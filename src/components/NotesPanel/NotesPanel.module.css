@@ -1,0 +1,257 @@
+/* Notes Panel */
+.panel {
+  position: relative;
+  width: 400px;
+  min-width: 300px;
+  max-width: 50%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hidden {
+  display: none;
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 0;
+}
+
+.empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.item:hover {
+  background: var(--bg-highlight);
+}
+
+.itemUsed {
+  opacity: 0.5;
+}
+
+.itemUsed .text {
+  text-decoration: line-through;
+}
+
+.body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.text {
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.date {
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.projectLabel {
+  font-size: var(--font-xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-md);
+  border: none;
+  cursor: pointer;
+  line-height: 1.4;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectTagged {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+.projectGlobal {
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+}
+
+.projectLabel:hover {
+  filter: brightness(1.2);
+}
+
+.reassignSelect {
+  font-size: var(--font-xs);
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: 1px 4px;
+  max-width: 140px;
+  outline: none;
+}
+
+.actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.item:hover .actions {
+  opacity: 1;
+}
+
+.actionBtn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--font-md);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.1s;
+  background: transparent;
+  color: var(--fg-secondary);
+}
+
+.editBtn:hover {
+  background: var(--warning);
+  color: var(--bg-primary);
+}
+
+.sendBtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.deleteBtn:hover {
+  background: var(--error);
+  color: var(--text-on-error);
+}
+
+.inputArea {
+  position: relative;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.input {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  padding: 8px 12px;
+  font-size: var(--font-sm);
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.submitBtn {
+  position: absolute;
+  right: 28px;
+  bottom: 20px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--font-xl);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.submitBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.submitBtn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* Thumbnails in saved notes */
+.thumbnails {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.thumbnail {
+  max-height: 80px;
+  max-width: 120px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  border: 1px solid var(--border);
+}
+
+/* Pending thumbnails above textarea (pre-submit preview) */
+.pendingThumbnails {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.pendingThumbWrap {
+  position: relative;
+}
+
+.thumbnailRemove {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--error);
+  color: var(--text-on-error);
+  border: none;
+  border-radius: 50%;
+  font-size: 10px;
+  cursor: pointer;
+  line-height: 1;
+}

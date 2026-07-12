@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content, viewport-fit=cover" />
+    <meta name="theme-color" content="#1e1e1e" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="manifest" href="/mobile-manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="/mobile-icon.svg" />
+    <link rel="apple-touch-icon" href="/mobile-icon.svg" />
+    <title>FastAF Mobile</title>
+    <style>
+      /* Inline critical styles — visible immediately before CSS/JS loads */
+      html, body { margin: 0; padding: 0; height: auto; background: #1e1e1e; }
+      #mobile-app {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: auto;
+        color: #848d97;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+      }
+    </style>
+    <script type="module" src="/src/mobile/index.tsx" defer></script>
+  </head>
+
+  <body>
+    <div id="mobile-app"></div>
+  </body>
+</html>

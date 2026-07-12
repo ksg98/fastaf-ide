@@ -1,0 +1,481 @@
+/* BranchesTab — local and remote branch list with inline search */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+}
+
+/* Inline search bar — sticky header with fold-toggle button */
+.searchBar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 12px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.searchInput {
+  width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  padding: 4px 8px;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.searchInput:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.searchInput::placeholder {
+  color: var(--fg-muted);
+  opacity: 0.5;
+}
+
+/* Collapsible section headers (Local, Remote) */
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s ease;
+}
+
+.sectionHeader:hover {
+  background: var(--bg-highlight);
+}
+
+.sectionCount {
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+  font-weight: 400;
+}
+
+/* Chevron for collapsible sections */
+.chevron {
+  font-size: var(--font-xs);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.chevronCollapsed {
+  transform: rotate(-90deg);
+}
+
+/* Individual branch row */
+.branchRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 20px;
+  cursor: default;
+  transition: background 0.1s ease;
+  font-size: var(--font-md);
+  font-family: var(--font-ui);
+  min-width: 0;
+}
+
+.branchRow:hover {
+  background: var(--bg-highlight);
+}
+
+/* Current branch: slightly bolder + accent icon */
+.branchCurrent {
+  color: var(--accent);
+}
+
+.branchCurrentIcon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+/* Placeholder to align non-current rows with current (icon width) */
+.branchIconPlaceholder {
+  width: 14px;
+  flex-shrink: 0;
+}
+
+/* Branch name — truncates if too long */
+.branchName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.branchNameBold {
+  font-weight: 600;
+}
+
+/* Ahead/behind indicators and date — dimmed, right-aligned */
+.branchMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: var(--font-xs);
+  font-family: var(--font-ui);
+  color: var(--fg-secondary);
+}
+
+.ahead {
+  color: var(--success);
+}
+
+.behind {
+  color: var(--fg-muted);
+}
+
+.baseBehind {
+  color: var(--warning);
+  font-weight: 600;
+}
+
+.metaDate {
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+/* "merged" badge */
+.merged {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--success) 20%, transparent);
+  color: var(--success);
+}
+
+/* Stale branches (old last commit) */
+.stale .branchName {
+  color: var(--fg-muted);
+}
+
+/* Empty state */
+.empty {
+  composes: empty from "./panel.module.css";
+  font-family: var(--font-ui);
+}
+
+/* Selected row — keyboard-navigated highlight */
+.selected {
+  background: var(--bg-tertiary);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Inline rename / create input */
+.inlineInput {
+  flex: 1;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  font-family: var(--font-ui);
+  padding: 2px 6px;
+  min-width: 0;
+  outline: none;
+}
+
+.smartActions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Create branch inline form row */
+.createForm {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.fromSelect {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  padding: 2px 4px;
+  max-width: 140px;
+}
+
+.createCheckboxLabel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.createConfirmBtn,
+.createCancelBtn {
+  padding: 3px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.createConfirmBtn {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.createConfirmBtn:hover {
+  background: var(--accent-hover);
+}
+
+.createCancelBtn {
+  background: var(--bg-highlight);
+  color: var(--fg-secondary);
+}
+
+.createCancelBtn:hover {
+  background: var(--border);
+  color: var(--fg-primary);
+}
+
+
+/* Inline dialog / popover (for multi-button confirms) */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.popover {
+  width: 340px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popup);
+  overflow: hidden;
+}
+
+.popoverHeader {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+}
+
+.popoverHeader h4 {
+  margin: 0;
+  font-size: var(--font-lg);
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.popoverBody {
+  padding: 16px;
+}
+
+.confirmInfo {
+  margin: 0;
+  font-size: var(--font-md);
+  font-family: var(--font-ui);
+  color: var(--fg-secondary);
+  line-height: 1.5;
+}
+
+.popoverActions {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border);
+}
+
+.popoverActions button {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-md);
+  font-weight: 500;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.popoverActions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cancelBtn {
+  background: var(--bg-highlight);
+  color: var(--fg-secondary);
+}
+
+.cancelBtn:hover:not(:disabled) {
+  background: var(--border);
+  color: var(--fg-primary);
+}
+
+.primaryBtn {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.primaryBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.secondaryBtn {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+  border: 1px solid var(--border) !important;
+}
+
+.secondaryBtn:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.dangerBtn {
+  background: color-mix(in srgb, var(--error) 80%, transparent);
+  color: var(--fg-primary);
+}
+
+.dangerBtn:hover:not(:disabled) {
+  background: var(--error);
+}
+
+/* --- Prefix folding: group header and indented rows --- */
+
+/* Fold toggle button in the search bar */
+.foldToggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.foldToggle:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.foldToggleActive {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Count badge on the "delete merged" cleanup button */
+.mergedBadge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-radius: var(--radius-pill);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Prefix group header row */
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 12px 3px 16px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  font-weight: 500;
+  color: var(--fg-secondary);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s ease;
+}
+
+.groupHeader:hover {
+  background: var(--bg-highlight);
+}
+
+.groupIcon {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  display: flex;
+  align-items: center;
+}
+
+.groupPrefix {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Indented container for branches inside a prefix group */
+.groupChildren {
+  border-left: 2px solid var(--border);
+  margin-left: 20px;
+}
+
+/* Branch rows inside a prefix group get extra left indent */
+.branchRowIndented {
+  padding-left: 16px;
+}

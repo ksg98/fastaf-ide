@@ -1,0 +1,982 @@
+//! GitHub OAuth Device Flow authentication.
+//!
+//! Provides an alternative to environment variables and `gh` CLI for GitHub
+//! API authentication. The OAuth token is stored in the unified credential
+//! vault (`credentials.rs`).
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "desktop")]
+use tauri::State;
+
+use crate::state::AppState;
+
+use crate::credentials::Credential;
+
+/// GitHub OAuth App client ID (public — not a secret).
+const CLIENT_ID: &str = "Ov23liN95BHKQDboVFRl";
+
+/// Scopes requested during Device Flow authentication.
+///
+/// Only `repo` is needed: it covers all REST/GraphQL endpoints TUIC calls
+/// (`/repos/...`, `viewer`, PRs, issues, checks) including org-owned private
+/// repos. Access to repos in a SAML-SSO org comes from `repo` + the user's
+/// per-org SSO token authorization — NOT from `read:org`, which only grants
+/// org/team/membership reads that TUIC never performs.
+const OAUTH_SCOPES: &str = "repo";
+
+// ---------------------------------------------------------------------------
+// Device Flow types
+// ---------------------------------------------------------------------------
+
+/// Response from `POST https://github.com/login/device/code`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DeviceCodeResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+/// Result of a single poll attempt to `POST https://github.com/login/oauth/access_token`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status")]
+pub(crate) enum PollResult {
+    /// User hasn't authorized yet — keep polling.
+    #[serde(rename = "pending")]
+    Pending,
+    /// Polling too fast — increase interval by 5 seconds.
+    #[serde(rename = "slow_down")]
+    SlowDown,
+    /// User authorized — token received.
+    #[serde(rename = "success")]
+    Success { access_token: String, scope: String },
+    /// Device code expired (15 min) — must restart flow.
+    #[serde(rename = "expired")]
+    Expired,
+    /// User denied access.
+    #[serde(rename = "access_denied")]
+    AccessDenied,
+}
+
+/// Where the active GitHub token came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TokenSource {
+    /// GH_TOKEN or GITHUB_TOKEN environment variable
+    Env,
+    /// OAuth Device Flow token stored in OS keyring
+    OAuth,
+    /// gh CLI config or `gh auth token`
+    GhCli,
+    /// Personal Access Token pasted for a GitHub Enterprise Server account
+    Pat,
+    /// No token available
+    #[default]
+    None,
+}
+
+/// Authentication status returned to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AuthStatus {
+    pub authenticated: bool,
+    pub login: Option<String>,
+    pub avatar_url: Option<String>,
+    pub source: TokenSource,
+    pub scopes: Option<String>,
+    /// Human-readable error when the token exists but validation failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Raw GitHub error response during token polling.
+#[derive(Debug, Deserialize)]
+struct GithubErrorResponse {
+    error: String,
+    #[allow(dead_code)]
+    error_description: Option<String>,
+}
+
+/// Raw GitHub success response during token polling.
+#[derive(Debug, Deserialize)]
+struct GithubTokenResponse {
+    access_token: String,
+    #[allow(dead_code)]
+    token_type: String,
+    scope: String,
+}
+
+// ---------------------------------------------------------------------------
+// Device Flow API calls
+// ---------------------------------------------------------------------------
+
+/// Start the Device Flow by requesting a device code from GitHub.
+pub(crate) async fn start_device_flow(
+    client: &reqwest::Client,
+) -> Result<DeviceCodeResponse, String> {
+    let params = [("client_id", CLIENT_ID), ("scope", OAUTH_SCOPES)];
+
+    crate::github_debug::log_api(
+        "POST",
+        "https://github.com/login/device/code",
+        "start_device_flow",
+    );
+    let response = client
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to start Device Flow: {e}"))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Device Flow response: {e}"))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "GitHub Device Flow request failed (HTTP {status}): {body}"
+        ));
+    }
+
+    serde_json::from_str(&body).map_err(|e| format!("Failed to parse Device Flow response: {e}"))
+}
+
+/// Make a single poll attempt to exchange the device code for an access token.
+pub(crate) async fn poll_device_flow(
+    client: &reqwest::Client,
+    device_code: &str,
+) -> Result<PollResult, String> {
+    let params = [
+        ("client_id", CLIENT_ID),
+        ("device_code", device_code),
+        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+    ];
+
+    crate::github_debug::log_api(
+        "POST",
+        "https://github.com/login/oauth/access_token",
+        "poll_device_flow",
+    );
+    let response = client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to poll Device Flow: {e}"))?;
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read poll response: {e}"))?;
+
+    // GitHub returns 200 for both success and error states during polling.
+    // Try parsing as a success response first, then as an error.
+    if let Ok(token_resp) = serde_json::from_str::<GithubTokenResponse>(&body) {
+        return Ok(PollResult::Success {
+            access_token: token_resp.access_token,
+            scope: token_resp.scope,
+        });
+    }
+
+    if let Ok(err_resp) = serde_json::from_str::<GithubErrorResponse>(&body) {
+        return Ok(match err_resp.error.as_str() {
+            "authorization_pending" => PollResult::Pending,
+            "slow_down" => PollResult::SlowDown,
+            "expired_token" => PollResult::Expired,
+            "access_denied" => PollResult::AccessDenied,
+            other => return Err(format!("Unexpected Device Flow error: {other}")),
+        });
+    }
+
+    Err(format!("Unexpected Device Flow response: {body}"))
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands
+// ---------------------------------------------------------------------------
+
+/// Start a Device Flow login. Returns the device code and user code
+/// for display in the UI.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn github_start_login(
+    state: State<'_, Arc<AppState>>,
+) -> Result<DeviceCodeResponse, String> {
+    start_device_flow(&state.http_client).await
+}
+
+/// Poll GitHub for the Device Flow token. The frontend calls this repeatedly
+/// with the interval from `github_start_login`. On success, the token is saved
+/// to the OS keyring and activated in AppState.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn github_poll_login(
+    state: State<'_, Arc<AppState>>,
+    device_code: String,
+) -> Result<PollResult, String> {
+    github_poll_login_impl(state.inner(), device_code).await
+}
+
+pub(crate) async fn github_poll_login_impl(
+    state: &Arc<AppState>,
+    device_code: String,
+) -> Result<PollResult, String> {
+    let result = poll_device_flow(&state.http_client, &device_code).await?;
+
+    if let PollResult::Success {
+        ref access_token, ..
+    } = result
+    {
+        // Save to keyring for persistence across restarts (blocking I/O → spawn_blocking)
+        let token_for_keyring = access_token.clone();
+        tokio::task::spawn_blocking(move || save_github_oauth_token(&token_for_keyring))
+            .await
+            .map_err(|e| format!("keyring task panicked: {e}"))?
+            .map_err(|e| {
+                tracing::error!(source = "github", error = %e, "OAuth token keyring save failed");
+                e
+            })?;
+        // Activate immediately in runtime state
+        *state.github_token.write() = Some(access_token.clone());
+        *state.github_token_source.write() = TokenSource::OAuth;
+        // Reset the github.com circuit breaker so we retry any previously-failed repos
+        state.github_circuit_breaker.reset();
+        // Clear only github.com cooldowns ("owner/name", no ':'), leaving GHE
+        // cooldowns ("{id}:owner/name") untouched — github.com login must not
+        // disturb other accounts' state.
+        state
+            .git_cache
+            .github_repo_cooldown
+            .retain(|key, _| key.contains(':'));
+        tracing::info!(source = "github", "OAuth Device Flow login successful");
+    }
+
+    Ok(result)
+}
+
+/// Poll the Device Flow for an ADDITIONAL github.com account. Unlike
+/// [`github_poll_login`], success does NOT touch the ambient default's token or
+/// runtime state: it validates the new token against `/user`, resolves the login
+/// (the account id), and persists a named registry entry with its own
+/// per-account token. The frontend drives this with the same start/interval as a
+/// normal login, but in "add account" mode.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn github_poll_add_account(
+    state: State<'_, Arc<AppState>>,
+    device_code: String,
+) -> Result<PollResult, String> {
+    let result = poll_device_flow(&state.http_client, &device_code).await?;
+
+    if let PollResult::Success {
+        ref access_token, ..
+    } = result
+    {
+        let host = crate::github_account::GitHubHost::new("github.com")
+            .expect("github.com is a valid host");
+        let login =
+            crate::github_account::fetch_account_login(&state.http_client, &host, access_token)
+                .await?
+                .ok_or_else(|| "GitHub did not return a login for this token".to_string())?;
+
+        if login == crate::github_account::GitHubAccount::GITHUB_COM_ID {
+            // Defensive: a real GitHub login can never be "github.com", but never
+            // let a value collide with the ambient default's reserved id.
+            return Err("Unexpected login collides with the default account id".to_string());
+        }
+
+        let account = crate::github_account::GitHubAccount::github_com_named(&login);
+        let token = access_token.clone();
+        let account_for_save = account.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::github_account::add_account_record(account_for_save, Some(&token))
+        })
+        .await
+        .map_err(|e| format!("keyring task panicked: {e}"))??;
+        tracing::info!(source = "github", login = %login, "Registered additional github.com account");
+    }
+
+    Ok(result)
+}
+
+/// Log out of GitHub OAuth. Deletes the token from keyring and clears
+/// the runtime state. Falls back to env/gh CLI tokens if available.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn github_logout(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    github_logout_impl(state.inner()).await
+}
+
+pub(crate) async fn github_logout_impl(state: &Arc<AppState>) -> Result<(), String> {
+    tokio::task::spawn_blocking(delete_github_oauth_token)
+        .await
+        .map_err(|e| format!("keyring task panicked: {e}"))??;
+
+    // Re-resolve token from remaining sources (env vars, gh CLI)
+    let (token, source) = tokio::task::spawn_blocking(resolve_token_with_source)
+        .await
+        .map_err(|e| format!("token resolve task panicked: {e}"))?;
+    *state.github_token.write() = token;
+    *state.github_token_source.write() = source;
+
+    tracing::info!(
+        source = "github",
+        ?source,
+        "OAuth logout — fell back to {source:?}"
+    );
+    Ok(())
+}
+
+/// Disconnect from GitHub entirely, clearing the runtime token regardless
+/// of source. Does NOT delete env vars or gh CLI config — only clears the
+/// in-memory token so the app stops using it until restart or re-login.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn github_disconnect(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    github_disconnect_impl(state.inner()).await
+}
+
+pub(crate) async fn github_disconnect_impl(state: &Arc<AppState>) -> Result<(), String> {
+    // Delete OAuth token from keyring if present
+    if let Err(e) = tokio::task::spawn_blocking(delete_github_oauth_token)
+        .await
+        .map_err(|e| format!("keyring task panicked: {e}"))
+        .and_then(|r| r)
+    {
+        tracing::warn!(source = "github", error = %e, "Failed to delete OAuth token during disconnect");
+    }
+    // Clear runtime state entirely
+    *state.github_token.write() = None;
+    *state.github_token_source.write() = TokenSource::None;
+    tracing::info!(
+        source = "github",
+        "GitHub disconnected (runtime token cleared)"
+    );
+    Ok(())
+}
+
+/// Diagnostics about the GitHub integration — repos with errors, circuit breaker state, etc.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct GitHubDiagnostics {
+    /// Whether the circuit breaker is currently open (API calls blocked)
+    pub circuit_breaker_open: bool,
+    /// Human-readable circuit breaker status
+    pub circuit_breaker_status: String,
+    /// Repos that returned "not found" from GitHub (in cooldown)
+    pub repos_not_found: Vec<String>,
+    /// Number of repos successfully monitored
+    pub repos_monitored: u32,
+}
+
+/// Compute GitHub integration diagnostics from the current state.
+///
+/// Pure seam (no `State`/network) so the Step 0 characterization net can pin
+/// the diagnostics shape for a github.com-only setup.
+pub(crate) fn compute_diagnostics(state: &AppState) -> GitHubDiagnostics {
+    let cloud_status = state.github_circuit_breaker.check();
+    // A GHE account whose breaker is open also counts as "open" for the UI, but
+    // never changes the github.com-only output (ghe_state is empty then).
+    let ghe_open = state
+        .ghe_state
+        .iter()
+        .any(|e| e.value().circuit_breaker.check().is_err());
+    let circuit_breaker_open = cloud_status.is_err() || ghe_open;
+    let circuit_breaker_status = match &cloud_status {
+        Ok(()) if ghe_open => "An Enterprise account is backing off".to_string(),
+        Ok(()) => "OK".to_string(),
+        Err(msg) => msg.clone(),
+    };
+
+    let now = std::time::Instant::now();
+    let repos_not_found: Vec<String> = state
+        .git_cache
+        .github_repo_cooldown
+        .iter()
+        .filter(|entry| *entry.value() > now)
+        .map(|entry| entry.key().clone())
+        .collect();
+
+    // Count repos with cached GitHub status (successfully queried).
+    // `entry_count` is eventually consistent — fine for a diagnostic gauge.
+    let repos_monitored = state.git_cache.github_status.entry_count() as u32;
+
+    GitHubDiagnostics {
+        circuit_breaker_open,
+        circuit_breaker_status,
+        repos_not_found,
+        repos_monitored,
+    }
+}
+
+/// Get GitHub integration diagnostics for the settings UI.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn github_diagnostics(
+    state: State<'_, Arc<AppState>>,
+) -> Result<GitHubDiagnostics, String> {
+    github_diagnostics_impl(state.inner()).await
+}
+
+/// HTTP/IPC-parity wrapper over the pure `compute_diagnostics` seam. Kept so the
+/// `/github/diagnostics` axum route (github_routes.rs) and the Tauri command
+/// share one code path; `compute_diagnostics` now also folds in GHE accounts.
+pub(crate) async fn github_diagnostics_impl(
+    state: &Arc<AppState>,
+) -> Result<GitHubDiagnostics, String> {
+    Ok(compute_diagnostics(state))
+}
+
+/// Get the current GitHub authentication status, including the user's
+/// login name if authenticated.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn github_auth_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<AuthStatus, String> {
+    github_auth_status_impl(state.inner()).await
+}
+
+pub(crate) async fn github_auth_status_impl(state: &Arc<AppState>) -> Result<AuthStatus, String> {
+    let mut token = state.github_token.read().clone();
+    let mut source = *state.github_token_source.read();
+
+    // Lazy resolution: if boot skipped the keychain, try full resolution now.
+    if token.is_none() {
+        let (t, s) = tokio::task::spawn_blocking(resolve_token_with_source)
+            .await
+            .map_err(|e| format!("token resolve task panicked: {e}"))?;
+        if t.is_some() {
+            *state.github_token.write() = t.clone();
+            *state.github_token_source.write() = s;
+        }
+        token = t;
+        source = s;
+    }
+
+    let Some(token) = token else {
+        return Ok(AuthStatus {
+            authenticated: false,
+            login: None,
+            avatar_url: None,
+            source: TokenSource::None,
+            scopes: None,
+            error: None,
+        });
+    };
+
+    // Call GitHub /user to get login + avatar. This validates the github.com
+    // global token, so it uses the cloud REST base (routed through GitHubHost
+    // rather than hardcoding api.github.com).
+    let user_url = crate::github_account::github_rest_url(
+        &crate::github_account::GitHubHost::new("github.com").expect("github.com is valid"),
+        "/user",
+    );
+    crate::github_debug::log_api("GET", &user_url, "validate_token_impl");
+    let resp = state
+        .http_client
+        .get(&user_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "FastAF")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            // Extract scopes header before consuming the body
+            let scopes = r
+                .headers()
+                .get("x-oauth-scopes")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let body: serde_json::Value = r
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse GitHub /user response: {e}"))?;
+            Ok(AuthStatus {
+                authenticated: true,
+                login: body["login"].as_str().map(|s| s.to_string()),
+                avatar_url: body["avatar_url"].as_str().map(|s| s.to_string()),
+                source,
+                scopes,
+                error: None,
+            })
+        }
+        Ok(r) if r.status() == 401 => {
+            // Token is invalid — clear it if it was an OAuth token
+            let error_msg = format!(
+                "Token rejected by GitHub (HTTP 401). The {} token may be expired or revoked.",
+                match source {
+                    TokenSource::Env => "environment variable",
+                    TokenSource::OAuth => "OAuth",
+                    TokenSource::GhCli => "gh CLI",
+                    TokenSource::Pat => "Personal Access Token",
+                    TokenSource::None => "current",
+                }
+            );
+            if source == TokenSource::OAuth {
+                if let Err(e) = tokio::task::spawn_blocking(delete_github_oauth_token)
+                    .await
+                    .map_err(|e| format!("keyring task panicked: {e}"))
+                    .and_then(|r| r)
+                {
+                    tracing::warn!(source = "github", error = %e, "Failed to delete stale OAuth token from keyring");
+                }
+                let (fallback_token, fallback_source) =
+                    tokio::task::spawn_blocking(resolve_token_with_source)
+                        .await
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(source = "github", error = %e, "Token resolution panicked during 401 recovery");
+                            (None, TokenSource::None)
+                        });
+                *state.github_token.write() = fallback_token;
+                *state.github_token_source.write() = fallback_source;
+            }
+            Ok(AuthStatus {
+                authenticated: false,
+                login: None,
+                avatar_url: None,
+                source: TokenSource::None,
+                scopes: None,
+                error: Some(error_msg),
+            })
+        }
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            tracing::warn!(source = "github", %status, "GitHub /user returned unexpected status");
+            Ok(AuthStatus {
+                authenticated: false,
+                login: None,
+                avatar_url: None,
+                source,
+                scopes: None,
+                error: Some(format!(
+                    "GitHub API error (HTTP {status}): {}",
+                    body.lines().next().unwrap_or("unknown error")
+                )),
+            })
+        }
+        Err(e) => {
+            tracing::warn!(source = "github", error = %e, "GitHub /user request failed");
+            Ok(AuthStatus {
+                authenticated: false,
+                login: None,
+                avatar_url: None,
+                source,
+                scopes: None,
+                error: Some(format!("Could not reach GitHub API: {e}")),
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Token resolution with source tracking
+// ---------------------------------------------------------------------------
+
+/// Run `gh auth token` CLI to get the current token from gh's secure storage.
+/// This works even when env vars are empty/unset, because gh reads from the
+/// system keychain on macOS or credential store on other platforms.
+pub(crate) fn token_from_gh_cli() -> Option<String> {
+    let mut cmd = std::process::Command::new(crate::agent::resolve_cli("gh"));
+    cmd.args(["auth", "token"]);
+    crate::cli::apply_no_window(&mut cmd);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(output.stdout).ok()?;
+    let token = token.trim().to_string();
+    if token.is_empty() { None } else { Some(token) }
+}
+
+/// Collect all non-empty GitHub token candidates with their source, in priority order.
+/// Single source of truth for token priority — used at startup, fallback, and logout.
+/// Priority: GH_TOKEN env → GITHUB_TOKEN env → keyring OAuth → gh_token crate → gh CLI.
+pub(crate) fn resolve_all_candidates() -> Vec<(String, TokenSource)> {
+    resolve_all_candidates_inner(true)
+}
+
+fn resolve_all_candidates_inner(include_keychain: bool) -> Vec<(String, TokenSource)> {
+    // Gather raw inputs (with the same per-source guards as before), then delegate
+    // the priority ordering + value-dedup to the pure `order_token_candidates` seam.
+    let gh_token_env = std::env::var("GH_TOKEN").ok().filter(|t| !t.is_empty());
+    let github_token_env = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
+    let keychain_oauth = if include_keychain {
+        read_github_oauth_token().ok().flatten()
+    } else {
+        None
+    };
+    let gh_token_crate = gh_token::get().ok().filter(|t| !t.is_empty());
+    let gh_cli = token_from_gh_cli();
+    order_token_candidates(
+        gh_token_env,
+        github_token_env,
+        keychain_oauth,
+        gh_token_crate,
+        gh_cli,
+    )
+}
+
+/// Pure priority-ordering + value-dedup of token candidates.
+///
+/// Seam pinned by the Step 0 characterization net so the github.com fallback
+/// order can't drift during the multi-account refactor. Order is fixed:
+/// GH_TOKEN env → GITHUB_TOKEN env → keyring OAuth → gh_token crate → gh CLI.
+/// A later source is dropped when its token value already appeared earlier.
+pub(crate) fn order_token_candidates(
+    gh_token_env: Option<String>,
+    github_token_env: Option<String>,
+    keychain_oauth: Option<String>,
+    gh_token_crate: Option<String>,
+    gh_cli: Option<String>,
+) -> Vec<(String, TokenSource)> {
+    let mut candidates: Vec<(String, TokenSource)> = Vec::new();
+    for (tok, src) in [
+        (gh_token_env, TokenSource::Env),
+        (github_token_env, TokenSource::Env),
+        (keychain_oauth, TokenSource::OAuth),
+        (gh_token_crate, TokenSource::GhCli),
+        (gh_cli, TokenSource::GhCli),
+    ] {
+        if let Some(t) = tok
+            && !candidates.iter().any(|(existing, _)| existing == &t)
+        {
+            candidates.push((t, src));
+        }
+    }
+    candidates
+}
+
+/// Resolve the highest-priority GitHub token and its source.
+/// Thin wrapper over `resolve_all_candidates()`.
+pub(crate) fn resolve_token_with_source() -> (Option<String>, TokenSource) {
+    resolve_all_candidates()
+        .into_iter()
+        .next()
+        .map(|(t, s)| (Some(t), s))
+        .unwrap_or((None, TokenSource::None))
+}
+
+/// Like `resolve_token_with_source` but skips keychain access.
+/// Used at boot to avoid prompting the user before they need it.
+pub(crate) fn resolve_token_without_keychain() -> (Option<String>, TokenSource) {
+    resolve_all_candidates_inner(false)
+        .into_iter()
+        .next()
+        .map(|(t, s)| (Some(t), s))
+        .unwrap_or((None, TokenSource::None))
+}
+
+/// Resolve the token for a specific account.
+///
+/// - The ambient github.com default runs the EXISTING env→keyring-OAuth→gh chain
+///   unchanged (so a single-account user sees no behavior change).
+/// - Every NAMED account (a GHE PAT or an additional github.com account) returns
+///   ONLY its own per-account vault token — never the ambient chain. This anchors
+///   each named account to an explicit token so `gh auth switch` (or an env-var
+///   change) can't silently drift its identity. A GHE account reports
+///   [`TokenSource::Pat`]; an additional github.com account reports
+///   [`TokenSource::OAuth`] (its device-flow token, stored per-account). A
+///   missing token yields `(None, TokenSource::None)`.
+pub(crate) fn resolve_token_for_account(
+    account: &crate::github_account::GitHubAccount,
+) -> (Option<String>, TokenSource) {
+    if account.is_ambient_default() {
+        // Ambient github.com default — existing chain, byte-for-byte unchanged.
+        return resolve_token_with_source();
+    }
+    match crate::credentials::get(Credential::GithubToken(&account.id))
+        .ok()
+        .flatten()
+    {
+        Some(token) => {
+            let source = match account.kind {
+                crate::github_account::AccountKind::GhePat => TokenSource::Pat,
+                _ => TokenSource::OAuth,
+            };
+            (Some(token), source)
+        }
+        None => (None, TokenSource::None),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyring helpers
+// ---------------------------------------------------------------------------
+
+/// Read the stored OAuth token from the OS keyring (cached in-memory).
+/// Returns `None` if no token is stored (not an error).
+pub(crate) fn read_github_oauth_token() -> Result<Option<String>, String> {
+    crate::credentials::get(Credential::GithubOauthToken)
+}
+
+pub(crate) fn save_github_oauth_token(token: &str) -> Result<(), String> {
+    crate::credentials::set(Credential::GithubOauthToken, token)
+}
+
+pub(crate) fn delete_github_oauth_token() -> Result<(), String> {
+    crate::credentials::delete(Credential::GithubOauthToken)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These tests interact with the real OS keyring. Write tests are #[ignore]
+    // because macOS prompts for Keychain access interactively, blocking CI.
+    // Run manually with: cargo test github_auth -- --ignored
+
+    #[test]
+    fn read_nonexistent_returns_none() {
+        // Use a different service name to avoid interfering with real tokens.
+        // Since we're testing the public API that uses fixed SERVICE_NAME,
+        // we test via the actual function — a missing token should return None.
+        let result = read_github_oauth_token();
+        match result {
+            Ok(None) | Ok(Some(_)) => {} // Either is fine depending on keyring state
+            Err(e) => {
+                // On systems without a keyring backend, this may error — skip gracefully
+                eprintln!("Skipping test (no keyring backend): {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn delete_when_empty_is_idempotent() {
+        // Deleting a non-existent token should not error
+        let result = delete_github_oauth_token();
+        match result {
+            Ok(()) => {} // Expected: idempotent
+            Err(e) => {
+                eprintln!("Skipping test (no keyring backend): {e}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Requires interactive Keychain access on macOS
+    fn save_read_delete_round_trip() {
+        let token = "gho_test_token_round_trip_xyz";
+
+        // Save
+        match save_github_oauth_token(token) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Skipping test (no keyring backend): {e}");
+                return;
+            }
+        }
+
+        // Read back
+        let read = read_github_oauth_token().unwrap();
+        assert_eq!(read, Some(token.to_string()));
+
+        // Delete
+        delete_github_oauth_token().unwrap();
+
+        // Verify deleted
+        let after_delete = read_github_oauth_token().unwrap();
+        assert_eq!(after_delete, None);
+    }
+
+    // -- Device Flow deserialization tests --
+
+    #[test]
+    fn parse_device_code_response() {
+        let json = r#"{
+            "device_code": "3584d83530557fdd1f46af8289938c8ef79f9dc5",
+            "user_code": "WDJB-MJHT",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900,
+            "interval": 5
+        }"#;
+        let resp: DeviceCodeResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.user_code, "WDJB-MJHT");
+        assert_eq!(resp.verification_uri, "https://github.com/login/device");
+        assert_eq!(resp.expires_in, 900);
+        assert_eq!(resp.interval, 5);
+    }
+
+    #[test]
+    fn parse_token_success_response() {
+        let json = r#"{
+            "access_token": "gho_16C7e42F292c6912E7710c838347Ae178B4a",
+            "token_type": "bearer",
+            "scope": "repo"
+        }"#;
+        let resp: GithubTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            resp.access_token,
+            "gho_16C7e42F292c6912E7710c838347Ae178B4a"
+        );
+        assert_eq!(resp.scope, "repo");
+    }
+
+    #[test]
+    fn parse_authorization_pending_error() {
+        let json = r#"{
+            "error": "authorization_pending",
+            "error_description": "The authorization request is still pending."
+        }"#;
+        let resp: GithubErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "authorization_pending");
+    }
+
+    #[test]
+    fn parse_slow_down_error() {
+        let json = r#"{
+            "error": "slow_down",
+            "error_description": "Too many requests."
+        }"#;
+        let resp: GithubErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "slow_down");
+    }
+
+    #[test]
+    fn parse_expired_token_error() {
+        let json = r#"{
+            "error": "expired_token",
+            "error_description": "The device code has expired."
+        }"#;
+        let resp: GithubErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "expired_token");
+    }
+
+    #[test]
+    fn parse_access_denied_error() {
+        let json = r#"{
+            "error": "access_denied",
+            "error_description": "The user has denied your application access."
+        }"#;
+        let resp: GithubErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "access_denied");
+    }
+
+    #[test]
+    fn parse_error_without_description() {
+        let json = r#"{"error": "authorization_pending"}"#;
+        let resp: GithubErrorResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.error, "authorization_pending");
+        assert!(resp.error_description.is_none());
+    }
+
+    #[test]
+    fn poll_result_serializes_with_tag() {
+        let pending = PollResult::Pending;
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(json.contains(r#""status":"pending"#));
+
+        let success = PollResult::Success {
+            access_token: "gho_abc".to_string(),
+            scope: "repo".to_string(),
+        };
+        let json = serde_json::to_string(&success).unwrap();
+        assert!(json.contains(r#""status":"success"#));
+        assert!(json.contains(r#""access_token":"gho_abc"#));
+    }
+
+    #[test]
+    #[ignore] // Requires interactive Keychain access on macOS
+    fn overwrite_token() {
+        let token_v1 = "gho_test_v1";
+        let token_v2 = "gho_test_v2";
+
+        match save_github_oauth_token(token_v1) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Skipping test (no keyring backend): {e}");
+                return;
+            }
+        }
+
+        // Overwrite
+        save_github_oauth_token(token_v2).unwrap();
+
+        // Read latest
+        let read = read_github_oauth_token().unwrap();
+        assert_eq!(read, Some(token_v2.to_string()));
+
+        // Cleanup
+        delete_github_oauth_token().unwrap();
+    }
+
+    // --- resolve_token_for_account (Step 4) ---
+
+    use crate::github_account::{AccountKind, GitHubAccount, GitHubHost};
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_for_github_com_delegates_to_existing_chain() {
+        // github.com accounts must run the existing env→OAuth→gh chain verbatim,
+        // so the result is identical to resolve_token_with_source(). Serialized
+        // against the env-mutating token tests so the global env is stable across
+        // the two resolutions below.
+        let acc = GitHubAccount::github_com(AccountKind::GithubComOauth, None);
+        assert_eq!(resolve_token_for_account(&acc), resolve_token_with_source());
+    }
+
+    #[test]
+    fn resolve_for_ghe_returns_vault_pat() {
+        let host = GitHubHost::new("ghe.resolve-pat-test.example").unwrap();
+        let acc = GitHubAccount::ghe_pat(host, None);
+        // The mock keyring is installed lazily on first credential access.
+        crate::credentials::set(Credential::GithubToken(&acc.id), "ghp_resolve_test").unwrap();
+
+        let (token, source) = resolve_token_for_account(&acc);
+        assert_eq!(token, Some("ghp_resolve_test".to_string()));
+        assert_eq!(source, TokenSource::Pat);
+
+        crate::credentials::delete(Credential::GithubToken(&acc.id)).unwrap();
+    }
+
+    #[test]
+    fn resolve_for_ghe_missing_pat_is_none() {
+        let host = GitHubHost::new("ghe.missing-pat-test.example").unwrap();
+        let acc = GitHubAccount::ghe_pat(host, None);
+        // Ensure no token is present for this id.
+        let _ = crate::credentials::delete(Credential::GithubToken(&acc.id));
+
+        assert_eq!(resolve_token_for_account(&acc), (None, TokenSource::None));
+    }
+
+    // --- Story 005: named github.com accounts anchored to their own token ---
+
+    #[test]
+    fn resolve_for_named_github_com_uses_own_token_not_chain() {
+        // An additional named github.com account resolves ONLY from its own
+        // per-account vault slot — never the ambient env→OAuth→gh chain — so a
+        // `gh auth switch` cannot drift its identity. Source is OAuth (its
+        // device-flow token), distinct from a GHE PAT.
+        let acc = GitHubAccount::github_com_named("named-anchor-test");
+        crate::credentials::set(Credential::GithubToken(&acc.id), "gho_named_anchor").unwrap();
+
+        let (token, source) = resolve_token_for_account(&acc);
+        assert_eq!(token, Some("gho_named_anchor".to_string()));
+        assert_eq!(source, TokenSource::OAuth);
+
+        crate::credentials::delete(Credential::GithubToken(&acc.id)).unwrap();
+    }
+
+    #[test]
+    fn resolve_for_named_github_com_missing_token_is_none() {
+        // No ambient fallback: a named github.com account with no stored token
+        // resolves to None, it does NOT silently fall back to env/gh.
+        let acc = GitHubAccount::github_com_named("named-missing-test");
+        let _ = crate::credentials::delete(Credential::GithubToken(&acc.id));
+
+        assert_eq!(resolve_token_for_account(&acc), (None, TokenSource::None));
+    }
+}

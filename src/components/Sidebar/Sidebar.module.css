@@ -1,0 +1,1873 @@
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+
+/* Sidebar */
+.sidebar {
+  width: var(--sidebar-width);
+  min-width: 200px;
+  max-width: 500px;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  transition: width 0.2s ease, min-width 0.2s ease, opacity 0.15s ease;
+  overflow: hidden;
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+.resizeHandle:hover {
+  background: var(--accent);
+  opacity: 0.5;
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.repoList {
+  /* container for repo sections */
+}
+
+/* ── Repo filter status banner (shown only while "active only" is engaged) ── */
+.filterStatus {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: calc(100% - 16px);
+  margin: 0 8px 6px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.filterStatus:hover {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.filterStatusClear {
+  margin-left: auto;
+  text-decoration: underline;
+  opacity: 0.85;
+}
+
+.footer {
+  height: var(--status-height);
+  min-height: var(--status-height);
+  padding: 0 6px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+}
+
+.addRepo {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  text-align: left;
+  min-width: 0;
+}
+
+.addRepo:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.addRepoIcon {
+  flex-shrink: 0;
+}
+
+.footerIcons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.footerAction {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.footerAction:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.empty {
+  padding: 20px 16px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+
+.empty p {
+  margin-bottom: 12px;
+}
+
+.empty button {
+  padding: 8px 16px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-on-accent);
+  font-size: var(--font-md);
+  cursor: pointer;
+}
+
+/* ── Repository Section ── */
+.repoSection {
+  margin-bottom: 4px;
+}
+
+.repoHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 4px;
+  cursor: pointer;
+  position: relative;
+}
+
+.repoInitials {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  border-radius: var(--radius-md);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--text-on-accent);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+  flex-shrink: 0;
+}
+
+.repoInitials:hover {
+  transform: scale(1.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.repoName {
+  flex: 1;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repoActions {
+  display: flex;
+  gap: 2px;
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--bg-secondary);
+  padding-left: 4px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (hover: hover) {
+  .repoHeader:hover .repoActions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.repoChevron {
+  font-size: var(--font-2xl);
+  color: var(--fg-secondary);
+  transition: transform 150ms ease;
+  transform: rotate(0deg);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.repoChevron.expanded {
+  transform: rotate(90deg);
+}
+
+.repoActionBtn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.repoActionBtn:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.addBtn {
+  color: var(--accent);
+  font-weight: 600;
+  margin-right: 5px;
+}
+
+.addBtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+/* Collapsed repository state */
+.collapsed {
+  transition: width 0.2s ease-in-out, padding 0.2s ease-in-out, opacity 0.2s ease-in-out;
+}
+
+.collapsed .repoHeader {
+  padding: 8px 6px;
+  justify-content: center;
+}
+
+.collapsed .repoInitials {
+  width: 32px;
+  height: 32px;
+  font-size: var(--font-md);
+}
+
+.dragging {
+  opacity: 0.5;
+}
+
+.dragOverTop {
+  position: relative;
+}
+.dragOverTop::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.dragOverBottom {
+  position: relative;
+}
+.dragOverBottom::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.dragOverTarget {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-radius: 4px;
+}
+
+/* ── Group sections ── */
+.groupSection {
+  margin-bottom: 2px;
+}
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-md);
+  transition: background 0.1s;
+}
+
+.groupHeader:hover {
+  background: var(--bg-tertiary);
+}
+
+.groupColorDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.groupName {
+  flex: 1;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.groupCount {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  opacity: 0.6;
+}
+
+.groupChevron {
+  font-size: var(--font-md);
+  color: var(--fg-secondary);
+  transition: transform 150ms ease;
+  transform: rotate(0deg);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.groupChevron.expanded {
+  transform: rotate(90deg);
+}
+
+.groupRepos {
+  padding-left: 0;
+}
+
+.groupEmptyHint {
+  padding: 8px 16px;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  opacity: 0.5;
+  font-style: italic;
+}
+
+/* ── Branch Item ── */
+.repoBranches {
+  padding-left: 16px;
+  padding-top: 1px;
+}
+
+.repoEmpty {
+  padding: 8px 16px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.branchItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  margin: 1px 0;
+  transition: background 0.1s;
+  position: relative;
+  min-height: 30px;
+}
+
+@media (hover: hover) {
+  .branchItem:hover {
+    background: var(--bg-highlight);
+  }
+}
+
+.branchItem.active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-highlight));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--radius-sm);
+}
+
+.branchPreparing {
+  cursor: default;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+.branchIcon {
+  font-size: var(--font-md);
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.branchIconMain {
+  color: var(--warning);
+}
+
+.branchIconWorktree {
+  color: var(--success);
+}
+
+/* Terminal state colors — applied directly via BranchIcon colorClass prop */
+.branchIconError {
+  color: var(--error);
+  animation: pulse-opacity 1s ease-in-out infinite;
+  font-weight: bold;
+}
+
+.branchIconActivity {
+  color: var(--activity);
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+.branchIconQuestion {
+  color: var(--attention);
+  animation: pulse-opacity 1s ease-in-out infinite;
+  font-weight: bold;
+}
+
+.branchIconIdle {
+  color: var(--fg-muted);
+}
+
+.branchIconUnseen {
+  color: var(--unseen);
+}
+
+.branchContent {
+  flex: 1;
+  min-width: 0;
+}
+
+.branchName {
+  display: block;
+  font-size: var(--font-md);
+  font-weight: 500;
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+.branchStats {
+  display: flex;
+  gap: 4px;
+  font-size: var(--font-2xs);
+  font-family: var(--font-ui);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 2px 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.statAdd {
+  color: var(--success);
+}
+
+.statDel {
+  color: var(--error);
+}
+
+/* Git merged badge — branch fully merged into main */
+.remoteBadge {
+  font-size: 9px;
+  color: var(--fg-muted);
+  margin-left: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* Branch group — wraps a branch row + its collapsible terminal tab list.
+   When expanded, hovering anywhere over the block lifts the whole group as a
+   unified card (DIA-style), while individual items keep their own stronger hover. */
+.branchGroup {
+  border-radius: var(--radius-lg);
+  transition: background 0.15s ease;
+}
+
+.branchGroupExpanded {
+  padding-bottom: 3px;
+}
+
+@media (hover: hover) {
+  .branchGroupExpanded:hover {
+    background: rgba(255, 255, 255, 0.035);
+  }
+}
+
+/* Branch tab list — collapsible terminal tab list under branch row */
+.branchTabsChevron {
+  background: none;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: var(--font-xl);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: transform 150ms ease, color 0.1s;
+  transform: rotate(0deg);
+  opacity: 0.8;
+}
+
+.branchTabsChevron:hover {
+  color: var(--fg-primary);
+  opacity: 1;
+}
+
+.branchTabsChevron.expanded {
+  transform: rotate(90deg);
+  color: var(--fg-primary);
+  opacity: 1;
+}
+
+.branchTabList {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 0 4px 0;
+  margin: 0 2px 0 8px;
+}
+
+.branchTabItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 16px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.15s, color 0.15s;
+  background: none;
+  border: none;
+  font-family: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.branchTabItem.active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg-primary);
+}
+
+@media (hover: hover) {
+  .branchTabItem:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--fg-primary);
+  }
+
+  .branchTabItem.active:hover {
+    background: rgba(255, 255, 255, 0.11);
+  }
+}
+
+/* Terminal status dot. Sized to match the UI Legend (8px) and, for the active
+ * states, given a soft same-color glow so sessions that need attention are easy
+ * to spot at a glance in the sidebar (issue #100). Busy stays animated so it is
+ * still distinguishable from a static idle dot without relying on hue alone. */
+.branchTabDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--fg-muted);
+  opacity: 0.4;
+}
+
+.branchTabDotBusy {
+  background: var(--activity);
+  opacity: 1;
+  box-shadow: 0 0 4px var(--activity);
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+.branchTabDotIdle {
+  background: var(--success);
+  opacity: 1;
+  box-shadow: 0 0 4px var(--success);
+}
+
+.branchTabDotUnseen {
+  background: var(--unseen);
+  opacity: 1;
+  box-shadow: 0 0 4px var(--unseen);
+}
+
+.branchTabDotError {
+  background: var(--error);
+  opacity: 1;
+  box-shadow: 0 0 4px var(--error);
+}
+
+.branchTabDotQuestion {
+  background: var(--attention);
+  opacity: 1;
+  box-shadow: 0 0 4px var(--attention);
+}
+
+.branchTabName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mergedBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  margin-left: 4px;
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  font-family: var(--font-ui);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  flex-shrink: 0;
+  background: var(--fg-muted);
+  color: var(--bg-primary);
+  opacity: 0.7;
+}
+
+/* PR state badge */
+.prBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  margin-left: 4px;
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  font-family: var(--font-ui);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.prReady,
+.prOpen {
+  background: var(--success);
+  color: var(--text-on-success);
+}
+
+.prMerged {
+  background: var(--merged);
+  color: var(--text-on-accent);
+}
+
+.prClosed {
+  background: var(--error);
+  color: var(--text-on-error);
+}
+
+.prBadgeDimmed {
+  opacity: 0.4;
+}
+
+.prDraft {
+  background: transparent;
+  border: 1px dashed var(--fg-secondary);
+  color: var(--fg-secondary);
+}
+
+.prConflict {
+  background: var(--error);
+  color: var(--text-on-error);
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+.prCiFailed {
+  background: var(--error);
+  color: var(--text-on-error);
+}
+
+.prChangesRequested {
+  background: var(--changes);
+  color: var(--text-on-accent);
+}
+
+.prReviewRequired {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--changes);
+  color: var(--changes);
+}
+
+.prCiPending {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--changes);
+  color: var(--changes);
+  animation: pulse-opacity 2s ease-in-out infinite;
+}
+
+/* Branch actions */
+.branchActions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: max-width 0.15s ease, opacity 0.15s ease;
+}
+
+@media (hover: hover) {
+  .branchItem:hover .branchActions {
+    max-width: 44px;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.branchAddBtn,
+.branchRemoveBtn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--font-md);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.branchAddBtn {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.branchAddBtn:hover {
+  background: var(--accent-hover);
+}
+
+.branchRemoveBtn {
+  background: transparent;
+  color: var(--fg-secondary);
+}
+
+.branchRemoveBtn:hover {
+  background: var(--error);
+  color: var(--text-on-error);
+}
+
+.branchShortcut {
+  flex-shrink: 0;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  font-family: var(--font-ui);
+  margin-left: auto;
+}
+
+/* ── Global Workspace Entry ── */
+.globalWorkspaceEntry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  padding-left: 14px;
+  color: var(--fg-secondary);
+  background: var(--bg-tertiary);
+  transition: background 0.1s, color 0.1s;
+}
+
+.globalWorkspaceEntry:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.globalWorkspaceActive {
+  border-left-color: var(--accent);
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.globalWorkspaceLabel {
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.globalWorkspaceBadge {
+  margin-left: auto;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  min-width: 18px;
+  text-align: center;
+}
+
+/* ── Git Quick Actions ── */
+.gitQuickActions {
+  height: var(--status-height);
+  min-height: var(--status-height);
+  padding: 0 6px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+}
+
+.gitQuickLabel {
+  flex-shrink: 0;
+  color: var(--fg-secondary);
+  align-self: center;
+}
+
+.gitQuickBtns {
+  display: flex;
+  flex: 1;
+  gap: 2px;
+}
+
+.gitQuickBtn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 4px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.gitQuickBtn:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.gitQuickBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.gitQuickBtn.loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.gitQuickIcon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* Parked repos popover */
+.parkedPopover {
+  position: absolute;
+  bottom: 42px;
+  right: 6px;
+  width: 220px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-dropdown);
+  z-index: 100;
+  padding: 4px 0;
+}
+
+.parkedPopoverHeader {
+  padding: 6px 10px 4px;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+
+.parkedPopoverEmpty {
+  padding: 12px 10px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+.parkedPopoverItem {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+}
+
+.parkedPopoverName {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.parkedPopoverName:hover {
+  background: var(--bg-tertiary);
+}
+
+.parkedPopoverUnpark {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.parkedPopoverUnpark:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.parkedBadge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--radius-lg);
+  background: var(--accent);
+  color: var(--bg-primary);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* GitHub badge always visible (replaces broken :has() with LightningCSS Modules) */
+.repoActionsWithBadge {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Hide non-badge action buttons; only the ghBadgeBtn stays visible */
+.repoActionsWithBadge .repoActionBtn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.repoActionsWithBadge .ghBadgeBtn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: hover) {
+  .repoHeader:hover .repoActionsWithBadge .repoActionBtn {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* ── Remote-only PR popover ── */
+.remoteOnlyOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+}
+
+.remoteOnlyPopover {
+  position: fixed;
+  left: var(--sidebar-width, 240px);
+  top: 0;
+  bottom: 0;
+  width: 320px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  z-index: 201;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+}
+
+.remoteOnlyHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.remoteOnlyClose {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: var(--font-md);
+}
+
+.remoteOnlyClose:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.remoteOnlyList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+/* ── Remote-only PR row (collapsed) ── */
+.remoteOnlyItem {
+  border-bottom: 1px solid transparent;
+}
+
+.remoteOnlyItemExpanded {
+  border-bottom: 1px solid var(--border);
+}
+
+.remoteOnlyRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.remoteOnlyRow:hover {
+  background: var(--bg-tertiary);
+}
+
+.remoteOnlyNum {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.remoteOnlyTitle {
+  flex: 1;
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* ── Remote-only PR accordion detail ── */
+.remoteOnlyDetail {
+  position: relative;
+  padding: 0 4px 8px;
+  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border);
+}
+
+.remoteOnlyDetailDismiss {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: var(--font-md);
+  z-index: 1;
+}
+
+.remoteOnlyDetailDismiss:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.remoteOnlyDetailActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 8px 4px;
+}
+
+.remoteOnlyCheckout,
+.remoteOnlyWorktree {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.remoteOnlyCheckout:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.remoteOnlyWorktree:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.remoteOnlyApprove {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.remoteOnlyApprove:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.remoteOnlyApprove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.remoteOnlyMerge {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--success);
+  background: none;
+  color: var(--success);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.remoteOnlyMerge:hover {
+  background: var(--success);
+  color: var(--text-on-success);
+}
+
+.remoteOnlyMerge:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.remoteOnlyMergeError {
+  padding: 4px 8px;
+  font-size: var(--font-2xs);
+  color: var(--error);
+}
+
+.remoteOnlyViewDiff {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.remoteOnlyViewDiff:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.remoteOnlyViewDiffActive {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+  border-color: var(--accent);
+}
+
+.remoteOnlyViewDiff:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.remoteOnlyDismiss {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.remoteOnlyDismiss:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.remoteOnlyShowDismissed {
+  font-size: var(--font-2xs);
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  margin-left: auto;
+  margin-right: 8px;
+}
+
+.remoteOnlyShowDismissed:hover {
+  text-decoration: underline;
+}
+
+.remoteOnlyDiffViewer {
+  max-height: 400px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
+  line-height: 1.4;
+}
+
+/* ---------------------------------------------------------------------------
+   Unified GitHub Panel (replaces RemoteOnlyPrPopover)
+   --------------------------------------------------------------------------- */
+
+.ghPanelOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  outline: none;
+  -webkit-app-region: no-drag;
+}
+
+.ghPanel {
+  position: fixed;
+  left: var(--sidebar-width, 240px);
+  top: 0;
+  bottom: 0;
+  width: 340px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  z-index: 201;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+  outline: none;
+  -webkit-app-region: no-drag;
+}
+
+.ghPanelHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.ghPanelHeader svg {
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.ghPanelClose {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  font-size: var(--font-md);
+  margin-left: auto;
+}
+
+.ghPanelClose:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.ghPanelBody {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Section (PR / Issues) ── */
+.ghSection {
+  border-bottom: 1px solid var(--border);
+}
+
+.ghSectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-secondary);
+  user-select: none;
+}
+
+.ghSectionHeader:hover {
+  background: var(--bg-tertiary);
+}
+
+.ghSectionHeader svg {
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.ghSectionChevron {
+  display: inline-block;
+  font-size: var(--font-md);
+  color: var(--fg-muted);
+  transition: transform 0.15s ease;
+  transform: rotate(0deg);
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.ghSectionChevronOpen {
+  transform: rotate(90deg);
+}
+
+.ghSectionCount {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+}
+
+.ghShowDismissed {
+  font-size: var(--font-2xs);
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  margin-left: 4px;
+}
+
+.ghShowDismissed:hover {
+  text-decoration: underline;
+}
+
+.ghSectionList {
+  padding: 0;
+}
+
+.ghEmpty {
+  padding: 12px;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+/* ── Item row (PR or Issue) ── */
+.ghItem {
+  border-bottom: 1px solid transparent;
+}
+
+.ghItemExpanded {
+  border-bottom: 1px solid var(--border);
+}
+
+.ghItemRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.ghItemRow:hover {
+  background: var(--bg-tertiary);
+}
+
+.ghItemNum {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.ghItemTitle {
+  flex: 1;
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* ── Issue state badges ── */
+.ghIssueBadge {
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.ghIssueOpen {
+  background: rgba(63, 185, 80, 0.12);
+  color: var(--success);
+}
+
+.ghIssueClosed {
+  background: color-mix(in srgb, var(--merged) 12%, transparent);
+  color: var(--merged);
+}
+
+/* ── Accordion detail ── */
+.ghItemDetail {
+  position: relative;
+  padding: 0 0 8px;
+  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border);
+}
+
+.ghItemDismiss {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: var(--font-md);
+  z-index: 1;
+}
+
+.ghItemDismiss:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+/* ── Action buttons ── */
+.ghItemActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px 4px;
+}
+
+.ghActionBtn {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.ghActionBtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.ghActionBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ghApproveBtn {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ghApproveBtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.ghMergeBtn {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.ghMergeBtn:hover {
+  background: var(--success);
+  color: var(--text-on-success);
+}
+
+.ghLinkBtn {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ghLinkBtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.ghCloseBtn {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.ghCloseBtn:hover {
+  background: var(--error);
+  color: var(--bg-primary);
+}
+
+.ghReopenBtn {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.ghReopenBtn:hover {
+  background: var(--success);
+  color: var(--bg-primary);
+}
+
+.ghActionError {
+  padding: 4px 8px;
+  font-size: var(--font-2xs);
+  color: var(--error);
+}
+
+/* ── Filter bar ── */
+.ghFilterBar {
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.ghFilterSelect {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: var(--font-xs);
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.ghFilterSelect:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── GitHub badge button (replaces remoteOnlyBadgeBtn) ── */
+.ghBadgeBtn {
+  min-width: 20px;
+  width: auto;
+  padding: 0 4px;
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+}
+
+.ghBadgeBtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.ghBadgeSep {
+  opacity: 0.5;
+  font-size: 0.7em;
+}
+
+.ghBadgeBtn svg {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+}
+
+/* ── Rate limit banner ── */
+.ghRateLimitBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--error);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.ghRetryBtn {
+  padding: 2px 10px;
+  font-size: var(--font-2xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--error);
+  background: none;
+  color: var(--error);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.ghRetryBtn:hover {
+  background: var(--error);
+  color: var(--bg-primary);
+}
+
+/* ── Focused item (keyboard nav) ── */
+.ghItemFocused {
+  background: var(--bg-tertiary);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* ── Skeleton loading rows ── */
+.ghSkeletonRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.ghSkeletonBar {
+  flex: 1;
+  height: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  animation: pulse-opacity 1.2s ease-in-out infinite;
+}
+
+.ghSkeletonBarShort {
+  width: 40px;
+  height: 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  animation: pulse-opacity 1.2s ease-in-out infinite;
+  animation-delay: 0.2s;
+}
+
+/* ---------------------------------------------------------------------------
+   Plugin sidebar sections
+   --------------------------------------------------------------------------- */
+
+.pluginSection {
+  margin-top: 4px;
+  padding-left: 16px;
+}
+
+.pluginSectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+.pluginSectionHeader:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-secondary);
+}
+
+.pluginSectionIcon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.pluginSectionIcon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.pluginSectionLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pluginSectionBadge {
+  font-size: var(--font-3xs);
+  background: var(--accent);
+  color: var(--bg-primary);
+  padding: 0 5px;
+  border-radius: 8px;
+  line-height: 1.4;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.pluginSectionChevron {
+  font-size: 8px;
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+.pluginSectionItems {
+  padding-top: 1px;
+}
+
+.pluginItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  margin: 1px 0;
+  transition: background 0.1s;
+  min-height: 26px;
+}
+
+.pluginItem:hover {
+  background: var(--bg-highlight);
+}
+
+.pluginItemIcon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.pluginItemIcon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.pluginItemText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pluginItemLabel {
+  display: block;
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pluginItemSubtitle {
+  display: block;
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

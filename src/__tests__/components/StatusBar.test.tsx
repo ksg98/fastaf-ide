@@ -1,0 +1,424 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import "../mocks/tauri";
+import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+
+// Use vi.hoisted so these are available to vi.mock factories (which are hoisted)
+const { mockGitHubStatus, mockGitHubRefresh, mockGetActive, mockGetBranchPrData } = vi.hoisted(() => ({
+	mockGitHubStatus: vi.fn<() => unknown>(() => null),
+	mockGitHubRefresh: vi.fn(),
+	mockGetActive: vi.fn<() => unknown>(() => null),
+	mockGetBranchPrData: vi.fn<() => unknown>(() => null),
+}));
+
+vi.mock("../../hooks/useGitHub", () => ({
+	useGitHub: () => ({
+		status: mockGitHubStatus,
+		loading: () => false,
+		error: () => null,
+		refresh: mockGitHubRefresh,
+		startPolling: vi.fn(),
+		stopPolling: vi.fn(),
+	}),
+}));
+
+vi.mock("../../stores/repositories", () => ({
+	repositoriesStore: {
+		getActive: mockGetActive,
+		get: vi.fn(() => undefined),
+		getGroupForRepo: vi.fn(() => undefined),
+		getRevision: vi.fn(() => 0),
+	},
+}));
+
+vi.mock("../../stores/repoSettings", () => ({
+	repoSettingsStore: {
+		get: vi.fn(() => undefined),
+	},
+}));
+
+vi.mock("../../hooks/useRepository", () => ({
+	useRepository: () => ({
+		renameBranch: vi.fn().mockResolvedValue(undefined),
+	}),
+}));
+
+vi.mock("../../stores/github", () => ({
+	githubStore: {
+		getBranchPrData: mockGetBranchPrData,
+		// getPrStatus is used by mergedPrGrace utility — share the same mock so tests
+		// that set mockGetBranchPrData automatically drive both the StatusBar PR badge
+		// (via activePrStatus → getPrStatus) and PrDetailPopover (via getBranchPrData)
+		getPrStatus: mockGetBranchPrData,
+		getCheckSummary: vi.fn(() => null),
+		getCheckDetails: vi.fn(() => []),
+		loadCheckDetails: vi.fn().mockResolvedValue(undefined),
+	},
+}));
+
+const { mockDictationState } = vi.hoisted(() => ({
+	mockDictationState: {
+		enabled: false,
+		recording: false,
+		processing: false,
+		loading: false,
+		hotkey: "F8",
+	},
+}));
+
+vi.mock("../../stores/dictation", () => ({
+	dictationStore: {
+		state: mockDictationState,
+	},
+}));
+
+const { mockLastActivityAt } = vi.hoisted(() => ({
+	mockLastActivityAt: vi.fn<() => number>(() => 0),
+}));
+
+vi.mock("../../stores/userActivity", () => ({
+	userActivityStore: {
+		lastActivityAt: mockLastActivityAt,
+	},
+}));
+
+import { StatusBar } from "../../components/StatusBar/StatusBar";
+
+/** Build a mock BranchPrStatus for testing */
+function makePrData(overrides: Record<string, unknown> = {}) {
+	return {
+		branch: "main",
+		number: 42,
+		title: "Fix bug",
+		state: "OPEN",
+		url: "https://github.com/test/pr/42",
+		additions: 10,
+		deletions: 5,
+		checks: { passed: 3, failed: 0, pending: 0, total: 3 },
+		check_details: [],
+		author: "alice",
+		commits: 1,
+		mergeable: "MERGEABLE",
+		merge_state_status: "CLEAN",
+		review_decision: "APPROVED",
+		labels: [],
+		is_draft: false,
+		base_ref_name: "main",
+		head_ref_oid: "abc1234",
+		created_at: "2025-01-01T00:00:00Z",
+		updated_at: "2025-01-02T00:00:00Z",
+		merge_state_label: null,
+		review_state_label: null,
+		...overrides,
+	};
+}
+
+/** Find the CI badge wrapper span (the one with the onClick handler) */
+function findCiBadgeWrapper(container: HTMLElement): HTMLElement {
+	const badges = container.querySelectorAll(".githubStatus [data-testid='status-badge']");
+	const ciBadgeEl = Array.from(badges).find((b) => b.textContent?.includes("CI"));
+	if (!ciBadgeEl?.parentElement) throw new Error("CI badge wrapper not found");
+	return ciBadgeEl.parentElement;
+}
+
+/** Find a toggle button by its title text */
+function findToggleByTitle(container: HTMLElement, titlePart: string): HTMLElement | null {
+	const buttons = container.querySelectorAll("button[title]");
+	return (Array.from(buttons).find((b) => b.getAttribute("title")?.includes(titlePart)) as HTMLElement) ?? null;
+}
+
+describe("StatusBar", () => {
+	const defaultProps = {
+		fontSize: 14,
+		defaultFontSize: 14,
+		statusInfo: "Ready",
+		onToggleDiff: vi.fn(),
+		onToggleMarkdown: vi.fn(),
+		onDictationStart: vi.fn(),
+		onDictationStop: vi.fn(),
+	};
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.clearAllMocks();
+		mockGitHubStatus.mockReturnValue(null);
+		mockGetActive.mockReturnValue(null);
+		mockGetBranchPrData.mockReturnValue(null);
+		mockDictationState.enabled = false;
+		mockDictationState.recording = false;
+		mockDictationState.processing = false;
+		mockDictationState.loading = false;
+		mockLastActivityAt.mockReturnValue(0);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("renders status info text", () => {
+		const { container } = render(() => <StatusBar {...defaultProps} />);
+		const statusInfo = container.querySelector(".info");
+		expect(statusInfo).not.toBeNull();
+		expect(statusInfo!.textContent).toBe("Ready");
+	});
+
+	it("calls onToggleMarkdown when MD button clicked", () => {
+		const onToggleMarkdown = vi.fn();
+		const { container } = render(() => <StatusBar {...defaultProps} onToggleMarkdown={onToggleMarkdown} />);
+		const mdBtn = findToggleByTitle(container, "Markdown")!;
+		fireEvent.click(mdBtn);
+		expect(onToggleMarkdown).toHaveBeenCalledOnce();
+	});
+
+	it("calls onToggleDiff when Git button clicked", () => {
+		const onToggleDiff = vi.fn();
+		const { container } = render(() => <StatusBar {...defaultProps} onToggleDiff={onToggleDiff} />);
+		const gitBtn = findToggleByTitle(container, "Git")!;
+		fireEvent.click(gitBtn);
+		expect(onToggleDiff).toHaveBeenCalledOnce();
+	});
+
+	it("does not render githubStatus when github status is null", () => {
+		const { container } = render(() => <StatusBar {...defaultProps} />);
+		const githubStatus = container.querySelector(".githubStatus");
+		expect(githubStatus).toBeNull();
+	});
+
+	it("shows PrBadge when githubStore has PR data for active branch", () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(makePrData());
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+		const githubStatus = container.querySelector(".githubStatus");
+		expect(githubStatus).not.toBeNull();
+		const badges = githubStatus!.querySelectorAll("[data-testid='status-badge']");
+		const prBadge = Array.from(badges).find((b) => b.textContent?.includes("PR #42"));
+		expect(prBadge).toBeDefined();
+	});
+
+	it("shows CiBadge when githubStore has checks with total > 0", () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(
+			makePrData({
+				checks: { passed: 3, failed: 0, pending: 0, total: 3 },
+			}),
+		);
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+		const githubStatus = container.querySelector(".githubStatus");
+		expect(githubStatus).not.toBeNull();
+		const badges = githubStatus!.querySelectorAll("[data-testid='status-badge']");
+		const ciBadge = Array.from(badges).find((b) => b.textContent?.includes("CI passed"));
+		expect(ciBadge).toBeDefined();
+	});
+
+	it("CI badge click opens PrDetailPopover", async () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(
+			makePrData({
+				checks: { passed: 3, failed: 0, pending: 0, total: 3 },
+			}),
+		);
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+
+		const ciBadge = findCiBadgeWrapper(container);
+		fireEvent.click(ciBadge);
+
+		await waitFor(() => {
+			const popover = container.querySelector(".popover");
+			expect(popover).not.toBeNull();
+		});
+	});
+
+	it("does not render CI badge when no currentRepoPath", () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		// Even if githubStore has PR data, without currentRepoPath the activePrData memo returns null
+		mockGetBranchPrData.mockReturnValue(
+			makePrData({
+				checks: { passed: 1, failed: 0, pending: 0, total: 1 },
+			}),
+		);
+		const { container } = render(() => <StatusBar {...defaultProps} />);
+
+		const badges = container.querySelectorAll(".githubStatus [data-testid='status-badge']");
+		const ciBadge = Array.from(badges).find((b) => b.textContent?.includes("CI"));
+		expect(ciBadge).toBeUndefined();
+	});
+
+	it("shows CiBadge with failure state", () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(
+			makePrData({
+				checks: { passed: 2, failed: 1, pending: 0, total: 3 },
+			}),
+		);
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+		const badges = container.querySelectorAll("[data-testid='status-badge']");
+		const ciBadge = Array.from(badges).find((b) => b.textContent?.includes("CI failed"));
+		expect(ciBadge).toBeDefined();
+	});
+
+	it("opens PR detail popover when PrBadge is clicked", () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(makePrData());
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+		const badges = container.querySelectorAll("[data-testid='status-badge']");
+		const prBadge = Array.from(badges).find((b) => b.textContent?.includes("PR #42"))!;
+		fireEvent.click(prBadge);
+		const popover = container.querySelector(".popover");
+		expect(popover).not.toBeNull();
+	});
+
+	it("shows mic button when dictation is enabled", () => {
+		mockDictationState.enabled = true;
+		const { container } = render(() => <StatusBar {...defaultProps} />);
+		const micBtn = findToggleByTitle(container, "Voice Dictation");
+		expect(micBtn).not.toBeNull();
+	});
+
+	it("does not show mic button when dictation is disabled", () => {
+		mockDictationState.enabled = false;
+		const { container } = render(() => <StatusBar {...defaultProps} />);
+		const micBtn = findToggleByTitle(container, "Voice Dictation");
+		expect(micBtn).toBeNull();
+	});
+
+	it("calls onDictationStart on mouseDown", () => {
+		mockDictationState.enabled = true;
+		const onDictationStart = vi.fn();
+		const { container } = render(() => <StatusBar {...defaultProps} onDictationStart={onDictationStart} />);
+		const micBtn = findToggleByTitle(container, "Voice Dictation")!;
+		fireEvent.mouseDown(micBtn, { button: 0 });
+		expect(onDictationStart).toHaveBeenCalled();
+	});
+
+	it("calls onDictationStop on mouseUp when recording", () => {
+		mockDictationState.enabled = true;
+		mockDictationState.recording = true;
+		const onDictationStop = vi.fn();
+		const { container } = render(() => <StatusBar {...defaultProps} onDictationStop={onDictationStop} />);
+		const micBtn = findToggleByTitle(container, "Voice Dictation")!;
+		fireEvent.mouseUp(micBtn, { button: 0 });
+		expect(onDictationStop).toHaveBeenCalled();
+	});
+
+	it("calls onDictationStop on mouseUp even when recording is false (start in-flight)", () => {
+		mockDictationState.enabled = true;
+		mockDictationState.recording = false; // start hasn't resolved yet
+		const onDictationStop = vi.fn();
+		const { container } = render(() => <StatusBar {...defaultProps} onDictationStop={onDictationStop} />);
+		const micBtn = findToggleByTitle(container, "Voice Dictation")!;
+		fireEvent.mouseUp(micBtn, { button: 0 });
+		expect(onDictationStop).toHaveBeenCalled();
+	});
+
+	it("calls onDictationStop on mouseLeave when recording", () => {
+		mockDictationState.enabled = true;
+		mockDictationState.recording = true;
+		const onDictationStop = vi.fn();
+		const { container } = render(() => <StatusBar {...defaultProps} onDictationStop={onDictationStop} />);
+		const micBtn = findToggleByTitle(container, "Voice Dictation")!;
+		fireEvent.mouseLeave(micBtn);
+		expect(onDictationStop).toHaveBeenCalled();
+	});
+
+	it("calls onDictationStop on mouseLeave when loading (start in-flight)", () => {
+		mockDictationState.enabled = true;
+		mockDictationState.recording = false;
+		mockDictationState.loading = true;
+		const onDictationStop = vi.fn();
+		const { container } = render(() => <StatusBar {...defaultProps} onDictationStop={onDictationStop} />);
+		const micBtn = findToggleByTitle(container, "Voice Dictation")!;
+		fireEvent.mouseLeave(micBtn);
+		expect(onDictationStop).toHaveBeenCalled();
+	});
+
+	it("does not show PrBadge for CLOSED PR", () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(makePrData({ state: "CLOSED" }));
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+		// CLOSED PR hides the entire github section (no activePrData)
+		const githubStatus = container.querySelector(".githubStatus");
+		expect(githubStatus).toBeNull();
+	});
+
+	it("shows PrBadge for MERGED PR with recent user activity", () => {
+		vi.setSystemTime(10000);
+		mockLastActivityAt.mockReturnValue(9000); // active 1s ago
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(makePrData({ state: "MERGED" }));
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+		const githubStatus = container.querySelector(".githubStatus");
+		const badges = githubStatus!.querySelectorAll("[data-testid='status-badge']");
+		const prBadge = Array.from(badges).find((b) => b.textContent?.includes("PR #42"));
+		expect(prBadge).toBeDefined();
+	});
+
+	it("hides PrBadge for MERGED PR after 5 min of accumulated activity", () => {
+		vi.setSystemTime(400_000); // 400s in
+		// Simulate: last activity was long ago, and accumulated activity exceeds 5 min
+		// This tests the mergedActivityMs accumulation logic
+		mockLastActivityAt.mockReturnValue(0); // no recent activity
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(makePrData({ state: "MERGED" }));
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+
+		// Simulate 301 seconds of activity ticking (each tick adds 1s when user is active)
+		for (let i = 0; i < 301; i++) {
+			vi.setSystemTime(400_000 + (i + 1) * 1000);
+			mockLastActivityAt.mockReturnValue(400_000 + (i + 1) * 1000 - 500); // active within 2s
+			vi.advanceTimersByTime(1000);
+		}
+
+		// After 5+ min of accumulated activity, the entire github section is hidden
+		const githubStatus = container.querySelector(".githubStatus");
+		expect(githubStatus).toBeNull();
+	});
+
+	it("OPEN PR still renders normally", () => {
+		mockGitHubStatus.mockReturnValue({
+			current_branch: "main",
+			ahead: 0,
+			behind: 0,
+		});
+		mockGetBranchPrData.mockReturnValue(makePrData({ state: "OPEN" }));
+		const { container } = render(() => <StatusBar {...defaultProps} currentRepoPath="/repo" />);
+		const githubStatus = container.querySelector(".githubStatus");
+		const badges = githubStatus!.querySelectorAll("[data-testid='status-badge']");
+		const prBadge = Array.from(badges).find((b) => b.textContent?.includes("PR #42"));
+		expect(prBadge).toBeDefined();
+	});
+});

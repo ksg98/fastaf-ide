@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Why we replaced xterm.js with a native terminal — FastAF Blog</title>
+  <meta name="description" content="After a year of patching xterm.js workarounds, we replaced it with an Alacritty-based native terminal. Here's what broke, what we gained, and why it was worth it." />
+
+  <meta property="og:title" content="Why we replaced xterm.js with a native terminal — FastAF" />
+  <meta property="og:description" content="After a year of patching xterm.js workarounds, we replaced it with a native Alacritty-based terminal. What broke, what we gained, and why it was worth it." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/ksg98/fastaf/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>May 4, 2026</time>
+      <h1>Why we replaced xterm.js with a native terminal</h1>
+      <p class="blog-post-summary">After months of patching WebGL atlas corruption, scroll jump races, and scrollbar visibility hacks, we replaced xterm.js with an Alacritty-based terminal rendered to Canvas. The result: fewer workaround files than we had bug fixes, and a rendering pipeline we actually control.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>The xterm.js era</h2>
+      <p>FastAF launched with xterm.js. It's the industry standard: VS Code uses it, Hyper uses it, practically every browser-based terminal uses it. For a v1, it was the right call. We got a working terminal fast and could focus on everything else — agent detection, split panes, status dots, the whole orchestration layer.</p>
+      <p>But xterm.js is designed for browsers. We're a native desktop app wrapping a WebView. That mismatch started small and grew into a constant maintenance burden. Every month brought a new edge case that was technically our problem but practically xterm's.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Death by a thousand workarounds</h2>
+      <p>Here's a partial list of xterm.js issues we patched over the course of six months:</p>
+      <ul>
+        <li><strong>WebGL atlas corruption.</strong> After font changes or DPR changes (moving between monitors), glyphs turned into garbage. We had to detect the condition and do a full atlas rebuild — not <code>clearTextureAtlas()</code>, which doesn't work reliably, but a complete teardown and reconstruction of the WebGL addon. We shipped a dedicated "Refresh terminal" shortcut (<code>Cmd+Shift+L</code>) just for this.</li>
+        <li><strong>Scroll position jumps.</strong> Seven distinct root causes for the viewport jumping to line 0: escape-sequence jumps, buffer contraction drift, <code>baseY</code> staleness on idle sessions, alternate buffer corruption, hidden terminal <code>viewportY</code> drift, hidden-to-visible transition guards, and WebGL atlas rebuild timing. Each one required a separate fix. We ended up building a <code>ViewportLock</code> system that intercepts xterm's programmatic scrolls during writes and restores position via <code>scrollToLine()</code>.</li>
+        <li><strong>Scrollbar visibility.</strong> xterm v6 auto-fades the scrollbar. That's fine for a chat widget — useless for a terminal where you need to see at a glance whether there's scrollback. CSS overrides didn't work because xterm's <code>_hide()</code> early-returns before adding the <code>.fade</code> class on terminals that haven't been interacted with. We wrote a MutationObserver that watches xterm's internal DOM and forces inline opacity. A MutationObserver. For a scrollbar.</li>
+        <li><strong>Double scrollbar jank.</strong> xterm v6 renders its own custom scrollbar widget, but a native scrollbar also appeared on the viewport div, updating out of sync. The result was a visible thumb-resize flash on every write.</li>
+        <li><strong>Copy trailing whitespace.</strong> Every copy path (Cmd+C, copy-on-select, keyboard handler) had to strip trailing spaces that xterm pads to the terminal width. Four copy paths, four places to strip.</li>
+        <li><strong>PTY write coalescing.</strong> Calling <code>terminal.write()</code> on every PTY event (hundreds per second during burst output) caused WebGL texture uploads to stack up and drop frames. We built a <code>requestAnimationFrame</code> accumulator to coalesce writes to ~60/sec.</li>
+        <li><strong>Bell handling.</strong> xterm's built-in <code>bellStyle</code> doesn't integrate with our notification system. We rewired it to an <code>onBell</code> handler.</li>
+        <li><strong>Fit dimensions.</strong> <code>fit()</code> crashes on zero-size terminals. Guard added.</li>
+      </ul>
+      <p>Each fix was individually reasonable. But the trend was clear: we were spending more time fighting the terminal renderer than building features. And every fix lived in a workaround file (<code>webglLifecycle.ts</code>, <code>scrollbarFix.ts</code>, <code>scrollTracker.ts</code>) that only existed because of xterm.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The real problem: we didn't own the grid</h2>
+      <p>xterm.js owns the terminal grid. When you call <code>terminal.write(data)</code>, the bytes go into xterm's parser, into xterm's grid model, and out through xterm's renderer. You get callbacks (<code>onData</code>, <code>onRender</code>, <code>onScroll</code>), but you never see the grid state directly. Want to know what's on row 15, column 30? You can ask for a buffer range, but it's a serialized copy — not the live state.</p>
+      <p>For a tool that builds features on top of terminal content — agent detection, output parsing, suggestion chips, intent extraction, scrollback search — this is backwards. We were feeding bytes to xterm so it could build a grid, then reading the grid back out through a serialization API to do our actual work. Two parsers, two grids, two sources of truth.</p>
+      <p>Worse: we already had the grid. Our Rust backend runs <code>alacritty_terminal</code> for PTY management and output parsing. The Alacritty grid is the authoritative source for everything — shell state detection, parsed events, VT log buffer, the scrollback overlay. xterm.js was a second grid that we fed the same bytes to, just for rendering.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>CanvasTerminal: one grid, one renderer</h2>
+      <p>The replacement is <code>CanvasTerminal</code> — a Canvas 2D renderer that reads directly from the Alacritty grid via Tauri IPC. No JavaScript terminal emulator in the loop. The Rust backend owns the grid, the frontend just paints it.</p>
+      <p>The rendering pipeline is simple:</p>
+      <ol>
+        <li>PTY bytes arrive in Rust, feed into <code>alacritty_terminal::Processor</code></li>
+        <li>Alacritty's damage tracker marks which rows changed</li>
+        <li>Frontend requests only the damaged rows via IPC</li>
+        <li>Canvas 2D draws the cells — text, colors, decorations, cursor</li>
+      </ol>
+      <p>No WebGL. No atlas. No texture uploads. No <code>requestAnimationFrame</code> coalescing of writes. The renderer draws what the grid says, and the grid is always right because there's only one.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What we gained</h2>
+      <p><strong>Eliminated an entire class of bugs.</strong> Scroll jump races are gone — there's no xterm viewport state to desync from. Atlas corruption is gone — there's no atlas. Scrollbar hacks are gone — we draw our own scrollbar from the grid's scroll offset. The three workaround files (<code>webglLifecycle.ts</code>, <code>scrollbarFix.ts</code>, <code>scrollTracker.ts</code>) are deleted.</p>
+      <p><strong>Single source of truth.</strong> The output parser, the suggestion system, the scrollback overlay, and the renderer all read from the same Alacritty grid. No more cross-checking between two terminal emulators.</p>
+      <p><strong>In-band signalling.</strong> We patched VTE (the ANSI parser) to handle OSC 7770 — a custom escape sequence for state/suggest/intent signalling. The PTY stream carries structured events that never hit the grid, never need concealment, and never suffer from cross-chunk parsing issues. This was impossible with xterm.js because we couldn't touch its parser.</p>
+      <p><strong>Native search.</strong> Alacritty has a built-in DFA regex engine that searches across grid + scrollback. We get regex search without building a search index or extracting text into JavaScript.</p>
+      <p><strong>Native selection.</strong> <code>selection_to_string()</code> returns the selected text without trailing whitespace padding. One API call, correct output, no per-copy-path stripping.</p>
+      <p><strong>Simpler codebase.</strong> We removed xterm.js, its WebGL addon, the fit addon, and all the lifecycle code around them. The CanvasTerminal component is self-contained — no addon initialization, no renderer fallback chains, no disposal races.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What we patched in Alacritty</h2>
+      <p>We maintain a local fork of <code>alacritty_terminal</code> with a small number of patches. This sounds scary, but the patches are minimal and targeted:</p>
+      <ul>
+        <li><strong>Resize without reflow.</strong> Ink-based TUIs (Claude Code, Codex) use cursor positioning that breaks when reflow merges or splits lines. We added a <code>reflow</code> flag to <code>resize()</code>.</li>
+        <li><strong>Public damage tracking.</strong> Made <code>mark_fully_damaged()</code> public so we can force full-frame redraws when needed.</li>
+        <li><strong>OSC 7770 handler.</strong> Our custom protocol for in-band state signalling. Fires an event from VTE through to the application layer without touching the grid.</li>
+        <li><strong>OSC 7 and OSC 133 routing.</strong> Current working directory and shell integration markers, routed from VTE to application events.</li>
+        <li><strong>Named color index mapping.</strong> A utility function that eliminates a 30-line match statement in our color serializer.</li>
+      </ul>
+      <p>Five patches in <code>alacritty_terminal</code>, three in VTE. Each is a few lines. We can rebase on upstream releases in minutes. Compare that to the workaround surface area we had with xterm.js — it's not even close.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The tradeoff we accepted</h2>
+      <p>Canvas 2D is slower than WebGL for pure text throughput. A terminal that does nothing but <code>cat</code> a 100MB file will scroll faster in xterm.js with its WebGL renderer. In practice, this doesn't matter for our use case — AI agents produce text at LLM speed (hundreds of tokens per second), not disk speed. The bottleneck is never rendering.</p>
+      <p>We also took on the responsibility of rendering text correctly. Ligatures, emoji, wide characters, bidirectional text — xterm.js handled all of this. We handle it now. For the subset our users need (code output, no bidi), this is straightforward. If someone needs Arabic terminal output, we'll cross that bridge.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Was it worth it?</h2>
+      <p>Unambiguously yes. The migration took two weeks of focused work. In return, we eliminated a category of bugs that had been generating a new issue every month, removed an entire rendering layer from the architecture, and gained direct access to the grid for features we were already building. The codebase is simpler, the bugs are fewer, and the features we want to build next (OSC 133 semantic zones, prompt-aware rendering, structured output overlays) are now possible without fighting a JavaScript terminal emulator that wasn't designed for what we're doing.</p>
+      <p>If you're building a terminal-based desktop app and you're using xterm.js because "everyone does" — take a hard look at whether you actually need a browser-based terminal emulator. We didn't, and finding that out was the best engineering decision we've made this year.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/ksg98/fastaf/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

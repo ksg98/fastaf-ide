@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Using Codex to orchestrate Claude Code through FastAF — FastAF Blog</title>
+  <meta name="description" content="How to use OpenAI Codex CLI to drive Claude Code sessions through FastAF's MCP bridge — with structured state, clean text, and fewer tokens than tmux." />
+
+  <meta property="og:title" content="Using Codex to orchestrate Claude Code through FastAF" />
+  <meta property="og:description" content="Cross-agent orchestration via MCP: structured terminal state instead of screen-scraping, at a fraction of the token cost." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/ksg98/fastaf/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>May 4, 2026</time>
+      <h1>Using Codex to orchestrate Claude Code through FastAF</h1>
+      <p class="blog-post-summary">Cross-agent orchestration without screen-scraping. FastAF's MCP bridge gives external agents structured terminal state — shell idle/busy, parsed questions, suggestion chips — instead of raw ANSI bytes. Here's how to set it up and why it beats tmux.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>The problem: agents driving agents</h2>
+      <p>You want one AI agent to supervise another. Maybe Codex reviews Claude Code's work. Maybe a coordinator agent dispatches tasks to multiple workers. The underlying mechanic is always the same: send a prompt to a terminal, wait for the agent to finish, read what it produced.</p>
+      <p>The traditional approach uses tmux: <code>tmux send-keys</code> to type, <code>tmux capture-pane</code> to read. It works. It also means your orchestrating agent sees raw terminal output — ANSI escape codes, box-drawing characters, Ink TUI redraws, cursor movement sequences. The agent spends tokens parsing visual noise instead of understanding results.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What FastAF gives you instead</h2>
+      <p>FastAF runs an MCP server on localhost. Any MCP-compatible client (Claude Code, Codex with MCP config, custom agents) can connect and use structured tools for terminal interaction:</p>
+
+      <table class="blog-table">
+        <thead>
+          <tr><th>Tool</th><th>What it does</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>ai_terminal_send_input</code></td><td>Send a command to a session (with safety checks)</td></tr>
+          <tr><td><code>ai_terminal_read_screen</code></td><td>Read visible terminal text — already stripped of ANSI escapes</td></tr>
+          <tr><td><code>ai_terminal_wait_for</code></td><td>Block until a regex matches or output stabilizes</td></tr>
+          <tr><td><code>ai_terminal_get_state</code></td><td>Structured JSON: shell state, agent type, intent, pending question, choice prompts</td></tr>
+          <tr><td><code>ai_terminal_drive_agent</code></td><td>Atomic send→wait→read in one call (new in v1.1.0)</td></tr>
+        </tbody>
+      </table>
+
+      <p>The critical difference: <code>get_state</code> returns parsed events, not text. FastAF's output parser runs on every PTY chunk and extracts structured data from the terminal stream — questions, choice prompts, rate limits, progress, error states, suggestion chips. The orchestrating agent gets JSON, not a screenshot.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Setup: connecting Codex to FastAF</h2>
+      <p>Codex CLI supports MCP servers as tool providers. FastAF auto-installs itself into Codex's TOML config when you enable the MCP bridge in Settings &gt; Services. The result in <code>~/.codex/config.toml</code>:</p>
+      <pre><code># ~/.codex/config.toml
+[mcp_servers.tuicommander]
+command = "/path/to/tuic-bridge"</code></pre>
+      <p>That's it. Codex now has access to all <code>ai_terminal_*</code> tools. Every write tool (send_input, send_key, drive_agent) prompts you for confirmation before executing — FastAF never lets an external agent type into a terminal silently.</p>
+      <p>The bridge binary communicates with FastAF over the local Unix socket — no port configuration needed.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Example: Codex reviews Claude Code's work</h2>
+      <p>You have Claude Code running in FastAF tab 1. The tab tooltip shows its alias: <code>tc-1</code> (derived from the repo name "tuicommander"). You start Codex in tab 2 and tell it:</p>
+      <pre><code>"Review what Claude Code produced in session tc-1. If there are
+test failures, tell Claude to fix them."</code></pre>
+      <p>Here's what Codex does behind the scenes:</p>
+      <pre><code>// Step 1: Check what's happening (tc-1 resolves to the full UUID)
+ai_terminal_get_state({ session_id: "tc-1" })
+→ { shell_state: "idle", agent_type: "claude-code",
+    intent: "Refactored auth module", ... }
+
+// Step 2: Read the output
+ai_terminal_read_screen({ session_id: "tc-1", lines: 100 })
+→ Clean text, no ANSI. Codex reads the last 100 lines.
+
+// Step 3: If tests failed, send a fix instruction
+ai_terminal_drive_agent({
+  session_id: "tc-1",
+  command: "The auth tests are failing because the mock doesn't match the new signature. Fix the mock in auth.test.ts.",
+  timeout_ms: 60000
+})
+→ { screen: "...", shell_state: "idle",
+    session_state: { agent_type: "claude-code", ... },
+    pattern_matched: false }</code></pre>
+      <p>Three tool calls. The first two are read-only (no confirmation prompt). The third sends a command and waits for Claude Code to finish — one atomic operation instead of the send→poll→poll→poll→read dance.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Example: automated multi-agent pipeline</h2>
+      <p>A more advanced pattern: Codex orchestrates a pipeline across two Claude Code sessions.</p>
+      <pre><code>"Run the linter in session tc-1. If it finds issues,
+send them to session tc-2 to resolve. Repeat until clean."</code></pre>
+      <p>Codex's execution loop:</p>
+      <pre><code>// 1. Run linter
+ai_terminal_drive_agent({
+  session_id: "tc-1",
+  command: "npm run lint",
+  wait_pattern: "\\d+ problems?|no issues",
+  timeout_ms: 30000
+})
+
+// 2. Check result
+// drive_agent returns screen + pattern_matched
+// If "0 problems" or "no issues" matched → done
+
+// 3. Otherwise, extract errors from screen and forward
+ai_terminal_drive_agent({
+  session_id: "tc-2",
+  command: "Fix these lint errors: [extracted from step 1]",
+  timeout_ms: 120000
+})
+
+// 4. Loop back to step 1</code></pre>
+      <p>The key insight: <code>wait_pattern</code> in <code>drive_agent</code> lets the orchestrator define a structured exit condition. Instead of polling "is it done yet?" over and over, the tool blocks server-side until the pattern matches. Zero wasted tokens on polling.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Why this beats tmux: a token cost comparison</h2>
+      <p>With tmux, every "check what happened" cycle looks like this:</p>
+      <pre><code>// tmux approach (5 shell commands, ~3000 tokens round-trip)
+tmux send-keys -t 0 "fix the bug" Enter      // send
+sleep 30                                       // guess at timing
+tmux capture-pane -t 0 -p -S -100            // capture raw output
+// → 100 lines of ANSI-encoded terminal output
+// → agent parses escape codes, box drawing, cursor moves
+// → extracts actual content from visual noise
+tmux capture-pane -t 0 -p -S -100            // poll again to check
+// → same parsing overhead</code></pre>
+      <p>The raw output from <code>capture-pane</code> includes Ink TUI redraws, progress spinners, ANSI color codes, and box-drawing characters. A typical Claude Code session dump is 60–70% visual noise that the orchestrating agent must tokenize and ignore.</p>
+      <p>With FastAF's MCP tools:</p>
+      <pre><code>// MCP approach (1 tool call, ~500 tokens round-trip)
+ai_terminal_drive_agent({
+  session_id: "tc-1",
+  command: "fix the bug",
+  timeout_ms: 120000
+})
+// → Clean text (ANSI stripped server-side)
+// → Structured state (shell_state, agent_type, intent)
+// → No polling (blocks until idle)
+// → ~500 tokens for the response</code></pre>
+
+      <table class="blog-table">
+        <thead>
+          <tr><th></th><th>tmux</th><th>FastAF MCP</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Commands per cycle</td><td>3–5 (send + sleep + capture + parse + retry)</td><td>1 (<code>drive_agent</code>)</td></tr>
+          <tr><td>Output format</td><td>Raw ANSI with visual noise</td><td>Clean text + structured JSON</td></tr>
+          <tr><td>Tokens per read</td><td>~2000–3000 (raw terminal dump)</td><td>~300–500 (clean content only)</td></tr>
+          <tr><td>Idle detection</td><td>Sleep/guess or poll loop</td><td>Server-side shell state tracking</td></tr>
+          <tr><td>Error detection</td><td>Grep for "error" in raw output</td><td>Parsed events: <code>tool-error</code>, <code>api-error</code></td></tr>
+          <tr><td>Question detection</td><td>Regex on raw text (fragile)</td><td>Parsed <code>question</code> event with confidence flag</td></tr>
+          <tr><td>Suggestion chips</td><td>Not available</td><td>Parsed <code>suggest</code> event with items array</td></tr>
+        </tbody>
+      </table>
+      <p>The token savings come from three places: no ANSI overhead in the output (~60% reduction), no polling loops (~50% fewer calls), and structured state that replaces regex parsing on the agent side (fewer reasoning tokens).</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The parsed events advantage</h2>
+      <p>FastAF's output parser detects specific agent states in real time:</p>
+      <ul>
+        <li><strong>question</strong> — the agent is waiting for user input (with a confidence flag that distinguishes explicit prompts from silence-based heuristics)</li>
+        <li><strong>choice-prompt</strong> — numbered menu (edit confirmation, bash approval, apply patch). Includes the options as a structured array.</li>
+        <li><strong>suggest</strong> — follow-up suggestion chips. The orchestrator can pick one and send it back.</li>
+        <li><strong>rate-limit</strong> — API rate limit hit, with retry timing</li>
+        <li><strong>usage-limit / usage-exhausted</strong> — approaching or at the usage cap, with reset time</li>
+        <li><strong>progress</strong> — progress bar state (0–100)</li>
+        <li><strong>intent</strong> — what the agent says it's currently working on</li>
+        <li><strong>active-subtasks</strong> — how many background workers the agent has running</li>
+      </ul>
+      <p>None of this is available through tmux. With <code>capture-pane</code>, you get pixels. With FastAF, you get semantics.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Security model</h2>
+      <p>Every write operation from an external MCP client triggers a confirmation dialog in FastAF. The user sees exactly what will be sent and to which session. This is non-negotiable — an external agent cannot silently type commands into your terminal.</p>
+      <p>Read operations (read_screen, get_state, get_context) don't require confirmation. Secrets are redacted server-side before the output reaches the MCP client — API keys, tokens, and passwords are replaced with <code>[REDACTED]</code>.</p>
+      <p>Cross-session writes (one agent writing to another agent's terminal) are blocked by default. You must explicitly enable unrestricted mode for the orchestrating session. Read-only cross-session access (monitoring another session's state) is always allowed.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Session aliases: human-friendly names</h2>
+      <p>Raw session IDs are UUIDs — great for machines, terrible for prompts. When you tell Codex "check session <code>a1b2c3d4-e5f6-...</code>", you're burning tokens on noise. FastAF solves this with automatic session aliases.</p>
+      <p>Every terminal session gets an alias derived from the repo directory name. The algorithm takes the first letter of each segment (split on <code>-</code>, <code>_</code>, <code>.</code>, or camelCase boundaries) and appends a per-repo counter:</p>
+      <table class="blog-table">
+        <thead>
+          <tr><th>Repo name</th><th>Alias</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>tuicommander</td><td><code>tu-1</code></td></tr>
+          <tr><td>night-recovery</td><td><code>nr-1</code>, <code>nr-2</code>, ...</td></tr>
+          <tr><td>my-app</td><td><code>ma-1</code></td></tr>
+          <tr><td>myProject</td><td><code>mp-1</code></td></tr>
+        </tbody>
+      </table>
+      <p>Aliases are visible in the tab tooltip and in the output of <code>ai_terminal_list_sessions</code>. Every tool that accepts a <code>session_id</code> also accepts an alias — FastAF resolves it to the full UUID internally. Counters reset on app restart, keeping numbers low.</p>
+      <p>When two repo names collide on the same acronym (e.g. <code>my-app</code> and <code>my-api</code>), the alias extends with additional letters from the longest segment to disambiguate (<code>ma-1</code> vs <code>map-1</code>).</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Getting started</h2>
+      <ol>
+        <li>Open FastAF with at least two tabs — one for the agent to be orchestrated, one for the orchestrator</li>
+        <li>Hover any tab to see its alias in the tooltip (e.g. <code>tc-1</code>), or call <code>ai_terminal_list_sessions</code> to see all aliases</li>
+        <li>Configure your orchestrating agent (Codex, Claude Code, or custom) to connect to FastAF's MCP server at <code>http://127.0.0.1:{port}/mcp</code></li>
+        <li>Use aliases in your prompts and tool calls — "check session <code>tc-1</code>" instead of a UUID</li>
+      </ol>
+      <p>The full tool reference is available via the MCP <code>tools/list</code> endpoint. Each tool includes an input schema that your agent can inspect at runtime.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What's next</h2>
+      <p>The <code>drive_agent</code> tool is the beginning. We're exploring event-driven orchestration — instead of the orchestrator polling <code>get_state</code>, FastAF would push parsed events via the MCP SSE stream when an agent's state changes. That would enable fully reactive pipelines where the orchestrator only wakes up when something interesting happens.</p>
+      <p>We're also looking at session templates: "spawn a Claude Code session on this repo with these CLAUDE.md instructions" as a single MCP tool call. Combined with <code>drive_agent</code>, you'd be able to stand up and drive a full agent pipeline from a single orchestrating prompt.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/ksg98/fastaf/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

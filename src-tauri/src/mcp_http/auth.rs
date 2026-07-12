@@ -1,0 +1,608 @@
+use crate::AppState;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{Request, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+
+/// Cookie name used to persist the session after successful Basic Auth.
+/// The browser sends cookies automatically in fetch() calls (unlike stored Basic Auth),
+/// which is why we need this: JS API calls would otherwise fail with 401 every time.
+const SESSION_COOKIE: &str = "tui-session";
+
+/// Result of checking Basic Auth credentials against a config.
+pub(super) enum AuthResult {
+    /// Credentials are valid
+    Ok,
+    /// Missing Authorization header
+    MissingHeader,
+    /// Credentials are invalid (wrong user, wrong password, bad format)
+    Invalid,
+    /// Auth not configured (no username/password in config)
+    NotConfigured,
+}
+
+/// Validate a Basic Auth header value against expected credentials.
+/// Pure function for testability. NOTE: calls bcrypt::verify — CPU-intensive.
+/// Always call this from spawn_blocking in async contexts.
+pub(super) fn validate_basic_auth(
+    auth_header: Option<&str>,
+    expected_username: &str,
+    expected_password_hash: &str,
+) -> AuthResult {
+    if expected_username.is_empty() || expected_password_hash.is_empty() {
+        return AuthResult::NotConfigured;
+    }
+
+    let Some(auth_value) = auth_header else {
+        return AuthResult::MissingHeader;
+    };
+
+    let Some(encoded) = auth_value.strip_prefix("Basic ") else {
+        return AuthResult::Invalid;
+    };
+
+    let Ok(decoded_bytes) =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+    else {
+        return AuthResult::Invalid;
+    };
+
+    let Ok(decoded) = String::from_utf8(decoded_bytes) else {
+        return AuthResult::Invalid;
+    };
+
+    let Some((username, password)) = decoded.split_once(':') else {
+        return AuthResult::Invalid;
+    };
+
+    if username != expected_username {
+        return AuthResult::Invalid;
+    }
+
+    match bcrypt::verify(password, expected_password_hash) {
+        Ok(true) => AuthResult::Ok,
+        _ => AuthResult::Invalid,
+    }
+}
+
+/// Check whether the request carries a valid session cookie.
+/// This is the fast path — avoids bcrypt on every API call after the first auth.
+fn has_valid_session_cookie(req: &Request<axum::body::Body>, session_token: &str) -> bool {
+    let cookie_header = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let expected = format!("{SESSION_COOKIE}={session_token}");
+    cookie_header
+        .split(';')
+        .map(str::trim)
+        .any(|c| c == expected)
+}
+
+/// Check whether the request carries a valid `?token=<session_token>` query param.
+/// This is the primary auth method for remote devices: the QR code URL includes the token,
+/// and scanning it authenticates the device (a session cookie is then set for subsequent calls).
+fn has_valid_url_token(req: &Request<axum::body::Body>, session_token: &str) -> bool {
+    let query = req.uri().query().unwrap_or("");
+    let expected = format!("token={session_token}");
+    query.split('&').any(|param| param == expected)
+}
+
+/// Build a Set-Cookie header value for the session token.
+/// `max_age_secs` controls cookie lifetime (0 = session cookie that expires on browser close).
+fn session_cookie_value(token: &str, max_age_secs: u64, secure: bool) -> String {
+    // HttpOnly: JS cannot read the cookie (XSS protection)
+    // SameSite=Strict: only sent on same-origin requests (stronger CSRF protection)
+    // Path=/: valid for all routes
+    // Secure: only sent over HTTPS (when TLS is active)
+    let secure_flag = if secure { "; Secure" } else { "" };
+    let base = format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/{secure_flag}");
+    if max_age_secs > 0 {
+        format!("{base}; Max-Age={max_age_secs}")
+    } else {
+        base // session cookie — expires when browser closes
+    }
+}
+
+/// Check whether an IP address belongs to a private/LAN network.
+/// Covers RFC1918 (10/8, 172.16/12, 192.168/16), CGNAT/Tailscale (100.64/10),
+/// IPv6 ULA (fc00::/7), and IPv6 link-local (fe80::/10).
+pub(crate) fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_ipv4(v4),
+        IpAddr::V6(v6) => is_private_ipv6(v6),
+    }
+}
+
+fn is_private_ipv4(ip: &Ipv4Addr) -> bool {
+    let o = ip.octets();
+    // 10.0.0.0/8
+    if o[0] == 10 {
+        return true;
+    }
+    // 172.16.0.0/12
+    if o[0] == 172 && (16..=31).contains(&o[1]) {
+        return true;
+    }
+    // 192.168.0.0/16
+    if o[0] == 192 && o[1] == 168 {
+        return true;
+    }
+    // 100.64.0.0/10 (CGNAT / Tailscale)
+    if o[0] == 100 && (64..=127).contains(&o[1]) {
+        return true;
+    }
+    false
+}
+
+fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
+    let seg = ip.segments();
+    // fc00::/7 — Unique Local Address (ULA)
+    if (seg[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    // fe80::/10 — Link-local
+    if (seg[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    false
+}
+
+/// Check if a string IP address belongs to the Tailscale CGNAT range (100.64/10)
+/// or the Tailscale IPv6 prefix (fd7a:115c:a1e0::/48).
+pub(crate) fn is_tailscale_ip(ip_str: &str) -> bool {
+    use std::net::IpAddr;
+    let ip: IpAddr = match ip_str.parse() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (64..=127).contains(&o[1])
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+        }
+    }
+}
+
+/// Basic Auth middleware that validates credentials against config.
+///
+/// Flow:
+/// 1. Localhost connections bypass auth (local Tauri app).
+/// 2. Requests with a valid session cookie pass through (fast path — no bcrypt).
+/// 3. Requests with a valid `Authorization: Basic` header pass through AND get
+///    a session cookie set so subsequent JS fetch() calls are authenticated.
+/// 4. Everything else → 401.
+///
+/// Why session cookies? Browsers store Basic Auth credentials for direct navigation
+/// but do NOT send them in JS `fetch()` calls. The session cookie is sent automatically
+/// with all same-origin fetch() calls, allowing the SPA to work after the initial auth.
+pub async fn basic_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    mut req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    // Mark the request as authenticated for downstream route guards
+    // (require_local_or_auth). Reaching a handler implies the request passed
+    // one of the auth gates below (loopback/LAN bypass, session cookie, URL
+    // token, or Basic Auth); every failed path short-circuits with 401/429
+    // here and never runs the handler, so the marker only ever propagates to
+    // authenticated handler invocations. (Boss 2026-06-27: token-auth = full
+    // trust across config + agent-spawn + prompt routes.)
+    req.extensions_mut().insert(super::guards::Authenticated);
+
+    // Localhost bypass: only in desktop mode where the Tauri webview connects
+    // locally. Headless mode binds 0.0.0.0 so loopback must be authenticated
+    // like any other address — otherwise any local process gets full access.
+    #[cfg(feature = "desktop")]
+    if addr.ip().is_loopback() {
+        return next.run(req).await;
+    }
+
+    // LAN bypass: skip auth for private/RFC1918 addresses when configured
+    if state.config.read().services.auth.lan_auth_bypass && is_private_ip(&addr.ip()) {
+        return next.run(req).await;
+    }
+
+    let session_token = state.session_token.read().clone();
+    let token_duration_secs = state
+        .config
+        .read()
+        .services
+        .auth
+        .session_token_duration_secs;
+
+    // Detect TLS for Secure cookie flag (dual-protocol injects Protocol extension)
+    let is_tls = req
+        .extensions()
+        .get::<axum_server_dual_protocol::Protocol>()
+        .is_some_and(|p| matches!(p, axum_server_dual_protocol::Protocol::Tls));
+
+    // Fast path: valid session cookie skips bcrypt entirely
+    if has_valid_session_cookie(&req, &session_token) {
+        return next.run(req).await;
+    }
+
+    // Primary remote auth: valid ?token=<session_token> in URL.
+    // The QR code embeds this token, so scanning it authenticates the device.
+    // We set a session cookie so the SPA's subsequent fetch() calls are also authenticated.
+    if has_valid_url_token(&req, &session_token) {
+        state.auth_rate_limits.remove(&addr.ip());
+        let mut response = next.run(req).await;
+        if let Ok(val) = session_cookie_value(&session_token, token_duration_secs, is_tls).parse() {
+            response.headers_mut().insert(header::SET_COOKIE, val);
+        }
+        return response;
+    }
+
+    // Rate limit check: reject early if this IP has too many recent failures
+    let (rate_max, rate_window_secs) = {
+        let config = state.config.read();
+        (
+            config.services.auth.auth_rate_limit_max,
+            config.services.auth.auth_rate_limit_window_secs,
+        )
+    };
+    let client_ip = addr.ip();
+    if rate_max > 0
+        && let Some(entry) = state.auth_rate_limits.get(&client_ip)
+    {
+        let (count, window_start) = *entry;
+        let window = std::time::Duration::from_secs(rate_window_secs);
+        let elapsed = window_start.elapsed();
+        if elapsed < window && count >= rate_max {
+            let retry_after = window.saturating_sub(elapsed).as_secs() + 1;
+            tracing::warn!(source = "auth", ip = %client_ip, count, "Rate limited — too many failed auth attempts");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after.to_string())],
+                "Too many failed authentication attempts",
+            )
+                .into_response();
+        }
+    }
+
+    // Fallback: Basic Auth (if username+password are configured)
+    let (username, hash) = {
+        let config = state.config.read();
+        (
+            config.services.auth.username.clone(),
+            config.services.auth.password_hash.clone(),
+        )
+    };
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    // bcrypt::verify is CPU-intensive (~100ms). Run it on a blocking thread to
+    // avoid stalling the single-threaded tokio runtime for the entire server.
+    let result = tokio::task::spawn_blocking(move || {
+        validate_basic_auth(auth_header.as_deref(), &username, &hash)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(source = "auth", error = %e, "spawn_blocking for bcrypt panicked or was cancelled");
+        AuthResult::Invalid
+    });
+
+    match result {
+        AuthResult::Ok => {
+            // Successful auth clears rate limit counter for this IP
+            state.auth_rate_limits.remove(&client_ip);
+            let mut response = next.run(req).await;
+            if let Ok(val) =
+                session_cookie_value(&session_token, token_duration_secs, is_tls).parse()
+            {
+                response.headers_mut().insert(header::SET_COOKIE, val);
+            }
+            response
+        }
+        AuthResult::MissingHeader | AuthResult::NotConfigured => (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"FastAF\"")],
+            "Scan the QR code or authenticate with Basic Auth",
+        )
+            .into_response(),
+        AuthResult::Invalid => {
+            tracing::warn!(source = "auth", ip = %client_ip, "Failed auth attempt");
+            record_auth_failure(&state.auth_rate_limits, client_ip, rate_window_secs);
+            (StatusCode::UNAUTHORIZED, "Invalid credentials").into_response()
+        }
+    }
+}
+
+/// Record a failed auth attempt for rate limiting.
+fn record_auth_failure(
+    rate_limits: &dashmap::DashMap<std::net::IpAddr, (u32, std::time::Instant)>,
+    ip: std::net::IpAddr,
+    window_secs: u64,
+) {
+    let window = std::time::Duration::from_secs(window_secs);
+    let now = std::time::Instant::now();
+    rate_limits
+        .entry(ip)
+        .and_modify(|(count, start)| {
+            if start.elapsed() >= window {
+                *count = 1;
+                *start = now;
+            } else {
+                *count += 1;
+            }
+        })
+        .or_insert((1, now));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- is_private_ip tests ---
+
+    #[test]
+    fn private_ipv4_rfc1918() {
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 68, 111))));
+    }
+
+    #[test]
+    fn private_ipv4_cgnat_tailscale() {
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
+        assert!(is_private_ip(&IpAddr::V4(Ipv4Addr::new(
+            100, 127, 255, 255
+        ))));
+    }
+
+    #[test]
+    fn public_ipv4_not_private() {
+        assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(172, 32, 0, 1))));
+        assert!(!is_private_ip(&IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))));
+    }
+
+    #[test]
+    fn private_ipv6_ula() {
+        // fd00::1 — ULA
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0xfd00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // fc00::1 — ULA
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0xfc00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+    }
+
+    #[test]
+    fn private_ipv6_link_local() {
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0, 0, 0, 1
+        ))));
+    }
+
+    #[test]
+    fn public_ipv6_not_private() {
+        assert!(!is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888
+        ))));
+    }
+
+    #[test]
+    fn session_cookie_with_max_age() {
+        let cookie = session_cookie_value("abc-123", 86400, false);
+        assert!(cookie.contains("tui-session=abc-123"));
+        assert!(cookie.contains("Max-Age=86400"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(!cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn session_cookie_zero_duration_omits_max_age() {
+        let cookie = session_cookie_value("abc-123", 0, false);
+        assert!(cookie.contains("tui-session=abc-123"));
+        assert!(!cookie.contains("Max-Age"));
+        assert!(cookie.contains("HttpOnly"));
+    }
+
+    #[test]
+    fn session_cookie_never_duration() {
+        let cookie = session_cookie_value("tok", 31536000, false);
+        assert!(cookie.contains("Max-Age=31536000"));
+    }
+
+    #[test]
+    fn session_cookie_secure_flag_on_tls() {
+        let cookie = session_cookie_value("tok", 86400, true);
+        assert!(cookie.contains("; Secure"));
+    }
+
+    #[test]
+    fn tailscale_ip_detection() {
+        assert!(is_tailscale_ip("100.80.90.53"));
+        assert!(is_tailscale_ip("100.64.0.1"));
+        assert!(is_tailscale_ip("100.127.255.255"));
+        assert!(!is_tailscale_ip("100.128.0.1"));
+        assert!(!is_tailscale_ip("192.168.1.1"));
+        assert!(is_tailscale_ip("fd7a:115c:a1e0::c601:5a3a"));
+        assert!(!is_tailscale_ip("fe80::1"));
+        assert!(!is_tailscale_ip("not-an-ip"));
+    }
+
+    #[test]
+    fn valid_session_cookie_matches() {
+        let req = Request::get("/")
+            .header(header::COOKIE, "tui-session=my-token; other=val")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(has_valid_session_cookie(&req, "my-token"));
+    }
+
+    #[test]
+    fn invalid_session_cookie_rejected() {
+        let req = Request::get("/")
+            .header(header::COOKIE, "tui-session=wrong-token")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!has_valid_session_cookie(&req, "correct-token"));
+    }
+
+    // --- validate_basic_auth tests ---
+
+    fn basic_header(user: &str, pass: &str) -> String {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        format!("Basic {encoded}")
+    }
+
+    #[test]
+    fn basic_auth_valid_credentials() {
+        let hash = bcrypt::hash("secret123", 4).unwrap(); // cost=4 for fast tests
+        assert!(matches!(
+            validate_basic_auth(Some(&basic_header("admin", "secret123")), "admin", &hash),
+            AuthResult::Ok
+        ));
+    }
+
+    #[test]
+    fn basic_auth_wrong_password() {
+        let hash = bcrypt::hash("correct", 4).unwrap();
+        assert!(matches!(
+            validate_basic_auth(Some(&basic_header("admin", "wrong")), "admin", &hash),
+            AuthResult::Invalid
+        ));
+    }
+
+    #[test]
+    fn basic_auth_missing_header() {
+        let hash = bcrypt::hash("pass", 4).unwrap();
+        assert!(matches!(
+            validate_basic_auth(None, "admin", &hash),
+            AuthResult::MissingHeader
+        ));
+    }
+
+    #[test]
+    fn basic_auth_empty_config_not_configured() {
+        assert!(matches!(
+            validate_basic_auth(Some(&basic_header("admin", "pass")), "", ""),
+            AuthResult::NotConfigured
+        ));
+    }
+
+    #[test]
+    fn basic_auth_malformed_base64() {
+        assert!(matches!(
+            validate_basic_auth(Some("Basic !!!not-base64!!!"), "admin", "somehash"),
+            AuthResult::Invalid
+        ));
+    }
+
+    #[test]
+    fn basic_auth_wrong_username() {
+        let hash = bcrypt::hash("pass", 4).unwrap();
+        assert!(matches!(
+            validate_basic_auth(Some(&basic_header("hacker", "pass")), "admin", &hash),
+            AuthResult::Invalid
+        ));
+    }
+
+    #[test]
+    fn basic_auth_no_colon_separator() {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode("nocolon");
+        assert!(matches!(
+            validate_basic_auth(Some(&format!("Basic {encoded}")), "admin", "somehash"),
+            AuthResult::Invalid
+        ));
+    }
+
+    #[test]
+    fn basic_auth_not_basic_scheme() {
+        assert!(matches!(
+            validate_basic_auth(Some("Bearer some-token"), "admin", "somehash"),
+            AuthResult::Invalid
+        ));
+    }
+
+    #[test]
+    fn valid_url_token_matches() {
+        let req = Request::get("/?token=abc&other=1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(has_valid_url_token(&req, "abc"));
+    }
+
+    #[test]
+    fn invalid_url_token_rejected() {
+        let req = Request::get("/?token=wrong")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert!(!has_valid_url_token(&req, "correct"));
+    }
+
+    // --- rate limiting tests ---
+
+    #[test]
+    fn rate_limit_records_failures() {
+        let map = dashmap::DashMap::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        record_auth_failure(&map, ip, 300);
+        assert_eq!(map.get(&ip).unwrap().0, 1);
+        record_auth_failure(&map, ip, 300);
+        assert_eq!(map.get(&ip).unwrap().0, 2);
+    }
+
+    #[test]
+    fn rate_limit_resets_after_window() {
+        let map = dashmap::DashMap::new();
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+        // Insert with a past timestamp
+        map.insert(
+            ip,
+            (
+                5,
+                std::time::Instant::now() - std::time::Duration::from_secs(301),
+            ),
+        );
+        record_auth_failure(&map, ip, 300);
+        assert_eq!(map.get(&ip).unwrap().0, 1);
+    }
+
+    #[test]
+    fn rate_limit_different_ips_independent() {
+        let map = dashmap::DashMap::new();
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+        for _ in 0..3 {
+            record_auth_failure(&map, ip1, 300);
+        }
+        record_auth_failure(&map, ip2, 300);
+        assert_eq!(map.get(&ip1).unwrap().0, 3);
+        assert_eq!(map.get(&ip2).unwrap().0, 1);
+    }
+
+    #[test]
+    fn successful_auth_clears_rate_limit() {
+        let map = dashmap::DashMap::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        for _ in 0..3 {
+            record_auth_failure(&map, ip, 300);
+        }
+        assert_eq!(map.get(&ip).unwrap().0, 3);
+        map.remove(&ip);
+        assert!(map.get(&ip).is_none());
+    }
+}

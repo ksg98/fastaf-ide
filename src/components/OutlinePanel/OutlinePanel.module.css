@@ -1,0 +1,110 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  width: 280px;
+  min-width: 200px;
+}
+
+.panel[data-visible="false"] {
+  display: none;
+}
+
+.symbolList {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.symbolItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  font-family: var(--font-mono);
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.symbolItem:hover {
+  background: var(--bg-highlight);
+}
+
+.kindBadge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-ui);
+}
+
+.kindFunction {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+.kindStruct,
+.kindClass,
+.kindEnum,
+.kindInterface {
+  background: color-mix(in srgb, var(--success) 20%, transparent);
+  color: var(--success);
+}
+
+.kindConst,
+.kindVariable,
+.kindField,
+.kindProperty {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  color: var(--warning);
+}
+
+.kindType,
+.kindTypeAlias {
+  background: color-mix(in srgb, var(--merged) 20%, transparent);
+  color: var(--merged);
+}
+
+.kindDefault {
+  background: color-mix(in srgb, var(--fg-muted) 20%, transparent);
+  color: var(--fg-muted);
+}
+
+.symbolName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lineNum {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  padding-left: 8px;
+}
+
+.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  padding: 16px;
+  text-align: center;
+}
+
+.nested1 { padding-left: 24px; }
+.nested2 { padding-left: 36px; }

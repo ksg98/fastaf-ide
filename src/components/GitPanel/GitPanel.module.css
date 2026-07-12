@@ -1,0 +1,141 @@
+/* Git Panel — tabbed container for git operations */
+.panel {
+  position: relative;
+  width: 380px;
+  min-width: 300px;
+  max-width: 50%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  outline: none;
+}
+
+.hidden {
+  display: none;
+}
+
+.detached {
+  width: 100%;
+  max-width: 100%;
+  border-left: none;
+}
+
+.tabs {
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  flex: 1;
+  min-width: 0;
+  /* Breathing room so the last tab never butts against the window controls. */
+  margin-right: 6px;
+  /* Hide the overflow scrollbar entirely — the GitPanel.tsx onWheel handler maps
+     vertical wheel/trackpad to horizontal scroll instead. The app's global
+     ::-webkit-scrollbar forces *reserved* (space-taking) scrollbars, so a visible
+     bar here would reserve height: inflating this row above the window controls
+     (misaligned icons) and leaving dead space below. VSCode/Zed tab strips scroll
+     without a visible bar for the same reason. */
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  /* Tighter horizontal padding so all four labels fit before scrolling kicks in. */
+  padding: 6px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.1s ease, border-color 0.15s ease;
+}
+
+.tab:hover {
+  color: var(--fg-primary);
+}
+
+.tabActive {
+  color: var(--fg-primary);
+  border-bottom-color: var(--accent);
+}
+
+/* Tab content area — fills remaining space above sub-panels */
+.tabContent {
+  flex: 1;
+  min-height: 200px;
+  overflow: hidden;
+}
+
+/* Sub-panels (History, Blame) — collapsible sections at bottom.
+   Shares vertical space with tabContent via flex; shrinks if needed. */
+.subPanels {
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+.subPanelHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  color: var(--fg-muted);
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s ease;
+}
+
+.subPanelHeader:hover {
+  background: var(--bg-highlight);
+}
+
+.subChevron {
+  font-size: var(--font-xs);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.subChevronCollapsed {
+  transform: rotate(-90deg);
+}
+
+.subPanelLabel {
+  color: var(--fg-secondary);
+}
+
+.subPanelFile {
+  font-size: var(--font-xs);
+  font-family: var(--font-ui);
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.subPanelBody {
+  max-height: 250px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.placeholder {
+  padding: 20px;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}

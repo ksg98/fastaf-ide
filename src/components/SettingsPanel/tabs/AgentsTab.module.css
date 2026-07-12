@@ -1,0 +1,621 @@
+/* AgentsTab — agent list, run configs, and MCP management */
+
+.agentList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.agentRow {
+  background: var(--bg-primary);
+}
+
+.agentHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 10px 12px;
+  gap: 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+
+.agentHeader:hover {
+  background: var(--bg-highlight);
+}
+
+.agentInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.agentNameRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.agentIcon {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-xs);
+  font-weight: 700;
+  color: white;
+  flex-shrink: 0;
+}
+
+.agentName {
+  font-weight: 600;
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+}
+
+.agentBinary {
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+}
+
+.badge {
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.badge[data-type="available"] {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--success);
+}
+
+.badge[data-type="notfound"] {
+  background: var(--bg-tertiary);
+  color: var(--fg-muted);
+}
+
+.badge[data-type="disabled"] {
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--fg-muted);
+}
+
+.badge[data-type="mcp"] {
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+}
+
+.agentVersion {
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.expandIcon {
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  flex-shrink: 0;
+  transition: transform 0.15s;
+  margin-top: 3px;
+}
+
+.expandIcon.expanded {
+  transform: rotate(90deg);
+}
+
+/* Expanded section */
+
+.agentExpanded {
+  border-top: 1px solid var(--border);
+  padding: 12px;
+  background: var(--bg-secondary);
+}
+
+.expandedSection {
+  margin-bottom: 12px;
+}
+
+.expandedSection:last-child {
+  margin-bottom: 0;
+}
+
+.expandedLabel {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-secondary);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Run config rows */
+
+.configList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.configRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.configName {
+  font-weight: 500;
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+}
+
+.configCommand {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.defaultBadge {
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.configActions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.smallBtn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.smallBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.smallBtn.danger:hover {
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--error);
+  border-color: var(--error);
+}
+
+/* More-actions dropdown */
+
+.menuWrap {
+  position: relative;
+}
+
+.menuDropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 2px;
+  min-width: 90px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  z-index: 20;
+  overflow: hidden;
+}
+
+.menuItem {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  background: none;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.menuItem:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.menuItem.danger:hover {
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--error);
+}
+
+/* Add config form */
+
+.addConfigForm {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.formRow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.formRow:last-child {
+  margin-bottom: 0;
+}
+
+.formInput {
+  flex: 1;
+  width: 100%;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  box-sizing: border-box;
+}
+
+.formInput:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.formInput.mono {
+  font-family: var(--font-mono);
+}
+
+.formInput.inputError {
+  border-color: var(--error);
+}
+
+.validationError {
+  color: var(--error);
+  font-size: 0.75rem;
+  padding: 0 4px 4px;
+}
+
+/* Action buttons row */
+
+.actionsRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.actionBtn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--fg-secondary);
+  font-size: var(--font-sm);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.actionBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+  border-color: var(--accent);
+}
+
+.actionBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.actionBtn.installed {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.actionBtn.installed:hover {
+  background: rgba(248, 81, 73, 0.1);
+  color: var(--error);
+  border-color: var(--error);
+}
+
+/* MCP status indicator */
+
+.mcpStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.mcpDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.mcpDot.on {
+  background: var(--success);
+}
+
+.mcpDot.off {
+  background: var(--fg-muted);
+  opacity: 0.4;
+}
+
+/* Feature toggle row */
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+
+.toggleRow input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.toggleRow input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggleRow input[type="checkbox"]:checked::after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: 2px;
+  left: 5px;
+  width: 4px;
+  height: 8px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* Run config row wrapper (for inline env editing) */
+
+.configRowWrap {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Env var badge on config row */
+
+.envBadge {
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+  color: var(--warning);
+  flex-shrink: 0;
+}
+
+/* Env vars editing */
+
+.envVarsSection {
+  margin-bottom: 6px;
+}
+
+.envVarsHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.envVarsLabel {
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.envVarsList {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.envVarRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.envVarKey {
+  flex: 0 0 35%;
+  min-width: 0;
+}
+
+.envVarEquals {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
+  flex-shrink: 0;
+}
+
+.envVarValue {
+  flex: 1;
+  min-width: 0;
+}
+
+.envEditPanel {
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border);
+}
+
+/* Env flags panel */
+
+.envFlagsGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.envFlagCategory {
+  margin-bottom: 8px;
+}
+
+.envFlagCategory:last-child {
+  margin-bottom: 0;
+}
+
+.envCategoryLabel {
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+  padding: 0 2px;
+}
+
+.envFlagRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+}
+
+.envFlagRow:hover {
+  background: var(--bg-highlight);
+}
+
+.envFlagToggle {
+  flex-shrink: 0;
+}
+
+.envFlagKey {
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
+  color: var(--fg-secondary);
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.envFlagDesc {
+  flex: 1;
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.envFlagSelect {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-2xs);
+  font-family: var(--font-mono);
+  padding: 1px 4px;
+  flex-shrink: 0;
+}
+
+.envFlagInput {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-2xs);
+  font-family: var(--font-mono);
+  padding: 1px 4px;
+  width: 80px;
+  flex-shrink: 0;
+}
+
+.envFlagInput:focus,
+.envFlagSelect:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.remoteBanner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--fg-secondary);
+}
+
+.remoteBannerIcon {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.remoteLoading {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  color: var(--fg-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.remoteError {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-md);
+  color: var(--error);
+  font-size: 13px;
+}

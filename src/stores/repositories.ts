@@ -1,0 +1,1006 @@
+import { batch } from "solid-js";
+import { createStore, produce } from "solid-js/store";
+import { invoke } from "../invoke";
+import type { SavedTerminal } from "../types";
+import { markPerf } from "../utils/perfTrace";
+import { appLogger } from "./appLogger";
+import { makeBranchKey } from "./tabManager";
+
+const LEGACY_STORAGE_KEY = "tui-commander-repos";
+
+/** Returns paths of repos that have at least one active terminal. */
+function getHotRepoPaths(repositories: Record<string, RepositoryState>): string[] {
+	return Object.entries(repositories)
+		.filter(([, repo]) => Object.values(repo.branches).some((b) => b.terminals.length > 0))
+		.map(([path]) => path);
+}
+
+function syncHotRepos(repositories: Record<string, RepositoryState>): void {
+	invoke("set_hot_repos", { paths: getHotRepoPaths(repositories) }).catch((err: unknown) =>
+		appLogger.warn("store", "Failed to sync hot repos", err),
+	);
+}
+
+/** Branch with its terminals */
+export interface BranchState {
+	name: string;
+	isMain: boolean; // true for main/master/develop
+	isShell?: boolean; // true for non-git directory shell entries
+	isPreparing?: boolean; // true while stale worktree is being cleaned up and recreated in background
+	isRemoving?: boolean; // true while worktree removal is in progress
+	worktreePath: string | null; // Path to worktree directory (null for main branch)
+	terminals: string[]; // terminal IDs belonging to this branch
+	hadTerminals: boolean; // true once a terminal has been created — suppresses auto-spawn after close-all
+	lastActiveTerminal: string | null; // last active terminal ID when leaving this branch
+	additions: number;
+	deletions: number;
+	isMerged: boolean; // true when branch is fully merged into the repo's main branch
+	lastCommitTs: number | null; // Unix timestamp of last commit on this branch
+	runCommand?: string; // Saved run command for this branch
+	savedTerminals?: SavedTerminal[]; // Persisted terminal metadata for session restore
+	/** CI auto-heal: when enabled, CI failures trigger automatic agent fix cycles */
+	ciAutoHeal?: { enabled: boolean; attempts: number; lastRunId?: number; healing?: boolean };
+	/** Whether the terminal tab list is expanded under this branch row */
+	tabsExpanded?: boolean;
+}
+
+/** Repository with branches */
+export interface RepositoryState {
+	path: string;
+	displayName: string;
+	initials: string;
+	isGitRepo?: boolean; // false for plain directories (defaults to true for backward compat)
+	expanded: boolean; // Whether branches are expanded/collapsed
+	collapsed: boolean; // Whether entire repo is collapsed to icon only
+	parked: boolean; // Whether repo is hidden from sidebar (recallable via popover)
+	branches: Record<string, BranchState>;
+	activeBranch: string | null;
+	/** Which remote connection this repo belongs to (undefined = local) */
+	connectionId?: string;
+}
+
+/** A named, colored group of repositories */
+export interface RepoGroup {
+	id: string;
+	name: string;
+	color: string; // hex color or "" for default
+	collapsed: boolean; // accordion state
+	repoOrder: string[]; // ordered repo paths in this group
+}
+
+/** Repositories store state */
+interface RepositoriesStoreState {
+	repositories: Record<string, RepositoryState>;
+	repoOrder: string[]; // ungrouped repo order
+	activeRepoPath: string | null;
+	/** Per-repo monotonic revision counter, bumped by repo-changed events */
+	revisions: Record<string, number>;
+	groups: Record<string, RepoGroup>;
+	groupOrder: string[]; // display order of group IDs
+	/** True while a branch switch is in progress — TabBar holds previous tabs */
+	branchSwitching: boolean;
+}
+
+/** Grouped layout returned by getGroupedLayout() */
+export interface GroupedLayout {
+	groups: Array<{ group: RepoGroup; repos: RepositoryState[] }>;
+	ungrouped: RepositoryState[];
+}
+
+/** Fallback check when Rust-provided is_main is not available (e.g. local rename). */
+function isMainBranch(branchName: string): boolean {
+	const mainBranches = ["main", "master", "develop", "development", "dev"];
+	return mainBranches.includes(branchName.toLowerCase());
+}
+
+const SAVE_DEBOUNCE_MS = 500;
+
+/** Guard: prevent saves before hydrate completes to avoid nuking persisted data */
+let hydrated = false;
+
+/** Persist repos to Rust backend (fire-and-forget, terminals excluded) */
+function saveReposImmediate(
+	repositories: Record<string, RepositoryState>,
+	repoOrder: string[],
+	activeRepoPath: string | null | undefined,
+	groups: Record<string, RepoGroup>,
+	groupOrder: string[],
+): void {
+	if (!hydrated) {
+		appLogger.warn("store", "Repositories save blocked — hydrate not yet complete");
+		return;
+	}
+	const serializable: Record<string, RepositoryState> = {};
+	for (const [path, repo] of Object.entries(repositories)) {
+		const branches: Record<string, BranchState> = {};
+		for (const [name, branch] of Object.entries(repo.branches)) {
+			const persisted: BranchState = { ...branch, terminals: [] };
+			// `healing` is a transient runtime flag; never persist it (a crash mid-heal
+			// would otherwise leave the toggle showing "Healing" forever after reload).
+			if (persisted.ciAutoHeal?.healing) {
+				persisted.ciAutoHeal = { ...persisted.ciAutoHeal, healing: false };
+			}
+			branches[name] = persisted;
+		}
+		serializable[path] = { ...repo, branches };
+	}
+	invoke("save_repositories", {
+		config: {
+			repos: serializable,
+			repoOrder,
+			activeRepoPath: activeRepoPath ?? null,
+			groups,
+			groupOrder,
+		},
+	}).catch((err) => appLogger.debug("store", "Failed to save repos", err));
+}
+
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Debounced save — coalesces rapid mutations into a single IPC call */
+function saveRepos(
+	repositories: Record<string, RepositoryState>,
+	repoOrder: string[],
+	activeRepoPath: string | null | undefined,
+	groups: Record<string, RepoGroup>,
+	groupOrder: string[],
+): void {
+	if (saveTimer) clearTimeout(saveTimer);
+	saveTimer = setTimeout(() => {
+		saveTimer = null;
+		saveReposImmediate(repositories, repoOrder, activeRepoPath, groups, groupOrder);
+	}, SAVE_DEBOUNCE_MS);
+}
+
+/** Generate a unique group ID */
+function generateGroupId(): string {
+	return `grp-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+/** Create the repositories store */
+function createRepositoriesStore() {
+	const [state, setState] = createStore<RepositoriesStoreState>({
+		repositories: {},
+		repoOrder: [],
+		activeRepoPath: null,
+		revisions: {},
+		groups: {},
+		groupOrder: [],
+		branchSwitching: false,
+	});
+
+	// Inverse index: terminal ID → repo path (O(1) lookup instead of O(repos*branches*terminals)).
+	// Maps termId→repoPath only (NOT branchName). renameBranch and mergeBranchState don't update
+	// this map because they never change the repoPath — terminals stay in the same repo.
+	const terminalToRepo = new Map<string, string>();
+
+	/** Debounced save shorthand using current state */
+	const save = () =>
+		saveRepos(state.repositories, state.repoOrder, state.activeRepoPath, state.groups, state.groupOrder);
+
+	/** Immediate save shorthand using current state (for app exit) */
+	const saveNow = () =>
+		saveReposImmediate(state.repositories, state.repoOrder, state.activeRepoPath, state.groups, state.groupOrder);
+
+	const actions = {
+		/** Load repos from Rust backend; migrate from localStorage on first run */
+		async hydrate(): Promise<void> {
+			try {
+				// One-time migration from localStorage
+				const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+				if (legacy) {
+					try {
+						const parsed = JSON.parse(legacy);
+						await invoke("save_repositories", { config: { repos: parsed } });
+					} catch {
+						/* ignore corrupt legacy data */
+					}
+					localStorage.removeItem(LEGACY_STORAGE_KEY);
+				}
+
+				const loaded = await invoke<{
+					repos?: Record<string, RepositoryState>;
+					repoOrder?: string[];
+					activeRepoPath?: string | null;
+					groups?: Record<string, RepoGroup>;
+					groupOrder?: string[];
+				}>("load_repositories");
+				const repos = loaded?.repos;
+				if (repos) {
+					// Migration: add collapsed/expanded fields, clear stale terminal IDs
+					Object.values(repos).forEach((repo) => {
+						if (repo.collapsed === undefined) {
+							repo.collapsed = false;
+						}
+						if (repo.expanded === undefined) {
+							repo.expanded = true;
+						}
+						if (repo.parked === undefined) {
+							repo.parked = false;
+						}
+						// Migration: remove legacy showAllBranches field
+						delete (repo as unknown as Record<string, unknown>).showAllBranches;
+						for (const branch of Object.values(repo.branches)) {
+							branch.terminals = [];
+							// Reset hadTerminals on startup: the flag only suppresses auto-spawn
+							// within a session (after user closes all terminals). Across restarts,
+							// auto-spawn should work unless savedTerminals will restore them.
+							branch.hadTerminals = !!branch.savedTerminals?.length;
+							if (branch.savedTerminals === undefined) {
+								branch.savedTerminals = [];
+							}
+							if (branch.isMerged === undefined) {
+								branch.isMerged = false;
+							}
+						}
+					});
+					setState("repositories", repos);
+
+					// Hydrate repoOrder: use saved order, falling back to Object.keys for repos not yet in the order
+					const repoPaths = Object.keys(repos);
+					const savedOrder = loaded.repoOrder ?? [];
+					const validOrder = savedOrder.filter((p) => p in repos);
+					const missing = repoPaths.filter((p) => !validOrder.includes(p));
+					setState("repoOrder", [...validOrder, ...missing]);
+
+					// Hydrate groups — migration: missing groups field initializes empty
+					setState("groups", loaded.groups ?? {});
+					setState("groupOrder", loaded.groupOrder ?? []);
+
+					// Restore active repo
+					if (loaded.activeRepoPath && loaded.activeRepoPath in repos) {
+						setState("activeRepoPath", loaded.activeRepoPath);
+					}
+				}
+				hydrated = true;
+				syncHotRepos(state.repositories);
+			} catch (err) {
+				appLogger.error("store", "Failed to hydrate repositories", err);
+				// hydrated stays false — saves are blocked to prevent data loss
+			}
+		},
+
+		/** Add a repository */
+		add(repo: {
+			path: string;
+			displayName: string;
+			initials?: string;
+			isGitRepo?: boolean;
+			connectionId?: string;
+		}): void {
+			setState("repositories", repo.path, {
+				path: repo.path,
+				displayName: repo.displayName,
+				initials: repo.initials ?? "",
+				isGitRepo: repo.isGitRepo ?? true,
+				expanded: true,
+				collapsed: false,
+				parked: false,
+				branches: {},
+				activeBranch: null,
+				connectionId: repo.connectionId,
+			});
+			if (!state.repoOrder.includes(repo.path)) {
+				setState("repoOrder", [...state.repoOrder, repo.path]);
+			}
+			save();
+			invoke("github_update_paths", { paths: this.getActivePaths() }).catch(() => {});
+		},
+
+		/** Remove a repository */
+		remove(path: string): void {
+			// Clear inverse index entries for all terminals in this repo
+			const repo = state.repositories[path];
+			if (repo) {
+				for (const branch of Object.values(repo.branches)) {
+					for (const termId of branch.terminals) {
+						terminalToRepo.delete(termId);
+					}
+				}
+			}
+			setState(
+				produce((s) => {
+					delete s.repositories[path];
+					delete s.revisions[path];
+					s.repoOrder = s.repoOrder.filter((p) => p !== path);
+					// Clean up group membership
+					for (const group of Object.values(s.groups)) {
+						group.repoOrder = group.repoOrder.filter((p) => p !== path);
+					}
+					if (s.activeRepoPath === path) {
+						s.activeRepoPath = null;
+					}
+				}),
+			);
+			save();
+			invoke("github_update_paths", { paths: this.getActivePaths() }).catch(() => {});
+		},
+
+		/** Set active repository */
+		setActive(path: string | null): void {
+			// Freeze-investigation breadcrumb: the synchronous reactive cascade off
+			// activeRepoPath/revision is the prime repo-switch-hang suspect.
+			markPerf("repo.setActive", { path });
+			setState("activeRepoPath", path);
+			save();
+			if (path && !getHotRepoPaths(state.repositories).includes(path)) {
+				setState("revisions", path, (n) => (n ?? 0) + 1);
+				invoke("github_poll_repo", { path }).catch(() => {});
+			}
+		},
+
+		/** Update the display name of a repository */
+		setDisplayName(path: string, displayName: string): void {
+			if (!state.repositories[path]) return;
+			setState("repositories", path, "displayName", displayName);
+			save();
+		},
+
+		/** Toggle repository expanded state */
+		toggleExpanded(path: string): void {
+			setState("repositories", path, "expanded", (e) => !e);
+			save();
+		},
+
+		/** Toggle repository collapsed state */
+		toggleCollapsed(path: string): void {
+			setState("repositories", path, "collapsed", (c) => !c);
+			save();
+		},
+
+		/** Toggle branch terminal tab list expanded state */
+		toggleBranchTabsExpanded(repoPath: string, branchName: string): void {
+			if (!state.repositories[repoPath]?.branches[branchName]) return;
+			setState("repositories", repoPath, "branches", branchName, "tabsExpanded", (e) => !e);
+			save();
+		},
+
+		/** Set branch terminal tab list expanded state explicitly */
+		setBranchTabsExpanded(repoPath: string, branchName: string, expanded: boolean): void {
+			if (!state.repositories[repoPath]?.branches[branchName]) return;
+			setState("repositories", repoPath, "branches", branchName, "tabsExpanded", expanded);
+			save();
+		},
+
+		/** Update git repo status (used when a directory gains or loses .git) */
+		setIsGitRepo(path: string, isGitRepo: boolean): void {
+			setState("repositories", path, "isGitRepo", isGitRepo);
+			save();
+		},
+
+		/** Add or update a branch */
+		setBranch(repoPath: string, branchName: string, data?: Partial<BranchState>): void {
+			const existing = state.repositories[repoPath]?.branches[branchName];
+			if (existing) {
+				setState("repositories", repoPath, "branches", branchName, (prev) => ({
+					...prev,
+					...data,
+				}));
+			} else {
+				setState("repositories", repoPath, "branches", branchName, {
+					name: branchName,
+					isMain: isMainBranch(branchName),
+					worktreePath: null,
+					terminals: [],
+					hadTerminals: false,
+					tabsExpanded: false,
+					lastActiveTerminal: null,
+					additions: 0,
+					deletions: 0,
+					isMerged: false,
+					lastCommitTs: null,
+					...data,
+				});
+			}
+			save();
+		},
+
+		/** Set active branch for a repo */
+		setActiveBranch(repoPath: string, branchName: string | null): void {
+			setState("repositories", repoPath, "activeBranch", branchName);
+		},
+
+		/** Add terminal to branch */
+		addTerminalToBranch(repoPath: string, branchName: string, terminalId: string): void {
+			const branch = state.repositories[repoPath]?.branches[branchName];
+			if (branch && !branch.terminals.includes(terminalId)) {
+				appLogger.info("terminal", `addTerminalToBranch ${branchName} += ${terminalId}`, {
+					before: [...branch.terminals],
+				});
+				terminalToRepo.set(terminalId, repoPath);
+				batch(() => {
+					setState("repositories", repoPath, "branches", branchName, "terminals", (t) => [...t, terminalId]);
+					if (!branch.hadTerminals) {
+						setState("repositories", repoPath, "branches", branchName, "hadTerminals", true);
+					}
+				});
+				save();
+				syncHotRepos(state.repositories);
+			}
+		},
+
+		/** Remove terminal from branch */
+		removeTerminalFromBranch(repoPath: string, branchName: string, terminalId: string): void {
+			const branch = state.repositories[repoPath]?.branches[branchName];
+			appLogger.info("terminal", `removeTerminalFromBranch ${branchName} -= ${terminalId}`, {
+				before: branch?.terminals ? [...branch.terminals] : [],
+			});
+			terminalToRepo.delete(terminalId);
+			batch(() => {
+				setState("repositories", repoPath, "branches", branchName, "terminals", (t) =>
+					t.filter((id) => id !== terminalId),
+				);
+				// When last terminal is removed, clear stale savedTerminals so the periodic
+				// snapshot doesn't resurrect closed tabs on next branch click.
+				const updated = state.repositories[repoPath]?.branches[branchName];
+				if (updated && updated.terminals.length === 0 && updated.savedTerminals && updated.savedTerminals.length > 0) {
+					setState("repositories", repoPath, "branches", branchName, "savedTerminals", []);
+				}
+			});
+			save();
+			syncHotRepos(state.repositories);
+		},
+
+		/** Set run command for a branch */
+		setRunCommand(repoPath: string, branchName: string, command: string | undefined): void {
+			const branch = state.repositories[repoPath]?.branches[branchName];
+			if (branch) {
+				setState("repositories", repoPath, "branches", branchName, "runCommand", command);
+				save();
+			}
+		},
+
+		/** Update CI auto-heal state for a branch */
+		setCiAutoHeal(repoPath: string, branchName: string, value: BranchState["ciAutoHeal"]): void {
+			if (!state.repositories[repoPath]?.branches[branchName]) return;
+			setState("repositories", repoPath, "branches", branchName, "ciAutoHeal", value);
+			save();
+		},
+
+		/** Update branch stats (additions/deletions) — only if branch already exists */
+		updateBranchStats(repoPath: string, branchName: string, additions: number, deletions: number): void {
+			if (!state.repositories[repoPath]?.branches[branchName]) return;
+			setState("repositories", repoPath, "branches", branchName, { additions, deletions });
+		},
+
+		/** Remove a branch from a repository */
+		removeBranch(repoPath: string, branchName: string): void {
+			const repo = state.repositories[repoPath];
+			if (!repo) return;
+
+			const branch = repo.branches[branchName];
+			if (branch) {
+				appLogger.debug("terminal", `removeBranch "${branchName}" from ${repoPath}`, {
+					terminals: branch.terminals,
+					hadTerminals: branch.hadTerminals,
+					savedTerminals: branch.savedTerminals?.length ?? 0,
+				});
+			}
+
+			// Clean up inverse index for all terminals in the removed branch
+			if (branch) {
+				for (const tid of branch.terminals) {
+					terminalToRepo.delete(tid);
+				}
+			}
+
+			setState(
+				produce((s) => {
+					const r = s.repositories[repoPath];
+					if (!r) return;
+
+					// Delete the branch
+					delete r.branches[branchName];
+
+					// Clear active branch if it was removed
+					if (r.activeBranch === branchName) {
+						const remainingBranches = Object.keys(r.branches);
+						r.activeBranch = remainingBranches[0] || null;
+					}
+				}),
+			);
+			save();
+		},
+
+		/** Rename a branch in a repository */
+		renameBranch(repoPath: string, oldName: string, newName: string): void {
+			const repo = state.repositories[repoPath];
+			if (!repo?.branches[oldName]) return;
+
+			setState(
+				produce((s) => {
+					const r = s.repositories[repoPath];
+					if (!r) return;
+
+					// Get the old branch data
+					const oldBranch = r.branches[oldName];
+					if (!oldBranch) return;
+
+					// Create new branch entry with updated name
+					r.branches[newName] = {
+						...oldBranch,
+						name: newName,
+						isMain: isMainBranch(newName),
+					};
+
+					// Delete the old branch entry
+					delete r.branches[oldName];
+
+					// Update active branch if it was renamed
+					if (r.activeBranch === oldName) {
+						r.activeBranch = newName;
+					}
+				}),
+			);
+			save();
+		},
+
+		/** Merge terminal state from one branch into another (for main checkout rename race).
+		 *  Moves terminals, savedTerminals, hadTerminals, lastActiveTerminal from source
+		 *  to target, keeping the target's worktreePath and other git-derived fields. */
+		mergeBranchState(repoPath: string, sourceName: string, targetName: string): void {
+			const repo = state.repositories[repoPath];
+			if (!repo?.branches[sourceName] || !repo.branches[targetName]) return;
+
+			setState(
+				produce((s) => {
+					const r = s.repositories[repoPath];
+					if (!r) return;
+					const src = r.branches[sourceName];
+					const tgt = r.branches[targetName];
+					if (!src || !tgt) return;
+
+					// Transfer terminals
+					for (const termId of src.terminals) {
+						if (!tgt.terminals.includes(termId)) {
+							tgt.terminals.push(termId);
+						}
+					}
+					src.terminals = [];
+
+					// Transfer savedTerminals (only if target has none)
+					if (
+						src.savedTerminals &&
+						src.savedTerminals.length > 0 &&
+						(!tgt.savedTerminals || tgt.savedTerminals.length === 0)
+					) {
+						tgt.savedTerminals = src.savedTerminals;
+						src.savedTerminals = [];
+					}
+
+					// Carry over flags
+					if (src.hadTerminals) tgt.hadTerminals = true;
+					if (src.lastActiveTerminal && !tgt.lastActiveTerminal) {
+						tgt.lastActiveTerminal = src.lastActiveTerminal;
+					}
+				}),
+			);
+			save();
+		},
+
+		/** Get the connectionId for a repo (undefined = local) */
+		getConnectionId(path: string): string | undefined {
+			return state.repositories[path]?.connectionId;
+		},
+
+		/** Get repository by path */
+		get(path: string): RepositoryState | undefined {
+			return state.repositories[path];
+		},
+
+		/** Get active repository */
+		getActive(): RepositoryState | undefined {
+			return state.activeRepoPath ? state.repositories[state.activeRepoPath] : undefined;
+		},
+
+		/** Get all repository paths (includes parked — use for persistence,
+		 *  path-resolution, and snapshot operations). */
+		getPaths(): string[] {
+			return Object.keys(state.repositories);
+		},
+
+		/** Get repository paths that should receive active scan/poll/refresh
+		 *  work (excludes parked repos). Use this for any "fan out across all
+		 *  repos" loop where parked repos should stay dormant — git stats
+		 *  refresh, GitHub PR/issue polling, plugin SDK enumeration, etc.
+		 *  (#1358-caf5) */
+		getActivePaths(): string[] {
+			return Object.keys(state.repositories).filter((p) => !state.repositories[p]?.parked);
+		},
+
+		/** Reorder repositories in the sidebar */
+		reorderRepo(fromIndex: number, toIndex: number): void {
+			setState("repoOrder", (order) => {
+				const result = [...order];
+				const [moved] = result.splice(fromIndex, 1);
+				result.splice(toIndex, 0, moved);
+				return result;
+			});
+			save();
+		},
+
+		/** Park or unpark a repository (hide from sidebar, recallable via popover).
+		 *  Tears down the Rust file watcher when parked and re-creates it when
+		 *  unparked so parked repos stay fully dormant. (#1358-caf5) */
+		setPark(path: string, parked: boolean): void {
+			if (!state.repositories[path]) return;
+			setState("repositories", path, "parked", parked);
+			save();
+			invoke("github_update_paths", { paths: this.getActivePaths() }).catch(() => {});
+			const cmd = parked ? "stop_repo_watcher" : "start_repo_watcher";
+			invoke(cmd, { repoPath: path }).catch((err) => {
+				appLogger.warn("store", `${cmd} failed for ${path}`, err);
+			});
+		},
+
+		/** Park or unpark all repositories in a group at once. */
+		setParkGroup(groupId: string, parked: boolean): void {
+			const group = state.groups[groupId];
+			if (!group) return;
+			for (const path of group.repoOrder) {
+				this.setPark(path, parked);
+			}
+		},
+
+		/** Check if all repos in a group are parked */
+		isGroupFullyParked(groupId: string): boolean {
+			const group = state.groups[groupId];
+			if (!group || group.repoOrder.length === 0) return false;
+			return group.repoOrder.every((path) => state.repositories[path]?.parked);
+		},
+
+		/** Get all parked repositories */
+		getParkedRepos(): RepositoryState[] {
+			return Object.values(state.repositories).filter((r) => r.parked);
+		},
+
+		/** Get ordered repo paths (excludes parked repos) */
+		getOrderedRepos(): RepositoryState[] {
+			return state.repoOrder.map((path) => state.repositories[path]).filter((r) => r && !r.parked);
+		},
+
+		/** Reorder terminals within the active branch */
+		reorderTerminals(repoPath: string, branchName: string, fromIndex: number, toIndex: number): void {
+			setState("repositories", repoPath, "branches", branchName, "terminals", (terminals) => {
+				const result = [...terminals];
+				const [moved] = result.splice(fromIndex, 1);
+				result.splice(toIndex, 0, moved);
+				return result;
+			});
+			save();
+		},
+
+		/** Reverse-lookup: find which repo a terminal belongs to (O(1) via inverse index). */
+		getRepoPathForTerminal(termId: string): string | null {
+			return terminalToRepo.get(termId) ?? null;
+		},
+
+		/** Reverse-lookup: find repo path + branch name owning a terminal.
+		 *  Uses O(1) repo lookup via inverse index, then scans branches (typically 1-5). */
+		findOwnerForTerminal(termId: string): { repoPath: string; branchName: string } | null {
+			const repoPath = terminalToRepo.get(termId);
+			if (!repoPath) return null;
+			const repo = state.repositories[repoPath];
+			if (!repo) return null;
+			for (const [name, branch] of Object.entries(repo.branches)) {
+				if (branch.terminals.includes(termId)) return { repoPath, branchName: name };
+			}
+			return null;
+		},
+
+		/** Reverse-lookup: returns repo displayName for a terminal (for overlay labels). */
+		getRepoForTerminal(termId: string): string | null {
+			const path = terminalToRepo.get(termId);
+			if (!path) return null;
+			return state.repositories[path]?.displayName ?? null;
+		},
+
+		/** Get terminals for current active branch */
+		getActiveTerminals(): string[] {
+			const repo = actions.getActive();
+			if (!repo?.activeBranch) return [];
+			return repo.branches[repo.activeBranch]?.terminals || [];
+		},
+
+		/** Snapshot terminal metadata into each branch for persistence (called at quit time) */
+		snapshotTerminals(snapshots: Map<string, Map<string, SavedTerminal[]>>): void {
+			setState(
+				produce((s) => {
+					for (const [repoPath, branches] of snapshots) {
+						const repo = s.repositories[repoPath];
+						if (!repo) continue;
+						for (const [branchName, terminals] of branches) {
+							const branch = repo.branches[branchName];
+							if (!branch) continue;
+							branch.savedTerminals = terminals;
+						}
+					}
+				}),
+			);
+			// Flush immediately (not debounced) — app is about to exit
+			saveNow();
+		},
+
+		/** Clear savedTerminals from all branches (consume-once after restore) */
+		clearSavedTerminals(): void {
+			setState(
+				produce((s) => {
+					for (const repo of Object.values(s.repositories)) {
+						for (const branch of Object.values(repo.branches)) {
+							branch.savedTerminals = [];
+						}
+					}
+				}),
+			);
+			save();
+		},
+
+		/** Bump the revision counter for a repo (signals panels to re-fetch) */
+		bumpRevision(repoPath: string): void {
+			setState("revisions", repoPath, (n) => (n ?? 0) + 1);
+		},
+
+		/** Get the current revision counter for a repo (reactive — tracks in effects) */
+		getRevision(repoPath: string): number {
+			return state.revisions[repoPath] ?? 0;
+		},
+
+		/** Check if empty */
+		isEmpty(): boolean {
+			return Object.keys(state.repositories).length === 0;
+		},
+
+		// ── Group CRUD ──
+
+		/** Create a new group. Returns ID or null if name is duplicate (case-insensitive). */
+		createGroup(name: string): string | null {
+			const nameLower = name.toLowerCase();
+			const exists = Object.values(state.groups).some((g) => g.name.toLowerCase() === nameLower);
+			if (exists) return null;
+
+			const id = generateGroupId();
+			batch(() => {
+				setState("groups", id, { id, name, color: "", collapsed: false, repoOrder: [] });
+				setState("groupOrder", [...state.groupOrder, id]);
+			});
+			save();
+			return id;
+		},
+
+		/** Delete a group — repos move to ungrouped */
+		deleteGroup(id: string): void {
+			const group = state.groups[id];
+			if (!group) return;
+			setState(
+				produce((s) => {
+					// Move repos to ungrouped order
+					const repos = s.groups[id]?.repoOrder ?? [];
+					s.repoOrder = [...s.repoOrder, ...repos];
+					delete s.groups[id];
+					s.groupOrder = s.groupOrder.filter((gid) => gid !== id);
+				}),
+			);
+			save();
+		},
+
+		/** Rename a group. Returns false if name is duplicate (case-insensitive). */
+		renameGroup(id: string, newName: string): boolean {
+			const nameLower = newName.toLowerCase();
+			const exists = Object.values(state.groups).some((g) => g.id !== id && g.name.toLowerCase() === nameLower);
+			if (exists) return false;
+			setState("groups", id, "name", newName);
+			save();
+			return true;
+		},
+
+		/** Set group color */
+		setGroupColor(id: string, color: string): void {
+			if (!state.groups[id]) return;
+			setState("groups", id, "color", color);
+			save();
+		},
+
+		/** Toggle group collapsed/expanded */
+		toggleGroupCollapsed(id: string): void {
+			if (!state.groups[id]) return;
+			setState("groups", id, "collapsed", (c) => !c);
+			save();
+		},
+
+		// ── Group assignment ──
+
+		/** Add repo to a group (removes from ungrouped or previous group) */
+		addRepoToGroup(repoPath: string, groupId: string): void {
+			if (!state.groups[groupId]) return;
+			setState(
+				produce((s) => {
+					// Remove from ungrouped
+					s.repoOrder = s.repoOrder.filter((p) => p !== repoPath);
+					// Remove from any other group
+					for (const group of Object.values(s.groups)) {
+						group.repoOrder = group.repoOrder.filter((p) => p !== repoPath);
+					}
+					// Add to target group
+					s.groups[groupId].repoOrder = [...s.groups[groupId].repoOrder, repoPath];
+				}),
+			);
+			save();
+		},
+
+		/** Remove repo from its group back to ungrouped */
+		removeRepoFromGroup(repoPath: string): void {
+			setState(
+				produce((s) => {
+					for (const group of Object.values(s.groups)) {
+						group.repoOrder = group.repoOrder.filter((p) => p !== repoPath);
+					}
+					if (!s.repoOrder.includes(repoPath)) {
+						s.repoOrder = [...s.repoOrder, repoPath];
+					}
+				}),
+			);
+			save();
+		},
+
+		/** Find which group a repo belongs to (or undefined if ungrouped) */
+		getGroupForRepo(repoPath: string): RepoGroup | undefined {
+			// Direct lookup via group iteration with early return — O(groups) worst case
+			// instead of O(groups * repos_per_group) with Array.includes
+			for (const group of Object.values(state.groups)) {
+				if (group.repoOrder.indexOf(repoPath) !== -1) return group;
+			}
+			return undefined;
+		},
+
+		// ── Group reordering ──
+
+		/** Reorder a repo within its group */
+		reorderRepoInGroup(groupId: string, fromIndex: number, toIndex: number): void {
+			if (!state.groups[groupId]) return;
+			setState("groups", groupId, "repoOrder", (order) => {
+				const result = [...order];
+				const [moved] = result.splice(fromIndex, 1);
+				result.splice(toIndex, 0, moved);
+				return result;
+			});
+			save();
+		},
+
+		/** Move repo from one group to another at a specific index */
+		moveRepoBetweenGroups(repoPath: string, fromGroupId: string, toGroupId: string, toIndex: number): void {
+			if (!state.groups[fromGroupId] || !state.groups[toGroupId]) return;
+			setState(
+				produce((s) => {
+					s.groups[fromGroupId].repoOrder = s.groups[fromGroupId].repoOrder.filter((p) => p !== repoPath);
+					const target = [...s.groups[toGroupId].repoOrder];
+					target.splice(toIndex, 0, repoPath);
+					s.groups[toGroupId].repoOrder = target;
+				}),
+			);
+			save();
+		},
+
+		/** Reorder groups in the display order */
+		reorderGroups(fromIndex: number, toIndex: number): void {
+			setState("groupOrder", (order) => {
+				const result = [...order];
+				const [moved] = result.splice(fromIndex, 1);
+				result.splice(toIndex, 0, moved);
+				return result;
+			});
+			save();
+		},
+
+		/** Get the grouped layout for rendering: ordered groups with their repos, plus ungrouped repos */
+		getGroupedLayout(): GroupedLayout {
+			const groups = state.groupOrder
+				.map((gid) => state.groups[gid])
+				.filter(Boolean)
+				.map((group) => ({
+					group,
+					repos: group.repoOrder.map((path) => state.repositories[path]).filter((r) => r && !r.parked),
+				}));
+
+			// Collect all repo paths that belong to a group
+			const groupedPaths = new Set(groups.flatMap((g) => g.group.repoOrder));
+
+			const ungrouped = state.repoOrder
+				.filter((path) => !groupedPaths.has(path))
+				.map((path) => state.repositories[path])
+				.filter((r) => r && !r.parked);
+
+			return { groups, ungrouped };
+		},
+
+		/** Every configured repo in display order (ungrouped first, then each
+		 *  group's repos in group order). Includes parked repos. Used by the
+		 *  Settings nav, which must list every repo regardless of group/park
+		 *  state — grouped repos live in group.repoOrder, not state.repoOrder. (#64) */
+		getAllReposOrdered(): RepositoryState[] {
+			const seen = new Set<string>();
+			const result: RepositoryState[] = [];
+			const push = (path: string) => {
+				if (seen.has(path)) return;
+				const repo = state.repositories[path];
+				if (!repo) return;
+				seen.add(path);
+				result.push(repo);
+			};
+			for (const path of state.repoOrder) push(path);
+			for (const gid of state.groupOrder) {
+				const group = state.groups[gid];
+				if (!group) continue;
+				for (const path of group.repoOrder) push(path);
+			}
+			return result;
+		},
+
+		setBranchSwitching(value: boolean): void {
+			setState("branchSwitching", value);
+		},
+	};
+
+	return {
+		state,
+		...actions,
+		/** Test-only: set hydrated flag to enable saves in tests that skip hydrate */
+		_testSetHydrated(value: boolean): void {
+			hydrated = value;
+		},
+		_testCancelPendingSave(): void {
+			if (saveTimer) {
+				clearTimeout(saveTimer);
+				saveTimer = null;
+			}
+		},
+	};
+}
+
+export const repositoriesStore = createRepositoriesStore();
+
+// Debug registry — expose repo topology for MCP introspection
+import { registerDebugSnapshot } from "./debugRegistry";
+
+registerDebugSnapshot("repositories", () => {
+	const s = repositoriesStore.state;
+	return {
+		activeRepoPath: s.activeRepoPath,
+		repoOrder: s.repoOrder,
+		groupOrder: s.groupOrder,
+		repos: Object.fromEntries(
+			Object.entries(s.repositories).map(([path, r]) => [
+				path,
+				{
+					displayName: r.displayName,
+					activeBranch: r.activeBranch,
+					expanded: r.expanded,
+					collapsed: r.collapsed,
+					parked: r.parked,
+					isGitRepo: r.isGitRepo,
+					branches: Object.fromEntries(
+						Object.entries(r.branches).map(([name, b]) => [
+							name,
+							{
+								isMain: b.isMain,
+								terminals: b.terminals.length,
+								additions: b.additions,
+								deletions: b.deletions,
+								isMerged: b.isMerged,
+							},
+						]),
+					),
+				},
+			]),
+		),
+	};
+});
+
+/** Get the branch key for the currently active repo+branch.
+ *  Shared helper used by tab stores (diff, md, editor) to scope tabs. */
+export function currentBranchKey(): string | undefined {
+	const repoPath = repositoriesStore.state.activeRepoPath;
+	if (!repoPath) return undefined;
+	const repo = repositoriesStore.state.repositories[repoPath];
+	if (!repo?.activeBranch) return undefined;
+	return makeBranchKey(repoPath, repo.activeBranch);
+}

@@ -1,0 +1,454 @@
+/* FastAF — Global layout styles.
+   Only cross-component layout rules, JS-applied classes, and library overrides.
+   Component-specific styles live in *.module.css next to each component. */
+
+/* Sidebar hidden state (cross-component: App.tsx controls sidebar visibility) */
+#app.sidebar-hidden #sidebar {
+  width: 0;
+  min-width: 0;
+  border-right: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Focus mode (Cmd+Alt+Enter): maximize active tab content.
+ * Hides sidebar, tab bar, and all side panels. Toolbar and StatusBar stay
+ * visible so Boss can still see repo/branch/session state and exit the mode. */
+#app.focus-mode #sidebar,
+#app.focus-mode #tab-bar,
+#app.focus-mode #ai-chat-panel,
+#app.focus-mode #git-panel,
+#app.focus-mode #markdown-panel,
+#app.focus-mode #notes-panel,
+#app.focus-mode #file-browser-panel,
+#app.focus-mode #outline-panel,
+#app.focus-mode #references-panel {
+  display: none !important;
+}
+
+/* Panel mode: full-viewport single panel (detached AI Chat window) */
+#app.panel-mode {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#app.panel-mode > * {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 100% !important;
+  border-left: none !important;
+}
+
+/* Main Content */
+#main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg-primary);
+}
+
+/* Tab Bar wrapper (used by App.tsx) */
+#tab-bar {
+  height: var(--tab-bar-height);
+  min-height: var(--tab-bar-height);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+}
+
+/* Terminal Container */
+#terminal-container {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  background: var(--bg-primary);
+  position: relative;
+}
+
+/* Highlight applied (via JS) to the folder row under a Tauri drag-drop cursor.
+   Matches elements with data-drop-target="folder" during a drag session. */
+.drop-target-hover[data-drop-target="folder"] {
+  background: rgba(80, 160, 255, 0.18) !important;
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.ptr-drag-ghost {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0.9;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+#terminal-panes {
+  flex: 1;
+  min-width: 200px;
+  position: relative;
+  background: var(--bg-secondary);
+}
+
+.terminal-pane {
+  position: absolute;
+  inset: 0;
+  padding: 5px;
+  display: none;
+  background: var(--bg-secondary);
+}
+
+.terminal-pane.active {
+  display: block;
+  z-index: 20;
+}
+
+/* --- Multiview: grid of every live terminal across all repos/branches.
+   Scoped under #terminal-panes.multiview so the id out-specifies
+   .terminal-pane.active; detached panes' inline display:none still wins. --- */
+#terminal-panes.multiview {
+  padding-top: 28px; /* strip for the top-right controls (pill + "+") */
+}
+
+#terminal-panes.multiview > .terminal-pane {
+  display: none; /* diff/md/edit panes and non-tile terminals stay hidden */
+}
+
+#terminal-panes.multiview > .terminal-pane.mv-tile {
+  display: block;
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 26px 4px 4px; /* top band hosts the tile header */
+  border: 1px solid var(--bg-highlight);
+  border-radius: var(--radius-md);
+}
+
+#terminal-panes.multiview > .terminal-pane.mv-tile.active {
+  border-color: var(--accent);
+}
+
+.mv-tile-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--bg-highlight);
+  cursor: pointer;
+  user-select: none;
+}
+
+.mv-tile-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  flex: none;
+}
+
+.mv-tile-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mv-tile-status {
+  flex: none;
+  text-transform: uppercase;
+  font-size: var(--font-2xs);
+  letter-spacing: 0.5px;
+}
+
+.mv-tile-status.busy {
+  color: var(--warning);
+}
+
+.mv-tile-status.input {
+  color: var(--error);
+}
+
+.mv-tile-status.idle {
+  color: var(--success);
+}
+
+.mv-tile-btn {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mv-tile-btn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.mv-tile-btn-close:hover {
+  color: var(--error);
+}
+
+/* Top-right multiview controls: overflow pill + "+" project picker */
+.mv-controls {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mv-overflow-pill {
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--bg-highlight);
+  border-radius: var(--radius-pill);
+  background: var(--bg-primary);
+  color: var(--fg-muted);
+  font-size: var(--font-2xs);
+  cursor: pointer;
+}
+
+.mv-overflow-pill:hover {
+  color: var(--fg-primary);
+  border-color: var(--accent);
+}
+
+.mv-add-btn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--bg-highlight);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--fg-muted);
+  font-size: var(--font-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mv-add-btn:hover {
+  color: var(--fg-primary);
+  border-color: var(--accent);
+}
+
+.mv-picker {
+  position: absolute;
+  top: 28px;
+  right: 8px;
+  z-index: 50;
+  width: 220px;
+  padding: 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--bg-highlight);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.mv-picker-input {
+  width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  margin-bottom: 4px;
+  border: 1px solid var(--bg-highlight);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  outline: none;
+}
+
+.mv-picker-input:focus {
+  border-color: var(--accent);
+}
+
+.mv-picker-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.mv-picker-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mv-picker-item:hover,
+.mv-picker-item:first-child {
+  background: var(--bg-highlight);
+}
+
+.mv-picker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mv-picker-empty {
+  padding: 6px;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  text-align: center;
+}
+
+/* Draggable track boundaries (column/row resize) */
+.mv-resize {
+  position: absolute;
+  z-index: 30;
+  background: transparent;
+}
+
+.mv-resize:hover,
+.mv-resize:active {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.mv-resize-col {
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+}
+
+.mv-resize-row {
+  left: 0;
+  right: 0;
+  height: 8px;
+  cursor: row-resize;
+}
+
+.mv-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--fg-muted);
+}
+
+/* xterm scrollbar overrides — keep native viewport scrollable.
+   xterm v6 reads scrollTop from this element to compute viewportY.
+   overflow-y:hidden breaks viewportY (always returns 0).
+   Selector uses [data-terminal-id] so it works in both flat and split modes. */
+[data-terminal-id] .xterm-viewport {
+  overflow-y: auto;
+}
+
+[data-terminal-id] .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+[data-terminal-id] .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-terminal-id] .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--bg-highlight);
+  border-radius: var(--radius-md);
+}
+
+[data-terminal-id] .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-muted);
+}
+
+/* Hide xterm v6 scroll shadow */
+[data-terminal-id] .xterm .xterm-scrollable-element > .shadow {
+  display: none !important;
+}
+
+/* Match xterm custom scrollbar widget to app-wide thin style */
+[data-terminal-id] .xterm .xterm-scrollable-element > .scrollbar.vertical {
+  width: 8px !important;
+}
+
+[data-terminal-id] .xterm .xterm-scrollable-element > .scrollbar.vertical .slider {
+  border-radius: var(--radius-md);
+}
+
+/* Diff viewer overrides */
+#diff-content {
+  padding: 8px 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-md);
+  line-height: 1.5;
+}
+
+/* @git-diff-view theme overrides — match FastAF palette */
+.diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root {
+  --diff-border--: var(--border);
+  --diff-plain-content--: var(--bg-primary);
+  --diff-expand-content--: var(--bg-secondary);
+  --diff-empty-content--: var(--bg-secondary);
+  --diff-add-content--: rgba(158, 206, 106, 0.1);
+  --diff-del-content--: rgba(247, 118, 142, 0.1);
+  --diff-add-content-highlight--: rgba(158, 206, 106, 0.25);
+  --diff-del-content-highlight--: rgba(247, 118, 142, 0.25);
+  --diff-hunk-content--: var(--bg-highlight);
+  --diff-hunk-content-color--: var(--fg-muted);
+}
+
+/* Compact line number columns */
+.diff-tailwindcss-wrapper .diff-line-old-num,
+.diff-tailwindcss-wrapper .diff-line-new-num,
+.diff-tailwindcss-wrapper .diff-line-num {
+  min-width: 28px !important;
+  padding-left: 4px !important;
+  padding-right: 6px !important;
+}
+
+/* Tab content pane backgrounds */
+.terminal-pane.diff-pane {
+  background: var(--bg-primary);
+}
+
+.terminal-pane.edit-pane {
+  background: var(--bg-primary);
+}
+
+.terminal-pane.md-pane {
+  background: var(--bg-primary);
+}

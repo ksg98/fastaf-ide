@@ -1,0 +1,13 @@
+pub(crate) mod agent;
+pub(crate) mod audit;
+pub(crate) mod backoff;
+pub(crate) mod classifier;
+pub(crate) mod command;
+pub(crate) mod commands;
+pub(crate) mod manager;
+pub(crate) mod port;
+pub(crate) mod profile;
+pub(crate) mod storage;
+pub(crate) mod supervisor;
+#[cfg(feature = "desktop")]
+pub(crate) mod tauri_commands;

@@ -1,0 +1,248 @@
+[workspace]
+members = [".", "crates/tuic-bridge", "crates/tuic-cli", "patches/alacritty_terminal"]
+resolver = "2"
+
+[workspace.package]
+version = "1.5.1"
+
+[package]
+name = "tuicommander"
+version.workspace = true
+description = "FastAF - Native platform for AI coding agents"
+authors = ["Stefano Straus <github.com/sstraus>"]
+edition = "2024"
+default-run = "tuicommander"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.release.package."*"]
+codegen-units = 16
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+too_many_lines = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+similar_names = "allow"
+single_match_else = "allow"
+needless_pass_by_value = "allow"
+unnecessary_wraps = "allow"
+if_not_else = "allow"
+match_wildcard_for_single_variants = "allow"
+redundant_closure_for_method_calls = "allow"
+items_after_statements = "allow"
+wildcard_imports = "allow"
+unreadable_literal = "allow"
+unnested_or_patterns = "allow"
+uninlined_format_args = "allow"
+doc_markdown = "allow"
+doc_link_with_quotes = "allow"
+default_trait_access = "allow"
+implicit_clone = "allow"
+ignored_unit_patterns = "allow"
+manual_let_else = "allow"
+match_same_arms = "allow"
+map_unwrap_or = "allow"
+semicolon_if_nothing_returned = "allow"
+trivially_copy_pass_by_ref = "allow"
+unused_self = "allow"
+used_underscore_binding = "allow"
+struct_field_names = "allow"
+ref_option = "allow"
+needless_raw_string_hashes = "allow"
+single_char_pattern = "allow"
+explicit_iter_loop = "allow"
+manual_is_variant_and = "allow"
+large_stack_arrays = "allow"
+return_self_not_must_use = "allow"
+option_if_let_else = "allow"
+duration_suboptimal_units = "allow"
+format_push_string = "allow"
+non_std_lazy_statics = "allow"
+needless_continue = "allow"
+redundant_else = "allow"
+bool_to_int_with_if = "allow"
+cast_possible_wrap = "allow"
+cast_ptr_alignment = "allow"
+borrow_as_ptr = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+assigning_clones = "allow"
+unused_async = "allow"
+unnecessary_debug_formatting = "allow"
+unchecked_time_subtraction = "allow"
+
+[lints]
+workspace = true
+
+[lib]
+name = "tuicommander_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "tuic-remote"
+path = "src/bin/tuic_remote.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"
+tokio = { version = "1", features = ["full"] }
+dashmap = "6"
+moka = { version = "0.12", features = ["sync"] }
+gix = { version = "0.84", default-features = false, features = [
+    "sha1",
+    "revision",
+    "status",
+    "blame",
+    "blob-diff",
+    "dirwalk",
+    "parallel",
+] }
+parking_lot = "0.12"
+regex = "1"
+lazy_static = "1"
+uuid = { version = "1", features = ["v4", "v7"] }
+ulid = "1"
+cuid2 = "0.1"
+base32 = "0.4"
+zeroize = { version = "1", features = ["alloc"] }
+hex = "0.4"
+ring = "0.17"
+dirs = "6"
+tauri-plugin-dialog = { version = "2.7", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
+whisper-rs = { version = "0.16", optional = true }
+cpal = { version = "0.17", optional = true }
+rodio = { version = "0.20", optional = true }
+reqwest = { version = "0.13", features = ["stream", "json", "form"] }
+futures-util = "0.3"
+axum = { version = "0.8", features = ["ws"] }
+async-stream = "0.3"
+tauri-plugin-window-state = { version = "2.4.1", optional = true }
+bcrypt = "0.19"
+base64 = "0.22"
+include_dir = { version = "0.7.4", features = ["glob"] }
+mime_guess = "2.0.5"
+tower-http = { version = "0.6.8", features = ["cors", "compression-gzip", "compression-br"] }
+rand = "0.10"
+libc = "0.2"
+notify = "8"
+gh-token = "0.1"
+keepawake = "0.6"
+tauri-plugin-updater = { version = "2", optional = true }
+tauri-plugin-process = { version = "2", optional = true }
+tauri-plugin-deep-link = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
+tauri-plugin-global-shortcut = { version = "2", optional = true }
+drag = { version = "2.1", features = ["serde"], optional = true }
+zip = "8"
+glob = "0.3"
+ignore = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+alacritty_terminal = "0.26.0"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+aes-gcm = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server-dual-protocol = "0.7"
+web-push-native = { version = "0.4", default-features = false, features = ["serialization"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64ct = { version = "1", features = ["alloc"] }
+anyhow = "1"
+oauth2 = "5"
+bm25 = "2.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+genai = "0.6.0-beta.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+console-subscriber = { version = "0.4", optional = true }
+cron = "0.16"
+toml = "1"
+rusqlite = { version = "0.39", features = ["bundled"] }
+ssh2-config = "0.7"
+
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-single-instance",
+    "dep:tauri-plugin-window-state",
+    "dep:tauri-plugin-updater",
+    "dep:tauri-plugin-process",
+    "dep:tauri-plugin-deep-link",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:tauri-plugin-global-shortcut",
+    "dep:drag",
+    "dep:whisper-rs",
+    "dep:cpal",
+    "dep:rodio",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-app-kit",
+    "dep:block2",
+]
+# GPU features for Linux builds (macOS always has Metal via target dep; Windows
+# is CPU-only — the whisper.cpp Vulkan backend's vulkan-shaders-gen sub-build is
+# chronically broken on the Windows runner (MAX_PATH/MSBuild), so we ship CPU).
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
+tokio-console = ["console-subscriber"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16", features = ["metal"], optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSDictionary", "NSString", "NSValue"], optional = true }
+objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"], optional = true }
+block2 = { version = "0.6", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# CPU-only on Windows: the Vulkan backend (vulkan-shaders-gen) fails to build on
+# the CI runner. Dictation runs on CPU; re-enable "vulkan" only once the
+# whisper.cpp Windows shader build is stabilized.
+whisper-rs = { version = "0.16", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_Foundation", "Win32_System_ProcessStatus", "Wdk_System_Threading"] }
+
+[patch.crates-io]
+alacritty_terminal = { path = "patches/alacritty_terminal" }
+vte = { path = "patches/vte" }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+serial_test = "3"
+mockito = "1"
+strip-ansi-escapes = "0.2"
+

@@ -1,0 +1,50 @@
+.output {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  background: var(--bg-primary);
+  padding: 8px 12px;
+}
+
+.text {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--fg-primary);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  font-variant-emoji: text;
+  margin: 0;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.tableBlock {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+  white-space: pre;
+}
+
+.line {
+  min-height: 1.5em;
+}
+
+.loadingOlder {
+  text-align: center;
+  padding: 8px;
+  color: var(--fg-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.error {
+  padding: 12px;
+  color: var(--error);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}

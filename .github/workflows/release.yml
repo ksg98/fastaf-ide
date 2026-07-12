@@ -1,0 +1,385 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+            label: macOS-ARM
+          - platform: ubuntu-22.04
+            args: ''
+            label: Linux-x64
+          - platform: windows-latest
+            args: '--bundles nsis'
+            label: Windows-x64
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+
+      # Keep the Windows build/target dir short (C:/t): whisper.cpp's nested
+      # CMake TryCompile paths can exceed the 260-char MAX_PATH that MSBuild's
+      # FileTracker enforces. tauri-action honours CARGO_TARGET_DIR for artifact
+      # discovery (see tauri-action/src/utils.ts).
+      - name: Short CARGO_TARGET_DIR (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=C:/t" >> $GITHUB_ENV
+
+      # The windows-latest image (mid windows-2025/2026 migration) ships VS 18
+      # 2026, but the preinstalled CMake is too old to know that generator —
+      # whisper-rs-sys's build fails with "CMake Error: generator: Visual
+      # Studio 18 2026". Install the latest CMake, which recognises it.
+      - name: Upgrade CMake (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: lukka/get-cmake@latest
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          cache-directories: ${{ matrix.platform == 'windows-latest' && 'C:/t' || '' }}
+
+      # A restored Windows build cache (C:/t) may hold a CMakeCache.txt from an
+      # older VS generator (e.g. VS 17 2022). When the runner image moves to a
+      # newer VS (18 2026), CMake aborts: "generator does not match the generator
+      # used previously". Drop the stale CMake config so whisper-rs-sys
+      # reconfigures against the current toolchain (sccache still caches the
+      # actual compiles, so the rebuild cost is minimal).
+      - name: Clear stale CMake cache (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (Test-Path C:/t) {
+            Get-ChildItem -Path C:/t -Recurse -Force -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -eq 'CMakeCache.txt' -or $_.Name -eq 'CMakeFiles' } |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Import macOS signing certificate
+        if: startsWith(matrix.platform, 'macos-')
+        env:
+          DEVELOPER_ID_CERT_BASE64: ${{ secrets.DEVELOPER_ID_CERT_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CERT_PATH=$RUNNER_TEMP/cert.p12
+          echo "$DEVELOPER_ID_CERT_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "$CERT_PATH"
+
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application:" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Write Apple API key file for notarization
+        if: startsWith(matrix.platform, 'macos-')
+        env:
+          NOTARIZE_KEY_BASE64: ${{ secrets.NOTARIZE_KEY_BASE64 }}
+          NOTARIZE_KEY_ID: ${{ secrets.NOTARIZE_KEY_ID }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARIZE_KEY_ID}.p8"
+          echo "$NOTARIZE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # sccache
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          # mold linker on Linux
+          RUSTFLAGS: ${{ matrix.label == 'Linux-x64' && '-C link-arg=-fuse-ld=mold' || '' }}
+          # macOS signing — uses certificate imported in previous step
+          APPLE_CERTIFICATE: ${{ secrets.DEVELOPER_ID_CERT_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          # macOS notarization — API key written to file in previous step
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+          APPLE_API_ISSUER: ${{ secrets.NOTARIZE_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.NOTARIZE_KEY_ID }}
+          # Updater artifact signing
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # whisper.cpp build flags per platform:
+          # - macOS: override -march to avoid i8mm detection mismatch on M-series < M4 (Metal GPU always active)
+          # - Linux: -fPIC required for whisper-rs-sys static linking
+          # - Windows: whisper-rs is CPU-only (Vulkan backend's shader build is broken on the runner); /Z7 for sccache MSVC compat
+          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
+          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Linux-x64' && '-fPIC' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
+        with:
+          tauriScript: pnpm tauri
+          tagName: v__VERSION__
+          releaseName: 'FastAF v__VERSION__'
+          releaseBody: 'Download the appropriate installer for your platform.'
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+      - name: Cleanup macOS keychain
+        if: always() && startsWith(matrix.platform, 'macos-')
+        run: |
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          rm -f "$APPLE_API_KEY_PATH" 2>/dev/null || true
+
+  remote-daemon:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            label: linux-x64
+            ext: ''
+          - platform: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            label: linux-arm64
+            ext: ''
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x64
+            ext: '.exe'
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            label: macos-arm64
+            ext: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux dependencies
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+
+      - name: Install cross-compilation tools (aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Build tuic-remote
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CARGO_PROFILE_RELEASE_STRIP: 'true'
+          RUSTFLAGS: ${{ startsWith(matrix.platform, 'ubuntu') && matrix.target != 'aarch64-unknown-linux-gnu' && '-C link-arg=-fuse-ld=mold' || '' }}
+        run: cargo build --release --no-default-features --bin tuic-remote --target ${{ matrix.target }}
+
+      - name: Smoke test (Linux x64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        working-directory: src-tauri
+        run: |
+          ./target/${{ matrix.target }}/release/tuic-remote &
+          PID=$!
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:9877/health | grep -q '"ok":true'; then
+              echo "Health check passed after ${i}s"
+              kill $PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Health check failed after 15s"
+          kill $PID 2>/dev/null
+          exit 1
+
+      - name: Smoke test (macOS)
+        if: startsWith(matrix.platform, 'macos-')
+        working-directory: src-tauri
+        run: |
+          ./target/${{ matrix.target }}/release/tuic-remote &
+          PID=$!
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:9877/health | grep -q '"ok":true'; then
+              echo "Health check passed after ${i}s"
+              kill $PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Health check failed after 15s"
+          kill $PID 2>/dev/null
+          exit 1
+
+      - name: Smoke test (Windows)
+        if: matrix.platform == 'windows-latest'
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "target/${{ matrix.target }}/release/tuic-remote.exe" -PassThru -NoNewWindow
+          for ($i = 1; $i -le 15; $i++) {
+            try {
+              $resp = Invoke-WebRequest -Uri "http://127.0.0.1:9877/health" -UseBasicParsing -ErrorAction Stop
+              if ($resp.Content -match '"ok":true') {
+                Write-Host "Health check passed after ${i}s"
+                Stop-Process -Id $proc.Id -Force
+                exit 0
+              }
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+          Write-Host "Health check failed after 15s"
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          exit 1
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          TAG="v${VERSION}"
+          ASSET="tuic-remote-${{ matrix.target }}${{ matrix.ext }}"
+          cp "src-tauri/target/${{ matrix.target }}/release/tuic-remote${{ matrix.ext }}" "$ASSET"
+          for i in $(seq 1 20); do
+            gh release upload "${TAG}" "$ASSET" --clobber && exit 0
+            echo "Release not found yet, waiting 30s... (attempt $i/20)"
+            sleep 30
+          done
+          echo "Release still not found after 10 minutes"
+          exit 1
+
+  finalize-release:
+    needs: [build, remote-daemon]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          TAG="v${VERSION}"
+
+          # Extract changelog section for this version
+          awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md > /tmp/changelog-section.md
+
+          # Build release body: changelog + download legend
+          {
+            echo "## What's Changed"
+            echo ""
+            if [ -s /tmp/changelog-section.md ]; then
+              cat /tmp/changelog-section.md
+            else
+              echo "See [CHANGELOG.md](https://github.com/ksg98/fastaf/blob/main/CHANGELOG.md) for details."
+            fi
+            echo ""
+            # Download legend (quoted heredoc — no variable expansion)
+            cat <<'LEGEND'
+          ---
+
+          📦 **Downloads**
+
+          Pick the right build for your system:
+          LEGEND
+            # Version-specific filenames (unquoted heredoc for variable expansion)
+            cat <<FILENAMES
+
+          * 🍎 **macOS** (Apple Silicon)
+              \`FastAF_${VERSION}_aarch64.dmg\`
+              (alt: \`FastAF_aarch64.app.tar.gz\`)
+          * 🪟 **Windows** (64-bit)
+              \`FastAF_${VERSION}_x64-setup.exe\`
+          * 🐧 **Linux** (Debian / Ubuntu)
+              \`FastAF_${VERSION}_amd64.deb\`
+          * 🐧 **Linux** (RHEL / Fedora / CentOS)
+              \`FastAF-${VERSION}-1.x86_64.rpm\`
+          * 🐧 **Linux** (portable)
+              \`FastAF_${VERSION}_amd64.AppImage\`
+          FILENAMES
+            cat <<'FOOTER'
+
+          ---
+
+          🔐 **Verify** (optional)
+
+          Each release includes `.sig` files for signature verification.
+
+          ---
+
+          💻 **Install** (unsigned build)
+
+          macOS quarantines unsigned apps — after copying FastAF.app to /Applications, run before first launch:
+
+          ```bash
+          xattr -cr /Applications/FastAF.app
+          ```
+          FOOTER
+          } > /tmp/release-body.md
+
+          gh release edit "${TAG}" --notes-file /tmp/release-body.md --draft=false

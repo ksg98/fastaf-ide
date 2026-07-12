@@ -1,0 +1,21 @@
+# cargo-nextest configuration.
+# Runs each test in its own process — the isolation that #[serial] provided
+# in-process is now provided by the OS, so serial-marked tests stay correct
+# (the serial_test mutex is per-process and simply never contends under nextest).
+
+[profile.default]
+# Surface long-running tests (warn at 30s, 60s, 90s) and hard-kill true hangs
+# at 120s. The slowest legit tests here are the tunnels supervisor retry tests
+# (~7s), so the 30s warn threshold never fires falsely.
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci]
+# On CI, keep going after a failure so a run reports every failing test, and
+# retry twice to absorb infrastructure flakiness (shared runners, port races).
+# Local runs use the default profile (no retries) so flakes surface honestly.
+fail-fast = false
+retries = { backoff = "fixed", count = 2, delay = "1s" }
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[profile.ci.junit]
+path = "junit.xml"

@@ -1,0 +1,1302 @@
+//! Configuration schema and persistence for upstream MCP servers.
+//!
+//! Each upstream server is identified by a unique name and can use either
+//! HTTP (Streamable HTTP) or stdio (spawned process) transport. Configuration
+//! lives in `mcp-upstreams.json`, separate from the main `AppConfig`.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::config::{load_json_config, save_json_config};
+
+pub(crate) const UPSTREAMS_FILE: &str = "mcp-upstreams.json";
+
+/// Top-level wrapper for the upstream config file.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct UpstreamMcpConfig {
+    #[serde(default)]
+    pub(crate) servers: Vec<UpstreamMcpServer>,
+}
+
+/// A single upstream MCP server configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub(crate) struct UpstreamMcpServer {
+    /// Unique identifier (UUID).
+    pub(crate) id: String,
+    /// Human-readable name, also used as the tool namespace prefix.
+    /// Must be unique, non-empty, and contain only `[a-z0-9_-]`.
+    pub(crate) name: String,
+    /// Transport configuration.
+    pub(crate) transport: UpstreamTransport,
+    /// Whether this upstream is active.
+    #[serde(default = "default_true")]
+    pub(crate) enabled: bool,
+    /// Timeout in seconds for tool calls (0 = no timeout).
+    #[serde(default = "default_timeout")]
+    pub(crate) timeout_secs: u32,
+    /// Optional tool filter (allow/deny list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_filter: Option<ToolFilter>,
+    /// Optional authentication configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auth: Option<UpstreamAuth>,
+}
+
+/// Transport type for connecting to an upstream MCP server.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub(crate) enum UpstreamTransport {
+    Http {
+        url: String,
+    },
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Working directory for the spawned process.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+}
+
+/// Tool filter: allow or deny specific tools by glob pattern.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub(crate) struct ToolFilter {
+    pub(crate) mode: FilterMode,
+    pub(crate) patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FilterMode {
+    Allow,
+    Deny,
+}
+
+/// Authentication method for an upstream MCP server.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum UpstreamAuth {
+    /// Static bearer token.
+    Bearer { token: String },
+    /// OAuth 2.1 with PKCE (RFC 9449 / RFC 8707).
+    ///
+    /// Wire tag is `oauth2` (matches the frontend `UpstreamAuth` type and the
+    /// Authorize-button gate). The `o_auth2` alias keeps reading config files
+    /// written before this rename — they migrate to `oauth2` on the next save.
+    /// Without the explicit rename, `rename_all = "snake_case"` would derive
+    /// `o_auth2`, which never matched the frontend's `"oauth2"` comparison and
+    /// left OAuth upstreams (e.g. publishwith-ai) with no Authorize action.
+    #[serde(rename = "oauth2", alias = "o_auth2")]
+    OAuth2 {
+        client_id: String,
+        /// Confidential clients (e.g. from DCR) have a secret; public clients omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_secret: Option<String>,
+        #[serde(default)]
+        scopes: Vec<String>,
+        /// Override discovered authorization endpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorization_endpoint: Option<String>,
+        /// Override discovered token endpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_endpoint: Option<String>,
+    },
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_timeout() -> u32 {
+    30
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+/// Validation errors for upstream config.
+#[derive(Debug, PartialEq)]
+pub(crate) enum UpstreamConfigError {
+    EmptyName(String),
+    InvalidName(String),
+    DuplicateName(String),
+    InvalidUrlScheme(String),
+    SelfReferentialUrl(String),
+    EmptyUrl(String),
+    EmptyCommand(String),
+    EmptyOAuthClientId(String),
+}
+
+impl std::fmt::Display for UpstreamConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyName(id) => write!(f, "Server '{id}' has an empty name"),
+            Self::InvalidName(name) => write!(
+                f,
+                "Name '{name}' is invalid: must contain only lowercase letters, digits, hyphens, and underscores"
+            ),
+            Self::DuplicateName(name) => write!(f, "Duplicate server name: '{name}'"),
+            Self::InvalidUrlScheme(url) => {
+                write!(f, "URL '{url}' must use http:// or https:// scheme")
+            }
+            Self::SelfReferentialUrl(url) => {
+                write!(
+                    f,
+                    "URL '{url}' points to this TUIC instance (circular proxy)"
+                )
+            }
+            Self::EmptyUrl(id) => write!(f, "Server '{id}' has an empty HTTP URL"),
+            Self::EmptyCommand(id) => write!(f, "Server '{id}' has an empty stdio command"),
+            Self::EmptyOAuthClientId(id) => {
+                write!(f, "Server '{id}' has an OAuth2 auth with empty client_id")
+            }
+        }
+    }
+}
+
+/// Validate the upstream config. Returns all errors found (not just the first).
+pub(crate) fn validate_upstream_config(
+    config: &UpstreamMcpConfig,
+    self_port: u16,
+) -> Vec<UpstreamConfigError> {
+    let mut errors = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+    let name_re = regex::Regex::new(r"^[a-z0-9_-]+$").unwrap();
+
+    for server in &config.servers {
+        // Empty name
+        if server.name.is_empty() {
+            errors.push(UpstreamConfigError::EmptyName(server.id.clone()));
+            continue;
+        }
+
+        // Invalid name characters
+        if !name_re.is_match(&server.name) {
+            errors.push(UpstreamConfigError::InvalidName(server.name.clone()));
+        }
+
+        // Duplicate name
+        if !seen_names.insert(&server.name) {
+            errors.push(UpstreamConfigError::DuplicateName(server.name.clone()));
+        }
+
+        // Transport-specific validation
+        match &server.transport {
+            UpstreamTransport::Http { url } => {
+                if url.is_empty() {
+                    errors.push(UpstreamConfigError::EmptyUrl(server.id.clone()));
+                } else if !url.starts_with("http://") && !url.starts_with("https://") {
+                    errors.push(UpstreamConfigError::InvalidUrlScheme(url.clone()));
+                } else if is_self_referential(url, self_port) {
+                    errors.push(UpstreamConfigError::SelfReferentialUrl(url.clone()));
+                }
+            }
+            UpstreamTransport::Stdio { command, .. } => {
+                if command.is_empty() {
+                    errors.push(UpstreamConfigError::EmptyCommand(server.id.clone()));
+                }
+            }
+        }
+
+        // Auth-specific validation
+        if let Some(UpstreamAuth::OAuth2 { client_id, .. }) = &server.auth
+            && client_id.is_empty()
+        {
+            errors.push(UpstreamConfigError::EmptyOAuthClientId(server.id.clone()));
+        }
+    }
+
+    errors
+}
+
+/// Check if a URL points to this TUIC instance (circular proxy).
+pub(crate) fn is_self_referential(url: &str, self_port: u16) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let host = parsed.host_str().unwrap_or("");
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    let is_localhost = matches!(
+        host,
+        "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
+    );
+    is_localhost && port == self_port
+}
+
+// ---------------------------------------------------------------------------
+// Boot-time auto-connect
+// ---------------------------------------------------------------------------
+
+/// Connect all saved upstream MCP servers on app startup.
+/// Skips validation errors (logs them) and connects each enabled server.
+pub(crate) async fn auto_connect_saved_upstreams(state: &crate::state::AppState) {
+    let config: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+    if config.servers.is_empty() {
+        // No upstreams to wait for — let tools/list serve immediately.
+        state.mcp_upstream_registry.mark_initial_connect_complete();
+        return;
+    }
+
+    let self_port = state.config.read().services.server.port;
+    let errors = validate_upstream_config(&config, self_port);
+    if !errors.is_empty() {
+        for e in &errors {
+            tracing::warn!(source = "mcp_upstream", "Boot-time config error: {e}");
+        }
+    }
+
+    let registry = &state.mcp_upstream_registry;
+    tracing::info!(
+        source = "mcp_upstream",
+        count = config.servers.len(),
+        names = ?config.servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        "Boot-time auto-connect starting"
+    );
+    for server in config.servers {
+        tracing::info!(source = "mcp_upstream", name = %server.name, "Connecting upstream...");
+        if let Err(e) = registry
+            .connect_upstream(server.clone(), Some(self_port))
+            .await
+        {
+            tracing::warn!(source = "mcp_upstream", name = %server.name, "Boot-time connect failed: {e}");
+        }
+    }
+    // All upstreams registered (async initialize may still be in flight). This
+    // unblocks `await_initial_settle`, which then waits only for the in-flight
+    // initializations to settle before serving the first tools/list.
+    registry.mark_initial_connect_complete();
+
+    tracing::info!(
+        source = "mcp_upstream",
+        "Boot-time upstream auto-connect complete"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Persistence (Tauri commands)
+// ---------------------------------------------------------------------------
+
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) fn load_mcp_upstreams() -> UpstreamMcpConfig {
+    load_json_config(UPSTREAMS_FILE)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn save_mcp_upstreams(
+    config: UpstreamMcpConfig,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+) -> Result<(), String> {
+    let self_port = state.config.read().services.server.port;
+    let errors = validate_upstream_config(&config, self_port);
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        return Err(msgs.join("; "));
+    }
+
+    // Load old config to compute the diff for hot-reload
+    let old_config: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+    save_json_config(UPSTREAMS_FILE, &config)?;
+
+    // Apply diff to the live registry (no server restart needed)
+    state
+        .mcp_upstream_registry
+        .apply_config_diff(&old_config, &config, self_port)
+        .await;
+
+    Ok(())
+}
+
+/// Persist a DCR-obtained (or manually set) auth config for a single upstream.
+/// Loads the config file, patches the matching entry, and writes it back
+/// atomically. Other upstreams are left untouched.
+pub(crate) fn update_upstream_auth(name: &str, auth: UpstreamAuth) -> Result<(), String> {
+    set_upstream_auth(name, Some(auth))
+}
+
+/// Clear persisted auth for a single upstream (e.g. when transport URL changes
+/// and a DCR-obtained client_id is stale).
+pub(crate) fn clear_upstream_auth(name: &str) -> Result<(), String> {
+    set_upstream_auth(name, None)
+}
+
+fn set_upstream_auth(name: &str, auth: Option<UpstreamAuth>) -> Result<(), String> {
+    let mut config: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+    let entry = config
+        .servers
+        .iter_mut()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("Upstream '{name}' not found in {UPSTREAMS_FILE}"))?;
+    entry.auth = auth;
+    save_json_config(UPSTREAMS_FILE, &config)
+}
+
+/// Set per-project upstream MCP allowlist. `None` clears the override
+/// (inherits all globally-enabled servers). Persists to repo-settings.json
+/// and emits a tool-list refresh so connected MCP clients see the change.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) fn set_project_mcp_upstreams(
+    repo_path: String,
+    upstream_names: Option<Vec<String>>,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+) -> Result<(), String> {
+    set_project_mcp_upstreams_inner(&state, &repo_path, upstream_names)
+}
+
+/// Testable inner function (no Tauri state wrapper).
+pub(crate) fn set_project_mcp_upstreams_inner(
+    state: &crate::state::AppState,
+    repo_path: &str,
+    upstream_names: Option<Vec<String>>,
+) -> Result<(), String> {
+    let mut settings = crate::config::load_repo_settings();
+    let entry = settings
+        .repos
+        .entry(repo_path.to_string())
+        .or_insert_with(|| crate::config::RepoSettingsEntry {
+            path: repo_path.to_string(),
+            ..Default::default()
+        });
+    entry.mcp_upstreams = upstream_names;
+    crate::config::save_repo_settings(settings)?;
+    // Notify connected MCP clients that the tool list may have changed
+    let _ = state.mcp_tools_changed.send(());
+    Ok(())
+}
+
+/// Reconnect a single upstream by name (disconnect + connect).
+///
+/// Useful when credentials change or the upstream is temporarily unreachable.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn reconnect_mcp_upstream(
+    name: String,
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+) -> Result<(), String> {
+    let config: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+    let self_port = state.config.read().services.server.port;
+
+    // Validate before connecting
+    let errors = validate_upstream_config(&config, self_port);
+    if !errors.is_empty() {
+        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        return Err(msgs.join("; "));
+    }
+
+    let server = config
+        .servers
+        .into_iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("Upstream '{name}' not found in config"))?;
+
+    let registry = &state.mcp_upstream_registry;
+
+    // Emit reconnecting event so the UI can show feedback
+    registry.emit_status_change(&name, "connecting");
+
+    // Disconnect if currently registered (ignore error if not present)
+    let _ = registry.disconnect_upstream(&name);
+
+    // Reconnect
+    registry.connect_upstream(server, Some(self_port)).await
+}
+
+/// Returns a JSON snapshot of all upstream statuses, tool lists, and metrics.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) fn get_mcp_upstream_status(
+    state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
+) -> serde_json::Value {
+    state.mcp_upstream_registry.status_snapshot()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn http_server(name: &str, url: &str) -> UpstreamMcpServer {
+        UpstreamMcpServer {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            transport: UpstreamTransport::Http {
+                url: url.to_string(),
+            },
+            enabled: true,
+            timeout_secs: 30,
+            tool_filter: None,
+            auth: None,
+        }
+    }
+
+    fn stdio_server(name: &str, command: &str) -> UpstreamMcpServer {
+        UpstreamMcpServer {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            transport: UpstreamTransport::Stdio {
+                command: command.to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                ],
+                env: HashMap::new(),
+                cwd: None,
+            },
+            enabled: true,
+            timeout_secs: 30,
+            tool_filter: None,
+            auth: None,
+        }
+    }
+
+    // -- Serialization round-trip --
+
+    #[test]
+    fn http_server_round_trip() {
+        let server = http_server("github", "http://localhost:8080/mcp");
+        let json = serde_json::to_string_pretty(&server).unwrap();
+        let parsed: UpstreamMcpServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(server, parsed);
+    }
+
+    #[test]
+    fn stdio_server_round_trip() {
+        let server = stdio_server("filesystem", "npx");
+        let json = serde_json::to_string_pretty(&server).unwrap();
+        let parsed: UpstreamMcpServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(server, parsed);
+    }
+
+    #[test]
+    fn config_round_trip() {
+        let config = UpstreamMcpConfig {
+            servers: vec![
+                http_server("github", "http://localhost:8080/mcp"),
+                stdio_server("filesystem", "npx"),
+            ],
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: UpstreamMcpConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn empty_config_round_trip() {
+        let config = UpstreamMcpConfig::default();
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: UpstreamMcpConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+        assert!(parsed.servers.is_empty());
+    }
+
+    #[test]
+    fn defaults_applied_on_deserialize() {
+        // Minimal JSON without optional fields
+        let json = r#"{
+            "id": "abc",
+            "name": "test",
+            "transport": { "type": "http", "url": "http://example.com/mcp" }
+        }"#;
+        let server: UpstreamMcpServer = serde_json::from_str(json).unwrap();
+        assert!(server.enabled); // default_true
+        assert_eq!(server.timeout_secs, 30); // default_timeout
+        assert!(server.tool_filter.is_none());
+        assert!(server.auth.is_none());
+    }
+
+    #[test]
+    fn tool_filter_round_trip() {
+        let server = UpstreamMcpServer {
+            id: "id-filtered".to_string(),
+            name: "filtered".to_string(),
+            transport: UpstreamTransport::Http {
+                url: "http://localhost:9000/mcp".to_string(),
+            },
+            enabled: true,
+            timeout_secs: 60,
+            tool_filter: Some(ToolFilter {
+                mode: FilterMode::Deny,
+                patterns: vec!["dangerous_*".to_string(), "admin_*".to_string()],
+            }),
+            auth: None,
+        };
+        let json = serde_json::to_string_pretty(&server).unwrap();
+        let parsed: UpstreamMcpServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(server, parsed);
+        let filter = parsed.tool_filter.unwrap();
+        assert_eq!(filter.mode, FilterMode::Deny);
+        assert_eq!(filter.patterns.len(), 2);
+    }
+
+    // -- Auth serialization --
+
+    #[test]
+    fn bearer_auth_round_trip() {
+        let mut server = http_server("secure", "https://remote:443/mcp");
+        server.auth = Some(UpstreamAuth::Bearer {
+            token: "sk-test-123".to_string(),
+        });
+        let json = serde_json::to_string_pretty(&server).unwrap();
+        let parsed: UpstreamMcpServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(server, parsed);
+        assert!(matches!(parsed.auth, Some(UpstreamAuth::Bearer { .. })));
+    }
+
+    #[test]
+    fn oauth2_auth_round_trip() {
+        let mut server = http_server("oauth", "https://remote:443/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: "my-app".to_string(),
+            client_secret: None,
+            scopes: vec!["read".to_string(), "write".to_string()],
+            authorization_endpoint: Some("https://auth.example.com/authorize".to_string()),
+            token_endpoint: Some("https://auth.example.com/token".to_string()),
+        });
+        let json = serde_json::to_string_pretty(&server).unwrap();
+        let parsed: UpstreamMcpServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(server, parsed);
+        if let Some(UpstreamAuth::OAuth2 {
+            client_id, scopes, ..
+        }) = &parsed.auth
+        {
+            assert_eq!(client_id, "my-app");
+            assert_eq!(scopes.len(), 2);
+        } else {
+            panic!("Expected OAuth2 auth variant");
+        }
+    }
+
+    #[test]
+    fn oauth2_serializes_with_oauth2_tag() {
+        // The wire tag MUST be `oauth2` — the frontend's UpstreamAuth type and the
+        // Authorize-button gate compare against this exact string. Regressing to the
+        // snake_case-derived `o_auth2` silently hides the Authorize action.
+        let mut server = http_server("oauth", "https://remote:443/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: "my-app".to_string(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        });
+        let json = serde_json::to_string(&server).unwrap();
+        assert!(
+            json.contains(r#""type":"oauth2""#),
+            "expected oauth2 tag, got: {json}"
+        );
+        assert!(
+            !json.contains("o_auth2"),
+            "must not emit legacy o_auth2 tag: {json}"
+        );
+    }
+
+    #[test]
+    fn oauth2_reads_legacy_o_auth2_tag() {
+        // Config files written before the rename use `o_auth2`; the serde alias keeps
+        // them loadable (they migrate to `oauth2` on the next save).
+        let json = r#"{
+            "id": "abc",
+            "name": "legacy",
+            "transport": { "type": "http", "url": "https://remote:443/mcp" },
+            "auth": { "type": "o_auth2", "client_id": "my-app" }
+        }"#;
+        let server: UpstreamMcpServer = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            server.auth,
+            Some(UpstreamAuth::OAuth2 { ref client_id, .. }) if client_id == "my-app"
+        ));
+    }
+
+    #[test]
+    fn oauth2_minimal_round_trip() {
+        let mut server = http_server("oauth-min", "https://remote:443/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: "my-app".to_string(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        });
+        let json = serde_json::to_string_pretty(&server).unwrap();
+        // Optional fields should be omitted
+        assert!(!json.contains("authorization_endpoint"));
+        assert!(!json.contains("token_endpoint"));
+        let parsed: UpstreamMcpServer = serde_json::from_str(&json).unwrap();
+        assert_eq!(server, parsed);
+    }
+
+    #[test]
+    fn config_without_auth_deserializes_to_none() {
+        let json = r#"{
+            "id": "abc",
+            "name": "test",
+            "transport": { "type": "http", "url": "http://example.com/mcp" }
+        }"#;
+        let server: UpstreamMcpServer = serde_json::from_str(json).unwrap();
+        assert!(server.auth.is_none());
+    }
+
+    #[test]
+    fn auth_not_serialized_when_none() {
+        let server = http_server("plain", "http://remote:8080/mcp");
+        let json = serde_json::to_string_pretty(&server).unwrap();
+        assert!(!json.contains("\"auth\""));
+    }
+
+    // -- Validation: auth --
+
+    #[test]
+    fn oauth2_empty_client_id_rejected() {
+        let mut server = http_server("bad-oauth", "https://remote:443/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: String::new(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        });
+        let config = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            UpstreamConfigError::EmptyOAuthClientId(_)
+        ));
+    }
+
+    #[test]
+    fn oauth2_valid_client_id_passes() {
+        let mut server = http_server("good-oauth", "https://remote:443/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: "my-app".to_string(),
+            client_secret: None,
+            scopes: vec!["read".to_string()],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        });
+        let config = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    #[test]
+    fn bearer_auth_passes_validation() {
+        let mut server = http_server("bearer", "https://remote:443/mcp");
+        server.auth = Some(UpstreamAuth::Bearer {
+            token: "sk-123".to_string(),
+        });
+        let config = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    // -- Validation: valid configs --
+
+    #[test]
+    fn valid_config_passes() {
+        let config = UpstreamMcpConfig {
+            servers: vec![
+                http_server("github", "http://remote-host:8080/mcp"),
+                stdio_server("filesystem", "npx"),
+            ],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn valid_single_char_name() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("a", "http://remote:8080/mcp")],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    #[test]
+    fn valid_name_with_hyphens_underscores_digits() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("my-server_2", "http://remote:8080/mcp")],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    // -- Validation: empty name --
+
+    #[test]
+    fn empty_name_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("", "http://remote:8080/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], UpstreamConfigError::EmptyName(_)));
+    }
+
+    // -- Validation: invalid name characters --
+
+    #[test]
+    fn uppercase_name_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("GitHub", "http://remote:8080/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], UpstreamConfigError::InvalidName(_)));
+    }
+
+    #[test]
+    fn name_with_spaces_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("my server", "http://remote:8080/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], UpstreamConfigError::InvalidName(_)));
+    }
+
+    #[test]
+    fn name_with_dots_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("my.server", "http://remote:8080/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], UpstreamConfigError::InvalidName(_)));
+    }
+
+    // -- Validation: duplicate names --
+
+    #[test]
+    fn duplicate_names_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![
+                http_server("github", "http://host-a:8080/mcp"),
+                http_server("github", "http://host-b:9090/mcp"),
+            ],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], UpstreamConfigError::DuplicateName(_)));
+    }
+
+    // -- Validation: self-referential URL --
+
+    #[test]
+    fn self_referential_localhost_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("bad", "http://localhost:3845/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            UpstreamConfigError::SelfReferentialUrl(_)
+        ));
+    }
+
+    #[test]
+    fn self_referential_127_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("bad", "http://127.0.0.1:3845/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            UpstreamConfigError::SelfReferentialUrl(_)
+        ));
+    }
+
+    #[test]
+    fn self_referential_ipv6_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("bad", "http://[::1]:3845/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            UpstreamConfigError::SelfReferentialUrl(_)
+        ));
+    }
+
+    #[test]
+    fn different_port_not_self_referential() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("ok", "http://localhost:9999/mcp")],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    #[test]
+    fn remote_host_not_self_referential() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("ok", "http://remote-host:3845/mcp")],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    // -- Validation: empty URL / command --
+
+    #[test]
+    fn empty_url_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("bad", "")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], UpstreamConfigError::EmptyUrl(_)));
+    }
+
+    #[test]
+    fn empty_command_rejected() {
+        let mut server = stdio_server("bad", "npx");
+        if let UpstreamTransport::Stdio {
+            ref mut command, ..
+        } = server.transport
+        {
+            *command = String::new();
+        }
+        let config = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0], UpstreamConfigError::EmptyCommand(_)));
+    }
+
+    // -- Validation: multiple errors --
+
+    #[test]
+    fn multiple_errors_collected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![
+                http_server("", "http://remote:8080/mcp"), // empty name
+                http_server("BAD", ""),                    // invalid name + empty url
+                http_server("ok", "http://localhost:3845/mcp"), // self-ref
+            ],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert!(
+            errors.len() >= 3,
+            "Expected at least 3 errors, got: {errors:?}"
+        );
+    }
+
+    // -- Validation: invalid URL scheme --
+
+    #[test]
+    fn ftp_scheme_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("bad", "ftp://remote:8080/mcp")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            UpstreamConfigError::InvalidUrlScheme(_)
+        ));
+    }
+
+    #[test]
+    fn file_scheme_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("bad", "file:///etc/passwd")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            UpstreamConfigError::InvalidUrlScheme(_)
+        ));
+    }
+
+    #[test]
+    fn javascript_scheme_rejected() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("bad", "javascript:alert(1)")],
+        };
+        let errors = validate_upstream_config(&config, 3845);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            UpstreamConfigError::InvalidUrlScheme(_)
+        ));
+    }
+
+    #[test]
+    fn http_scheme_accepted() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("ok", "http://remote:8080/mcp")],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    #[test]
+    fn https_scheme_accepted() {
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("ok", "https://remote:443/mcp")],
+        };
+        assert!(validate_upstream_config(&config, 3845).is_empty());
+    }
+
+    // -- is_self_referential edge cases --
+
+    #[test]
+    fn invalid_url_not_self_referential() {
+        assert!(!is_self_referential("not-a-url", 3845));
+    }
+
+    #[test]
+    fn https_localhost_with_matching_port() {
+        assert!(is_self_referential("https://localhost:3845/mcp", 3845));
+    }
+
+    #[test]
+    fn zero_zero_zero_zero_is_localhost() {
+        assert!(is_self_referential("http://0.0.0.0:3845/mcp", 3845));
+    }
+
+    // -- Persistence (file I/O) --
+
+    #[test]
+    fn load_nonexistent_returns_default() {
+        // load_json_config returns Default for missing files
+        let config: UpstreamMcpConfig = load_json_config("nonexistent-mcp-upstreams-test.json");
+        assert!(config.servers.is_empty());
+    }
+
+    // -- apply_config_diff (via UpstreamRegistry) --
+
+    use crate::mcp_proxy::registry::UpstreamRegistry;
+
+    fn disabled_http_server(name: &str, url: &str) -> UpstreamMcpServer {
+        let mut s = http_server(name, url);
+        s.enabled = false;
+        s
+    }
+
+    #[tokio::test]
+    async fn diff_connects_new_server() {
+        let registry = UpstreamRegistry::new();
+        let old = UpstreamMcpConfig { servers: vec![] };
+        let new_server = disabled_http_server("alpha", "http://127.0.0.1:1/mcp");
+        let new = UpstreamMcpConfig {
+            servers: vec![new_server],
+        };
+
+        registry.apply_config_diff(&old, &new, 9999).await;
+
+        assert_eq!(registry.upstream_names(), vec!["alpha"]);
+    }
+
+    #[tokio::test]
+    async fn diff_disconnects_removed_server() {
+        let registry = UpstreamRegistry::new();
+        let server = disabled_http_server("beta", "http://127.0.0.1:1/mcp");
+        registry
+            .connect_upstream(server.clone(), None)
+            .await
+            .unwrap();
+
+        let old = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+        let new = UpstreamMcpConfig { servers: vec![] };
+
+        registry.apply_config_diff(&old, &new, 9999).await;
+
+        assert!(registry.upstream_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn diff_reconnects_changed_server() {
+        let registry = UpstreamRegistry::new();
+        let mut old_server = disabled_http_server("gamma", "http://127.0.0.1:1/mcp");
+        registry
+            .connect_upstream(old_server.clone(), None)
+            .await
+            .unwrap();
+
+        let old = UpstreamMcpConfig {
+            servers: vec![old_server.clone()],
+        };
+
+        // Change the URL → same id, different transport
+        old_server.transport = UpstreamTransport::Http {
+            url: "http://127.0.0.1:2/mcp".to_string(),
+        };
+        let new = UpstreamMcpConfig {
+            servers: vec![old_server],
+        };
+
+        registry.apply_config_diff(&old, &new, 9999).await;
+
+        // gamma should still be registered (disconnected + reconnected)
+        assert!(registry.upstream_names().contains(&"gamma".to_string()));
+    }
+
+    #[tokio::test]
+    async fn diff_unchanged_server_stays_connected() {
+        let registry = UpstreamRegistry::new();
+        let server = disabled_http_server("delta", "http://127.0.0.1:1/mcp");
+        registry
+            .connect_upstream(server.clone(), None)
+            .await
+            .unwrap();
+
+        let old = UpstreamMcpConfig {
+            servers: vec![server.clone()],
+        };
+        let new = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+
+        registry.apply_config_diff(&old, &new, 9999).await;
+
+        // Unchanged → still registered once (no double-connect)
+        assert_eq!(registry.upstream_names(), vec!["delta"]);
+    }
+
+    #[tokio::test]
+    async fn diff_reconnects_on_auth_change() {
+        let registry = UpstreamRegistry::new();
+        let server = disabled_http_server("epsilon", "http://127.0.0.1:1/mcp");
+        registry
+            .connect_upstream(server.clone(), None)
+            .await
+            .unwrap();
+
+        let old = UpstreamMcpConfig {
+            servers: vec![server.clone()],
+        };
+
+        // Add bearer auth → should trigger reconnect
+        let mut new_server = server;
+        new_server.auth = Some(UpstreamAuth::Bearer {
+            token: "tok".to_string(),
+        });
+        let new = UpstreamMcpConfig {
+            servers: vec![new_server],
+        };
+
+        registry.apply_config_diff(&old, &new, 9999).await;
+
+        // epsilon should still be registered (disconnected + reconnected)
+        assert!(registry.upstream_names().contains(&"epsilon".to_string()));
+    }
+
+    #[test]
+    fn save_and_load_round_trip_via_file() {
+        use tempfile::TempDir;
+
+        // We can't easily override config_dir() in tests, so we test the
+        // serialization format is compatible with load_json_config's expectations.
+        let config = UpstreamMcpConfig {
+            servers: vec![
+                http_server("github", "http://remote:8080/mcp"),
+                stdio_server("filesystem", "npx"),
+            ],
+        };
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("mcp-upstreams.json");
+        std::fs::write(&path, &json).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let loaded: UpstreamMcpConfig = serde_json::from_str(&content).unwrap();
+        assert_eq!(config, loaded);
+    }
+
+    // -- update_upstream_auth --
+
+    #[test]
+    #[serial_test::serial]
+    fn update_upstream_auth_writes_auth_without_affecting_other_upstreams() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+
+        // Seed two upstreams — one with existing auth, one without
+        let mut server_a = http_server("alpha", "https://a.example.com/mcp");
+        server_a.auth = Some(UpstreamAuth::Bearer {
+            token: "old-tok".into(),
+        });
+        let server_b = http_server("beta", "https://b.example.com/mcp");
+        let config = UpstreamMcpConfig {
+            servers: vec![server_a, server_b.clone()],
+        };
+        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+
+        // Write OAuth auth to beta
+        let new_auth = UpstreamAuth::OAuth2 {
+            client_id: "dcr-obtained-id".into(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        };
+        update_upstream_auth("beta", new_auth.clone()).unwrap();
+
+        // Reload and verify
+        let reloaded: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+        let alpha = reloaded.servers.iter().find(|s| s.name == "alpha").unwrap();
+        let beta = reloaded.servers.iter().find(|s| s.name == "beta").unwrap();
+
+        // alpha's auth must be untouched
+        assert!(matches!(alpha.auth, Some(UpstreamAuth::Bearer { .. })));
+        // beta must have the new OAuth2 auth
+        assert_eq!(beta.auth, Some(new_auth));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn update_upstream_auth_returns_err_for_unknown_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+
+        let config = UpstreamMcpConfig {
+            servers: vec![http_server("alpha", "https://a.example.com/mcp")],
+        };
+        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+
+        let auth = UpstreamAuth::OAuth2 {
+            client_id: "x".into(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        };
+        let result = update_upstream_auth("nonexistent", auth);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn clear_upstream_auth_removes_auth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+
+        let mut server = http_server("delta", "https://d.example.com/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: "stale-id".into(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        });
+        let config = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+
+        clear_upstream_auth("delta").unwrap();
+
+        let reloaded: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+        let delta = reloaded.servers.iter().find(|s| s.name == "delta").unwrap();
+        assert!(delta.auth.is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn update_upstream_auth_overwrites_existing_auth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+
+        let mut server = http_server("gamma", "https://g.example.com/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: "old-id".into(),
+            client_secret: None,
+            scopes: vec!["read".into()],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        });
+        let config = UpstreamMcpConfig {
+            servers: vec![server],
+        };
+        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+
+        let new_auth = UpstreamAuth::OAuth2 {
+            client_id: "new-id".into(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        };
+        update_upstream_auth("gamma", new_auth.clone()).unwrap();
+
+        let reloaded: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+        let gamma = reloaded.servers.iter().find(|s| s.name == "gamma").unwrap();
+        assert_eq!(gamma.auth, Some(new_auth));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn set_project_mcp_upstreams_persists_and_emits_signal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+
+        let state = crate::state::tests_support::make_test_app_state();
+        let mut rx = state.mcp_tools_changed.subscribe();
+
+        // Set allowlist
+        set_project_mcp_upstreams_inner(
+            &state,
+            "/test/repo",
+            Some(vec!["server-a".to_string(), "server-b".to_string()]),
+        )
+        .unwrap();
+
+        // Verify persisted
+        let settings = crate::config::load_repo_settings();
+        let entry = settings
+            .repos
+            .get("/test/repo")
+            .expect("entry should exist");
+        assert_eq!(
+            entry.mcp_upstreams,
+            Some(vec!["server-a".to_string(), "server-b".to_string()])
+        );
+
+        // Verify signal emitted
+        assert!(
+            rx.try_recv().is_ok(),
+            "mcp_tools_changed should have been emitted"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn set_project_mcp_upstreams_none_clears_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+
+        let state = crate::state::tests_support::make_test_app_state();
+
+        // Set then clear
+        set_project_mcp_upstreams_inner(&state, "/test/repo", Some(vec!["server-a".to_string()]))
+            .unwrap();
+        set_project_mcp_upstreams_inner(&state, "/test/repo", None).unwrap();
+
+        let settings = crate::config::load_repo_settings();
+        let entry = settings
+            .repos
+            .get("/test/repo")
+            .expect("entry should exist");
+        assert_eq!(entry.mcp_upstreams, None, "None should clear the override");
+    }
+}

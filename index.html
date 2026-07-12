@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FastAF</title>
+    <style>
+      /* Inline critical styles — visible immediately before CSS/JS loads */
+      html, body { margin: 0; padding: 0; height: 100%; background: #1e1e1e; }
+      #splash {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        color: #848d97;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13px;
+        gap: 12px;
+      }
+      #splash .spinner {
+        width: 24px;
+        height: 24px;
+        border: 2px solid #333;
+        border-top-color: #848d97;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+    <script>
+      // Early error catcher — runs before the SolidJS bundle loads.
+      // Captures load failures, syntax errors, and uncaught exceptions that
+      // would otherwise produce a blank white screen with no diagnostics.
+      (function () {
+        var errors = [];
+        function fmt(e) {
+          if (e instanceof Error) return e.message + '\n' + (e.stack || '');
+          if (typeof e === 'string') return e;
+          try { return JSON.stringify(e); } catch (_) { return String(e); }
+        }
+        function report(msg) {
+          errors.push(msg);
+          // Try Tauri backend logging (available after IPC bridge loads)
+          if (window.__TAURI__ && window.__TAURI__.core) {
+            window.__TAURI__.core.invoke('push_log', {
+              level: 'error', source: 'boot', message: msg, dataJson: null
+            }).catch(function () {});
+          }
+          // Visual fallback: show error on screen if splash is still visible
+          var splash = document.getElementById('splash');
+          if (splash) {
+            var errDiv = document.getElementById('boot-errors');
+            if (!errDiv) {
+              errDiv = document.createElement('pre');
+              errDiv.id = 'boot-errors';
+              errDiv.style.cssText = 'color:#f44;font-size:11px;max-width:90vw;white-space:pre-wrap;text-align:left;margin-top:12px;max-height:40vh;overflow:auto;';
+              splash.appendChild(errDiv);
+            }
+            errDiv.textContent = errors.join('\n---\n');
+          }
+        }
+        window.addEventListener('error', function (ev) {
+          var detail = ev.filename
+            ? ev.filename + ':' + ev.lineno + ':' + ev.colno + ' ' + ev.message
+            : ev.message || 'Script error (no details — cross-origin?)';
+          report('[boot error] ' + detail);
+        });
+        window.addEventListener('unhandledrejection', function (ev) {
+          report('[boot rejection] ' + fmt(ev.reason));
+        });
+      })();
+    </script>
+    <script>
+      // Shim for @tauri-apps/api — prevents module-load crash in browser mode.
+      // The Tauri SDK accesses window.__TAURI_INTERNALS__.transformCallback at
+      // import time. Without this stub, any static import of @tauri-apps/api
+      // throws in non-Tauri contexts (PWA, browser via Tailscale).
+      // The __TAURI_SHIM__ flag lets isTauri() distinguish real from stubbed.
+      if (!window.__TAURI_INTERNALS__) {
+        window.__TAURI_INTERNALS__ = {
+          transformCallback: function () { return 0; },
+          invoke: function () { return Promise.reject(new Error('not in Tauri')); },
+          // convertFileSrc has no asset protocol in browser mode; returning the
+          // raw path degrades to a broken image instead of crashing the app.
+          convertFileSrc: function (path) { return path; },
+        };
+        window.__TAURI_SHIM__ = true;
+      }
+    </script>
+    <script type="module" src="/src/index.tsx" defer></script>
+  </head>
+
+  <body>
+    <!-- Splash screen — shown instantly, replaced when SolidJS mounts -->
+    <div id="splash">
+      <div class="spinner"></div>
+      <span id="splash-msg"></span>
+    </div>
+    <script>
+      (function () {
+        var msgs = [
+          "Aligning satellites for optimal awesomeness\u2026",
+          "Searching for the lost commit in the ancient repo\u2026",
+          "Warming up the quantum hamsters\u2026",
+          "Calibrating the flux capacitor\u2026",
+          "Negotiating with the cloud\u2026",
+          "Refactoring reality\u2026",
+          "Polishing pixels\u2026",
+          "Rehydrating dehydrated data\u2026",
+          "Asking the AI nicely\u2026",
+          "Herding microservices\u2026",
+          "Synchronizing parallel universes\u2026",
+          "Charging the lasers\u2026",
+          "Compiling sarcasm\u2026",
+          "Untangling spaghetti code\u2026",
+          "Mapping unknown territories\u2026",
+          "Debugging the matrix\u2026",
+          "Downloading more RAM\u2026",
+          "Spinning up tiny containers\u2026",
+          "Consulting the rubber duck\u2026",
+          "Optimizing the timeline\u2026"
+        ];
+        var el = document.getElementById("splash-msg");
+        var last = -1;
+        function pick() {
+          var i;
+          do { i = Math.floor(Math.random() * msgs.length); } while (i === last);
+          last = i;
+          el.style.opacity = "0";
+          setTimeout(function () { el.textContent = msgs[i]; el.style.opacity = "1"; }, 250);
+        }
+        el.style.transition = "opacity 0.25s ease";
+        pick();
+        setInterval(pick, 3000);
+      })();
+    </script>
+
+    <!-- SolidJS renders into this container, replacing splash -->
+    <div id="app"></div>
+  </body>
+</html>

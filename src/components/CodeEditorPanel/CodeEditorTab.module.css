@@ -1,0 +1,74 @@
+/* CodeEditorTab */
+.tabContent {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+/* Relative wrapper so the absolutely-positioned <SearchBar> overlay anchors to
+   the editor area (not the whole tab, which includes the header). */
+.editorArea {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.editorContent {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  /* Override global user-select:none so CodeMirror text selection & copy work */
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+
+.notice {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.noticeIcon {
+  color: var(--fg-muted);
+  opacity: 0.55;
+}
+
+.noticeTitle {
+  font-size: var(--font-md);
+  color: var(--fg-secondary);
+}
+
+.noticeSub {
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  word-break: break-all;
+  max-width: 480px;
+}
+
+.conflictBanner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: color-mix(in srgb, var(--attention) 15%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--attention) 40%, transparent);
+  font-size: var(--font-sm);
+  color: var(--attention);
+}
