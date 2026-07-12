@@ -1,0 +1,25 @@
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Never let an overflowing tab strip squeeze the detach/close buttons. */
+  flex-shrink: 0;
+}
+
+.btn {
+  background: none;
+  border: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.btn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}

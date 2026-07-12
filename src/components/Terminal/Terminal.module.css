@@ -1,0 +1,133 @@
+/* Terminal component */
+.wrapper {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  padding: 8px 0 8px 8px;
+}
+
+.content :global(.xterm) {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Resume banner — shown when a restored terminal had an active agent session */
+.reconnectBanner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--warning) 15%, var(--bg-primary));
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
+  color: var(--warning);
+  font-size: var(--font-sm);
+  animation: reconnectPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes reconnectPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.resumeBanner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+.resumeBanner:hover {
+  color: var(--accent);
+  background: var(--bg-highlight);
+}
+
+.resumeDismiss {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: var(--font-md);
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.resumeDismiss:hover {
+  color: var(--error);
+}
+
+/* Visual bell flash — applied as raw class on the container DOM element */
+:global(.bell-flash) {
+  animation: bell-flash-anim 150ms ease-out;
+}
+
+@keyframes bell-flash-anim {
+  0%, 100% { background-color: transparent; }
+  50%      { background-color: rgba(255, 255, 255, 0.15); }
+}
+
+
+/* OSC 133 gutter exit code markers */
+.osc133Gutter {
+  width: 3px !important;
+  margin-left: -8px !important;
+  border-radius: 1px;
+  pointer-events: none;
+}
+
+.osc133GutterErr {
+  background: var(--error);
+}
+
+/* Compose panel tab — bottom edge handle that pulls up the compose panel */
+.composeHint {
+  position: absolute;
+  bottom: 0;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  color: var(--fg-muted);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+  opacity: 0.5;
+  user-select: none;
+  transition: opacity 0.15s;
+}
+
+.composeHint:hover {
+  opacity: 1;
+  color: var(--fg-primary);
+}

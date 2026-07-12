@@ -1,0 +1,297 @@
+import { type Component, createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { cx } from "../../utils";
+import s from "./ContextMenu.module.css";
+
+export interface ContextMenuItem {
+	label: string;
+	shortcut?: string;
+	action: () => void;
+	separator?: boolean;
+	disabled?: boolean;
+	children?: ContextMenuItem[];
+	/** Native tooltip shown on hover — e.g. the full path behind a "Copy Path" item */
+	title?: string;
+}
+
+export interface ContextMenuProps {
+	items: ContextMenuItem[];
+	x: number;
+	y: number;
+	visible: boolean;
+	onClose: () => void;
+}
+
+/** True when a keyboard event matches a menu item's shortcut hint (e.g. "⇧M",
+ *  "↵", "r"). Modifier glyphs: ⇧ shift, ⌘ meta, ⌃ ctrl, ⌥ alt. */
+function matchesShortcut(e: KeyboardEvent, shortcut: string): boolean {
+	const wantShift = shortcut.includes("⇧");
+	const wantMeta = shortcut.includes("⌘");
+	const wantCtrl = shortcut.includes("⌃");
+	const wantAlt = shortcut.includes("⌥");
+	const key = shortcut.replace(/[⇧⌘⌃⌥]/g, "");
+	if (e.shiftKey !== wantShift || e.metaKey !== wantMeta || e.ctrlKey !== wantCtrl || e.altKey !== wantAlt) {
+		return false;
+	}
+	if (key === "⏎") return e.key === "Enter"; // ↵
+	if (key.length !== 1) return false;
+	return e.key.toLowerCase() === key.toLowerCase();
+}
+
+/** Clamp a submenu position so it stays within the viewport (8px margin). */
+const clampSubmenu = (wrapEl: HTMLDivElement, submenuEl: HTMLDivElement) => {
+	const parentRect = wrapEl.getBoundingClientRect();
+	const subRect = submenuEl.getBoundingClientRect();
+	const vw = window.innerWidth;
+	const vh = window.innerHeight;
+	const margin = 8;
+
+	// Horizontal: prefer right of parent, flip left if needed, clamp to viewport
+	let left = parentRect.right;
+	if (left + subRect.width > vw - margin) {
+		left = parentRect.left - subRect.width;
+	}
+	left = Math.max(margin, Math.min(left, vw - subRect.width - margin));
+
+	// Vertical: align top with parent item, clamp to viewport
+	let top = parentRect.top;
+	if (top + subRect.height > vh - margin) {
+		top = vh - subRect.height - margin;
+	}
+	top = Math.max(margin, top);
+
+	submenuEl.style.left = `${left}px`;
+	submenuEl.style.top = `${top}px`;
+};
+
+/** Single menu item — handles both leaf items and items with submenus */
+const MenuItem: Component<{
+	item: ContextMenuItem;
+	onClose: () => void;
+	isLast?: boolean;
+}> = (props) => {
+	let wrapRef: HTMLDivElement | undefined;
+	let submenuRef: HTMLDivElement | undefined;
+	const [submenuOpen, setSubmenuOpen] = createSignal(false);
+	const hasChildren = () => !!(props.item.children && props.item.children.length > 0);
+
+	const openSubmenu = () => {
+		if (props.item.disabled || !hasChildren()) return;
+		setSubmenuOpen(true);
+		// Position after render
+		requestAnimationFrame(() => {
+			if (wrapRef && submenuRef) clampSubmenu(wrapRef, submenuRef);
+		});
+	};
+
+	// `separator` on an EMPTY-label item is a standalone divider row (no button).
+	// `separator` on a REAL item (non-empty label) is a trailing-divider modifier:
+	// render the item, then a divider after it. FileBrowser/App menus use the
+	// modifier form — treating separator as exclusive silently drops those items
+	// (e.g. Delete). Disambiguate on the label being empty.
+	//
+	// A trailing separator (pure divider row OR the modifier's trailing divider)
+	// is suppressed on the LAST item — a divider with nothing after it is noise.
+	const isPureSeparator = () => !!props.item.separator && props.item.label === "";
+
+	return (
+		<Show
+			when={!isPureSeparator()}
+			fallback={
+				<Show when={!props.isLast}>
+					<div class={s.separator} />
+				</Show>
+			}
+		>
+			<div ref={wrapRef} class={s.itemWrap} onMouseEnter={openSubmenu} onMouseLeave={() => setSubmenuOpen(false)}>
+				<button
+					class={cx(s.item, props.item.disabled && s.disabled)}
+					title={props.item.title}
+					onClick={() => {
+						if (props.item.disabled) return;
+						if (hasChildren()) {
+							if (submenuOpen()) {
+								setSubmenuOpen(false);
+							} else {
+								openSubmenu();
+							}
+							return;
+						}
+						props.item.action();
+						props.onClose();
+					}}
+					disabled={props.item.disabled}
+				>
+					<span class={s.label}>{props.item.label}</span>
+					<Show when={props.item.shortcut}>
+						<span class={s.shortcut}>{props.item.shortcut}</span>
+					</Show>
+					<Show when={hasChildren()}>
+						<span class={s.arrow}>{"\u203A"}</span>
+					</Show>
+				</button>
+				<Show when={submenuOpen() && props.item.children}>
+					<div ref={submenuRef} class={s.submenu}>
+						<For each={props.item.children}>
+							{(child, i) => (
+								<MenuItem
+									item={child}
+									onClose={props.onClose}
+									isLast={i() === (props.item.children?.length ?? 0) - 1}
+								/>
+							)}
+						</For>
+					</div>
+				</Show>
+			</div>
+			<Show when={props.item.separator && !props.isLast}>
+				<div class={s.separator} />
+			</Show>
+		</Show>
+	);
+};
+
+export const ContextMenu: Component<ContextMenuProps> = (props) => {
+	let menuRef: HTMLDivElement | undefined;
+
+	// Close on escape key
+	createEffect(() => {
+		if (!props.visible) return;
+
+		const handleKeydown = (e: KeyboardEvent) => {
+			// Modifier-only keys (Shift, Control, etc.) are ignored so chords can form.
+			if (e.key === "Shift" || e.key === "Control" || e.key === "Alt" || e.key === "Meta") return;
+			if (e.key === "Escape") {
+				e.preventDefault();
+				props.onClose();
+				return;
+			}
+			// Trigger a matching item's action while the menu is open (the shortcut
+			// hints shown next to each item). Top-level items only.
+			const hit = props.items.find(
+				(it) => !it.separator && !it.disabled && it.shortcut && matchesShortcut(e, it.shortcut),
+			);
+			if (hit) {
+				e.preventDefault();
+				props.onClose();
+				hit.action();
+				return;
+			}
+			// Any other key closes the menu (existing behavior).
+			props.onClose();
+		};
+
+		const handleClickOutside = (e: MouseEvent) => {
+			if (menuRef && !menuRef.contains(e.target as Node)) {
+				props.onClose();
+			}
+		};
+
+		document.addEventListener("keydown", handleKeydown);
+		document.addEventListener("mousedown", handleClickOutside);
+
+		onCleanup(() => {
+			document.removeEventListener("keydown", handleKeydown);
+			document.removeEventListener("mousedown", handleClickOutside);
+		});
+	});
+
+	// Reposition menu after render to use measured dimensions
+	const clampToViewport = () => {
+		if (!menuRef) return;
+		const rect = menuRef.getBoundingClientRect();
+		// Fallback estimates when getBoundingClientRect returns 0 (e.g. jsdom)
+		const menuWidth = rect.width || 180;
+		const menuHeight = rect.height || props.items.length * 36 + 8;
+		const vw = window.innerWidth;
+		const vh = window.innerHeight;
+		const margin = 8;
+
+		let x = props.x;
+		let y = props.y;
+
+		// Horizontal: flip left if overflows right
+		if (x + menuWidth > vw - margin) {
+			x = vw - menuWidth - margin;
+		}
+		x = Math.max(margin, x);
+
+		// Vertical: if menu doesn't fit below click point, grow upward
+		if (y + menuHeight > vh - margin) {
+			y = props.y - menuHeight;
+		}
+		// Clamp to viewport top
+		y = Math.max(margin, y);
+
+		menuRef.style.left = `${x}px`;
+		menuRef.style.top = `${y}px`;
+		menuRef.style.opacity = "1";
+	};
+
+	createEffect(() => {
+		if (!props.visible || !menuRef) return;
+		const raf = requestAnimationFrame(clampToViewport);
+		onCleanup(() => cancelAnimationFrame(raf));
+	});
+
+	return (
+		<Show when={props.visible}>
+			<div
+				ref={menuRef}
+				class={s.menu}
+				onClick={(e) => e.stopPropagation()}
+				style={{
+					left: `${props.x}px`,
+					top: `${props.y}px`,
+					opacity: "0",
+				}}
+			>
+				<For each={props.items}>
+					{(item, i) => <MenuItem item={item} onClose={props.onClose} isLast={i() === props.items.length - 1} />}
+				</For>
+			</div>
+		</Show>
+	);
+};
+
+/** Hook to manage context menu state */
+export function createContextMenu() {
+	const [visible, setVisible] = createSignal(false);
+	const [position, setPosition] = createSignal({ x: 0, y: 0 });
+	let previousFocus: HTMLElement | null = null;
+
+	const open = (e: MouseEvent) => {
+		e.preventDefault();
+		previousFocus = document.activeElement as HTMLElement | null;
+		setPosition({ x: e.clientX, y: e.clientY });
+		setVisible(true);
+	};
+
+	/** Open the menu at specific coordinates (for programmatic positioning) */
+	const openAt = (x: number, y: number) => {
+		previousFocus = document.activeElement as HTMLElement | null;
+		setPosition({ x, y });
+		setVisible(true);
+	};
+
+	let closeRaf = 0;
+	const close = () => {
+		setVisible(false);
+		cancelAnimationFrame(closeRaf);
+		if (previousFocus) {
+			closeRaf = requestAnimationFrame(() => previousFocus?.focus());
+			previousFocus = null;
+		}
+	};
+
+	onCleanup(() => cancelAnimationFrame(closeRaf));
+
+	return {
+		visible,
+		position,
+		open,
+		openAt,
+		close,
+	};
+}
+
+export default ContextMenu;

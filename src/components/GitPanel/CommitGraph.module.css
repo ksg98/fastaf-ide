@@ -1,0 +1,12 @@
+/* CommitGraph — Canvas overlay for commit lane visualization.
+   Positioned absolutely over the scroll container (rendered as a
+   sibling outside the scroll flow). The canvas stays fixed in the
+   viewport while content scrolls; the draw pass applies a
+   translate(-scrollTop) to render the visible slice. */
+.canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  pointer-events: none;
+}

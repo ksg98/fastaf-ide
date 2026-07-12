@@ -1,0 +1,78 @@
+.dropup {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  background: rgba(37, 37, 38, 0.95);
+  border-top: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  z-index: 50;
+}
+
+.item {
+  display: block;
+  padding: 10px 16px;
+  border: none;
+  background: none;
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  font-family: var(--font-mono);
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.item:active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.itemHighlighted {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.command {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.description {
+  color: var(--fg-muted);
+  font-family: var(--font-ui);
+  font-size: 0.85em;
+  margin-left: 8px;
+}
+
+.nav {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.navBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg-muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.navBtn:active {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--fg-primary);
+}

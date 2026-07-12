@@ -1,0 +1,70 @@
+.triToggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.triToggle + .triToggle {
+  margin-top: 10px;
+}
+
+.track {
+  position: relative;
+  display: flex;
+  width: 44px;
+  height: 16px;
+  min-height: 16px;
+  max-height: 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.track[data-value="hide"] {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+}
+
+.track[data-value="show"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.track[data-value="hide"] .knob {
+  transform: translateX(0);
+  background: var(--fg-muted);
+}
+
+.track[data-value="default"] .knob {
+  transform: translateX(13px);
+  background: var(--fg-muted);
+}
+
+.track[data-value="show"] .knob {
+  transform: translateX(26px);
+  background: white;
+}
+
+.label {
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+}
+
+.stateHint {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  margin-left: 2px;
+}

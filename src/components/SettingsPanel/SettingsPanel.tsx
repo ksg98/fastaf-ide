@@ -1,0 +1,240 @@
+import { type Component, createEffect, createSignal, Show } from "solid-js";
+import { t } from "../../i18n";
+import { invoke } from "../../invoke";
+import { shortenHomePath } from "../../platform";
+import { repoDefaultsStore } from "../../stores/repoDefaults";
+import { type RepoSettings, repoSettingsStore } from "../../stores/repoSettings";
+import { repositoriesStore } from "../../stores/repositories";
+import { settingsStore } from "../../stores/settings";
+import { toastsStore } from "../../stores/toasts";
+import { uiStore } from "../../stores/ui";
+import { isTauri } from "../../transport";
+import { pathBasename } from "../../utils/pathUtils";
+import { getRepoColor } from "../../utils/repoColor";
+import { DictationSettings } from "./DictationSettings";
+import s from "./Settings.module.css";
+import type { SettingsShellTab } from "./SettingsShell";
+import { SettingsShell } from "./SettingsShell";
+import {
+	AgentsTab,
+	AiChatTab,
+	AppearanceTab,
+	GeneralTab,
+	GitHubTab,
+	NotificationsTab,
+	PluginsTab,
+	RepoScriptsTab,
+	RepoWorktreeTab,
+	ServicesTab,
+} from "./tabs";
+import { ProvidersTab } from "./tabs/ProvidersTab";
+
+/** Context for initial selection when opening the panel */
+export type SettingsContext = { kind: "global" } | { kind: "repo"; repoPath: string; connectionId?: string };
+
+export interface SettingsPanelProps {
+	visible: boolean;
+	onClose: () => void;
+	initialTab?: string;
+	context?: SettingsContext;
+}
+
+const BASE_GLOBAL_TABS: SettingsShellTab[] = [
+	{ key: "general", label: t("settings.general", "General") },
+	{ key: "appearance", label: t("settings.appearance", "Appearance") },
+	{ key: "notifications", label: t("settings.notifications", "Notifications") },
+	{ key: "dictation", label: t("settings.dictation", "Dictation") },
+	{ key: "github", label: "Git & GitHub" },
+	{ key: "services", label: t("settings.services", "Services") },
+	{ key: "plugins", label: t("settings.plugins", "Plugins") },
+	{ key: "providers", label: "Providers" },
+	{ key: "agents", label: t("settings.agents", "Agents") },
+];
+
+function getGlobalTabs(): SettingsShellTab[] {
+	const tabs = isTauri() ? BASE_GLOBAL_TABS : BASE_GLOBAL_TABS.filter((tab) => tab.key !== "dictation");
+	if (settingsStore.isAiChatEnabled()) {
+		return [...tabs, { key: "ai-chat", label: "AI Chat" }];
+	}
+	return tabs;
+}
+
+function defaultTab(ctx: SettingsContext): string {
+	if (ctx.kind === "repo") return `repo:${ctx.repoPath}`;
+	return "general";
+}
+
+/** Build the full nav from global sections + configured repos */
+function buildNavItems(): SettingsShellTab[] {
+	// All repos, including those nested in groups — grouped repos live in
+	// group.repoOrder, not state.repoOrder, so iterating repoOrder alone would
+	// hide them from the Settings nav. (#64)
+	const repos = repositoriesStore.getAllReposOrdered();
+
+	const items: SettingsShellTab[] = [...getGlobalTabs()];
+
+	if (repos.length > 0) {
+		items.push({ key: "__sep__", label: "─" });
+		items.push({ key: "__label__:Repositories", label: t("settings.repositories", "REPOSITORIES") });
+		for (const repo of repos) {
+			const label = repo.displayName || pathBasename(repo.path) || repo.path;
+			const color = getRepoColor(repo.path);
+			items.push({ key: `repo:${repo.path}`, label, color });
+		}
+	}
+
+	return items;
+}
+
+export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
+	const ctx = () => props.context ?? { kind: "global" as const };
+	const [activeTab, setActiveTab] = createSignal(props.initialTab ?? defaultTab(ctx()));
+
+	// Reset active tab when context changes or panel opens
+	createEffect(() => {
+		if (props.visible) {
+			setActiveTab(props.initialTab ?? defaultTab(ctx()));
+		}
+	});
+
+	// Auto-reset to general when the current tab vanishes (e.g. AI Chat flag
+	// toggled off while AI Chat tab is active). Without this, the body would
+	// also disappear (per the Show guard above) but the nav would have no
+	// highlight. (#1376-7333)
+	createEffect(() => {
+		if (activeTab() === "ai-chat" && !settingsStore.isAiChatEnabled()) {
+			setActiveTab("general");
+		}
+	});
+
+	/** Repo path if a repo nav item is currently active, null otherwise */
+	const activeRepoPath = (): string | null => {
+		const tab = activeTab();
+		return tab.startsWith("repo:") ? tab.slice(5) : null;
+	};
+
+	const activeConnectionId = (): string | undefined => {
+		const path = activeRepoPath();
+		return path ? repositoriesStore.getConnectionId(path) : undefined;
+	};
+
+	const repoSettings = (path: string) => repoSettingsStore.getOrCreate(path, shortenHomePath(path));
+
+	const updateRepoSetting =
+		(repoPath: string) =>
+		<K extends keyof RepoSettings>(key: K, value: RepoSettings[K]) => {
+			repoSettingsStore.update(repoPath, { [key]: value });
+			if (key === "displayName") {
+				repositoriesStore.setDisplayName(repoPath, value as string);
+			}
+		};
+
+	/** Write this repo's UI settings into a committable `.tuic.json` at its root */
+	const copyToProject = async (repoPath: string) => {
+		try {
+			await invoke("save_repo_local_config", { repoPath });
+			toastsStore.add(
+				t("settings.copyToProject.done", "Saved .tuic.json"),
+				t("settings.copyToProject.doneHint", "Repo settings written to the project root — commit to share"),
+				"info",
+			);
+		} catch (err) {
+			toastsStore.add(t("settings.copyToProject.failed", "Failed to write .tuic.json"), String(err), "error");
+		}
+	};
+
+	const footer = () => {
+		const path = activeRepoPath();
+		return (
+			<div class={s.footer}>
+				<Show when={path} fallback={<span />}>
+					{(p) => (
+						<button class={s.footerReset} onClick={() => repoSettingsStore.reset(p())}>
+							{t("settings.resetToDefaults", "Reset to Defaults")}
+						</button>
+					)}
+				</Show>
+				<button class={s.footerDone} onClick={props.onClose}>
+					{t("settings.done", "Done")}
+				</button>
+			</div>
+		);
+	};
+
+	return (
+		<SettingsShell
+			visible={props.visible}
+			onClose={props.onClose}
+			title={t("settings.title", "Settings")}
+			tabs={buildNavItems()}
+			activeTab={activeTab()}
+			onTabChange={setActiveTab}
+			navWidth={uiStore.state.settingsNavWidth}
+			onNavWidthChange={uiStore.setSettingsNavWidth}
+			onNavWidthPersist={uiStore.persistUIPrefs}
+			footer={footer()}
+		>
+			{/* Repo settings (shown when a repo nav item is active) */}
+			<Show when={activeRepoPath()} keyed>
+				{(path) => {
+					const settings = repoSettings(path);
+					const onUpdate = updateRepoSetting(path);
+					return (
+						<>
+							<RepoWorktreeTab settings={settings} defaults={repoDefaultsStore.state} onUpdate={onUpdate} />
+							<RepoScriptsTab settings={settings} defaults={repoDefaultsStore.state} onUpdate={onUpdate} />
+							<Show when={isTauri()}>
+								<div class={s.section}>
+									<h3>{t("settings.copyToProject.heading", "Share with Team")}</h3>
+									<p class={s.hint}>
+										{t(
+											"settings.copyToProject.hint",
+											"Write this repo's worktree/branch settings to a .tuic.json in the project root. Commit it so teammates inherit the same defaults. Scripts are never exported.",
+										)}
+									</p>
+									<div class={s.actions}>
+										<button onClick={() => copyToProject(path)}>
+											{t("settings.copyToProject.button", "Copy settings to .tuic.json")}
+										</button>
+									</div>
+								</div>
+							</Show>
+						</>
+					);
+				}}
+			</Show>
+
+			{/* Global sections */}
+			<Show when={activeTab() === "general"}>
+				<GeneralTab />
+			</Show>
+			<Show when={activeTab() === "appearance"}>
+				<AppearanceTab />
+			</Show>
+			<Show when={activeTab() === "notifications"}>
+				<NotificationsTab />
+			</Show>
+			<Show when={activeTab() === "dictation"}>
+				<DictationSettings />
+			</Show>
+			<Show when={activeTab() === "github"}>
+				<GitHubTab />
+			</Show>
+			<Show when={activeTab() === "services"}>
+				<ServicesTab />
+			</Show>
+			<Show when={activeTab() === "plugins"}>
+				<PluginsTab onClose={props.onClose} />
+			</Show>
+			<Show when={activeTab() === "providers"}>
+				<ProvidersTab />
+			</Show>
+			<Show when={activeTab() === "agents"}>
+				<AgentsTab connectionId={activeConnectionId()} />
+			</Show>
+			<Show when={activeTab() === "ai-chat" && settingsStore.isAiChatEnabled()}>
+				<AiChatTab />
+			</Show>
+		</SettingsShell>
+	);
+};

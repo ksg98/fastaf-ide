@@ -1,0 +1,346 @@
+import { createStore, produce } from "solid-js/store";
+import { AGENTS, type AgentRunConfig, type AgentsConfig, type AgentType } from "../agents";
+import { invoke } from "../invoke";
+import { buildEnvFromEntries, type EnvVarEntry } from "../utils/envVars";
+import { appLogger } from "./appLogger";
+
+export interface AgentConfigIO {
+	load: () => Promise<AgentsConfig>;
+	save: (config: AgentsConfig) => Promise<void>;
+}
+
+const defaultIO: AgentConfigIO = {
+	load: () => invoke<AgentsConfig>("load_agents_config"),
+	save: (config) => invoke("save_agents_config", { config }),
+};
+
+interface AgentConfigsState {
+	agents: Record<
+		string,
+		{
+			run_configs: AgentRunConfig[];
+			auto_retry_on_error?: boolean;
+			headless_template?: string;
+			env_flags?: Record<string, string>;
+			intent_tab_title?: boolean;
+			suggest_followups?: boolean;
+			hook_instrumentation?: boolean;
+		}
+	>;
+	/** Which agent CLI to use for headless prompt execution (user-chosen in Settings) */
+	headless_agent: AgentType | null;
+	loaded: boolean;
+}
+
+/** Deep-clone a plain object to break SolidJS proxy references.
+ * Must use JSON round-trip because structuredClone cannot handle SolidJS proxies. */
+function clone<T>(obj: T): T {
+	return JSON.parse(JSON.stringify(obj));
+}
+
+export function createAgentConfigsStore(io: AgentConfigIO = defaultIO) {
+	const [state, setState] = createStore<AgentConfigsState>({
+		agents: {},
+		headless_agent: null,
+		loaded: false,
+	});
+
+	/** Save full config to Rust. Logs and rethrows on failure so callers can surface errors. */
+	async function saveToDisk(): Promise<void> {
+		try {
+			const full: AgentsConfig = {
+				agents: clone(state.agents),
+				headless_agent: state.headless_agent ?? undefined,
+			};
+			await io.save(full);
+		} catch (err) {
+			appLogger.error("config", "Failed to save agent config", err);
+			throw err;
+		}
+	}
+
+	const actions = {
+		/** Hydrate store from persisted config */
+		async hydrate(): Promise<void> {
+			try {
+				const config = await io.load();
+				setState(
+					produce((s) => {
+						s.agents = config.agents ?? {};
+						s.headless_agent = config.headless_agent ?? null;
+						s.loaded = true;
+					}),
+				);
+			} catch (err) {
+				appLogger.error("config", "Failed to hydrate agent configs", err);
+				setState("loaded", true);
+			}
+		},
+
+		/** Get run configs for an agent type */
+		getRunConfigs(type: AgentType): AgentRunConfig[] {
+			return state.agents[type]?.run_configs ?? [];
+		},
+
+		/** Get the default run config for an agent, or undefined */
+		getDefaultConfig(type: AgentType): AgentRunConfig | undefined {
+			const configs = state.agents[type]?.run_configs ?? [];
+			return configs.find((c) => c.is_default) ?? configs[0];
+		},
+
+		/** Add a run config for an agent */
+		async addRunConfig(type: AgentType, config: AgentRunConfig): Promise<void> {
+			setState(
+				produce((s) => {
+					if (!s.agents[type]) {
+						s.agents[type] = { run_configs: [] };
+					}
+					const newConfig = clone(config);
+					if (s.agents[type].run_configs.length === 0) {
+						newConfig.is_default = true;
+					}
+					s.agents[type].run_configs.push(newConfig);
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Update a run config at a specific index */
+		async updateRunConfig(type: AgentType, index: number, config: AgentRunConfig): Promise<void> {
+			const current = state.agents[type]?.run_configs ?? [];
+			if (index < 0 || index >= current.length) return;
+			setState(
+				produce((s) => {
+					s.agents[type].run_configs[index] = clone(config);
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Remove a run config at a specific index */
+		async removeRunConfig(type: AgentType, index: number): Promise<void> {
+			const current = state.agents[type]?.run_configs ?? [];
+			if (index < 0 || index >= current.length) return;
+			setState(
+				produce((s) => {
+					const configs = s.agents[type].run_configs;
+					const wasDefault = configs[index].is_default;
+					configs.splice(index, 1);
+					if (wasDefault && configs.length > 0) {
+						configs[0].is_default = true;
+					}
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/**
+		 * Update env vars for a run config at a specific index.
+		 * Throws if entries contain duplicate keys — callers must validate first
+		 * to avoid silently losing data on key collisions.
+		 */
+		async updateRunConfigEnv(type: AgentType, index: number, entries: readonly EnvVarEntry[]): Promise<void> {
+			const current = state.agents[type]?.run_configs ?? [];
+			if (index < 0 || index >= current.length) return;
+			const env = buildEnvFromEntries(entries);
+			setState(
+				produce((s) => {
+					s.agents[type].run_configs[index].env = env;
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Check if auto-retry on error is enabled for an agent */
+		isAutoRetryEnabled(type: AgentType): boolean {
+			return state.agents[type]?.auto_retry_on_error === true;
+		},
+
+		/** Toggle auto-retry on error for an agent */
+		async setAutoRetry(type: AgentType, enabled: boolean): Promise<void> {
+			setState(
+				produce((s) => {
+					if (!s.agents[type]) {
+						s.agents[type] = { run_configs: [] };
+					}
+					s.agents[type].auto_retry_on_error = enabled;
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Get the headless command template for an agent (user override or built-in default) */
+		getHeadlessTemplate(type: AgentType): string | undefined {
+			return state.agents[type]?.headless_template ?? AGENTS[type]?.defaultHeadlessTemplate;
+		},
+
+		/** Get the globally configured headless agent */
+		getHeadlessAgent(): AgentType | null {
+			return state.headless_agent;
+		},
+
+		/** Set the globally configured headless agent */
+		async setHeadlessAgent(type: AgentType | null): Promise<void> {
+			setState("headless_agent", type);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Set the headless command template for an agent */
+		async setHeadlessTemplate(type: AgentType, template: string): Promise<void> {
+			setState(
+				produce((s) => {
+					if (!s.agents[type]) {
+						s.agents[type] = { run_configs: [] };
+					}
+					s.agents[type].headless_template = template || undefined;
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Set a specific config as the default (unset others) */
+		async setDefaultConfig(type: AgentType, index: number): Promise<void> {
+			const current = state.agents[type]?.run_configs ?? [];
+			if (index < 0 || index >= current.length) return;
+			setState(
+				produce((s) => {
+					const configs = s.agents[type].run_configs;
+					for (let i = 0; i < configs.length; i++) {
+						configs[i].is_default = i === index;
+					}
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Get per-agent intent_tab_title override (undefined = use default) */
+		getIntentTabTitle(type: AgentType): boolean | undefined {
+			return state.agents[type]?.intent_tab_title;
+		},
+
+		/** Set per-agent intent_tab_title override. Pass undefined to reset to default. */
+		async setIntentTabTitle(type: AgentType, value: boolean | undefined): Promise<void> {
+			setState(
+				produce((s) => {
+					if (!s.agents[type]) {
+						s.agents[type] = { run_configs: [] };
+					}
+					s.agents[type].intent_tab_title = value;
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Get per-agent suggest_followups override (undefined = use default) */
+		getSuggestFollowups(type: AgentType): boolean | undefined {
+			return state.agents[type]?.suggest_followups;
+		},
+
+		/** Set per-agent suggest_followups override. Pass undefined to reset to default. */
+		async setSuggestFollowups(type: AgentType, value: boolean | undefined): Promise<void> {
+			setState(
+				produce((s) => {
+					if (!s.agents[type]) {
+						s.agents[type] = { run_configs: [] };
+					}
+					s.agents[type].suggest_followups = value;
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+
+		/** Get per-agent hook_instrumentation flag (undefined/false = off). */
+		getHookInstrumentation(type: AgentType): boolean | undefined {
+			return state.agents[type]?.hook_instrumentation;
+		},
+
+		/**
+		 * Mirror the hook_instrumentation flag in memory after the
+		 * `set_agent_hook_instrumentation` command has persisted it (and installed/
+		 * removed the hooks). Does NOT save to disk — the command owns persistence.
+		 */
+		syncHookInstrumentation(type: AgentType, value: boolean): void {
+			setState(
+				produce((s) => {
+					if (!s.agents[type]) {
+						s.agents[type] = { run_configs: [] };
+					}
+					s.agents[type].hook_instrumentation = value;
+				}),
+			);
+		},
+
+		/** Get all env flags for an agent */
+		getEnvFlags(type: AgentType): Record<string, string> {
+			return state.agents[type]?.env_flags ?? {};
+		},
+
+		/** Set a single env flag (key→value). Removes the flag if value is undefined. */
+		async setEnvFlag(type: AgentType, key: string, value: string | undefined): Promise<void> {
+			setState(
+				produce((s) => {
+					if (!s.agents[type]) {
+						s.agents[type] = { run_configs: [] };
+					}
+					if (!s.agents[type].env_flags) {
+						s.agents[type].env_flags = {};
+					}
+					if (value === undefined) {
+						delete s.agents[type].env_flags![key];
+					} else {
+						s.agents[type].env_flags![key] = value;
+					}
+				}),
+			);
+			try {
+				await saveToDisk();
+			} catch (_err) {
+				// saveToDisk already logged the error
+			}
+		},
+	};
+
+	return { state, ...actions };
+}
+
+export const agentConfigsStore = createAgentConfigsStore();

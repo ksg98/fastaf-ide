@@ -1,0 +1,212 @@
+/* Shared Panel Styles (DiffPanel, MarkdownPanel, FileBrowserPanel, etc.) */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--font-md);
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.headerBtn {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+}
+
+.headerBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.title {
+  color: var(--fg-secondary);
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.headerSep {
+  width: 1px;
+  height: 14px;
+  background: var(--fg-muted);
+  opacity: 0.4;
+  flex-shrink: 0;
+}
+
+.close {
+  background: none;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: var(--font-xl);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-md);
+}
+
+.close:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.content {
+  flex: 1;
+  overflow: auto;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.searchInput {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  font-family: var(--font-mono);
+  padding: 3px 6px;
+  outline: none;
+}
+
+.searchInput:focus {
+  border-color: var(--accent);
+}
+
+.searchInput::placeholder {
+  color: var(--fg-muted);
+  opacity: 0.5;
+}
+
+.searchClear {
+  background: none;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+  cursor: pointer;
+  padding: 0 4px;
+  margin-left: 4px;
+}
+
+.searchClear:hover {
+  color: var(--fg-primary);
+}
+
+.fileCountBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* File List */
+.fileList {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.fileItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s ease;
+}
+
+.fileItem:hover {
+  background: var(--bg-highlight);
+}
+
+.fileItem:active {
+  background: var(--bg-highlight);
+}
+
+.fileStatusContainer {
+  flex-shrink: 0;
+}
+
+.fileStatus {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  font-weight: 700;
+  font-family: var(--font-ui);
+}
+
+.statusModified {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+.statusAdded {
+  background: color-mix(in srgb, var(--success) 20%, transparent);
+  color: var(--success);
+}
+
+.statusDeleted {
+  background: color-mix(in srgb, var(--error) 20%, transparent);
+  color: var(--error);
+}
+
+.statusRenamed {
+  background: color-mix(in srgb, var(--merged) 20%, transparent);
+  color: var(--merged);
+}
+
+.statusUnknown {
+  background: color-mix(in srgb, var(--fg-muted) 20%, transparent);
+  color: var(--fg-muted);
+}
+
+.fileName {
+  flex: 1;
+  font-size: var(--font-base);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileStats {
+  flex-shrink: 0;
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  color: var(--fg-muted);
+}

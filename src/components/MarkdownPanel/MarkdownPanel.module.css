@@ -1,0 +1,155 @@
+/* Markdown Panel */
+.panel {
+  position: relative;
+  width: 400px;
+  min-width: 300px;
+  max-width: 50%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hidden {
+  display: none;
+}
+
+.fileList {
+  padding: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+  position: relative;
+}
+
+.virtualList {
+  position: relative;
+  width: 100%;
+}
+
+/* Each virtualized row is absolutely positioned by the virtualizer. */
+.virtualRow {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dirHeader {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--fg-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 12px 4px;
+}
+
+.fileItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  font-size: var(--font-md);
+  font-family: var(--font-ui);
+  transition: background 0.15s;
+}
+
+.fileItem:hover {
+  background: var(--bg-highlight);
+}
+
+.fileIgnored {
+  opacity: 0.4;
+}
+
+.fileIcon {
+  font-size: var(--font-lg);
+  flex-shrink: 0;
+}
+
+.fileName {
+  flex: 1;
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--fg-muted);
+}
+
+.error {
+  padding: 20px;
+  text-align: center;
+  color: var(--error);
+}
+
+/* Filename/content search mode toggle (inline with search, shared visual with FileBrowser) */
+.modeToggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-right: 6px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  cursor: pointer;
+}
+
+.modeToggle:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.modeToggleActive,
+.modeToggleActive:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+/* Sort control (inline with search) */
+.sortControl {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.sortTrigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: color 0.1s, background 0.1s;
+}
+
+.sortTrigger:hover {
+  color: var(--fg-secondary);
+  background: var(--bg-highlight);
+  border-color: var(--border);
+}
+
+.filePath {
+  display: block;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

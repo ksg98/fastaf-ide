@@ -1,0 +1,10 @@
+.subLabel {
+  display: block;
+  font-size: 10px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: monospace;
+  line-height: 1.3;
+}

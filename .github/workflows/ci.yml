@@ -1,0 +1,300 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  socket:
+    name: Socket Security
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request'
+    # Informational supply-chain scan — never a hard PR blocker. Socket's
+    # sfw-wrapped installs add a network dependency on Socket's service, and an
+    # upstream action retirement (socketdev/socket-security-action was deleted)
+    # previously failed every PR at "Set up job". continue-on-error keeps the
+    # scan running + reporting without gating merges on Socket availability.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      # Socket Firewall (free): blocks known-malicious npm/cargo packages at
+      # install time. The legacy socket-security-action manifest scanner was
+      # retired (repo deleted), so SocketDev/action now installs the `sfw`
+      # wrapper and we run the installs through it. No Socket API token needed.
+      # Pinned to an immutable SHA per Socket's supply-chain guidance.
+      - uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Scan pnpm install through Socket Firewall
+        run: sfw pnpm install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Scan cargo fetch through Socket Firewall
+        run: cd src-tauri && sfw cargo fetch
+
+  frontend:
+    name: Frontend (typecheck + tests)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Tests
+        run: pnpm exec vitest run --reporter=verbose
+
+  # Always runs: clippy + tests on Linux (fastest, catches most issues)
+  rust:
+    name: Rust (Linux-x64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Create dist stub for include_dir
+        run: mkdir -p dist && echo '<html></html>' > dist/index.html
+
+      - name: Create sidecar stub for Tauri build.rs
+        run: |
+          target=$(rustc --print host-tuple)
+          touch "src-tauri/binaries/tuic-bridge-${target}"
+          touch "src-tauri/binaries/tuic-${target}"
+
+      - name: Clippy
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          CMAKE_C_FLAGS: '-fPIC'
+          CMAKE_CXX_FLAGS: '-fPIC'
+          RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          CMAKE_C_FLAGS: '-fPIC'
+          CMAKE_CXX_FLAGS: '-fPIC'
+          RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
+        run: cargo nextest run --profile ci
+
+      # nextest does not run doctests — run them separately so doc examples stay
+      # covered. Linux-only: doctests are platform-independent logic.
+      - name: Doctests
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          CMAKE_C_FLAGS: '-fPIC'
+          CMAKE_CXX_FLAGS: '-fPIC'
+          RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
+        run: cargo test --doc
+
+  # Verify tuic-remote compiles without the desktop feature (catches missing cfg gates)
+  check-remote:
+    name: Remote daemon (no-default-features)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Check tuic-remote
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          CMAKE_C_FLAGS: '-fPIC'
+          CMAKE_CXX_FLAGS: '-fPIC'
+          RUSTFLAGS: '-C link-arg=-fuse-ld=mold'
+        run: cargo check --no-default-features --bin tuic-remote
+
+  # Push to main only: verify build on macOS and Windows.
+  # GPU notes:
+  # - macOS: whisper-rs compiled with Metal (target-specific dep) — always GPU.
+  # - Windows: whisper-rs is CPU-only. The Vulkan backend's vulkan-shaders-gen
+  #   sub-build is chronically broken on the runner, so dictation runs on CPU.
+  #   CUDA support is optional (add Jimver/cuda-toolkit + --features cuda if needed).
+  rust-cross:
+    name: Rust (${{ matrix.label }})
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: macOS-ARM
+          - platform: windows-latest
+            label: Windows-x64
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Keep the Windows build/target dir short (C:/t): whisper.cpp's nested
+      # CMake TryCompile paths can exceed the 260-char MAX_PATH that MSBuild's
+      # FileTracker enforces (it ignores LongPathsEnabled).
+      - name: Short CARGO_TARGET_DIR (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=C:/t" >> $GITHUB_ENV
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          # On Windows the real target dir is CARGO_TARGET_DIR=C:/t (MAX_PATH workaround).
+          # rust-cache's `workspaces` input joins target with root, so it can't point at
+          # an absolute path — use `cache-directories` instead.
+          cache-directories: ${{ matrix.platform == 'windows-latest' && 'C:/t' || '' }}
+
+      # Only macOS runs the test suite below (Windows tests are skipped).
+      - name: Install nextest
+        if: matrix.platform != 'windows-latest'
+        uses: taiki-e/install-action@nextest
+
+      # A restored Windows build cache (C:/t) may hold a CMakeCache.txt from an
+      # older VS generator (e.g. VS 17 2022). When the runner image moves to a
+      # newer VS (18 2026), CMake aborts: "generator does not match the generator
+      # used previously". Drop the stale CMake config so whisper-rs-sys
+      # reconfigures against the current toolchain (sccache still caches the
+      # actual compiles, so the rebuild cost is minimal).
+      - name: Clear stale CMake cache (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (Test-Path C:/t) {
+            Get-ChildItem -Path C:/t -Recurse -Force -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -eq 'CMakeCache.txt' -or $_.Name -eq 'CMakeFiles' } |
+              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Create dist stub for include_dir
+        shell: bash
+        run: mkdir -p dist && echo '<html></html>' > dist/index.html
+
+      - name: Create sidecar stub for Tauri build.rs
+        shell: bash
+        run: |
+          target=$(rustc --print host-tuple)
+          touch "src-tauri/binaries/tuic-bridge-${target}"
+          touch "src-tauri/binaries/tuic-${target}"
+          # Windows needs .exe extension for sidecar resolution
+          if [[ "$target" == *windows* ]]; then
+            touch "src-tauri/binaries/tuic-bridge-${target}.exe"
+            touch "src-tauri/binaries/tuic-${target}.exe"
+          fi
+
+      - name: Clippy
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
+          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || matrix.label == 'Windows-x64' && '/Z7' || '' }}
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        if: matrix.platform != 'windows-latest'
+        working-directory: src-tauri
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+          CARGO_INCREMENTAL: "0"
+          CMAKE_C_COMPILER_LAUNCHER: "sccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
+          CMAKE_C_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || '' }}
+          CMAKE_CXX_FLAGS: ${{ matrix.label == 'macOS-ARM' && '-march=armv8.4-a' || '' }}
+        run: cargo nextest run --profile ci

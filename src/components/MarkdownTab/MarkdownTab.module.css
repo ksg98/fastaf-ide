@@ -1,0 +1,184 @@
+/* MarkdownTab layout */
+.wrapper {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  outline: none;
+}
+
+.content,
+.content * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.content {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px;
+  cursor: text;
+}
+
+/* Tweak comment highlights */
+.content :global(.tweak-highlight) {
+  background: color-mix(in srgb, var(--tweak-highlight) 25%, transparent);
+  border-bottom: 1.5px solid color-mix(in srgb, var(--tweak-highlight) 70%, transparent);
+  border-radius: 2px;
+  cursor: pointer;
+  padding: 0 1px;
+  transition: background 0.15s ease;
+}
+
+.content :global(.tweak-highlight:hover) {
+  background: color-mix(in srgb, var(--tweak-highlight) 40%, transparent);
+}
+
+/* Hover tooltip for existing highlights */
+.tooltip {
+  position: fixed;
+  z-index: 9002;
+  max-width: 360px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+  padding: 6px 10px;
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  color: var(--fg-primary);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  pointer-events: none;
+}
+
+/* Floating comment button (appears near active selection) */
+.commentBtn {
+  position: fixed;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  pointer-events: auto;
+}
+
+.commentBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+/* Inline comment popover */
+.popover {
+  position: fixed;
+  z-index: 9001;
+  width: 440px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.popoverTextarea {
+  resize: vertical;
+  min-height: 110px;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-base);
+  font-family: var(--font-ui);
+  line-height: 1.4;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.popoverTextarea:focus {
+  border-color: var(--accent);
+}
+
+.popoverActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.popoverBtn {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+}
+
+.popoverBtn:hover {
+  background: var(--bg-highlight);
+}
+
+.popoverBtnPrimary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.popoverBtnPrimary:hover {
+  opacity: 0.85;
+}
+
+.popoverBtnDanger {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+}
+
+.popoverBtnDanger:hover {
+  background: color-mix(in srgb, var(--error) 15%, transparent);
+}
+
+.popoverHighlightedText {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* DomSearchEngine highlight marks */
+.content :global(.search-match) {
+  background: var(--search-match);
+  border-radius: 2px;
+}
+
+.content :global(.search-match-active) {
+  background: var(--search-match-active);
+  outline: 1px solid var(--search-match-border);
+  border-radius: 2px;
+}

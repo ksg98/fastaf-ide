@@ -1,0 +1,137 @@
+# Sidebar
+
+The sidebar is your primary navigation for repositories, branches, and git operations.
+
+## Toggle & Resize
+
+- **Toggle visibility:** `Cmd+[`
+- **Resize:** Drag the right edge (200–500px range)
+- Width persists across sessions
+
+## Repository Management
+
+### Adding Repositories
+
+Click the `+` button at the top of the sidebar and select a git repository folder.
+
+### Repository Entry
+
+Each repo shows a header with the repo name and action buttons:
+
+- **Click** the header to expand/collapse the branch list
+- **Click again** to toggle icon-only mode (shows repo initials — saves space)
+- **`⋯` button** — Opens a menu with: Repo Settings, Create Worktree, Move to Group (with submenus for existing groups, Ungrouped, and New Group), Park Repository, Remove Repository
+- **Right-click main worktree row** → **Switch Branch** submenu: shows all local branches with a checkmark on the current one. If the working tree is dirty, prompts to stash changes first. Blocks switching when a terminal has a running process.
+
+### Removing Repositories
+
+Repo `⋯` → Remove. This only removes the repo from the sidebar — it does not delete any files.
+
+## Repository Groups
+
+Organize repos into named, colored groups.
+
+### Creating a Group
+
+- Repo `⋯` → **Move to Group** → **New Group...**
+- Enter a name in the dialog
+
+### Moving Repos Between Groups
+
+- **Drag** a repo onto a group header
+- Or: Repo `⋯` → **Move to Group** → select a group
+- To ungroup: Repo `⋯` → **Move to Group** → **Ungrouped**
+
+### Managing Groups
+
+Right-click a group header for:
+
+- **Rename** — Change the group name
+- **Change Color** — Pick a new accent color
+- **Delete** — Remove the group (repos become ungrouped)
+
+Groups can be collapsed/expanded by clicking the header, and reordered by drag-and-drop.
+
+## Branches
+
+### Selecting a Branch
+
+Click a branch name to switch to it. This:
+
+1. Creates a git worktree (for non-main branches) if one doesn't exist
+2. Shows the branch's terminals (or creates a new one)
+3. Hides terminals from the previous branch
+
+### Branch Indicators
+
+Each branch row can show:
+
+| Indicator | Meaning |
+|-----------|---------|
+| **CI ring** | Proportional arc segments — green (passed), red (failed), yellow (pending) |
+| **PR badge** | Colored by state — green (open), purple (merged), red (closed), gray (draft). Click for detail popover. |
+| **Diff stats** | `+N / -N` additions and deletions |
+| **Merged badge** | Branches merged into main show a "Merged" badge |
+| **Question icon** | An agent in this branch's terminal is asking a question |
+| **Grey icon** | No active terminals in the repo — branch icons dim to grey |
+
+### Branch Actions
+
+- **Double-click** the branch name to rename the branch
+- **Right-click** for context menu: Copy Path, Add Terminal, Create Worktree (for branches without a worktree), Delete Worktree, Open in IDE, Rename Branch/Worktree, Merge & Archive
+
+## Remote-Only PRs
+
+When a repository has open PRs on branches that only exist on the remote (not checked out locally), a badge appears in the branch section. Click it to open a popover listing these PRs. Each row shows the PR number, title, and state badge. Click a row to expand an inline accordion showing PR details, with action buttons:
+
+- **Checkout** — Create a local tracking branch
+- **Create Worktree** — Create a worktree for the branch
+- **Merge** — Merge the PR via GitHub API (shown when PR is mergeable)
+- **View Diff** — Open PR diff in a panel tab
+- **Approve** — Submit an approving review
+
+### Dismiss & Show Dismissed
+
+Remote-only PRs can be dismissed to reduce sidebar clutter. Right-click the remote PRs badge or use the "Dismiss" action in the accordion. A "Show Dismissed" toggle at the bottom reveals dismissed PRs again.
+
+## Park Repos
+
+Temporarily hide repos you're not actively using.
+
+### Parking
+
+Right-click any repo in the sidebar → **Park**. The repo disappears from the main list.
+
+### Viewing Parked Repos
+
+A button in the sidebar footer shows all parked repos with a count badge. Click it to open a popover listing them.
+
+### Unparking
+
+Click **Unpark** on any repo in the parked repos popover. It returns to the main sidebar list.
+
+## Active-Only Filter
+
+When you have many repos open, hide the ones you aren't using right now.
+
+Click the **filter icon** in the toolbar (next to the sidebar collapse button) to show only repositories that have at least one open terminal. The icon turns accent-colored while the filter is on, and a banner at the top of the sidebar shows how many repos are shown out of the total — click it (or "Show all") to clear the filter. The filter is session-only and resets when you restart.
+
+## Quick Branch Switcher
+
+Switch branches by number without the mouse:
+
+1. **Hold** `Cmd+Ctrl` (macOS) or `Ctrl+Alt` (Windows/Linux)
+2. All branches show **numbered badges** (1, 2, 3...)
+3. **Press a number** (`1–9`) to switch to that branch instantly
+4. **Release** the modifier to dismiss the overlay
+
+## Git Quick Actions
+
+When a repo is active, the bottom of the sidebar shows quick action buttons:
+
+- **Pull** — `git pull` in the active terminal
+- **Push** — `git push`
+- **Fetch** — `git fetch`
+- **Stash** — `git stash`
+
+For more git operations (staging, commit, push, pull, stash, blame, history), use the Git Panel (`Cmd+Shift+D`).

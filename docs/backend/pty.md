@@ -1,0 +1,341 @@
+# PTY Management
+
+**Module:** `src-tauri/src/pty.rs`
+
+Manages pseudo-terminal sessions for all terminal tabs in the application.
+
+## Session Lifecycle
+
+```
+create_pty() / create_pty_with_worktree()
+    │
+    ├── Resolve shell (platform default or user override)
+    ├── Build shell command via portable-pty CommandBuilder
+    ├── Spawn PTY pair (master + child process)
+    ├── Store PtySession in AppState.sessions (DashMap)
+    ├── Create OutputRingBuffer for MCP access
+    ├── Spawn reader thread (background, non-blocking)
+    │
+    ▼
+Session Active: write_pty() / resize_pty() / pause_pty() / resume_pty()
+    │
+    ▼
+close_pty(cleanup_worktree)
+    ├── Remove session from DashMap
+    ├── Kill child process
+    ├── Remove output buffer
+    └── Optionally remove associated git worktree
+```
+
+## Tauri Commands
+
+### Session Creation
+
+| Command | Description |
+|---------|-------------|
+| `create_pty(config: PtyConfig)` | Spawn a new PTY session. Returns session ID. |
+| `create_pty_with_worktree(pty_config, worktree_config)` | Create worktree + spawn PTY in it. Returns `WorktreeResult`. |
+
+### Session Control
+
+| Command | Description |
+|---------|-------------|
+| `write_pty(session_id, data)` | Write data (user input) to the PTY. |
+| `resize_pty(session_id, rows, cols)` | Resize the PTY terminal dimensions. |
+| `pause_pty(session_id)` | Pause the reader thread (stops output emission). |
+| `resume_pty(session_id)` | Resume the reader thread. |
+| `close_pty(session_id, cleanup_worktree)` | Close PTY and optionally remove worktree. |
+| `update_session_cwd(session_id, cwd)` | Update session's working directory (called from frontend on OSC 7). |
+
+### Monitoring
+
+| Command | Description |
+|---------|-------------|
+| `get_orchestrator_stats()` | Active/max/available session counts. |
+| `get_session_metrics()` | Total spawned, failed, bytes emitted, pauses. |
+| `can_spawn_session()` | Check if under MAX_CONCURRENT_SESSIONS (50). |
+| `list_active_sessions()` | List all sessions with cwd and worktree info. |
+| `list_worktrees()` | List all managed worktrees. |
+| `get_process_stats()` | CPU% and RSS for TUIC + all child process trees (desktop Tauri command). |
+| `collect_process_stats(state)` | Same logic, callable from HTTP routes and MCP tools. |
+
+## Reader Thread
+
+Each session spawns a dedicated reader thread that reads from the PTY master fd:
+
+```rust
+spawn_reader_thread(reader, paused, session_id, app, state)
+```
+
+**Processing pipeline per read:**
+
+1. Read raw bytes from PTY master (up to 64KB buffer for natural burst batching)
+2. Strip Kitty keyboard protocol sequences (non-printable noise for consumers)
+3. Push through `Utf8ReadBuffer` — accumulates bytes until valid UTF-8 boundary, returns safe string
+4. Push through `EscapeAwareBuffer` — holds incomplete ANSI escape sequences (CSI, OSC, etc.)
+5. Feed into `VtLogBuffer` for VT100-aware log extraction (mobile/MCP consumers)
+6. Write to `OutputRingBuffer` (64KB circular buffer for MCP access)
+7. Serialize parsed events once with `serde_json::to_value` — reused for both Tauri IPC and event bus (avoids double serialization)
+8. Broadcast to WebSocket clients (if any connected)
+9. Emit Tauri event `pty-output` with `{session_id, data}` — **throttled to ~10/s** (≥100ms between emits). The desktop canvas renders from grid frames and discards this text (it only drives the frontend activity dot / `lastDataAt`); emitting per-chunk flooded the WebView main thread under output storms (`yes`), starving keydown so Ctrl+C never reached `write_pty`. Dropping intermediate chunks is safe — only a periodic "output happened" pulse is needed.
+
+**Cursor-up clamping** — The `clamp_cursor_up()` function limits `ESC[nA` (cursor up) and `ESC[nF` (cursor previous line) sequences to prevent them from moving the cursor beyond the visible viewport. This replaced the previous DiffRenderer approach for simpler escape sequence handling.
+
+**ANSI anomaly detection** — The `detect_anomalous_sequences()` function scans PTY output for unusual escape sequences (screen clears, cursor home, alt-screen toggles, scrollback clears) and logs them at warn level. This is a diagnostic tool for investigating scroll-jump issues.
+
+**Pause behavior:** When `paused` flag is set (`AtomicBool`), the reader thread sleeps for 50ms instead of reading. This prevents output flooding during background operations.
+
+**Exit detection:** When the read returns 0 bytes or an error, the thread:
+1. Flushes remaining buffered data
+2. Emits `pty-exit` event with exit code
+3. Removes session from `AppState.sessions`
+4. Updates metrics (decrement `active_sessions`)
+
+### Frame Emission Pipeline
+
+Frame emission is decoupled from PTY reading via a per-session **frame ticker** thread (same approach as iTerm2's Metal display-link renderer):
+
+1. **Reader thread**: processes PTY data into the alacritty VT grid, sets a `grid_frame_dirty` AtomicBool flag
+2. **Ticker thread**: every 8ms, checks the dirty flag → if set, serializes dirty rows via `serialize_dirty_rows()` → sends frame via `send_grid_frame()` (respects `grid_frame_in_flight` backpressure)
+3. **Frontend**: coalesces paint triggers via `requestAnimationFrame` (~60fps)
+4. **Ack handler**: on frontend ack, flushes any remaining dirty rows accumulated while in-flight
+
+This coalesces rapid writes (e.g. spinner CR+erase+rewrite within 8ms) into a single frame, eliminating flicker from intermediate erase states. Max added latency is 8ms — imperceptible. The ticker exits when the reader's `running` flag clears, with a final flush to avoid losing the last frame.
+
+### Headless Reader Thread
+
+`spawn_headless_reader_thread()` — used for HTTP-created sessions (no Tauri app handle). Same pipeline but skips Tauri event emission; only writes to ring buffer and WebSocket. Includes `extract_question_line()` for silence-based question detection, session lifecycle events (`session-created`, `session-closed`), and full output parser integration.
+
+## Shell Resolution
+
+```rust
+pub(crate) fn resolve_shell(override_shell: Option<String>) -> String
+```
+
+Priority:
+1. User override from settings (`override_shell`)
+2. Platform default via `default_shell()`
+
+Platform defaults:
+- macOS: `/bin/zsh`
+- Linux: `$SHELL` environment variable, fallback `/bin/bash`
+- Windows: `powershell.exe`
+
+## Buffer Types
+
+### Utf8ReadBuffer
+
+Handles the case where a multi-byte UTF-8 character (e.g., emoji, CJK) is split across two reads:
+
+```rust
+impl Utf8ReadBuffer {
+    fn push(&mut self, new_bytes: &[u8]) -> String  // Returns valid UTF-8, keeps remainder
+    fn flush(&mut self) -> String                     // Force-flush (lossy conversion)
+}
+```
+
+### EscapeAwareBuffer
+
+Prevents ANSI escape sequences from being split between two emissions. Detects incomplete CSI (`\x1b[...`), OSC (`\x1b]...`), and other escape sequences:
+
+```rust
+impl EscapeAwareBuffer {
+    fn push(&mut self, input: &str) -> String  // Returns safe-to-emit portion
+    fn flush(&mut self) -> String              // Force-flush buffered escapes
+}
+```
+
+### OutputRingBuffer
+
+Fixed-capacity circular buffer (64KB) that stores recent output for MCP access:
+
+```rust
+impl OutputRingBuffer {
+    fn write(&mut self, data: &[u8])                    // Append data
+    fn read_last(&self, limit: usize) -> (Vec<u8>, u64) // Read last N bytes
+}
+```
+
+### VtLogBuffer
+
+**Module:** `src-tauri/src/state.rs`
+
+VT100-aware extractor that captures clean log lines from PTY output. Designed for mobile/browser clients that need readable text without ANSI noise or TUI screen garbage.
+
+```rust
+impl VtLogBuffer {
+    fn new(rows: u16, cols: u16, capacity: usize) -> Self  // Create with terminal size
+    fn process(&mut self, data: &[u8]) -> Vec<ChangedRow>   // Feed raw PTY bytes, return changed rows
+    fn resize(&mut self, rows: u16, cols: u16)              // Update terminal dimensions
+    fn screen_rows(&self) -> Vec<String>                    // Current VT100 screen content (for slash menu detection)
+    fn screen_log_lines(&self) -> Vec<LogLine>              // Styled screen rows for mobile/REST (structural tokens stripped)
+    fn trim_agent_chrome(&mut self, rows: &[ChangedRow]) -> Vec<ChangedRow> // Strip agent prompt/chrome from full-screen redraws
+    fn lines_since_owned(&self, offset: usize, limit: usize) -> (Vec<LogLine>, usize) // Paginated reads (absolute offset, structural tokens stripped)
+    fn total_lines(&self) -> usize                          // Monotonic counter (never decreases on eviction)
+    fn oldest_offset(&self) -> usize                        // Absolute offset of oldest retained line
+}
+```
+
+**`ChangedRow`** — describes a row that changed between two `process()` calls:
+
+```rust
+struct ChangedRow {
+    row_index: usize,   // 0-based row in the VT100 screen
+    text: String,        // Clean text content (no ANSI)
+}
+```
+
+**How it works:**
+
+1. Maintains a `vt100::Parser` — a full VT100 screen emulator (24 rows × 220 cols default)
+2. On each `process()` call, compares current screen rows against previous snapshot
+3. Lines that have scrolled off the top are emitted to the log (diff-based detection)
+4. **Alternate screen suppression:** When a TUI app activates alternate screen (`ESC[?1049h`), extraction is paused — no garbage from vim, htop, or Claude Code's TUI surfaces
+5. Bounded by `VT_LOG_BUFFER_CAPACITY` (10,000 lines); oldest lines are dropped when full
+6. **Monotonic cursor:** `total_lines()` returns a monotonically increasing count of all lines ever pushed (not the current buffer length). Clients use this as a stable cursor for paginated reads via `lines_since_owned(offset, limit)`. If a client's saved offset falls in the evicted range, it is clamped to `oldest_offset()`
+
+**Resize:** When the PTY is resized, `VtLogBuffer.resize()` is called to keep the parser in sync and clear the prev-row snapshot (avoids false scroll detection after resize).
+
+Each session gets its own `VtLogBuffer` stored in `AppState.vt_log_buffers: DashMap<String, Mutex<VtLogBuffer>>`.
+
+## OSC 7 CWD Tracking
+
+Shells that emit OSC 7 (`\x1b]7;file://hostname/path\x07`) report the current working directory after each command. FastAF uses this to keep the Rust-side `PtySession.cwd` in sync:
+
+1. **Frontend handler:** `terminal.parser.registerOscHandler(7, ...)` in `Terminal.tsx` parses the `file://` URL via `parseOsc7Url()`.
+2. **Store update:** The parsed path is written to `terminalsStore` so the UI reflects the current directory.
+3. **IPC persist:** The frontend calls `update_session_cwd(sessionId, cwd)` to update `PtySession.cwd` on the Rust side.
+4. **Restart recovery:** The persisted cwd is used during session restore so reopened terminals start in the correct directory.
+5. **Worktree reassignment:** When the cwd changes to a path inside a different worktree, the terminal tab is reassigned to the corresponding branch in the sidebar.
+
+## Shell Environment Variables
+
+`build_shell_command()` sets these environment variables for spawned PTY sessions:
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `COLORTERM` | `truecolor` | Advertise 24-bit color support |
+| `KITTY_WINDOW_ID` | `1` | Signal kitty keyboard protocol support for heuristic detection by Ink-based agents |
+| `TERM_PROGRAM` | `ghostty` | Satisfy Claude Code's terminal allow-list for kitty protocol; also prevents macOS `/etc/zshrc` from sourcing `zshrc_Apple_Terminal` |
+| `TERM_PROGRAM_VERSION` | `3.0.0` | Passes Claude Code's version gate (rejects `^[0-2]\.`) |
+
+Additionally, `CLAUDECODE` is removed from the environment (`env_remove`) to prevent nested-session detection when FastAF itself runs inside a Claude Code session.
+
+## Child Process Priority
+
+Each spawned shell is given a lower scheduling priority right after spawn
+(`lower_pty_child_priority()`), so heavy workloads run inside a pane (`cargo
+build`, bundlers, test runners) yield CPU to TUIC's own render loop and the rest
+of the system. A child inherits the parent's priority **at fork time**, so every
+process the shell later spawns is deprioritized too. The effect only bites under
+contention — an idle machine still runs the build at full speed.
+
+| Platform | Mechanism | Default |
+|----------|-----------|---------|
+| macOS / Linux | `setpriority(PRIO_PROCESS, …)` | nice **+10**, override via `TUIC_PTY_NICE` |
+| Windows | `SetPriorityClass(BELOW_NORMAL_PRIORITY_CLASS)` | fixed |
+
+Validated on an M4 Max under 14-core saturation: TUIC's UI goes from frozen
+(nice 0) to responsive (nice +10). `BELOW_NORMAL` (not `IDLE_PRIORITY_CLASS`) is
+the Windows analog — `IDLE` only runs when the whole system is idle, the
+equivalent of macOS QoS-background, which would make builds crawl.
+
+### macOS Thread QoS Elevation
+
+On macOS, the PTY **reader thread**, the **frame ticker**, and the **keystroke-write thread** are all raised to `QOS_CLASS_USER_INTERACTIVE` via `pthread_set_qos_class_self_np` (`raise_thread_for_interactive_io()` in `src-tauri/src/pty.rs`, `thread_qos` module). This is complementary to the child-process renice: on Apple Silicon the scheduler is QoS-band driven — `nice` only reorders threads within a band. Without this elevation, TUIC's interactive-path threads ran in the default QoS band alongside compiler worker threads, causing input latency under heavy builds. Raising to `USER_INTERACTIVE` puts the interactive path in a higher scheduler band. macOS-only; a no-op on Linux/Windows.
+
+## Session Conflict Flag File
+
+When an agent reports a session conflict (session already in use or not found), FastAF handles it via a flag-file mechanism instead of writing directly to the PTY.
+
+**Flow:**
+
+1. The output parser detects a session conflict message (`ParsedEvent::AgentSessionConflict`)
+2. `ChunkProcessor` calls `mark_session_conflict()`, which creates a flag file named `no-session-inject.<TUIC_SESSION>` in the app config directory
+3. Shell wrapper functions (zsh, bash, fish) check for this flag file before injecting `--session-id $TUIC_SESSION`
+4. If the flag file exists, the wrapper skips session-id injection, allowing the agent to start a fresh session
+
+This replaced the previous `maybe_reset_tuic_session` approach, which wrote `export TUIC_SESSION=...` directly to the PTY. Direct PTY writes could corrupt TUI output (e.g., Ink-based agents in raw mode). The flag-file approach is safe because it uses the filesystem as a side-channel — no bytes are injected into the terminal stream.
+
+A debounce (`last_session_conflict_mark`) prevents creating multiple flag files within a short window for the same session.
+
+## Ctrl-U Prefix Handling
+
+Single-key PTY writes that should clear the current input line prepend `\x15` (Ctrl-U) on POSIX shells. The selection is **shell-family aware**, not host-platform aware: the detected shell (`bash`/`zsh`/`fish` → POSIX, `powershell`/`cmd` → Windows) drives the choice. Mixing PowerShell on macOS or a POSIX shell via WSL/MSYS now behaves correctly. Native Windows shells skip the prefix entirely to avoid inserting a literal `^U`.
+
+Frontend input helpers route through `src/utils/sendCommand.ts`:
+- `sendCommand(fn, text)` — full command: `Ctrl-U` (family-gated) + text + `\r`. Handles Ink raw-mode split writes.
+- `sendPtyKey(fn, key)` — pass-through single key/escape sequence. No prefix, no trailing CR. Use for `ChoicePrompt` option keys, TUI app navigation, and any raw-stdin interaction.
+
+Never write `text + "\r"` directly to a PTY — see `AGENTS.md`.
+
+## OSC 133 Semantic Prompts
+
+When the shell emits OSC 133 markers (modern bash/zsh/fish with the integration enabled), the reader records clean command lifecycles into the per-session knowledge store:
+
+| Marker | Meaning |
+|--------|---------|
+| `OSC 133;A` | Prompt start — delimits a new prompt line |
+| `OSC 133;B` | Command start — the user has pressed Enter, command is about to run |
+| `OSC 133;C` | Command output start |
+| `OSC 133;D[;exit_code]` | Command completed with the given exit code |
+
+`ChunkProcessor.record_osc133_outcomes` consumes the markers and writes a `CommandOutcome { command, cwd, exit_code, classification, duration_ms, output_snippet }` into the session knowledge store. Classification is one of `Success`, `Error { error_type }`, `TuiLaunched { app_name }`, `Timeout`, `UserCancelled`, `Inferred`. `error_type` is inferred from the output snippet (e.g. `rust-error-borrow`, `npm-missing-module`, `python-traceback`).
+
+**Fallback:** when OSC 133 is absent (plain shells, remote sessions), the silence timer still records an `Inferred` outcome so the AI agent loop has *something* to learn from. The `has_osc133_integration` flag on `AppState` tracks per-session whether real markers have been seen.
+
+Persistence lives at `<config_dir>/agent-knowledge/<session_id>.json`. A 2 s debounced background task (`spawn_persist_task`) flushes `knowledge_dirty` sessions to disk. `load_all` rehydrates stores on app start.
+
+## TUI Application Detection
+
+`src-tauri/src/ai_agent/tui_detect.rs` tracks alternate-screen enter (`ESC[?1049h`) and leave (`ESC[?1049l`) to classify the terminal as:
+
+```rust
+enum TerminalMode {
+    Shell,
+    FullscreenTui { app_hint: Option<String>, depth: u8 },
+}
+```
+
+`depth` is a counter for nested alt-screen pushes (e.g. `less` invoked from inside `vim`). Known app hints — matched heuristically from nearby screen rows — include `vim`, `nvim`, `htop`, `btop`, `lazygit`, `less`, `tmux`, `claude`, and others. The mode is surfaced on `SessionState.terminal_mode` and used by:
+- `ai_terminal_get_context` — tells the model it's in a TUI so it prefers `send_key` + `wait_for` over line-oriented `send_input`.
+- `SessionKnowledgeBar` — renders a `TUI` badge and accumulates `tui_apps_seen`.
+- The agent safety layer — blocks Ctrl-U prefix injection while a TUI app is in the foreground.
+
+## Silence-Based Question Detection
+
+The reader thread tracks output silence to detect unanswered agent prompts. When the terminal stops producing output for 10 seconds after a line ending with `?` is detected, the session is treated as waiting for input. This complements the instant pattern-based detection in the output parser and catches generic questions that would cause too many false positives if detected immediately (e.g., streaming fragments like "ad?", "swap?").
+
+**Question extraction:** `extract_question_line()` scans all `ChangedRow` entries (not just the last) for question text. It skips rows that are mode-line status indicators (e.g., `⏵⏵ Reading files`), so a question on row 5 is still found even when a status line updates on row 23 in the same chunk.
+
+**Echo suppression:** When the user types a line into the PTY, the reader activates a 500ms suppression window (`suppress_user_input`). During this window, any matching text echoed by the shell is ignored for question detection. This prevents false positives when the user types a line ending with `?` — the PTY echoes it back, and without suppression, the silence detector would treat the echo as an agent question.
+
+**Single threshold:** All silence-based questions use a uniform 10-second timeout regardless of whether new output has arrived since the question was detected.
+
+## Shell State (Busy/Idle) Detection
+
+The reader thread tracks output timing to emit `ShellState` events (`busy`/`idle`). Rust is the single source of truth — the frontend does not derive busy/idle from raw PTY data.
+
+**Transitions:**
+- **→ busy:** Any non-chrome-only chunk transitions to busy via atomic CAS (`try_shell_transition`)
+- **→ idle (process_chunk):** Chrome-only chunks without a status line transition to idle if `should_transition_idle` passes (real output > 500ms ago for shells, > 2.5s for agents, no active sub-tasks)
+- **→ idle (backup timer):** A 1s timer catches the case where no chunks arrive at all (reader blocked on `read()`). Uses `has_recent_chunks()` (checks `last_chunk_at` with 2s window) to avoid firing when the reader is actively processing chunks
+
+**Spinner keepalive:** Agent spinners (dingbats ✻, braille ⠋, Aider ░█) produce chrome-only repaints at ~1Hz without a matching StatusLine event (e.g. timer-only lines like "✻ Cogitated for 3m 47s" lack trailing ellipsis). These spinner rows update `last_output_ms` via `is_spinner_row()` in `chrome.rs`, keeping `should_transition_idle()` from firing while the agent is alive. When the spinner stops, the idle timer expires naturally after AGENT_IDLE_MS (2.5s). Static chrome (mode-line ⏵, borders ▀▄) does NOT update the timestamp.
+
+**Presence-driven keepalive (frozen-TUI agents):** The keepalive above is *change-driven* — it needs the spinner row to keep repainting. Some agents (Codex) instead **freeze their whole TUI while a child subprocess runs** (`cargo`, `git`): for a long build that is minutes with no grid changes at all, so `last_output_ms` goes stale and `should_transition_idle` would falsely flip busy→idle after 2.5s (unlike Claude/Gemini, whose spinners animate continuously). The silence timer guards against this: while the **content zone** (above the chrome cutoff) still shows a working-status line — `is_working_status_row()` in `chrome.rs` matches Codex's `• Working (… esc to interrupt)`, both `•`/`◦` blink frames — `screen_shows_working_status()` re-stamps `last_output_ms` and skips the idle transition. Presence (not change) proves liveness. The line disappears when the agent finishes its turn, so idle resumes normally; the session-exit path clears state, so a crash can't wedge it busy.
+
+**Status line ticks:** Claude Code's status line updates every ~1s while an agent is thinking. These are chrome-only chunks with `has_status_line=true`. The `!has_status_line` guard in the chunk-processing idle path prevents idle transition while status line ticks are arriving.
+
+**Agent detection:** `detectAgentForTerminal()` fires on shell-state transitions (immediate on idle, 500ms debounce on busy). A 30s fallback poll catches cold starts. This replaces the previous 3s polling interval, reducing syscalls ~30x.
+
+## Amber Tab Styling
+
+Sessions created via HTTP/MCP (remote sessions) are flagged with `isRemote`. The tab bar applies an amber gradient background and amber bottom border (`rgba(251, 191, 36, ...)`) to visually distinguish remote-created sessions from locally spawned ones.
+
+## Concurrency
+
+- Sessions stored in `DashMap<String, Mutex<PtySession>>` for lock-free concurrent access
+- Each session's writer is behind `Mutex` for exclusive write access
+- Reader thread holds `Arc<AtomicBool>` for pause signaling
+- Metrics use `AtomicUsize` for zero-overhead counting

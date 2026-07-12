@@ -1,0 +1,533 @@
+/* PR Detail Popover */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.popover {
+  position: fixed;
+  bottom: calc(var(--status-height) + 8px);
+  right: 12px;
+  width: 380px;
+  max-height: 500px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-bottom-anchor);
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.popover.anchorTop {
+  bottom: auto;
+  top: calc(var(--toolbar-height, 38px) + 4px);
+}
+
+.repo {
+  /* top padding clears the popover's radius-xl (8px) rounded corner so the
+     owner/repo line isn't clipped against the top edge */
+  padding: 10px 14px 2px;
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--bg-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+/* PR state badge */
+.stateBadge {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.stateBadge.open {
+  background: rgba(63, 185, 80, 0.12);
+  color: var(--success);
+}
+
+.stateBadge.merged {
+  background: color-mix(in srgb, var(--merged) 12%, transparent);
+  color: var(--merged);
+}
+
+.stateBadge.closed {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--error);
+}
+
+.stateBadge.draft {
+  background: rgba(132, 141, 151, 0.12);
+  color: var(--fg-muted);
+}
+
+/* PR labels */
+.labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 12px;
+}
+
+.label {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  border: 1px solid;
+  white-space: nowrap;
+}
+
+/* Merge direction */
+.mergeDirection {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.branchName {
+  font-family: var(--font-ui);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 6px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-xs);
+}
+
+.arrow {
+  color: var(--fg-muted);
+}
+
+/* Timestamps */
+.timestamps {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 12px;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+}
+
+/* Status row (merge + review badges) */
+.statusRow {
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px;
+  flex-wrap: wrap;
+}
+
+/* Merge state badge */
+.mergeStateBadge {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mergeStateBadge.clean {
+  background: rgba(63, 185, 80, 0.2);
+  color: var(--success);
+}
+
+.mergeStateBadge.behind {
+  background: rgba(220, 220, 170, 0.2);
+  color: var(--warning);
+}
+
+.mergeStateBadge.blocked {
+  background: rgba(247, 118, 142, 0.1);
+  color: var(--error);
+}
+
+.mergeStateBadge.conflicting {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--error);
+}
+
+/* Review state badge */
+.reviewStateBadge {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.reviewStateBadge.approved {
+  background: rgba(63, 185, 80, 0.2);
+  color: var(--success);
+}
+
+.reviewStateBadge.changesRequested {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--error);
+}
+
+.reviewStateBadge.reviewRequired {
+  background: rgba(220, 220, 170, 0.2);
+  color: var(--warning);
+}
+
+.title {
+  flex: 1;
+  font-size: var(--font-base);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.number {
+  color: var(--fg-muted);
+  font-size: var(--font-md);
+  flex-shrink: 0;
+}
+
+.link {
+  cursor: pointer;
+}
+
+.link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.close {
+  background: none;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: var(--font-xl);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
+}
+
+.close:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.author {
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+.separator {
+  color: var(--fg-muted);
+}
+
+.additions {
+  color: var(--success);
+  font-weight: 600;
+  font-family: var(--font-ui);
+}
+
+.deletions {
+  color: var(--error);
+  font-weight: 600;
+  font-family: var(--font-ui);
+}
+
+/* CI summary */
+.ciSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ciText {
+  display: flex;
+  gap: 10px;
+  font-size: var(--font-sm);
+}
+
+.ciCount {
+  font-weight: 600;
+}
+
+.ciCount.success { color: var(--success); }
+.ciCount.failure { color: var(--error); }
+.ciCount.pending { color: var(--warning); }
+
+/* Check list */
+.checks {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.checkItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.checkItem:hover {
+  background: var(--bg-highlight);
+}
+
+.checkIcon {
+  font-size: var(--font-lg);
+  flex-shrink: 0;
+}
+
+.checkIcon.success { color: var(--success); }
+.checkIcon.failure { color: var(--error); }
+.checkIcon.pending { color: var(--warning); }
+
+.checkName {
+  flex: 1;
+  font-size: var(--font-md);
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.checkStatus {
+  font-size: var(--font-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-md);
+  text-transform: capitalize;
+}
+
+.checkStatus.success {
+  background: rgba(158, 206, 106, 0.12);
+  color: var(--success);
+}
+
+.checkStatus.failure {
+  background: rgba(247, 118, 142, 0.12);
+  color: var(--error);
+}
+
+.checkStatus.pending {
+  background: rgba(224, 175, 104, 0.2);
+  color: var(--warning);
+}
+
+/* Footer action buttons — aligned to the GitHub PR panel's `.ghActionBtn` language:
+ * compact, transparent background, natural width, wrap, accent border-glow on hover. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.viewDiffBtn {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.viewDiffBtn:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border-color: var(--accent);
+}
+
+.viewDiffBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mergeBtn {
+  padding: 4px 12px;
+  font-size: var(--font-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--success);
+  background: none;
+  color: var(--success);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.mergeBtn:hover {
+  background: var(--success);
+  color: var(--text-on-success);
+}
+
+.mergeBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.errorMsg {
+  padding: 4px 12px 8px;
+  font-size: var(--font-xs);
+  color: var(--error);
+}
+
+/* Auto-heal CI toggle — styled like .checkItem */
+.autoHealRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.autoHealRow:hover {
+  background: var(--bg-highlight);
+}
+
+.autoHealToggle {
+  position: relative;
+  display: inline-block;
+  width: 30px;
+  height: 16px;
+  min-height: 16px;
+  max-height: 16px;
+  flex-shrink: 0;
+}
+
+.autoHealToggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.autoHealSlider {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.autoHealSlider::after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  background: var(--fg-muted);
+  border-radius: 9999px;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.autoHealToggle input:checked + .autoHealSlider {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.autoHealToggle input:checked + .autoHealSlider::after {
+  transform: translateX(14px);
+  background: white;
+}
+
+.autoHealLabel {
+  flex: 1;
+  color: var(--fg-primary);
+}
+
+.autoHealStatus {
+  color: var(--attention);
+  font-size: var(--font-xs);
+}
+
+/* Empty state */
+.empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: var(--font-md);
+}
+
+/* ── Compact mode (sidebar accordion) ── */
+:global([data-compact]) .checkItem {
+  gap: 6px;
+  padding: 4px 8px;
+}
+
+:global([data-compact]) .checkName {
+  font-size: var(--font-sm);
+}
+
+:global([data-compact]) .checkStatus {
+  font-size: var(--font-2xs);
+  padding: 1px 5px;
+}
+
+:global([data-compact]) .checks {
+  padding: 4px;
+}
+
+:global([data-compact]) .ciSummary {
+  padding: 6px 12px;
+  border-bottom: none;
+}
+
+:global([data-compact]) .meta {
+  padding: 6px 12px;
+  font-size: var(--font-xs);
+  border-bottom: none;
+}
+
+:global([data-compact]) .timestamps {
+  padding: 2px 12px;
+}
+
+:global([data-compact]) .mergeDirection {
+  padding: 4px 12px;
+}
+
+:global([data-compact]) .statusRow {
+  padding: 4px 12px;
+}

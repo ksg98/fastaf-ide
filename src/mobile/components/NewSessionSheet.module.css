@@ -1,0 +1,65 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-end;
+}
+
+.sheet {
+  width: 100%;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+  border-top: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  padding: 8px 0 calc(56px + 8px);
+}
+
+.title {
+  padding: 12px 16px 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--fg-muted);
+  font-size: 14px;
+}
+
+.repoItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 16px;
+  border: none;
+  background: none;
+  color: var(--fg-primary);
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.repoItem:active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.repoName {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.repoPath {
+  font-size: 12px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
