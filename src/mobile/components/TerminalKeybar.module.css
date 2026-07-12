@@ -1,0 +1,60 @@
+.bar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  flex-shrink: 0;
+}
+
+.key {
+  flex-shrink: 0;
+  height: 32px;
+  min-width: 44px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.key:active {
+  opacity: 0.6;
+}
+
+.confirm {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.danger {
+  color: var(--error);
+  border-color: var(--error);
+  font-weight: 600;
+}
+
+.accent {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.sending {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  flex-shrink: 0;
+}

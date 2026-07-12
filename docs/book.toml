@@ -1,0 +1,15 @@
+[book]
+title = "FastAF"
+description = "Multi-agent terminal orchestrator"
+authors = ["Stefano Straus"]
+language = "en"
+src = "."
+
+[build]
+build-dir = "book"
+
+[output.html]
+site-url = "/docs/"
+default-theme = "light"
+git-repository-url = "https://github.com/sstraus/tuicommander" 
+additional-css = ["theme/custom.css"]

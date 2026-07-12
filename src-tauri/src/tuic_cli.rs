@@ -1,0 +1,384 @@
+//! Tauri commands for managing the `tuic` CLI binary installation.
+//!
+//! The CLI binary is embedded as a sidecar. These commands handle:
+//! - Checking if the CLI is installed in PATH
+//! - Installing the CLI (copy sidecar to /usr/local/bin/tuic)
+//! - Auto-updating the installed CLI on app startup
+//! - Tracking whether the first-run prompt has been dismissed
+
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub(crate) struct CliStatus {
+    installed: bool,
+    path: Option<String>,
+    version_match: bool,
+    /// True when the installed binary can be overwritten without elevation, i.e.
+    /// the silent startup auto-update can actually apply a pending update.
+    /// False (e.g. a root-owned file) means "restart to apply" would never work —
+    /// the user must click Update to trigger the elevation prompt.
+    auto_updatable: bool,
+    prompt_dismissed: bool,
+}
+
+/// Check CLI installation status.
+#[tauri::command]
+pub(crate) fn get_cli_status() -> CliStatus {
+    let prompt_dismissed = crate::config::config_dir()
+        .join(".cli-prompt-dismissed")
+        .exists();
+
+    // Prefer the canonical install location (keeps install/update semantics),
+    // then fall back to wherever `tuic` lives on the user's PATH — they may have
+    // symlinked it into their own bin dir without using our installer (#98).
+    let canonical = resolve_install_path();
+    let install_path = if std::path::Path::new(&canonical).exists() {
+        Some(canonical)
+    } else {
+        crate::cli::which_cli(sidecar_name())
+    };
+
+    let Some(install_path) = install_path else {
+        return CliStatus {
+            installed: false,
+            path: None,
+            version_match: false,
+            auto_updatable: false,
+            prompt_dismissed,
+        };
+    };
+
+    // Check if installed version matches current sidecar
+    let version_match = check_version_match(&install_path);
+    let auto_updatable = install_path_writable(&install_path);
+
+    CliStatus {
+        installed: true,
+        path: Some(install_path),
+        version_match,
+        auto_updatable,
+        prompt_dismissed,
+    }
+}
+
+/// Install the CLI binary to the system PATH.
+/// On macOS, uses osascript for admin privileges if needed.
+#[tauri::command]
+pub(crate) fn install_cli() -> Result<String, String> {
+    let sidecar_path = resolve_sidecar_path()?;
+    let install_path = resolve_install_path();
+
+    copy_with_elevation(&sidecar_path, &install_path)?;
+
+    // Mark executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&install_path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    tracing::info!(source = "tuic_cli", path = %install_path, "CLI installed");
+
+    Ok(install_path)
+}
+
+/// Uninstall the CLI binary from system PATH.
+#[tauri::command]
+pub(crate) fn uninstall_cli() -> Result<(), String> {
+    let install_path = resolve_install_path();
+    if !std::path::Path::new(&install_path).exists() {
+        return Ok(());
+    }
+
+    remove_with_elevation(&install_path)?;
+    tracing::info!(source = "tuic_cli", path = %install_path, "CLI uninstalled");
+    Ok(())
+}
+
+/// Dismiss the first-run CLI install prompt (persisted to disk).
+#[tauri::command]
+pub(crate) fn dismiss_cli_prompt() {
+    let marker = crate::config::config_dir().join(".cli-prompt-dismissed");
+    let _ = std::fs::write(&marker, "");
+}
+
+#[tauri::command]
+pub(crate) fn get_last_seen_version() -> Option<String> {
+    let path = crate::config::config_dir().join(".whats-new-seen");
+    std::fs::read_to_string(path).ok().filter(|s| !s.is_empty())
+}
+
+#[tauri::command]
+pub(crate) fn set_last_seen_version(version: String) {
+    let path = crate::config::config_dir().join(".whats-new-seen");
+    let _ = std::fs::write(path, version);
+}
+
+/// Auto-update: if the CLI is installed, overwrite it with the current sidecar.
+/// Called at app startup — silent, no elevation prompt (relies on existing permissions).
+pub(crate) fn auto_update_cli() {
+    let install_path = resolve_install_path();
+    if !std::path::Path::new(&install_path).exists() {
+        return;
+    }
+
+    if check_version_match(&install_path) {
+        return;
+    }
+
+    let Ok(sidecar_path) = resolve_sidecar_path() else {
+        return;
+    };
+
+    // Try direct copy (no elevation) — will succeed if user owns the file
+    if std::fs::copy(&sidecar_path, &install_path).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&install_path, std::fs::Permissions::from_mode(0o755));
+        }
+        tracing::info!(source = "tuic_cli", "CLI auto-updated at {install_path}");
+    } else {
+        tracing::debug!(
+            source = "tuic_cli",
+            "CLI auto-update skipped (permission denied)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn resolve_install_path() -> String {
+    // macOS: /usr/local/bin (in default PATH, standard for user-installed CLIs)
+    #[cfg(target_os = "macos")]
+    {
+        "/usr/local/bin/tuic".to_string()
+    }
+
+    // Linux: /usr/local/bin (FHS standard for locally installed software)
+    #[cfg(target_os = "linux")]
+    {
+        "/usr/local/bin/tuic".to_string()
+    }
+
+    // Windows: add to user-scoped PATH via %LOCALAPPDATA%\Microsoft\WindowsApps
+    // (writable without admin, automatically in PATH on modern Windows)
+    #[cfg(target_os = "windows")]
+    {
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        format!("{local_app_data}\\Microsoft\\WindowsApps\\tuic.exe")
+    }
+}
+
+/// Bundled sidecar filename (no target-triple suffix — Tauri strips it at
+/// bundle time, so the installed file is plain `tuic`/`tuic.exe`).
+fn sidecar_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "tuic.exe"
+    } else {
+        "tuic"
+    }
+}
+
+/// Locate the bundled `tuic` sidecar to copy into PATH.
+///
+/// `externalBin` sidecars are installed *next to the main executable* —
+/// `Contents/MacOS/` on macOS, the install dir on Windows, the same dir on
+/// Linux — NOT under the resource dir. This mirrors `detect_bridge_binary`
+/// in `agent_mcp.rs`; the previous resource-dir lookup never resolved in a
+/// packaged build and fell through to the dev path, which only exists on the
+/// build machine (the root cause of issue #52).
+fn resolve_sidecar_path() -> Result<String, String> {
+    let name = sidecar_name();
+
+    // Release: sidecar bundled alongside the main executable.
+    // Dev (`cargo tauri dev`/`build`): also next to the built app under target/.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return Ok(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    // Dev fallback: workspace target directory (build:sidecar output).
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for profile in ["debug", "release"] {
+        let dev_binary = manifest.join(format!("target/{profile}")).join(name);
+        if dev_binary.exists() {
+            return Ok(dev_binary.to_string_lossy().to_string());
+        }
+    }
+
+    Err("tuic CLI binary not found. Run 'cargo build -p tuic-cli' first.".to_string())
+}
+
+/// Run `<path> --version` and return its trimmed stdout (e.g. "tuic 1.1.0").
+/// Returns None if the binary can't be executed or exits non-zero.
+fn cli_version(path: &str) -> Option<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!version.is_empty()).then_some(version)
+}
+
+/// Compare the installed CLI against the bundled sidecar by their reported
+/// version strings — NOT file size, which flaps on every rebuild of the same
+/// version (different rustc/deps produce different-sized but identical-version
+/// binaries). If either version can't be determined, treat as a mismatch.
+fn check_version_match(installed_path: &str) -> bool {
+    let Ok(sidecar_path) = resolve_sidecar_path() else {
+        return false;
+    };
+    match (cli_version(installed_path), cli_version(&sidecar_path)) {
+        (Some(installed), Some(sidecar)) => installed == sidecar,
+        _ => false,
+    }
+}
+
+/// True when we can overwrite the installed binary without elevation. Opening it
+/// for write (without truncating) is a faithful proxy for whether the startup
+/// auto-update's `fs::copy` will succeed — a root-owned file returns false here.
+fn install_path_writable(path: &str) -> bool {
+    std::fs::OpenOptions::new().write(true).open(path).is_ok()
+}
+
+pub(crate) fn copy_with_elevation(src: &str, dst: &str) -> Result<(), String> {
+    // Ensure parent directory exists
+    if let Some(parent) = std::path::Path::new(dst).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Try direct copy first
+    if std::fs::copy(src, dst).is_ok() {
+        return Ok(());
+    }
+
+    // Need elevation
+    #[cfg(target_os = "macos")]
+    {
+        let parent = std::path::Path::new(dst)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "/usr/local/bin".to_string());
+        let script = format!(
+            "do shell script \"mkdir -p '{parent}' && cp -f '{src}' '{dst}' && chmod 755 '{dst}'\" with administrator privileges"
+        );
+        let status = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .status()
+            .map_err(|e| format!("Failed to run osascript: {e}"))?;
+        if !status.success() {
+            return Err("Installation cancelled by user".to_string());
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::process::Command::new("pkexec")
+            .args(["cp", "-f", src, dst])
+            .status()
+            .or_else(|_| {
+                std::process::Command::new("sudo")
+                    .args(["cp", "-f", src, dst])
+                    .status()
+            })
+            .map_err(|e| format!("Failed to elevate: {e}"))?;
+        if !status.success() {
+            return Err("Installation cancelled by user".to_string());
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows the install path is user-writable (LOCALAPPDATA)
+        std::fs::copy(src, dst).map_err(|e| format!("Failed to copy: {e}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Unsupported platform".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for issue #52: the bundled sidecar must be looked up by its
+    /// plain name (no `-{target-triple}` suffix), since Tauri strips the triple
+    /// when bundling `externalBin`. A reintroduced triple would make the lookup
+    /// miss the packaged binary and fall through to the dev-only path.
+    #[test]
+    fn sidecar_name_has_no_target_triple() {
+        let name = sidecar_name();
+        assert!(
+            !name.contains("aarch64")
+                && !name.contains("x86_64")
+                && !name.contains("apple")
+                && !name.contains("pc-windows")
+                && !name.contains("unknown-linux"),
+            "sidecar name must not embed a target triple, got {name:?}"
+        );
+        #[cfg(target_os = "windows")]
+        assert_eq!(name, "tuic.exe");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(name, "tuic");
+    }
+}
+
+pub(crate) fn remove_with_elevation(path: &str) -> Result<(), String> {
+    if std::fs::remove_file(path).is_ok() {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!("do shell script \"rm -f '{path}'\" with administrator privileges");
+        let status = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .status()
+            .map_err(|e| format!("Failed to run osascript: {e}"))?;
+        if !status.success() {
+            return Err("Removal cancelled by user".to_string());
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::process::Command::new("pkexec")
+            .args(["rm", "-f", path])
+            .status()
+            .or_else(|_| {
+                std::process::Command::new("sudo")
+                    .args(["rm", "-f", path])
+                    .status()
+            })
+            .map_err(|e| format!("Failed to elevate: {e}"))?;
+        if !status.success() {
+            return Err("Removal cancelled by user".to_string());
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::fs::remove_file(path).map_err(|e| format!("Failed to remove: {e}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Unsupported platform".to_string())
+}

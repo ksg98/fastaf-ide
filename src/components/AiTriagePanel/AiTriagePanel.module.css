@@ -1,0 +1,282 @@
+/* AI Triage side panel */
+.panel {
+  position: relative;
+  width: 400px;
+  min-width: 300px;
+  max-width: 50%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hidden {
+  display: none;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.content > * {
+  flex-shrink: 0;
+}
+
+.statBadge {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.statHigh {
+  background: color-mix(in srgb, var(--error) 20%, transparent);
+  color: var(--error);
+}
+
+.statMedium {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  color: var(--warning);
+}
+
+.statLow {
+  background: color-mix(in srgb, var(--fg-muted) 15%, transparent);
+  color: var(--fg-muted);
+}
+
+.refreshBtn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  padding: 2px 8px;
+  font-size: var(--font-xs);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.refreshBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.empty {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  padding: 20px 0;
+  text-align: center;
+}
+
+.error {
+  color: var(--error);
+  font-size: var(--font-sm);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
+}
+
+.loading {
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Stats context line */
+.statsLine {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  padding: 4px 0;
+}
+
+/* File row — two-line: summary on top, path + metadata below */
+.fileRow {
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  transition: border-color 0.1s;
+}
+
+.fileRow:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.fileHeader {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.fileHeaderTop {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.fileHeaderBottom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 0;
+}
+
+.relevanceBadge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.relevanceHigh {
+  background: color-mix(in srgb, var(--error) 20%, transparent);
+  color: var(--error);
+}
+
+.relevanceMedium {
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  color: var(--warning);
+}
+
+.relevanceLow {
+  background: color-mix(in srgb, var(--fg-muted) 15%, transparent);
+  color: var(--fg-muted);
+}
+
+.fileSummary {
+  font-size: var(--font-sm);
+  color: var(--fg-primary);
+  flex: 1;
+  line-height: 1.4;
+}
+
+.filePath {
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.categoryPill {
+  font-size: 10px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.fileStats {
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.statsAdd {
+  color: var(--success);
+}
+
+.statsDel {
+  color: var(--error);
+}
+
+.fileActions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.actionBtn {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.actionBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--accent);
+}
+
+.chevron {
+  width: 12px;
+  color: var(--fg-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+/* Low-relevance group */
+.lowGroup {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.lowGroupHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  background: var(--bg-primary);
+}
+
+.lowGroupHeader:hover {
+  background: var(--bg-highlight);
+}
+
+.lowGroupContent {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.lowGroupContent .fileRow {
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+}
+

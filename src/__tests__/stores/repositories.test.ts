@@ -1,0 +1,1254 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { testInScope, testInScopeAsync } from "../helpers/store";
+
+const mockInvoke = vi.fn().mockResolvedValue(undefined);
+
+vi.mock("@tauri-apps/api/core", () => ({
+	invoke: mockInvoke,
+}));
+
+describe("repositoriesStore", () => {
+	let store: typeof import("../../stores/repositories").repositoriesStore;
+
+	beforeEach(async () => {
+		vi.resetModules();
+		vi.useFakeTimers();
+		mockInvoke.mockReset().mockResolvedValue(undefined);
+		localStorage.clear();
+
+		vi.doMock("@tauri-apps/api/core", () => ({
+			invoke: mockInvoke,
+		}));
+
+		store = (await import("../../stores/repositories")).repositoriesStore;
+		store._testSetHydrated(true);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	describe("add()", () => {
+		it("adds a repository", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "my-project" });
+				const repo = store.get("/path/to/repo");
+				expect(repo).toBeDefined();
+				expect(repo!.displayName).toBe("my-project");
+				expect(repo!.expanded).toBe(true);
+				expect(repo!.collapsed).toBe(false);
+			});
+		});
+
+		it("stores initials from Rust backend", () => {
+			testInScope(() => {
+				store.add({ path: "/path/1", displayName: "my-project", initials: "MP" });
+				expect(store.get("/path/1")!.initials).toBe("MP");
+
+				store.add({ path: "/path/2", displayName: "app", initials: "AP" });
+				expect(store.get("/path/2")!.initials).toBe("AP");
+			});
+		});
+
+		it("persists via invoke (debounced)", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				vi.advanceTimersByTime(500);
+				expect(mockInvoke).toHaveBeenCalledWith("save_repositories", {
+					config: expect.objectContaining({
+						repos: expect.objectContaining({
+							"/path/to/repo": expect.objectContaining({ displayName: "test" }),
+						}),
+					}),
+				});
+			});
+		});
+
+		it("does not persist terminals via invoke", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				vi.advanceTimersByTime(500);
+				// Find the last save_repositories call
+				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				const lastCall = calls[calls.length - 1];
+				expect(lastCall[1].config.repos["/repo"].branches["main"].terminals).toEqual([]);
+			});
+		});
+	});
+
+	describe("setCiAutoHeal()", () => {
+		it("persists ciAutoHeal via invoke (debounced)", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.setCiAutoHeal("/repo", "main", { enabled: true, attempts: 1 });
+				vi.advanceTimersByTime(500);
+				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				const last = calls[calls.length - 1];
+				expect(last[1].config.repos["/repo"].branches["main"].ciAutoHeal).toEqual({ enabled: true, attempts: 1 });
+			});
+		});
+
+		it("never persists the transient healing flag", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.setCiAutoHeal("/repo", "main", { enabled: true, attempts: 2, healing: true });
+				vi.advanceTimersByTime(500);
+				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				const last = calls[calls.length - 1];
+				expect(last[1].config.repos["/repo"].branches["main"].ciAutoHeal.healing).toBe(false);
+			});
+		});
+	});
+
+	describe("remove()", () => {
+		it("removes a repository", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				store.remove("/path/to/repo");
+				expect(store.get("/path/to/repo")).toBeUndefined();
+			});
+		});
+
+		it("clears activeRepoPath if removed repo was active", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				store.setActive("/path/to/repo");
+				store.remove("/path/to/repo");
+				expect(store.state.activeRepoPath).toBeNull();
+			});
+		});
+	});
+
+	describe("setActive()", () => {
+		it("sets active repository", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				store.setActive("/path/to/repo");
+				expect(store.state.activeRepoPath).toBe("/path/to/repo");
+			});
+		});
+	});
+
+	describe("toggleExpanded()", () => {
+		it("toggles expanded state", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				expect(store.get("/path/to/repo")!.expanded).toBe(true);
+				store.toggleExpanded("/path/to/repo");
+				expect(store.get("/path/to/repo")!.expanded).toBe(false);
+			});
+		});
+	});
+
+	describe("branches", () => {
+		it("setBranch creates a new branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "feature/test");
+				const repo = store.get("/repo")!;
+				expect(repo.branches["feature/test"]).toBeDefined();
+				expect(repo.branches["feature/test"].name).toBe("feature/test");
+				expect(repo.branches["feature/test"].isMain).toBe(false);
+			});
+		});
+
+		it("setBranch detects main branches", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				expect(store.get("/repo")!.branches["main"].isMain).toBe(true);
+
+				store.setBranch("/repo", "master");
+				expect(store.get("/repo")!.branches["master"].isMain).toBe(true);
+
+				store.setBranch("/repo", "develop");
+				expect(store.get("/repo")!.branches["develop"].isMain).toBe(true);
+			});
+		});
+
+		it("setBranch updates existing branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.setBranch("/repo", "main", { additions: 5, deletions: 3 });
+				expect(store.get("/repo")!.branches["main"].additions).toBe(5);
+			});
+		});
+
+		it("setActiveBranch sets the active branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.setActiveBranch("/repo", "main");
+				expect(store.get("/repo")!.activeBranch).toBe("main");
+			});
+		});
+	});
+
+	describe("terminal-branch association", () => {
+		it("addTerminalToBranch adds terminal", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				expect(store.get("/repo")!.branches["main"].terminals).toContain("term-1");
+			});
+		});
+
+		it("addTerminalToBranch prevents duplicates", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				expect(store.get("/repo")!.branches["main"].terminals).toHaveLength(1);
+			});
+		});
+
+		it("removeTerminalFromBranch removes terminal", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.removeTerminalFromBranch("/repo", "main", "term-1");
+				expect(store.get("/repo")!.branches["main"].terminals).toHaveLength(0);
+			});
+		});
+
+		it("removeTerminalFromBranch clears savedTerminals when last terminal removed", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main", {
+					savedTerminals: [
+						{ name: "T1", cwd: "/repo", fontSize: 14, agentType: null },
+						{ name: "T2", cwd: "/repo", fontSize: 14, agentType: null },
+					],
+				});
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.addTerminalToBranch("/repo", "main", "term-2");
+
+				// Remove first — savedTerminals should persist (still have one terminal)
+				store.removeTerminalFromBranch("/repo", "main", "term-1");
+				expect(store.get("/repo")!.branches["main"].savedTerminals).toHaveLength(2);
+
+				// Remove last — savedTerminals should be cleared
+				store.removeTerminalFromBranch("/repo", "main", "term-2");
+				expect(store.get("/repo")!.branches["main"].savedTerminals).toHaveLength(0);
+			});
+		});
+	});
+
+	describe("getRepoPathForTerminal()", () => {
+		it("returns repo path for a known terminal", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				store.setBranch("/repo-a", "main");
+				store.addTerminalToBranch("/repo-a", "main", "term-1");
+				expect(store.getRepoPathForTerminal("term-1")).toBe("/repo-a");
+			});
+		});
+
+		it("returns null for an unknown terminal", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				store.setBranch("/repo-a", "main");
+				expect(store.getRepoPathForTerminal("nonexistent")).toBeNull();
+			});
+		});
+
+		it("finds terminal across multiple repos and branches", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				store.add({ path: "/repo-b", displayName: "B" });
+				store.setBranch("/repo-a", "main");
+				store.setBranch("/repo-b", "feature");
+				store.addTerminalToBranch("/repo-a", "main", "term-1");
+				store.addTerminalToBranch("/repo-b", "feature", "term-2");
+				expect(store.getRepoPathForTerminal("term-1")).toBe("/repo-a");
+				expect(store.getRepoPathForTerminal("term-2")).toBe("/repo-b");
+			});
+		});
+
+		it("returns null after terminal is removed from branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				expect(store.getRepoPathForTerminal("term-1")).toBe("/repo");
+				store.removeTerminalFromBranch("/repo", "main", "term-1");
+				expect(store.getRepoPathForTerminal("term-1")).toBeNull();
+			});
+		});
+	});
+
+	describe("removeBranch()", () => {
+		it("removes a branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "feature");
+				store.removeBranch("/repo", "feature");
+				expect(store.get("/repo")!.branches["feature"]).toBeUndefined();
+			});
+		});
+
+		it("updates activeBranch when removed branch was active", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.setBranch("/repo", "feature");
+				store.setActiveBranch("/repo", "feature");
+				store.removeBranch("/repo", "feature");
+				expect(store.get("/repo")!.activeBranch).toBe("main");
+			});
+		});
+	});
+
+	describe("renameBranch()", () => {
+		it("renames a branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "old-name");
+				store.addTerminalToBranch("/repo", "old-name", "term-1");
+				store.renameBranch("/repo", "old-name", "new-name");
+				expect(store.get("/repo")!.branches["old-name"]).toBeUndefined();
+				expect(store.get("/repo")!.branches["new-name"]).toBeDefined();
+				expect(store.get("/repo")!.branches["new-name"].terminals).toContain("term-1");
+			});
+		});
+
+		it("updates activeBranch when renamed branch was active", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "old-name");
+				store.setActiveBranch("/repo", "old-name");
+				store.renameBranch("/repo", "old-name", "new-name");
+				expect(store.get("/repo")!.activeBranch).toBe("new-name");
+			});
+		});
+	});
+
+	describe("mergeBranchState()", () => {
+		it("moves terminals and flags from source to target", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "old-branch", { hadTerminals: true });
+				store.addTerminalToBranch("/repo", "old-branch", "term-1");
+				store.addTerminalToBranch("/repo", "old-branch", "term-2");
+				store.setBranch("/repo", "new-branch", { worktreePath: "/repo" });
+
+				store.mergeBranchState("/repo", "old-branch", "new-branch");
+
+				const oldB = store.get("/repo")!.branches["old-branch"];
+				const newB = store.get("/repo")!.branches["new-branch"];
+				expect(oldB.terminals).toEqual([]);
+				expect(newB.terminals).toContain("term-1");
+				expect(newB.terminals).toContain("term-2");
+				expect(newB.hadTerminals).toBe(true);
+				// Target keeps its worktreePath
+				expect(newB.worktreePath).toBe("/repo");
+			});
+		});
+
+		it("transfers savedTerminals when target has none", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "old", {
+					savedTerminals: [{ name: "T", cwd: "/repo", fontSize: 14, agentType: null }],
+				});
+				store.setBranch("/repo", "new", {});
+
+				store.mergeBranchState("/repo", "old", "new");
+
+				expect(store.get("/repo")!.branches["old"].savedTerminals).toEqual([]);
+				expect(store.get("/repo")!.branches["new"].savedTerminals?.length).toBe(1);
+			});
+		});
+
+		it("does not overwrite target savedTerminals", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "old", {
+					savedTerminals: [{ name: "Old", cwd: "/repo", fontSize: 14, agentType: null }],
+				});
+				store.setBranch("/repo", "new", {
+					savedTerminals: [{ name: "Existing", cwd: "/repo", fontSize: 14, agentType: null }],
+				});
+
+				store.mergeBranchState("/repo", "old", "new");
+
+				// Target keeps its own savedTerminals
+				expect(store.get("/repo")!.branches["new"].savedTerminals?.[0]?.name).toBe("Existing");
+			});
+		});
+	});
+
+	describe("getActive()", () => {
+		it("returns active repo", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setActive("/repo");
+				expect(store.getActive()?.path).toBe("/repo");
+			});
+		});
+
+		it("returns undefined when no active", () => {
+			testInScope(() => {
+				expect(store.getActive()).toBeUndefined();
+			});
+		});
+	});
+
+	describe("getPaths()", () => {
+		it("returns all repo paths", () => {
+			testInScope(() => {
+				store.add({ path: "/repo1", displayName: "test1" });
+				store.add({ path: "/repo2", displayName: "test2" });
+				expect(store.getPaths()).toEqual(["/repo1", "/repo2"]);
+			});
+		});
+	});
+
+	describe("hydrate()", () => {
+		it("loads repos from Rust backend and clears stale terminals", async () => {
+			mockInvoke.mockResolvedValueOnce({
+				repos: {
+					"/repo": {
+						path: "/repo",
+						displayName: "test",
+						initials: "TE",
+						expanded: true,
+						collapsed: false,
+						branches: {
+							main: {
+								name: "main",
+								isMain: true,
+								worktreePath: "/repo",
+								terminals: ["stale-term-1", "stale-term-2"],
+								additions: 0,
+								deletions: 0,
+							},
+						},
+						activeBranch: "main",
+					},
+				},
+			});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				const repo = store.get("/repo");
+				expect(repo).toBeDefined();
+				expect(repo!.branches["main"].terminals).toEqual([]);
+				expect(mockInvoke).toHaveBeenCalledWith("load_repositories");
+			});
+		});
+
+		it("migrates expanded/collapsed fields when missing", async () => {
+			mockInvoke.mockResolvedValueOnce({
+				repos: {
+					"/repo": {
+						path: "/repo",
+						displayName: "test",
+						initials: "TE",
+						branches: {
+							main: {
+								name: "main",
+								isMain: true,
+								worktreePath: "/repo",
+								terminals: [],
+								additions: 0,
+								deletions: 0,
+							},
+						},
+						activeBranch: "main",
+						// No collapsed or expanded fields — migration should add them
+					},
+				},
+			});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				const repo = store.get("/repo");
+				expect(repo).toBeDefined();
+				expect(repo!.collapsed).toBe(false);
+				expect(repo!.expanded).toBe(true);
+			});
+		});
+
+		it("handles hydration failure gracefully", async () => {
+			mockInvoke.mockRejectedValueOnce(new Error("load failed"));
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate(); // Should not throw
+				expect(store.getPaths()).toEqual([]);
+				expect(errorSpy).toHaveBeenCalledWith("[store]", "Failed to hydrate repositories", expect.any(Error));
+				errorSpy.mockRestore();
+			});
+		});
+
+		it("blocks save after hydration failure", async () => {
+			// Reset hydrated flag to false — beforeEach sets it to true for other tests,
+			// but this test specifically checks that a failed hydration blocks saves.
+			store._testSetHydrated(false);
+			mockInvoke.mockRejectedValueOnce(new Error("load failed"));
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.getPaths()).toEqual([]);
+
+				// Clear mock calls from the hydrate attempt
+				mockInvoke.mockClear();
+
+				// Attempt a mutation after failed hydration
+				store.add({ path: "/test-repo", displayName: "Test" });
+
+				// Advance timers to trigger any debounced saves
+				vi.advanceTimersByTime(1000);
+
+				// Save should NOT have been called (hydrated flag is false)
+				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				expect(saveCalls).toHaveLength(0);
+			});
+
+			errorSpy.mockRestore();
+		});
+
+		it("migrates from localStorage on first run", async () => {
+			const staleData = {
+				"/repo": {
+					path: "/repo",
+					displayName: "test",
+					initials: "TE",
+					expanded: true,
+					collapsed: false,
+					branches: {},
+					activeBranch: null,
+				},
+			};
+			localStorage.setItem("tui-commander-repos", JSON.stringify(staleData));
+			mockInvoke.mockResolvedValueOnce(undefined); // save_repositories migration
+			mockInvoke.mockResolvedValueOnce({ repos: {} }); // load_repositories
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(localStorage.getItem("tui-commander-repos")).toBeNull();
+			});
+		});
+	});
+
+	describe("toggleCollapsed()", () => {
+		it("toggles collapsed state", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				expect(store.get("/path/to/repo")!.collapsed).toBe(false);
+				store.toggleCollapsed("/path/to/repo");
+				expect(store.get("/path/to/repo")!.collapsed).toBe(true);
+				store.toggleCollapsed("/path/to/repo");
+				expect(store.get("/path/to/repo")!.collapsed).toBe(false);
+			});
+		});
+	});
+
+	describe("toggleBranchTabsExpanded()", () => {
+		it("toggles tabsExpanded from falsy to true", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "My Repo" });
+				store.setBranch("/repo", "feat/foo");
+				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBeFalsy();
+				store.toggleBranchTabsExpanded("/repo", "feat/foo");
+				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(true);
+			});
+		});
+
+		it("toggles tabsExpanded from true to false", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "My Repo" });
+				store.setBranch("/repo", "feat/foo");
+				store.toggleBranchTabsExpanded("/repo", "feat/foo");
+				store.toggleBranchTabsExpanded("/repo", "feat/foo");
+				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(false);
+			});
+		});
+
+		it("no-ops on unknown repo/branch", () => {
+			testInScope(() => {
+				expect(() => store.toggleBranchTabsExpanded("/nonexistent", "main")).not.toThrow();
+			});
+		});
+
+		it("persists via save_repositories (debounced)", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "My Repo" });
+				store.setBranch("/repo", "feat/foo");
+				store.toggleBranchTabsExpanded("/repo", "feat/foo");
+				vi.advanceTimersByTime(500);
+				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				expect(calls.length).toBeGreaterThan(0);
+			});
+		});
+	});
+
+	describe("setBranchTabsExpanded()", () => {
+		it("sets tabsExpanded to true", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "My Repo" });
+				store.setBranch("/repo", "feat/foo");
+				store.setBranchTabsExpanded("/repo", "feat/foo", true);
+				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(true);
+			});
+		});
+
+		it("keeps tabsExpanded true when set true again (idempotent open)", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "My Repo" });
+				store.setBranch("/repo", "feat/foo");
+				store.setBranchTabsExpanded("/repo", "feat/foo", true);
+				store.setBranchTabsExpanded("/repo", "feat/foo", true);
+				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(true);
+			});
+		});
+
+		it("sets tabsExpanded to false", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "My Repo" });
+				store.setBranch("/repo", "feat/foo");
+				store.setBranchTabsExpanded("/repo", "feat/foo", true);
+				store.setBranchTabsExpanded("/repo", "feat/foo", false);
+				expect(store.state.repositories["/repo"].branches["feat/foo"].tabsExpanded).toBe(false);
+			});
+		});
+
+		it("no-ops on unknown repo/branch", () => {
+			testInScope(() => {
+				expect(() => store.setBranchTabsExpanded("/nonexistent", "main", true)).not.toThrow();
+			});
+		});
+	});
+
+	describe("isEmpty()", () => {
+		it("returns true when empty", () => {
+			testInScope(() => {
+				expect(store.isEmpty()).toBe(true);
+			});
+		});
+
+		it("returns false when repos exist", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				expect(store.isEmpty()).toBe(false);
+			});
+		});
+	});
+
+	describe("revision tracking", () => {
+		it("returns 0 for unknown repo", () => {
+			testInScope(() => {
+				expect(store.getRevision("/unknown-repo")).toBe(0);
+			});
+		});
+
+		it("increments revision on bumpRevision", () => {
+			testInScope(() => {
+				store.add({ path: "/test", displayName: "test" });
+				expect(store.getRevision("/test")).toBe(0);
+				store.bumpRevision("/test");
+				expect(store.getRevision("/test")).toBe(1);
+				store.bumpRevision("/test");
+				expect(store.getRevision("/test")).toBe(2);
+			});
+		});
+	});
+
+	describe("reorderTerminals()", () => {
+		it("reorders terminals in a branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.addTerminalToBranch("/repo", "main", "term-2");
+				store.addTerminalToBranch("/repo", "main", "term-3");
+				store.reorderTerminals("/repo", "main", 0, 2);
+				expect(store.get("/repo")!.branches["main"].terminals).toEqual(["term-2", "term-3", "term-1"]);
+			});
+		});
+	});
+
+	describe("getActiveTerminals()", () => {
+		it("returns terminals for active branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setActive("/repo");
+				store.setBranch("/repo", "main");
+				store.setActiveBranch("/repo", "main");
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				expect(store.getActiveTerminals()).toEqual(["term-1"]);
+			});
+		});
+
+		it("returns empty when no active repo", () => {
+			testInScope(() => {
+				expect(store.getActiveTerminals()).toEqual([]);
+			});
+		});
+	});
+
+	describe("groups — CRUD", () => {
+		it("initializes with empty groups and groupOrder", () => {
+			testInScope(() => {
+				expect(store.state.groups).toEqual({});
+				expect(store.state.groupOrder).toEqual([]);
+			});
+		});
+
+		it("createGroup() adds a group and returns its ID", () => {
+			testInScope(() => {
+				const id = store.createGroup("Work")!;
+				expect(id).toBeTruthy();
+				expect(store.state.groups[id]).toBeDefined();
+				expect(store.state.groups[id].name).toBe("Work");
+				expect(store.state.groups[id].color).toBe("");
+				expect(store.state.groups[id].collapsed).toBe(false);
+				expect(store.state.groups[id].repoOrder).toEqual([]);
+				expect(store.state.groupOrder).toContain(id);
+			});
+		});
+
+		it("createGroup() enforces unique names (case-insensitive)", () => {
+			testInScope(() => {
+				store.createGroup("Work");
+				expect(store.createGroup("work")).toBeNull();
+				expect(store.createGroup("WORK")).toBeNull();
+			});
+		});
+
+		it("deleteGroup() removes group and moves repos to ungrouped", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				const id = store.createGroup("Work")!;
+				store.addRepoToGroup("/repo-a", id);
+				expect(store.state.repoOrder).not.toContain("/repo-a");
+				store.deleteGroup(id);
+				expect(store.state.groups[id]).toBeUndefined();
+				expect(store.state.groupOrder).not.toContain(id);
+				expect(store.state.repoOrder).toContain("/repo-a");
+			});
+		});
+
+		it("renameGroup() updates name", () => {
+			testInScope(() => {
+				const id = store.createGroup("Work")!;
+				expect(store.renameGroup(id, "Personal")).toBe(true);
+				expect(store.state.groups[id].name).toBe("Personal");
+			});
+		});
+
+		it("renameGroup() rejects duplicate names", () => {
+			testInScope(() => {
+				const id1 = store.createGroup("Work")!;
+				store.createGroup("Personal");
+				expect(store.renameGroup(id1, "personal")).toBe(false);
+				expect(store.state.groups[id1].name).toBe("Work");
+			});
+		});
+
+		it("setGroupColor() updates color", () => {
+			testInScope(() => {
+				const id = store.createGroup("Work")!;
+				store.setGroupColor(id, "#4A9EFF");
+				expect(store.state.groups[id].color).toBe("#4A9EFF");
+			});
+		});
+
+		it("toggleGroupCollapsed() toggles collapsed flag", () => {
+			testInScope(() => {
+				const id = store.createGroup("Work")!;
+				expect(store.state.groups[id].collapsed).toBe(false);
+				store.toggleGroupCollapsed(id);
+				expect(store.state.groups[id].collapsed).toBe(true);
+				store.toggleGroupCollapsed(id);
+				expect(store.state.groups[id].collapsed).toBe(false);
+			});
+		});
+
+		it("hydrate() loads groups from backend", async () => {
+			mockInvoke.mockResolvedValueOnce({
+				repos: {},
+				repoOrder: [],
+				groups: {
+					g1: { id: "g1", name: "Work", color: "#4A9EFF", collapsed: false, repoOrder: [] },
+				},
+				groupOrder: ["g1"],
+			});
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.groups["g1"]).toBeDefined();
+				expect(store.state.groups["g1"].name).toBe("Work");
+				expect(store.state.groupOrder).toEqual(["g1"]);
+			});
+		});
+
+		it("hydrate() migration: missing groups field initializes empty", async () => {
+			mockInvoke.mockResolvedValueOnce({
+				repos: {
+					"/repo": {
+						path: "/repo",
+						displayName: "test",
+						initials: "TE",
+						expanded: true,
+						collapsed: false,
+						branches: {
+							main: { name: "main", isMain: true, worktreePath: null, terminals: [], additions: 0, deletions: 0 },
+						},
+						activeBranch: "main",
+					},
+				},
+				repoOrder: ["/repo"],
+				// No groups or groupOrder
+			});
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.groups).toEqual({});
+				expect(store.state.groupOrder).toEqual([]);
+				expect(store.state.repoOrder).toEqual(["/repo"]);
+			});
+		});
+
+		it("persists groups via save", () => {
+			testInScope(() => {
+				const id = store.createGroup("Work")!;
+				vi.advanceTimersByTime(500);
+				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				const lastCall = saveCalls[saveCalls.length - 1];
+				expect(lastCall[1].config.groups).toBeDefined();
+				expect(lastCall[1].config.groups[id].name).toBe("Work");
+				expect(lastCall[1].config.groupOrder).toContain(id);
+			});
+		});
+	});
+
+	describe("groups — repo assignment", () => {
+		it("addRepoToGroup() moves repo from ungrouped to group", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/repo-a", gid);
+				expect(store.state.groups[gid].repoOrder).toContain("/repo-a");
+				expect(store.state.repoOrder).not.toContain("/repo-a");
+			});
+		});
+
+		it("addRepoToGroup() moves repo from one group to another", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				const g1 = store.createGroup("Work")!;
+				const g2 = store.createGroup("Personal")!;
+				store.addRepoToGroup("/repo-a", g1);
+				store.addRepoToGroup("/repo-a", g2);
+				expect(store.state.groups[g1].repoOrder).not.toContain("/repo-a");
+				expect(store.state.groups[g2].repoOrder).toContain("/repo-a");
+			});
+		});
+
+		it("removeRepoFromGroup() moves repo to ungrouped", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/repo-a", gid);
+				store.removeRepoFromGroup("/repo-a");
+				expect(store.state.groups[gid].repoOrder).not.toContain("/repo-a");
+				expect(store.state.repoOrder).toContain("/repo-a");
+			});
+		});
+
+		it("remove() also cleans up group membership", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/repo-a", gid);
+				store.remove("/repo-a");
+				expect(store.state.groups[gid].repoOrder).not.toContain("/repo-a");
+			});
+		});
+
+		it("getGroupForRepo() returns correct group or undefined", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				store.add({ path: "/repo-b", displayName: "B" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/repo-a", gid);
+				expect(store.getGroupForRepo("/repo-a")?.id).toBe(gid);
+				expect(store.getGroupForRepo("/repo-b")).toBeUndefined();
+			});
+		});
+	});
+
+	describe("groups — reordering and layout", () => {
+		it("reorderRepoInGroup() reorders within group", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				store.add({ path: "/c", displayName: "C" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/a", gid);
+				store.addRepoToGroup("/b", gid);
+				store.addRepoToGroup("/c", gid);
+				store.reorderRepoInGroup(gid, 0, 2);
+				expect(store.state.groups[gid].repoOrder).toEqual(["/b", "/c", "/a"]);
+			});
+		});
+
+		it("moveRepoBetweenGroups() moves with correct index", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				const g1 = store.createGroup("Work")!;
+				const g2 = store.createGroup("Personal")!;
+				store.addRepoToGroup("/a", g1);
+				store.addRepoToGroup("/b", g2);
+				store.moveRepoBetweenGroups("/a", g1, g2, 0);
+				expect(store.state.groups[g1].repoOrder).toEqual([]);
+				expect(store.state.groups[g2].repoOrder).toEqual(["/a", "/b"]);
+			});
+		});
+
+		it("reorderGroups() reorders group display order", () => {
+			testInScope(() => {
+				const g1 = store.createGroup("A")!;
+				const g2 = store.createGroup("B")!;
+				const g3 = store.createGroup("C")!;
+				expect(store.state.groupOrder).toEqual([g1, g2, g3]);
+				store.reorderGroups(0, 2);
+				expect(store.state.groupOrder).toEqual([g2, g3, g1]);
+			});
+		});
+
+		it("getGroupedLayout() returns groups + ungrouped split", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				store.add({ path: "/c", displayName: "C" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/a", gid);
+				store.addRepoToGroup("/b", gid);
+				const layout = store.getGroupedLayout();
+				expect(layout.groups).toHaveLength(1);
+				expect(layout.groups[0].group.id).toBe(gid);
+				expect(layout.groups[0].repos).toHaveLength(2);
+				expect(layout.groups[0].repos[0].path).toBe("/a");
+				expect(layout.ungrouped).toHaveLength(1);
+				expect(layout.ungrouped[0].path).toBe("/c");
+			});
+		});
+
+		it("getGroupedLayout() respects groupOrder and per-group repoOrder", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				const g1 = store.createGroup("First")!;
+				const g2 = store.createGroup("Second")!;
+				store.addRepoToGroup("/a", g2);
+				store.addRepoToGroup("/b", g1);
+				const layout = store.getGroupedLayout();
+				expect(layout.groups[0].group.name).toBe("First");
+				expect(layout.groups[0].repos[0].path).toBe("/b");
+				expect(layout.groups[1].group.name).toBe("Second");
+				expect(layout.groups[1].repos[0].path).toBe("/a");
+			});
+		});
+	});
+
+	describe("park repos", () => {
+		it("setPark() marks a repo as parked", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				expect(store.get("/repo")!.parked).toBe(false);
+				store.setPark("/repo", true);
+				expect(store.get("/repo")!.parked).toBe(true);
+			});
+		});
+
+		it("setPark(false) unparks a repo", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setPark("/repo", true);
+				store.setPark("/repo", false);
+				expect(store.get("/repo")!.parked).toBe(false);
+			});
+		});
+
+		it("getParkedRepos() returns only parked repos", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				store.add({ path: "/c", displayName: "C" });
+				store.setPark("/b", true);
+				const parked = store.getParkedRepos();
+				expect(parked).toHaveLength(1);
+				expect(parked[0].path).toBe("/b");
+			});
+		});
+
+		it("getOrderedRepos() excludes parked repos", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				store.setPark("/b", true);
+				const ordered = store.getOrderedRepos();
+				expect(ordered).toHaveLength(1);
+				expect(ordered[0].path).toBe("/a");
+			});
+		});
+
+		// #1358-caf5: scan/poll loops must use getActivePaths so parked repos
+		// stay fully dormant (no git refresh, no PR polling, no plugin scans).
+		it("getActivePaths() returns all paths when none are parked", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				expect(store.getActivePaths().sort()).toEqual(["/a", "/b"]);
+			});
+		});
+
+		it("getActivePaths() excludes parked repos (vs getPaths which keeps them)", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				store.add({ path: "/c", displayName: "C" });
+				store.setPark("/b", true);
+				expect(store.getActivePaths().sort()).toEqual(["/a", "/c"]);
+				// getPaths still returns parked entries (persistence/path-resolution
+				// callers must keep seeing them).
+				expect(store.getPaths().sort()).toEqual(["/a", "/b", "/c"]);
+			});
+		});
+
+		it("setPark(true) calls stop_repo_watcher; setPark(false) calls start_repo_watcher", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				mockInvoke.mockClear();
+				store.setPark("/repo", true);
+				expect(
+					mockInvoke.mock.calls.some(
+						([cmd, args]) => cmd === "stop_repo_watcher" && (args as { repoPath: string }).repoPath === "/repo",
+					),
+				).toBe(true);
+
+				mockInvoke.mockClear();
+				store.setPark("/repo", false);
+				expect(
+					mockInvoke.mock.calls.some(
+						([cmd, args]) => cmd === "start_repo_watcher" && (args as { repoPath: string }).repoPath === "/repo",
+					),
+				).toBe(true);
+			});
+		});
+
+		it("getGroupedLayout() excludes parked repos from groups and ungrouped", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				store.add({ path: "/c", displayName: "C" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/a", gid);
+				store.addRepoToGroup("/b", gid);
+				store.setPark("/b", true);
+				store.setPark("/c", true);
+				const layout = store.getGroupedLayout();
+				expect(layout.groups[0].repos).toHaveLength(1);
+				expect(layout.groups[0].repos[0].path).toBe("/a");
+				expect(layout.ungrouped).toHaveLength(0);
+			});
+		});
+
+		it("parked repos persist via save", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setPark("/repo", true);
+				vi.advanceTimersByTime(500);
+				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				const lastCall = saveCalls[saveCalls.length - 1];
+				expect(lastCall[1].config.repos["/repo"].parked).toBe(true);
+			});
+		});
+
+		it("hydrate() defaults parked to false when missing", async () => {
+			mockInvoke.mockResolvedValueOnce({
+				repos: {
+					"/repo": {
+						path: "/repo",
+						displayName: "test",
+						initials: "TE",
+						expanded: true,
+						collapsed: false,
+						branches: {
+							main: { name: "main", isMain: true, worktreePath: null, terminals: [], additions: 0, deletions: 0 },
+						},
+						activeBranch: "main",
+					},
+				},
+				repoOrder: ["/repo"],
+			});
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.get("/repo")!.parked).toBe(false);
+			});
+		});
+	});
+
+	describe("hydrate guard", () => {
+		it("blocks saves before hydrate completes", () => {
+			testInScope(() => {
+				store._testSetHydrated(false);
+				store.add({ path: "/repo", displayName: "test" });
+				vi.advanceTimersByTime(500);
+
+				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories").length;
+				expect(saveCalls).toBe(0);
+
+				store._testSetHydrated(true);
+			});
+		});
+
+		it("allows saves after hydrate completes", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				vi.advanceTimersByTime(500);
+
+				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories").length;
+				expect(saveCalls).toBe(1);
+			});
+		});
+	});
+
+	describe("save debouncing", () => {
+		it("coalesces rapid mutations into a single save call", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				store.setBranch("/repo", "feature");
+				store.toggleExpanded("/repo");
+
+				// Before debounce fires, no save_repositories should have been called
+				const saveCallsBefore = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories").length;
+				expect(saveCallsBefore).toBe(0);
+
+				// After debounce period, exactly one save call
+				vi.advanceTimersByTime(500);
+				const saveCallsAfter = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories").length;
+				expect(saveCallsAfter).toBe(1);
+			});
+		});
+
+		it("does not save for updateBranchStats (ephemeral data)", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setBranch("/repo", "main");
+				vi.advanceTimersByTime(500);
+				mockInvoke.mockClear();
+
+				store.updateBranchStats("/repo", "main", 10, 5);
+				vi.advanceTimersByTime(1000);
+
+				expect(mockInvoke).not.toHaveBeenCalled();
+			});
+		});
+	});
+
+	describe("findOwnerForTerminal()", () => {
+		it("returns repo and branch for a registered terminal", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "Repo" });
+				store.setBranch("/repo", "main", { worktreePath: "/repo" });
+				store.addTerminalToBranch("/repo", "main", "term-1");
+
+				const owner = store.findOwnerForTerminal("term-1");
+				expect(owner).toEqual({ repoPath: "/repo", branchName: "main" });
+			});
+		});
+
+		it("returns null for an unknown terminal", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "Repo" });
+				store.setBranch("/repo", "main", { worktreePath: "/repo" });
+
+				expect(store.findOwnerForTerminal("unknown")).toBeNull();
+			});
+		});
+
+		it("finds the correct branch when multiple branches exist", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "Repo" });
+				store.setBranch("/repo", "main", { worktreePath: "/repo" });
+				store.setBranch("/repo", "feature", { worktreePath: "/repo-feat" });
+				store.addTerminalToBranch("/repo", "main", "term-main");
+				store.addTerminalToBranch("/repo", "feature", "term-feat");
+
+				expect(store.findOwnerForTerminal("term-main")).toEqual({ repoPath: "/repo", branchName: "main" });
+				expect(store.findOwnerForTerminal("term-feat")).toEqual({ repoPath: "/repo", branchName: "feature" });
+			});
+		});
+
+		it("returns null when terminal was removed from branch", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "Repo" });
+				store.setBranch("/repo", "main", { worktreePath: "/repo" });
+				store.addTerminalToBranch("/repo", "main", "term-1");
+				store.removeTerminalFromBranch("/repo", "main", "term-1");
+
+				expect(store.findOwnerForTerminal("term-1")).toBeNull();
+			});
+		});
+
+		it("works across multiple repos", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				store.setBranch("/repo-a", "main", { worktreePath: "/repo-a" });
+				store.addTerminalToBranch("/repo-a", "main", "term-a");
+
+				store.add({ path: "/repo-b", displayName: "B" });
+				store.setBranch("/repo-b", "dev", { worktreePath: "/repo-b" });
+				store.addTerminalToBranch("/repo-b", "dev", "term-b");
+
+				expect(store.findOwnerForTerminal("term-a")).toEqual({ repoPath: "/repo-a", branchName: "main" });
+				expect(store.findOwnerForTerminal("term-b")).toEqual({ repoPath: "/repo-b", branchName: "dev" });
+			});
+		});
+	});
+
+	describe("getAllReposOrdered()", () => {
+		it("includes repos nested in groups, not just ungrouped (#64)", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				store.add({ path: "/repo-b", displayName: "B" });
+				store.add({ path: "/repo-c", displayName: "C" });
+
+				const gid = store.createGroup("Group 1") as string;
+				store.addRepoToGroup("/repo-b", gid);
+				store.addRepoToGroup("/repo-c", gid);
+
+				// ungrouped first (a), then the group's repos in order (b, c)
+				expect(store.getAllReposOrdered().map((r) => r.path)).toEqual(["/repo-a", "/repo-b", "/repo-c"]);
+			});
+		});
+
+		it("returns every repo even when all are grouped (#64)", () => {
+			testInScope(() => {
+				store.add({ path: "/repo-a", displayName: "A" });
+				store.add({ path: "/repo-b", displayName: "B" });
+
+				const gid = store.createGroup("Group 1") as string;
+				store.addRepoToGroup("/repo-a", gid);
+				store.addRepoToGroup("/repo-b", gid);
+
+				// repoOrder is empty, but the repos still surface via the group
+				expect(store.state.repoOrder).toEqual([]);
+				expect(store.getAllReposOrdered().map((r) => r.path)).toEqual(["/repo-a", "/repo-b"]);
+			});
+		});
+	});
+});

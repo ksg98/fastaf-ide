@@ -1,0 +1,89 @@
+.dialog {
+	width: 380px;
+	max-width: calc(100vw - 32px);
+}
+
+.warning {
+	margin: 0 0 14px;
+	padding: 8px 10px;
+	font-size: var(--font-sm);
+	color: var(--warning);
+	background: color-mix(in srgb, var(--warning) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
+	border-radius: var(--radius-sm);
+}
+
+/* White card behind the QR — black-on-white guarantees reliable scanning
+   regardless of the app theme. */
+.qrCard {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: fit-content;
+	margin: 0 auto;
+	padding: 16px;
+	background: #ffffff;
+	border-radius: var(--radius-md);
+}
+
+.qr {
+	display: block;
+	width: 320px;
+	height: 320px;
+	max-width: 100%;
+	image-rendering: pixelated;
+}
+
+.placeholder {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 320px;
+	height: 320px;
+	max-width: 100%;
+	padding: 16px;
+	text-align: center;
+	font-size: var(--font-sm);
+	color: #555;
+}
+
+.ipRow {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 14px;
+	font-size: var(--font-sm);
+	color: var(--fg-muted);
+}
+
+.ipRow select {
+	flex: 1;
+	min-width: 0;
+	padding: 6px 8px;
+	background: var(--bg-tertiary);
+	color: var(--fg-primary);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	font-size: var(--font-sm);
+}
+
+.url {
+	display: block;
+	width: 100%;
+	margin-top: 14px;
+	padding: 8px 10px;
+	font-family: monospace;
+	font-size: 11px;
+	text-align: center;
+	color: var(--fg-muted);
+	background: var(--bg-tertiary);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+	word-break: break-all;
+}
+
+.url:hover {
+	color: var(--fg-primary);
+	border-color: var(--accent);
+}

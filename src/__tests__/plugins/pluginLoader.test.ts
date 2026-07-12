@@ -1,0 +1,201 @@
+import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import type { PluginManifest } from "../../plugins/pluginLoader";
+import { loadUserPlugins, pluginModuleBaseUrl, validateManifest, validateModule } from "../../plugins/pluginLoader";
+
+// Mock invoke
+vi.mock("../../invoke", () => ({
+	invoke: vi.fn(() => Promise.resolve([])),
+	listen: vi.fn(() => Promise.resolve(() => {})),
+}));
+
+// Mock pluginRegistry
+vi.mock("../../plugins/pluginRegistry", () => ({
+	pluginRegistry: {
+		register: vi.fn(),
+		unregister: vi.fn(),
+	},
+}));
+
+// Mock pluginStore
+vi.mock("../../stores/pluginStore", () => ({
+	pluginStore: {
+		registerPlugin: vi.fn(),
+		updatePlugin: vi.fn(),
+		getLogger: vi.fn(() => ({ info: vi.fn(), error: vi.fn(), warn: vi.fn() })),
+		removePlugin: vi.fn(),
+	},
+}));
+
+import { invoke, listen } from "../../invoke";
+import { pluginRegistry } from "../../plugins/pluginRegistry";
+import { pluginStore } from "../../stores/pluginStore";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function validManifest(overrides: Partial<PluginManifest> = {}): PluginManifest {
+	return {
+		id: "test-plugin",
+		name: "Test Plugin",
+		version: "1.0.0",
+		minAppVersion: "0.1.0",
+		main: "main.js",
+		capabilities: [],
+		...overrides,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// validateManifest
+// ---------------------------------------------------------------------------
+
+describe("validateManifest", () => {
+	it("accepts a valid manifest", () => {
+		expect(validateManifest(validManifest())).toBeNull();
+	});
+
+	it("rejects missing id", () => {
+		expect(validateManifest(validManifest({ id: "" }))).toContain("id");
+	});
+
+	it("rejects missing name", () => {
+		expect(validateManifest(validManifest({ name: "" }))).toContain("name");
+	});
+
+	it("rejects missing version", () => {
+		expect(validateManifest(validManifest({ version: "" }))).toContain("version");
+	});
+
+	it("rejects missing main", () => {
+		expect(validateManifest(validManifest({ main: "" }))).toContain("main");
+	});
+
+	it("rejects minAppVersion higher than current app version", () => {
+		const error = validateManifest(validManifest({ minAppVersion: "99.0.0" }));
+		expect(error).toContain("requires app version");
+	});
+
+	it("accepts minAppVersion equal to current", () => {
+		// App is 0.3.0
+		expect(validateManifest(validManifest({ minAppVersion: "0.3.0" }))).toBeNull();
+	});
+
+	it("accepts minAppVersion lower than current", () => {
+		expect(validateManifest(validManifest({ minAppVersion: "0.1.0" }))).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// validateModule
+// ---------------------------------------------------------------------------
+
+describe("validateModule", () => {
+	it("accepts a valid module with default export", () => {
+		const mod = {
+			default: { id: "test", onload: () => {}, onunload: () => {} },
+		};
+		expect(validateModule(mod, "test")).toBeNull();
+	});
+
+	it("rejects module without default export", () => {
+		expect(validateModule({}, "test")).toContain("default export");
+	});
+
+	it("rejects module where default is not an object", () => {
+		expect(validateModule({ default: "string" }, "test")).toContain("default export");
+	});
+
+	it("rejects module missing onload", () => {
+		const mod = { default: { id: "test", onunload: () => {} } };
+		expect(validateModule(mod, "test")).toContain("onload");
+	});
+
+	it("rejects module missing onunload", () => {
+		const mod = { default: { id: "test", onload: () => {} } };
+		expect(validateModule(mod, "test")).toContain("onunload");
+	});
+
+	it("rejects module where id doesn't match manifest", () => {
+		const mod = {
+			default: { id: "wrong-id", onload: () => {}, onunload: () => {} },
+		};
+		expect(validateModule(mod, "expected-id")).toContain("id mismatch");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// pluginModuleBaseUrl
+// ---------------------------------------------------------------------------
+
+describe("pluginModuleBaseUrl", () => {
+	it("uses the raw plugin:// scheme off Windows (macOS/Linux)", () => {
+		// wry serves custom schemes under their raw scheme on macOS/Linux.
+		expect(pluginModuleBaseUrl("mdkb-dashboard", "main.js", false)).toBe("plugin://mdkb-dashboard/main.js");
+	});
+
+	it("uses http://plugin.localhost on Windows (WebView2)", () => {
+		// WebView2 only serves register_uri_scheme_protocol schemes via
+		// http://{scheme}.localhost — see issue #86. plugins.rs parses this form.
+		expect(pluginModuleBaseUrl("mdkb-dashboard", "main.js", true)).toBe(
+			"http://plugin.localhost/mdkb-dashboard/main.js",
+		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// loadUserPlugins
+// ---------------------------------------------------------------------------
+
+describe("loadUserPlugins", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		(invoke as Mock).mockResolvedValue([]);
+	});
+
+	it("calls list_user_plugins to discover plugins", async () => {
+		await loadUserPlugins();
+		expect(invoke).toHaveBeenCalledWith("list_user_plugins");
+	});
+
+	it("registers listen handler for plugin-changed events", async () => {
+		await loadUserPlugins();
+		expect(listen).toHaveBeenCalledWith("plugin-changed", expect.any(Function));
+	});
+
+	it("skips plugins that fail manifest validation", async () => {
+		(invoke as Mock).mockResolvedValue([validManifest({ minAppVersion: "99.0.0" })]);
+		await loadUserPlugins();
+		expect(pluginRegistry.register).not.toHaveBeenCalled();
+	});
+
+	it("does not crash when list_user_plugins rejects", async () => {
+		(invoke as Mock).mockRejectedValue(new Error("Tauri not available"));
+		// Should not throw — just log and return
+		await expect(loadUserPlugins()).resolves.toBeUndefined();
+	});
+
+	it("registers disabled plugins in store without loading them", async () => {
+		const manifest = validManifest({ id: "disabled-plugin" });
+		(invoke as Mock).mockImplementation((cmd: string) => {
+			if (cmd === "load_config") return Promise.resolve({ disabled_plugin_ids: ["disabled-plugin"] });
+			if (cmd === "list_user_plugins") return Promise.resolve([manifest]);
+			return Promise.resolve(undefined);
+		});
+
+		await loadUserPlugins();
+
+		// Plugin is disabled — should NOT be loaded into registry
+		expect(pluginRegistry.register).not.toHaveBeenCalled();
+
+		// Plugin IS registered in pluginStore as disabled
+		expect(pluginStore.registerPlugin).toHaveBeenCalledWith(
+			"disabled-plugin",
+			expect.objectContaining({
+				manifest,
+				enabled: false,
+				loaded: false,
+			}),
+		);
+	});
+});

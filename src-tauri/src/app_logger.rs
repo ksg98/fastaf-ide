@@ -1,0 +1,758 @@
+//! Centralized application log ring buffer.
+//!
+//! Stores structured log entries (level, source, message) in a fixed-capacity
+//! circular buffer. The frontend pushes entries via `push_log` and retrieves
+//! them via `get_logs`. This is the Rust source-of-truth for the log store;
+//! the TypeScript `appLogger` store delegates to these commands.
+//!
+//! The `tracing` subscriber is wired to this buffer via [`RingBufferLayer`],
+//! so every `tracing::warn!()` / `tracing::error!()` / etc. automatically
+//! appears in the ErrorLogPanel and the `/logs` HTTP endpoint.
+
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+#[cfg(feature = "desktop")]
+use tauri::{Manager, State};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+use crate::AppState;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// A single log entry stored in the ring buffer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LogEntry {
+    pub id: u64,
+    pub timestamp_ms: i64,
+    pub level: String,
+    pub source: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_json: Option<String>,
+    /// Who the entry is for: `"user"` (actionable by the person using TUIC) or
+    /// `"diagnostic"` (app-internal telemetry useful only when debugging TUIC
+    /// itself). The ErrorLogPanel defaults to the user view so diagnostic spam
+    /// never buries user-relevant signal. Defaults to `"user"`.
+    #[serde(default = "default_audience")]
+    pub audience: String,
+    /// How many consecutive duplicate messages were coalesced into this entry.
+    /// 0 = first occurrence (no repeats), 1 = seen twice, etc.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub repeat_count: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+fn default_audience() -> String {
+    "user".to_string()
+}
+
+/// Sources whose every entry is app-internal telemetry, classified as
+/// `"diagnostic"` automatically so the emitters don't each have to opt in.
+const DIAGNOSTIC_SOURCES: &[&str] = &["diagnostics", "perf"];
+
+/// Resolve the audience for an entry: an explicit value wins; otherwise the
+/// source decides (known diagnostic sources → `"diagnostic"`, else `"user"`).
+fn resolve_audience(explicit: Option<String>, source: &str) -> String {
+    if let Some(a) = explicit {
+        return a;
+    }
+    if DIAGNOSTIC_SOURCES.contains(&source) {
+        "diagnostic".to_string()
+    } else {
+        default_audience()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ring buffer
+// ---------------------------------------------------------------------------
+
+pub(crate) const LOG_RING_CAPACITY: usize = 1000;
+
+/// Fixed-capacity circular buffer for structured log entries.
+pub(crate) struct LogRingBuffer {
+    entries: Vec<Option<LogEntry>>,
+    capacity: usize,
+    /// Write position (wraps around)
+    write_pos: usize,
+    /// Number of entries currently stored (≤ capacity)
+    count: usize,
+    /// Monotonically increasing ID for the next entry
+    next_id: u64,
+}
+
+impl LogRingBuffer {
+    pub(crate) fn new(capacity: usize) -> Self {
+        let mut entries = Vec::with_capacity(capacity);
+        entries.resize_with(capacity, || None);
+        Self {
+            entries,
+            capacity,
+            write_pos: 0,
+            count: 0,
+            next_id: 1,
+        }
+    }
+
+    /// Push a new entry into the ring buffer. Returns the assigned entry ID.
+    ///
+    /// If the most recent entry has the same level+source+message, the new push
+    /// is coalesced: the existing entry's timestamp and repeat_count are updated
+    /// instead of allocating a new slot. This prevents identical recurring
+    /// warnings (e.g. polling failures) from flooding the ring buffer.
+    pub(crate) fn push(
+        &mut self,
+        level: String,
+        source: String,
+        message: String,
+        data_json: Option<String>,
+    ) -> u64 {
+        self.push_with_audience(level, source, message, data_json, None)
+    }
+
+    /// Push with an explicit audience. `audience = None` derives it from the
+    /// source (see [`resolve_audience`]); existing callers keep using [`push`].
+    pub(crate) fn push_with_audience(
+        &mut self,
+        level: String,
+        source: String,
+        message: String,
+        data_json: Option<String>,
+        audience: Option<String>,
+    ) -> u64 {
+        let audience = resolve_audience(audience, &source);
+        // Dedup: coalesce with the most recent entry if level+source+message+audience match
+        if self.count > 0 {
+            let last_idx = if self.write_pos == 0 {
+                self.capacity - 1
+            } else {
+                self.write_pos - 1
+            };
+            if let Some(last) = &mut self.entries[last_idx]
+                && last.level == level
+                && last.source == source
+                && last.message == message
+                && last.audience == audience
+            {
+                last.repeat_count += 1;
+                last.timestamp_ms = chrono::Utc::now().timestamp_millis();
+                return last.id;
+            }
+        }
+
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let timestamp_ms = chrono::Utc::now().timestamp_millis();
+
+        let entry = LogEntry {
+            id,
+            timestamp_ms,
+            level,
+            source,
+            message,
+            data_json,
+            audience,
+            repeat_count: 0,
+        };
+
+        self.entries[self.write_pos] = Some(entry);
+        self.write_pos = (self.write_pos + 1) % self.capacity;
+        if self.count < self.capacity {
+            self.count += 1;
+        }
+
+        id
+    }
+
+    /// Return entries in chronological order (oldest first), up to `limit`.
+    /// If `limit` is 0, returns all entries.
+    pub(crate) fn get_entries(&self, limit: usize) -> Vec<LogEntry> {
+        if self.count == 0 {
+            return Vec::new();
+        }
+
+        let effective_limit = if limit == 0 {
+            self.count
+        } else {
+            limit.min(self.count)
+        };
+
+        // Start index: oldest entry in the buffer
+        let start = if self.count < self.capacity {
+            0
+        } else {
+            self.write_pos // write_pos points to the oldest when buffer is full
+        };
+
+        // We want the *last* `effective_limit` entries (most recent)
+        let skip = self.count - effective_limit;
+        let mut result = Vec::with_capacity(effective_limit);
+        for i in skip..self.count {
+            let idx = (start + i) % self.capacity;
+            if let Some(entry) = &self.entries[idx] {
+                result.push(entry.clone());
+            }
+        }
+
+        result
+    }
+
+    /// Remove all entries.
+    pub(crate) fn clear(&mut self) {
+        for slot in self.entries.iter_mut() {
+            *slot = None;
+        }
+        self.write_pos = 0;
+        self.count = 0;
+        // Keep next_id monotonic — don't reset
+    }
+
+    /// Current number of entries in the buffer.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.count
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tracing → ring buffer layer
+// ---------------------------------------------------------------------------
+
+/// A `tracing_subscriber::Layer` that forwards events into the [`LogRingBuffer`].
+///
+/// It extracts the first `source` field from the event's span/fields (falling
+/// back to the event target) and maps the tracing level to the ring buffer's
+/// `level` string (`"error"`, `"warn"`, `"info"`, `"debug"`).
+struct RingBufferLayer {
+    buffer: Arc<Mutex<LogRingBuffer>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingBufferLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        // Extract the message and optional `source` field.
+        let mut visitor = LogVisitor::default();
+        event.record(&mut visitor);
+
+        let level = match *event.metadata().level() {
+            tracing::Level::ERROR => "error",
+            tracing::Level::WARN => "warn",
+            tracing::Level::INFO => "info",
+            _ => "debug",
+        };
+
+        let source = visitor
+            .source
+            .take()
+            .unwrap_or_else(|| event.metadata().target().to_string());
+
+        let message = visitor.message.take().unwrap_or_default();
+        if message.is_empty() {
+            return;
+        }
+
+        let data_json = visitor.data_json();
+        let audience = visitor.audience.take();
+        let mut buf = self.buffer.lock();
+        buf.push_with_audience(level.to_string(), source, message, data_json, audience);
+    }
+}
+
+/// Visitor that extracts `message`, `source`, and extra fields from a tracing event.
+#[derive(Default)]
+struct LogVisitor {
+    message: Option<String>,
+    source: Option<String>,
+    audience: Option<String>,
+    extra: Option<std::collections::BTreeMap<String, String>>,
+}
+
+impl LogVisitor {
+    fn data_json(&self) -> Option<String> {
+        let extra = self.extra.as_ref()?;
+        if extra.is_empty() {
+            return None;
+        }
+        serde_json::to_string(extra).ok()
+    }
+
+    fn extra_mut(&mut self) -> &mut std::collections::BTreeMap<String, String> {
+        self.extra
+            .get_or_insert_with(std::collections::BTreeMap::new)
+    }
+}
+
+impl tracing::field::Visit for LogVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "message" => self.message = Some(value.to_string()),
+            "source" => self.source = Some(value.to_string()),
+            "audience" => self.audience = Some(value.to_string()),
+            _ => {
+                self.extra_mut()
+                    .insert(field.name().to_string(), value.to_string());
+            }
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "message" => self.message = Some(format!("{value:?}")),
+            "source" => self.source = Some(format!("{value:?}")),
+            "audience" => self.audience = Some(format!("{value:?}")),
+            _ => {
+                self.extra_mut()
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+        }
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.extra_mut()
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        self.extra_mut()
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.extra_mut()
+            .insert(field.name().to_string(), value.to_string());
+    }
+}
+
+/// Max age for rotated log files before cleanup.
+const LOG_RETENTION_DAYS: u64 = 5;
+
+/// Initialise the global `tracing` subscriber.
+///
+/// Sets up three layers:
+/// 1. **fmt** — writes structured logs to stderr (visible in `tauri dev`).
+/// 2. **RingBufferLayer** — forwards events into the shared [`LogRingBuffer`]
+///    so they appear in the ErrorLogPanel and the `/logs` HTTP endpoint.
+/// 3. **file** — daily-rotated log files in the config dir's `logs/` folder,
+///    surviving WebView crashes. Old files (> 5 days) are cleaned up at init.
+///
+/// The default level is `info`; override with `RUST_LOG=debug` etc.
+/// Must be called exactly once, early in `run()`.
+pub(crate) fn init_tracing(buffer: Arc<Mutex<LogRingBuffer>>) {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_writer(std::io::stderr);
+
+    let ring_layer = RingBufferLayer { buffer };
+
+    let log_dir = crate::config::config_dir().join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    cleanup_old_logs(&log_dir);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "tuic.log");
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_ansi(false)
+        .with_writer(file_appender);
+
+    let registry = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(ring_layer)
+        .with(file_layer);
+
+    #[cfg(feature = "tokio-console")]
+    {
+        let console_layer = console_subscriber::spawn();
+        registry.with(console_layer).init();
+    }
+    #[cfg(not(feature = "tokio-console"))]
+    {
+        registry.init();
+    }
+}
+
+/// Remove log files older than [`LOG_RETENTION_DAYS`].
+fn cleanup_old_logs(log_dir: &std::path::Path) {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(LOG_RETENTION_DAYS * 24 * 3600);
+    let Ok(entries) = std::fs::read_dir(log_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+            continue;
+        }
+        let Ok(meta) = path.metadata() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if modified < cutoff {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands
+// ---------------------------------------------------------------------------
+
+/// Push a log entry from the frontend into the Rust ring buffer.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) fn push_log(
+    state: State<'_, Arc<AppState>>,
+    level: String,
+    source: String,
+    message: String,
+    data_json: Option<String>,
+    audience: Option<String>,
+) {
+    let mut buf = state.log_buffer.lock();
+    buf.push_with_audience(level, source, message, data_json, audience);
+}
+
+/// Retrieve log entries. Returns up to `limit` most recent entries (0 = all).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) fn get_logs(state: State<'_, Arc<AppState>>, limit: Option<usize>) -> Vec<LogEntry> {
+    let buf = state.log_buffer.lock();
+    buf.get_entries(limit.unwrap_or(0))
+}
+
+/// Clear all log entries.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) fn clear_logs(state: State<'_, Arc<AppState>>) {
+    let mut buf = state.log_buffer.lock();
+    buf.clear();
+}
+
+#[cfg(feature = "desktop")]
+/// Push a log entry from internal Rust code using an AppHandle.
+///
+/// Use this in contexts where you have an `AppHandle` but not a `State<>` extractor
+/// (e.g. watcher callbacks, plugin lifecycle hooks). Falls back silently if state
+/// is not yet initialised.
+pub(crate) fn log_via_handle(handle: &tauri::AppHandle, level: &str, source: &str, message: &str) {
+    let state = handle.state::<Arc<AppState>>();
+    let mut buf = state.log_buffer.lock();
+    buf.push(
+        level.to_string(),
+        source.to_string(),
+        message.to_string(),
+        None,
+    );
+}
+
+/// Push a log entry from internal Rust code using an AppState reference directly.
+pub(crate) fn log_via_state(state: &Arc<AppState>, level: &str, source: &str, message: &str) {
+    let mut buf = state.log_buffer.lock();
+    buf.push(
+        level.to_string(),
+        source.to_string(),
+        message.to_string(),
+        None,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_assigns_monotonic_ids() {
+        let mut buf = LogRingBuffer::new(10);
+        let id1 = buf.push("info".into(), "app".into(), "first".into(), None);
+        let id2 = buf.push("warn".into(), "git".into(), "second".into(), None);
+        let id3 = buf.push("error".into(), "app".into(), "third".into(), None);
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(id3, 3);
+    }
+
+    #[test]
+    fn get_entries_returns_chronological_order() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("info".into(), "app".into(), "first".into(), None);
+        buf.push("warn".into(), "app".into(), "second".into(), None);
+        buf.push("error".into(), "app".into(), "third".into(), None);
+
+        let entries = buf.get_entries(0);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].message, "first");
+        assert_eq!(entries[1].message, "second");
+        assert_eq!(entries[2].message, "third");
+    }
+
+    #[test]
+    fn get_entries_with_limit() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("info".into(), "app".into(), "a".into(), None);
+        buf.push("info".into(), "app".into(), "b".into(), None);
+        buf.push("info".into(), "app".into(), "c".into(), None);
+
+        let entries = buf.get_entries(2);
+        assert_eq!(entries.len(), 2);
+        // Should return the 2 most recent
+        assert_eq!(entries[0].message, "b");
+        assert_eq!(entries[1].message, "c");
+    }
+
+    #[test]
+    fn ring_buffer_wraps_and_drops_oldest() {
+        let mut buf = LogRingBuffer::new(3);
+        buf.push("info".into(), "app".into(), "a".into(), None);
+        buf.push("info".into(), "app".into(), "b".into(), None);
+        buf.push("info".into(), "app".into(), "c".into(), None);
+        // Buffer is full, next push drops "a"
+        buf.push("info".into(), "app".into(), "d".into(), None);
+
+        assert_eq!(buf.len(), 3);
+        let entries = buf.get_entries(0);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].message, "b");
+        assert_eq!(entries[1].message, "c");
+        assert_eq!(entries[2].message, "d");
+    }
+
+    #[test]
+    fn ring_buffer_wraps_multiple_times() {
+        let mut buf = LogRingBuffer::new(3);
+        for i in 0..10 {
+            buf.push("info".into(), "app".into(), format!("msg-{}", i), None);
+        }
+
+        assert_eq!(buf.len(), 3);
+        let entries = buf.get_entries(0);
+        assert_eq!(entries[0].message, "msg-7");
+        assert_eq!(entries[1].message, "msg-8");
+        assert_eq!(entries[2].message, "msg-9");
+    }
+
+    #[test]
+    fn clear_removes_all_entries_but_keeps_next_id() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("info".into(), "app".into(), "a".into(), None);
+        buf.push("info".into(), "app".into(), "b".into(), None);
+        assert_eq!(buf.len(), 2);
+
+        buf.clear();
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.get_entries(0).len(), 0);
+
+        // Next push should get id=3 (not 1)
+        let id = buf.push("info".into(), "app".into(), "after-clear".into(), None);
+        assert_eq!(id, 3);
+    }
+
+    #[test]
+    fn empty_buffer_returns_empty() {
+        let buf = LogRingBuffer::new(10);
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.get_entries(0).len(), 0);
+        assert_eq!(buf.get_entries(5).len(), 0);
+    }
+
+    #[test]
+    fn data_json_is_preserved() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push(
+            "error".into(),
+            "network".into(),
+            "request failed".into(),
+            Some(r#"{"status":500}"#.into()),
+        );
+
+        let entries = buf.get_entries(0);
+        assert_eq!(entries[0].data_json.as_deref(), Some(r#"{"status":500}"#));
+    }
+
+    #[test]
+    fn limit_larger_than_count() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("info".into(), "app".into(), "only-one".into(), None);
+
+        let entries = buf.get_entries(100);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "only-one");
+    }
+
+    #[test]
+    fn entry_fields_are_correct() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("warn".into(), "github".into(), "rate limited".into(), None);
+
+        let entry = &buf.get_entries(0)[0];
+        assert_eq!(entry.id, 1);
+        assert_eq!(entry.level, "warn");
+        assert_eq!(entry.source, "github");
+        assert_eq!(entry.message, "rate limited");
+        assert!(entry.timestamp_ms > 0);
+        assert!(entry.data_json.is_none());
+    }
+
+    // ---- Deduplication tests ----
+
+    #[test]
+    fn dedup_identical_consecutive_messages() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+
+        // Should coalesce into a single entry with repeat_count=2
+        assert_eq!(buf.len(), 1);
+        let entries = buf.get_entries(0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "poll failed");
+        assert_eq!(entries[0].repeat_count, 2);
+    }
+
+    #[test]
+    fn dedup_resets_on_different_message() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+        buf.push("info".into(), "app".into(), "something else".into(), None);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+
+        // 3 entries: first (repeat_count=1), different, second occurrence
+        assert_eq!(buf.len(), 3);
+        let entries = buf.get_entries(0);
+        assert_eq!(entries[0].repeat_count, 1);
+        assert_eq!(entries[1].repeat_count, 0);
+        assert_eq!(entries[2].repeat_count, 0);
+    }
+
+    #[test]
+    fn dedup_requires_matching_level_source_message() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+        // Same message but different source — no dedup
+        buf.push("warn".into(), "git".into(), "poll failed".into(), None);
+        // Same source+message but different level — no dedup
+        buf.push("error".into(), "github".into(), "poll failed".into(), None);
+
+        assert_eq!(buf.len(), 3);
+    }
+
+    #[test]
+    fn dedup_updates_timestamp() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+        let ts1 = buf.get_entries(0)[0].timestamp_ms;
+
+        // Small delay to ensure different timestamp
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+
+        let entries = buf.get_entries(0);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].timestamp_ms >= ts1);
+    }
+
+    #[test]
+    fn dedup_preserves_original_id() {
+        let mut buf = LogRingBuffer::new(10);
+        let id1 = buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+        let id2 = buf.push("warn".into(), "github".into(), "poll failed".into(), None);
+
+        // Both return same id since it's coalesced
+        assert_eq!(id1, id2);
+        let entries = buf.get_entries(0);
+        assert_eq!(entries[0].id, id1);
+    }
+
+    // ---- Audience classification ----
+
+    #[test]
+    fn audience_defaults_to_user() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push("warn".into(), "app".into(), "ui freeze".into(), None);
+        assert_eq!(buf.get_entries(0)[0].audience, "user");
+    }
+
+    #[test]
+    fn audience_derived_from_diagnostic_source() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push(
+            "info".into(),
+            "diagnostics".into(),
+            "health snapshot".into(),
+            None,
+        );
+        assert_eq!(buf.get_entries(0)[0].audience, "diagnostic");
+    }
+
+    #[test]
+    fn explicit_audience_overrides_source_derivation() {
+        let mut buf = LogRingBuffer::new(10);
+        // App-sourced but explicitly diagnostic (e.g. the freeze detector).
+        buf.push_with_audience(
+            "warn".into(),
+            "app".into(),
+            "UI freeze: 1000ms".into(),
+            None,
+            Some("diagnostic".into()),
+        );
+        assert_eq!(buf.get_entries(0)[0].audience, "diagnostic");
+    }
+
+    #[test]
+    fn dedup_does_not_coalesce_across_audiences() {
+        let mut buf = LogRingBuffer::new(10);
+        buf.push_with_audience(
+            "warn".into(),
+            "app".into(),
+            "x".into(),
+            None,
+            Some("user".into()),
+        );
+        buf.push_with_audience(
+            "warn".into(),
+            "app".into(),
+            "x".into(),
+            None,
+            Some("diagnostic".into()),
+        );
+        // Same level+source+message but different audience → two distinct entries.
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn dedup_works_at_buffer_boundary() {
+        let mut buf = LogRingBuffer::new(3);
+        buf.push("info".into(), "app".into(), "a".into(), None);
+        buf.push("info".into(), "app".into(), "b".into(), None);
+        buf.push("info".into(), "app".into(), "c".into(), None);
+        // Buffer full. Now push duplicate of last — should dedup, not wrap
+        buf.push("info".into(), "app".into(), "c".into(), None);
+
+        assert_eq!(buf.len(), 3);
+        let entries = buf.get_entries(0);
+        assert_eq!(entries[2].message, "c");
+        assert_eq!(entries[2].repeat_count, 1);
+    }
+}

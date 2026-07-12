@@ -1,0 +1,144 @@
+.list {
+  height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pullIndicator {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  transition: height 0.15s ease;
+}
+
+.pullReady {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.errorBanner {
+  padding: 8px 16px;
+  background: rgba(244, 135, 113, 0.1);
+  color: var(--error);
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  color: var(--fg-muted);
+  padding: 32px 16px;
+}
+
+.emptyIcon {
+  opacity: 0.3;
+  margin-bottom: 8px;
+}
+
+.emptyTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+.emptyHint {
+  font-size: 13px;
+  text-align: center;
+  max-width: 240px;
+}
+
+/* Loading skeleton */
+.skeleton {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.skeletonIcon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  animation: shimmer 1.5s ease infinite;
+}
+
+.skeletonBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.skeletonLine {
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  animation: shimmer 1.5s ease infinite;
+}
+
+/* Pull-to-refresh in-progress spinner */
+.refreshSpinner {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+  color: var(--accent);
+}
+
+.refreshSpinner > svg {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+.fab {
+  position: fixed;
+  bottom: calc(64px + 12px);
+  right: 16px;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  -webkit-tap-highlight-color: transparent;
+  z-index: 10;
+}
+
+.fab:active {
+  opacity: 0.8;
+  transform: scale(0.95);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeletonIcon,
+  .skeletonLine,
+  .refreshSpinner > svg {
+    animation: none;
+    opacity: 0.6;
+  }
+}

@@ -1,0 +1,91 @@
+.menu {
+  position: fixed;
+  min-width: 180px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-dropdown);
+  padding: 4px;
+  z-index: 1000;
+  animation: fadeIn 0.1s ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  font-size: var(--font-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.item:hover:not(.disabled) {
+  background: var(--bg-highlight);
+}
+
+.disabled {
+  color: var(--fg-muted);
+  cursor: not-allowed;
+}
+
+.label {
+  flex: 1;
+}
+
+.shortcut {
+  margin-left: 20px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.separator {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 8px;
+}
+
+.itemWrap {
+  position: relative;
+}
+
+.arrow {
+  margin-left: 8px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.submenu {
+  position: fixed;
+  width: max-content;
+  min-width: 160px;
+  max-height: 400px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-dropdown);
+  padding: 4px;
+  z-index: 1001;
+}
+
+.submenu .item {
+  white-space: nowrap;
+}

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Triage: code review that understands what changed — FastAF Blog</title>
+  <meta name="description" content="Every AI IDE can generate code. None of them review the diff before you commit. FastAF's AI Triage classifies every changed file by risk, relevance, and category — before your PR even exists." />
+
+  <meta property="og:title" content="AI Triage: code review that understands what changed" />
+  <meta property="og:description" content="Heuristic pre-classification + LLM analysis of your git diff, per-file, with streaming progress. A code review assistant built into your terminal workspace." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/ksg98/fastaf/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>May 5, 2026</time>
+      <h1>AI Triage: code review that understands what changed</h1>
+      <p class="blog-post-summary">Every AI IDE can generate code. None of them review the diff before you commit. FastAF's AI Triage classifies every changed file by risk, relevance, and category — streaming results as the LLM works through your changes.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>The problem nobody is solving</h2>
+      <p>You've been using AI coding agents for months. Claude Code, Codex, Gemini CLI — they write code fast. Sometimes too fast. You end up with a 47-file diff and a vague sense that you should review it before pushing.</p>
+      <p>So you open <code>git diff</code>. Forty-seven files. Half of them are lock files and config changes. A quarter are test files mirroring the actual changes. Somewhere in the remaining dozen files are the changes that actually matter — the ones that could break production, change an API contract, or introduce a subtle bug.</p>
+      <p>You scan them linearly, top to bottom, giving equal attention to <code>pnpm-lock.yaml</code> and <code>auth_middleware.rs</code>. By file 30, your attention has drifted. The important change in file 38 gets a cursory glance.</p>
+      <p>Every AI IDE on the market can <em>generate</em> code. Not a single one helps you <em>triage</em> what changed.</p>
+    </div>
+
+    <figure class="blog-figure">
+      <img src="/public/blog/ai-triage/command-palette.png" alt="Command palette with AI Triage as the first result in the Panels category" />
+      <figcaption>AI Triage lives in the command palette — one keystroke away from any terminal.</figcaption>
+    </figure>
+
+    <div class="blog-section">
+      <h2>What AI Triage does</h2>
+      <p>One click on the triage button in the sidebar. FastAF reads your <code>git diff</code>, classifies every changed file, and presents them sorted by what needs your attention:</p>
+      <ul>
+        <li><strong>Relevance</strong> — high, medium, or low. A schema migration is high. A lock file is low.</li>
+        <li><strong>Category</strong> — business logic, API surface, schema, config, test, boilerplate, or style.</li>
+        <li><strong>Risk</strong> — breaking change, behavioral change, or cosmetic.</li>
+        <li><strong>Summary</strong> — one sentence explaining what changed in this file and why it matters.</li>
+      </ul>
+      <p>The result is a prioritized review list. You spend your attention where it counts.</p>
+    </div>
+
+    <figure class="blog-figure">
+      <img src="/public/blog/ai-triage/hero.png" alt="AI Triage panel showing 2 high-relevance files, 1 medium, and 6 low, with per-file risk badges, summaries, and Diff/Edit buttons" />
+      <figcaption>AI Triage reviewing its own code changes — business logic flagged high, a binary sidecar flagged for provenance verification, blog metadata flagged medium as config. Six low-relevance files collapsed at the bottom.</figcaption>
+    </figure>
+
+    <div class="blog-section">
+      <h2>Two-layer classification</h2>
+      <p>The system doesn't just throw everything at an LLM and wait. It runs a two-layer pipeline:</p>
+      <p><strong>Layer 1: Heuristic (instant, zero tokens).</strong> Lock files (<code>Cargo.lock</code>, <code>pnpm-lock.yaml</code>, <code>yarn.lock</code>...), generated code (protobuf output, codegen), CI configs, documentation, static assets, and formatting-only changes are classified locally. No API call needed. SQL migrations are auto-flagged as high-relevance schema changes — because you always want to review those.</p>
+      <p><strong>Layer 2: LLM (streaming, per-file).</strong> Everything that survives the heuristic filter gets sent to the LLM. But not all at once — file by file, with streaming progress events. As each file is classified, the result appears in the panel immediately. You can start reviewing high-risk files while the LLM is still working through the rest.</p>
+      <p>The heuristic layer typically handles 30-50% of files in a real diff. That's 30-50% fewer tokens, with instant results for the obvious stuff.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Multi-turn conversation</h2>
+      <p>Triage doesn't stop at classification. Each triage session is backed by a <code>TriageSession</code> struct that maintains conversation history with the LLM. After the initial classification, you can ask follow-up questions about specific findings:</p>
+      <ul>
+        <li>"Why did you flag <code>auth.rs</code> as a breaking change?"</li>
+        <li>"Is this schema migration safe to run on a table with 50M rows?"</li>
+        <li>"What's the relationship between the changes in <code>handler.rs</code> and <code>types.rs</code>?"</li>
+      </ul>
+      <p>The LLM has the full diff context in its conversation history — it can answer questions about relationships between files, not just individual changes.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Caching and refresh</h2>
+      <p>Real review workflows aren't one-shot. You triage, fix something, re-run. The system hashes each file's diff content. When you hit refresh, files that haven't changed get their cached classification instantly. Only modified files go back through the LLM.</p>
+      <p>If the set of changed files itself changes (a new file appears, or one is removed), the session resets its overview summary so the LLM gets a fresh picture of the overall change.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Provider-agnostic</h2>
+      <p>AI Triage plugs into FastAF's provider registry. The <code>triage</code> slot can be assigned to any configured provider — Anthropic, OpenAI, OpenRouter, Ollama (local), or any OpenAI-compatible endpoint. You pick the model that fits your budget and privacy requirements. Run it against a local LLM if the diff contains sensitive code.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Why this doesn't exist elsewhere</h2>
+      <p>AI-powered code review exists. GitHub Copilot reviews PRs. CodeRabbit, Codacy, and others analyze pull requests on CI. But they all share the same constraint: they operate on the PR <em>after</em> you push.</p>
+      <p>That's too late in the workflow. By the time a CI bot comments on your PR, you've already context-switched. You need to go back, re-read the diff, understand the comment, and make fixes. It's a round-trip that breaks flow.</p>
+      <p>AI Triage runs locally, before you commit. It's part of the "am I done?" check — the moment between finishing the work and pushing it. That's when you're most receptive to feedback, because you still have the full context in your head.</p>
+      <p>IDE extensions like Copilot and Cursor are focused on <em>generation</em> — autocomplete, inline chat, apply-in-editor. They help you write code. They don't help you assess what was written. The diff triage role is unoccupied in their UX.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The implementation</h2>
+      <p>1,800 lines of Rust. The heuristic classifier knows about 30+ file patterns across lock files, config, CI, docs, assets, migrations, and formatting. The LLM integration uses JSONL streaming — each line is either a summary object or a file classification object, parsed incrementally as the model generates. Tool use lets the LLM call back into the repo for additional context (reading files, checking git blame) when it needs more information to classify accurately.</p>
+      <p>The frontend panel updates progressively — files appear sorted by relevance as they're classified, with a progress indicator showing how many files remain. Each file card has a "Diff" button that opens the relevant file diff in context, so you can go from "this is flagged as high-risk" to reading the actual code in one click.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Customizable prompts</h2>
+      <p>The system prompt that guides the LLM's classification is fully editable. In Settings &gt; Agents, the AI Prompts editor lets you modify the triage prompt — or any other AI prompt — with a textarea, a "Modified" indicator, and a reset-to-default button. If you work on a codebase where migrations are routine or certain file patterns need special handling, you can tune the prompt to match your workflow.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What's next</h2>
+      <p>We're exploring branch-vs-branch triage (not just working tree diff), integration with the PR workflow so triage results can be attached as PR comments, and pattern learning — the system noticing that certain file patterns in your repo always get the same classification and promoting them to heuristic rules automatically.</p>
+      <p>The gap in AI coding tools isn't generation. It's review. AI Triage is our answer.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/ksg98/fastaf/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

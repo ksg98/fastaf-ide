@@ -1,0 +1,203 @@
+import type { AgentType } from "../agents";
+import type { RateLimitInfo } from "../rate-limit";
+import type { BranchPrStatus } from "../types";
+
+/** Partial PR status for preset overrides */
+export type PrOverride = Partial<BranchPrStatus>;
+
+/** Preset scenario definition */
+export interface Preset {
+	description: string;
+	pr?: PrOverride;
+	rateLimit?: RateLimitInfo[];
+}
+
+/** Default PR values shared by presets */
+const basePr: BranchPrStatus = {
+	branch: "",
+	number: 42,
+	title: "Simulated PR",
+	state: "OPEN",
+	url: "https://github.com/sim/repo/pull/42",
+	additions: 120,
+	deletions: 45,
+	checks: { passed: 5, failed: 0, pending: 0, total: 5 },
+	check_details: [
+		{ context: "ci/build", state: "SUCCESS" },
+		{ context: "ci/test", state: "SUCCESS" },
+		{ context: "ci/lint", state: "SUCCESS" },
+		{ context: "ci/typecheck", state: "SUCCESS" },
+		{ context: "ci/deploy-preview", state: "SUCCESS" },
+	],
+	author: "sim-user",
+	commits: 3,
+	mergeable: "MERGEABLE",
+	merge_state_status: "CLEAN",
+	review_decision: "APPROVED",
+	viewer_did_approve: false,
+	labels: [],
+	is_draft: false,
+	base_ref_name: "main",
+	head_ref_oid: "abc1234567890",
+	created_at: new Date(Date.now() - 86400000).toISOString(),
+	updated_at: new Date().toISOString(),
+	merge_state_label: { label: "Ready to merge", css_class: "clean" },
+	review_state_label: { label: "Approved", css_class: "approved" },
+	merge_commit_allowed: true,
+	squash_merge_allowed: true,
+	rebase_merge_allowed: true,
+};
+
+/** Derive merge_state_label from mergeable/merge_state_status when not explicitly set.
+ *  CSS classes match Rust classify_merge_state() output. */
+function deriveMergeLabel(pr: BranchPrStatus): { label: string; css_class: string } {
+	if (pr.mergeable === "CONFLICTING") return { label: "Conflicts", css_class: "conflicting" };
+	switch (pr.merge_state_status) {
+		case "CLEAN":
+			return { label: "Ready to merge", css_class: "clean" };
+		case "BEHIND":
+			return { label: "Behind base", css_class: "behind" };
+		case "BLOCKED":
+			return { label: "Blocked", css_class: "blocked" };
+		case "UNSTABLE":
+			return { label: "Unstable", css_class: "blocked" };
+		case "DIRTY":
+			return { label: "Conflicts", css_class: "conflicting" };
+		case "DRAFT":
+			return { label: "Draft", css_class: "behind" };
+		default:
+			return { label: "Ready to merge", css_class: "clean" };
+	}
+}
+
+/** Derive review_state_label from review_decision when not explicitly set.
+ *  CSS classes match Rust classify_review_state() output. */
+function deriveReviewLabel(pr: BranchPrStatus): { label: string; css_class: string } {
+	switch (pr.review_decision) {
+		case "APPROVED":
+			return { label: "Approved", css_class: "approved" };
+		case "CHANGES_REQUESTED":
+			return { label: "Changes requested", css_class: "changes-requested" };
+		case "REVIEW_REQUIRED":
+			return { label: "Review required", css_class: "review-required" };
+		default:
+			return { label: "Approved", css_class: "approved" };
+	}
+}
+
+/** Merge a partial override with base PR defaults, using the given branch name.
+ *  Auto-derives merge/review labels from state fields when not explicitly set. */
+export function buildPrStatus(branch: string, override?: PrOverride): BranchPrStatus {
+	const merged = { ...basePr, branch, ...override };
+	// Auto-derive labels unless explicitly overridden
+	if (!override?.merge_state_label) {
+		merged.merge_state_label = deriveMergeLabel(merged);
+	}
+	if (!override?.review_state_label) {
+		merged.review_state_label = deriveReviewLabel(merged);
+	}
+	return merged;
+}
+
+function rateLimitFor(agent: AgentType, minutes: number): RateLimitInfo {
+	return {
+		agentType: agent,
+		sessionId: `sim-${agent}-${Date.now()}`,
+		retryAfterMs: minutes * 60 * 1000,
+		message: `Simulated rate limit for ${agent}`,
+		detectedAt: Date.now(),
+	};
+}
+
+export const PRESETS: Record<string, Preset> = {
+	"pr-ready": {
+		description: "Open PR, approved, all CI passing, mergeable",
+		pr: {
+			state: "OPEN",
+			mergeable: "MERGEABLE",
+			merge_state_status: "CLEAN",
+			review_decision: "APPROVED",
+			checks: { passed: 5, failed: 0, pending: 0, total: 5 },
+		},
+	},
+
+	"pr-conflict": {
+		description: "Open PR, merge conflict, changes requested",
+		pr: {
+			state: "OPEN",
+			mergeable: "CONFLICTING",
+			merge_state_status: "DIRTY",
+			review_decision: "CHANGES_REQUESTED",
+			checks: { passed: 3, failed: 1, pending: 0, total: 4 },
+			check_details: [
+				{ context: "ci/build", state: "SUCCESS" },
+				{ context: "ci/test", state: "FAILURE" },
+				{ context: "ci/lint", state: "SUCCESS" },
+				{ context: "ci/typecheck", state: "SUCCESS" },
+			],
+		},
+	},
+
+	"pr-draft": {
+		description: "Draft PR, CI failing, review required",
+		pr: {
+			state: "OPEN",
+			is_draft: true,
+			mergeable: "UNKNOWN",
+			merge_state_status: "DRAFT",
+			review_decision: "REVIEW_REQUIRED",
+			checks: { passed: 1, failed: 2, pending: 1, total: 4 },
+			check_details: [
+				{ context: "ci/build", state: "FAILURE" },
+				{ context: "ci/test", state: "FAILURE" },
+				{ context: "ci/lint", state: "SUCCESS" },
+				{ context: "ci/typecheck", state: "PENDING" },
+			],
+		},
+	},
+
+	"pr-behind": {
+		description: "Open PR, behind base branch",
+		pr: {
+			state: "OPEN",
+			mergeable: "MERGEABLE",
+			merge_state_status: "BEHIND",
+			review_decision: "APPROVED",
+			checks: { passed: 5, failed: 0, pending: 0, total: 5 },
+		},
+	},
+
+	"ci-pending": {
+		description: "PR with checks still running",
+		pr: {
+			state: "OPEN",
+			mergeable: "UNKNOWN",
+			merge_state_status: "BLOCKED",
+			review_decision: "REVIEW_REQUIRED",
+			checks: { passed: 2, failed: 0, pending: 3, total: 5 },
+			check_details: [
+				{ context: "ci/build", state: "PENDING" },
+				{ context: "ci/test", state: "PENDING" },
+				{ context: "ci/lint", state: "SUCCESS" },
+				{ context: "ci/typecheck", state: "SUCCESS" },
+				{ context: "ci/deploy-preview", state: "PENDING" },
+			],
+		},
+	},
+
+	"rate-limited": {
+		description: "Claude rate limited",
+		rateLimit: [rateLimitFor("claude", 15)],
+	},
+
+	"all-down": {
+		description: "All agents rate limited",
+		rateLimit: [
+			rateLimitFor("claude", 15),
+			rateLimitFor("gemini", 10),
+			rateLimitFor("opencode", 20),
+			rateLimitFor("aider", 5),
+			rateLimitFor("codex", 30),
+		],
+	},
+};

@@ -1,0 +1,278 @@
+#[cfg(feature = "desktop")]
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+#[cfg(feature = "desktop")]
+use tauri::{App, Wry};
+
+/// Build the native system menu bar.
+///
+/// Custom items use string IDs (e.g. "new-tab") that are emitted to the frontend
+/// via `app.emit("menu-action", id)` so the JS side can dispatch to the same
+/// handlers used by keyboard shortcuts.
+pub fn build_menu(app: &App) -> Result<tauri::menu::Menu<Wry>, tauri::Error> {
+    let is_macos = cfg!(target_os = "macos");
+
+    // ---------- helpers for custom items with accelerators ----------
+    macro_rules! item {
+        ($id:expr, $label:expr, $accel:expr) => {
+            MenuItemBuilder::with_id($id, $label)
+                .accelerator($accel)
+                .build(app)?
+        };
+        ($id:expr, $label:expr) => {
+            MenuItemBuilder::with_id($id, $label).build(app)?
+        };
+    }
+
+    // ---------- File ----------
+    let mut file = SubmenuBuilder::new(app, "&File");
+    file = file
+        .item(&item!("new-tab", "New Tab", "CmdOrCtrl+T"))
+        .item(&item!("new-file", "New File…", "CmdOrCtrl+N"))
+        .item(&item!("close-tab", "Close Tab", "CmdOrCtrl+W"))
+        .item(&item!(
+            "reopen-closed-tab",
+            "Reopen Closed Tab",
+            "CmdOrCtrl+Shift+T"
+        ))
+        .separator()
+        .item(&item!("open-file", "Open File…", "CmdOrCtrl+O"))
+        .item(&item!("open-folder", "Open Folder…", "CmdOrCtrl+Shift+O"))
+        .item(&item!("open-path", "Open Path…", "CmdOrCtrl+Alt+O"))
+        .separator()
+        .item(&item!("settings", "Settings", "CmdOrCtrl+,"));
+
+    if !is_macos {
+        // On Windows/Linux, Quit lives in File menu
+        file = file
+            .separator()
+            .item(&item!("quit-app", "Quit", "CmdOrCtrl+Q"));
+    }
+    let file = file.build()?;
+
+    // ---------- Edit (predefined OS items) ----------
+    let edit = SubmenuBuilder::new(app, "&Edit")
+        .item(&PredefinedMenuItem::undo(app, None)?)
+        .item(&PredefinedMenuItem::redo(app, None)?)
+        .separator()
+        .item(&PredefinedMenuItem::cut(app, None)?)
+        .item(&item!("copy", "Copy", "CmdOrCtrl+C"))
+        // Paste stays native: a custom CmdOrCtrl+V item routes to navigator.clipboard.readText(),
+        // which triggers the macOS Sequoia "Paste" system confirmation popup. The native paste
+        // reaches the focused keyInputRef → CanvasTerminal's `paste` event handler (bracketed
+        // paste + image support) with no prompt.
+        .item(&PredefinedMenuItem::paste(app, None)?)
+        .item(&PredefinedMenuItem::select_all(app, None)?)
+        .separator()
+        .item(&item!("find-in-terminal", "Find in Content", "CmdOrCtrl+F"))
+        .separator()
+        .item(&item!("clear-terminal", "Clear Terminal", "CmdOrCtrl+L"))
+        .item(&item!(
+            "clear-scrollback",
+            "Clear Scrollback",
+            "CmdOrCtrl+K"
+        ))
+        .item(&item!(
+            "refresh-terminal",
+            "Refresh Terminal",
+            "CmdOrCtrl+Shift+L"
+        ))
+        .build()?;
+
+    // ---------- View ----------
+    let view = SubmenuBuilder::new(app, "&View")
+        .item(&item!("toggle-sidebar", "Toggle Sidebar", "CmdOrCtrl+["))
+        .separator()
+        .item(&item!("split-right", "Split Right", "CmdOrCtrl+\\"))
+        .item(&item!("split-down", "Split Down", "CmdOrCtrl+Alt+\\"))
+        .item(&item!(
+            "zoom-pane",
+            "Maximize/Restore Pane",
+            "CmdOrCtrl+Shift+Enter"
+        ))
+        .item(&item!(
+            "focus-mode",
+            "Toggle Focus Mode",
+            "CmdOrCtrl+Alt+Enter"
+        ))
+        .separator()
+        .item(&item!("zoom-in", "Zoom In", "CmdOrCtrl+="))
+        .item(&item!("zoom-out", "Zoom Out", "CmdOrCtrl+-"))
+        .item(&item!("zoom-reset", "Reset Zoom", "CmdOrCtrl+0"))
+        .separator()
+        .item(&item!(
+            "zoom-in-all",
+            "Zoom In All Terminals",
+            "CmdOrCtrl+Shift+="
+        ))
+        .item(&item!(
+            "zoom-out-all",
+            "Zoom Out All Terminals",
+            "CmdOrCtrl+Shift+-"
+        ))
+        .item(&item!(
+            "zoom-reset-all",
+            "Reset Zoom All Terminals",
+            "CmdOrCtrl+Shift+0"
+        ))
+        .separator()
+        .item(&item!("file-browser", "File Browser", "CmdOrCtrl+E"))
+        .item(&item!("diff-panel", "Diff Panel", "CmdOrCtrl+D"))
+        .item(&item!("markdown-panel", "Markdown Panel", "CmdOrCtrl+M"))
+        .item(&item!("notes-panel", "Notes Panel", "CmdOrCtrl+N"))
+        .item(&item!("outline-panel", "Outline Panel", "CmdOrCtrl+Alt+L"))
+        .item(&item!("ai-chat", "AI Chat", "CmdOrCtrl+Alt+A"))
+        .item(&item!("compose-panel", "Compose Panel", "CmdOrCtrl+I"))
+        .item(&item!(
+            "global-workspace",
+            "Global Workspace",
+            "CmdOrCtrl+Shift+X"
+        ))
+        .build()?;
+
+    // ---------- Go ----------
+    let mut go = SubmenuBuilder::new(app, "&Go");
+    go = go
+        .item(&item!("next-tab", "Next Tab", "CmdOrCtrl+Shift+]"))
+        .item(&item!("prev-tab", "Previous Tab", "CmdOrCtrl+Shift+["))
+        .separator();
+
+    // Tab 1-9 shortcuts
+    for i in 1..=9u8 {
+        go = go.item(&item!(
+            format!("switch-tab-{i}"),
+            format!("Switch to Tab {i}"),
+            format!("CmdOrCtrl+{i}")
+        ));
+    }
+
+    go = go
+        .separator()
+        .item(&item!(
+            "block-prev",
+            "Previous Command Block",
+            "CmdOrCtrl+Shift+Up"
+        ))
+        .item(&item!(
+            "block-next",
+            "Next Command Block",
+            "CmdOrCtrl+Shift+Down"
+        ))
+        .item(&item!(
+            "block-fold-toggle",
+            "Toggle Block Fold",
+            "CmdOrCtrl+Shift+."
+        ))
+        .item(&item!(
+            "block-search-toggle",
+            "Search in Block",
+            "CmdOrCtrl+Shift+B"
+        ));
+
+    let go = go.build()?;
+
+    // ---------- Tools ----------
+    let tools = SubmenuBuilder::new(app, "&Tools")
+        .item(&item!("command-palette", "Command Palette", "CmdOrCtrl+P"))
+        .separator()
+        .item(&item!(
+            "prompt-library",
+            "Prompt Library",
+            "CmdOrCtrl+Shift+K"
+        ))
+        .item(&item!("run-command", "Run Command", "CmdOrCtrl+R"))
+        .item(&item!(
+            "edit-run-command",
+            "Edit && Run Command",
+            "CmdOrCtrl+Shift+R"
+        ))
+        .item(&item!(
+            "content-search",
+            "Search File Contents",
+            "CmdOrCtrl+Shift+F"
+        ))
+        .separator()
+        .item(&item!("git-operations", "Git Panel", "CmdOrCtrl+Shift+D"))
+        .item(&item!("branches", "Branches", "CmdOrCtrl+G"))
+        .item(&item!("diff-scroll", "Diff Scroll", "CmdOrCtrl+Shift+G"))
+        .item(&item!(
+            "worktree-manager",
+            "Worktree Manager",
+            "CmdOrCtrl+Shift+W"
+        ))
+        .item(&item!(
+            "quick-branch-switch",
+            "Quick Branch Switch",
+            "CmdOrCtrl+B"
+        ))
+        .separator()
+        .item(&item!(
+            "activity-dashboard",
+            "Activity Dashboard",
+            "CmdOrCtrl+Shift+A"
+        ))
+        .item(&item!("mcp-popup", "MCP Servers", "CmdOrCtrl+Shift+I"))
+        .item(&item!("error-log", "Error Log", "CmdOrCtrl+Shift+E"))
+        .item(&item!("task-queue", "Task Queue", "CmdOrCtrl+J"))
+        .item(&item!("tunnels", "SSH Tunnels"))
+        .item(&item!("process-manager", "Process Manager"))
+        .build()?;
+
+    // ---------- Help ----------
+    let mut help = SubmenuBuilder::new(app, "&Help");
+    help = help
+        .item(&item!("help-panel", "Help Panel", "CmdOrCtrl+Shift+/"))
+        .item(&item!("online-guide", "Online Guide"))
+        .item(&item!("changelog", "Changelog"))
+        .separator();
+    if !is_macos {
+        help = help.item(&item!("check-for-updates", "Check for Updates…"));
+    }
+    let help = help.item(&item!("about", "About FastAF")).build()?;
+
+    // ---------- Assemble ----------
+    let mut menu = MenuBuilder::new(app);
+
+    if is_macos {
+        // macOS: App menu with standard items
+        let app_menu = SubmenuBuilder::new(app, "FastAF")
+            .item(&PredefinedMenuItem::about(
+                app,
+                Some("About FastAF"),
+                None,
+            )?)
+            .separator()
+            .item(&item!("check-for-updates", "Check for Updates…"))
+            .separator()
+            .item(&PredefinedMenuItem::services(app, None)?)
+            .separator()
+            .item(&PredefinedMenuItem::hide(app, None)?)
+            .item(&PredefinedMenuItem::hide_others(app, None)?)
+            .item(&PredefinedMenuItem::show_all(app, None)?)
+            .separator()
+            .item(&item!("quit-app", "Quit FastAF", "CmdOrCtrl+Q"))
+            .build()?;
+        menu = menu.item(&app_menu);
+    }
+
+    let menu = menu
+        .item(&file)
+        .item(&edit)
+        .item(&view)
+        .item(&go)
+        .item(&tools)
+        .item(&help)
+        .build()?;
+
+    Ok(menu)
+}
+
+#[cfg(test)]
+mod tests {
+    // Smoke test: verify the module compiles and the function signature is correct.
+    // Full menu building requires a Tauri App handle, which is only available
+    // at runtime, so we can't unit-test build_menu() without an integration harness.
+    #[test]
+    fn module_compiles() {
+        // If this test runs, the menu module compiles correctly.
+    }
+}

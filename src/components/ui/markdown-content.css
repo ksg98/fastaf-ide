@@ -1,0 +1,189 @@
+/* Styles for #markdown-content (ContentRenderer innerHTML output).
+   Global selectors required — CSS modules don't apply to innerHTML. */
+
+#markdown-content {
+  min-width: 0;
+  padding: 16px;
+  font-family: var(--font-ui);
+  color: var(--fg-primary);
+  line-height: 1.6;
+  font-size: var(--font-lg);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+#markdown-content h1,
+#markdown-content h2,
+#markdown-content h3,
+#markdown-content h4,
+#markdown-content h5,
+#markdown-content h6 {
+  margin-top: 24px;
+  margin-bottom: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--fg-primary);
+}
+
+#markdown-content h1 {
+  font-size: 2em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3em;
+}
+
+#markdown-content h2 {
+  font-size: 1.5em;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.3em;
+}
+
+#markdown-content h3 {
+  font-size: 1.25em;
+}
+
+#markdown-content h4 {
+  font-size: 1em;
+}
+
+#markdown-content h5 {
+  font-size: 0.875em;
+}
+
+#markdown-content h6 {
+  font-size: 0.85em;
+  color: var(--fg-secondary);
+}
+
+#markdown-content p {
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+#markdown-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+#markdown-content a:hover {
+  text-decoration: underline;
+}
+
+#markdown-content ul,
+#markdown-content ol {
+  margin-top: 0;
+  margin-bottom: 16px;
+  padding-left: 2em;
+}
+
+#markdown-content li {
+  margin-top: 0.25em;
+}
+
+#markdown-content li > p {
+  margin-top: 16px;
+}
+
+#markdown-content li + li {
+  margin-top: 0.25em;
+}
+
+#markdown-content code {
+  padding: 0.2em 0.4em;
+  margin: 0;
+  font-size: 85%;
+  background-color: rgba(175, 184, 193, 0.2);
+  border-radius: var(--radius-lg);
+  font-family: var(--font-mono);
+}
+
+#markdown-content pre {
+  padding: 16px;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
+  background-color: var(--bg-secondary);
+  border-radius: var(--radius-lg);
+  margin-bottom: 16px;
+}
+
+#markdown-content pre code {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
+  line-height: inherit;
+  word-wrap: normal;
+  background-color: transparent;
+  border: 0;
+}
+
+#markdown-content .mermaid-diagram {
+  display: flex;
+  justify-content: center;
+  margin: 16px 0;
+  overflow-x: auto;
+}
+
+#markdown-content .mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+#markdown-content blockquote {
+  margin: 0 0 16px;
+  padding: 0 1em;
+  color: var(--fg-secondary);
+  border-left: 0.25em solid var(--border);
+}
+
+#markdown-content blockquote > :first-child {
+  margin-top: 0;
+}
+
+#markdown-content blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+#markdown-content table {
+  border-spacing: 0;
+  border-collapse: collapse;
+  margin-top: 0;
+  margin-bottom: 16px;
+  width: 100%;
+  overflow: auto;
+}
+
+#markdown-content table th {
+  font-weight: 600;
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+  background-color: var(--bg-secondary);
+}
+
+#markdown-content table td {
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+}
+
+#markdown-content table tr {
+  background-color: var(--bg-primary);
+  border-top: 1px solid var(--border);
+}
+
+#markdown-content table tr:nth-child(2n) {
+  background-color: var(--bg-secondary);
+}
+
+#markdown-content img {
+  max-width: 100%;
+  box-sizing: content-box;
+  background-color: var(--bg-primary);
+}
+
+#markdown-content hr {
+  height: 0.25em;
+  padding: 0;
+  margin: 24px 0;
+  background-color: var(--border);
+  border: 0;
+}

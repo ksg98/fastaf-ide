@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Running your agents from the couch, on an iPad — FastAF Blog</title>
+  <meta name="description" content="v1.5.1 makes the full FastAF desktop UI usable from an iPad over Tailscale — not a cut-down mobile view. The friction we removed to make couch-mode supervision feel like sitting at the desk." />
+
+  <meta property="og:title" content="Running your agents from the couch, on an iPad — FastAF" />
+  <meta property="og:description" content="Not a mobile app — the real desktop UI, in Safari on an iPad, over Tailscale. The seven fixes in v1.5.1 that closed the gap between the desk and the couch." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/ksg98/fastaf/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>June 27, 2026</time>
+      <h1>Running your agents from the couch, on an iPad</h1>
+      <p class="blog-post-summary">You kick off a long agent run and want to leave the desk — but still keep an eye on it. We already had a mobile view for that. What we wanted in v1.5.1 was different: the <em>whole</em> desktop UI, in Safari on an iPad, over Tailscale, with almost every function intact. This is the friction we had to remove to make the couch feel like the desk.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>The desk is the bottleneck</h2>
+      <p>The whole point of running coding agents is that they work while you don't have to. But "supervising" still pins you to the desk: an agent stops at a Y/n prompt, hits a rate limit, or finishes a task, and someone has to notice and nudge it. Do that for a few hours and the chair, not the agent, becomes the bottleneck.</p>
+      <p>We <a href="remote-mobile.html">already built a mobile experience</a> for exactly this — a phone-shaped, DOM-rendered view you open over Tailscale to glance at sessions and tap a reply. It's great on a phone. But on an iPad it felt like wearing someone else's coat: a tablet has a real screen and a real keyboard, and the cut-down mobile view leaves most of the app behind. You can't reorder repos, drive the command palette, open the git panel, or use the smart-prompt buttons. You're glancing, not working.</p>
+      <p>So the goal for v1.5.1 was blunt: open the <strong>actual desktop UI</strong> in a browser on the iPad and have it just work — sidebar, tabs, panels, terminals, the lot — well enough to run a full session from the sofa.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Ship the real UI, don't rebuild it</h2>
+      <p>The key decision was to not build an "iPad app." FastAF already serves its frontend over HTTP for remote access, and the desktop bundle is a web app to begin with. So the iPad just loads the same UI the desktop window renders — same SolidJS app, same components — over a Tailscale link to your machine. Add it to the Home Screen and it runs full-screen as a PWA.</p>
+
+      <figure class="blog-figure">
+        <svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="iPad Safari or PWA loads the same desktop UI from the machine over an encrypted Tailscale link" style="width:100%;height:auto;background:#1a1a1a;border:1px solid #2e2e32;border-radius:8px;font-family:ui-monospace,Menlo,monospace">
+          <text x="380" y="26" text-anchor="middle" fill="#666666" font-size="11">the tablet renders the same app the desktop window does — nothing rebuilt</text>
+
+          <!-- iPad -->
+          <rect x="30" y="60" width="180" height="120" rx="8" fill="#1e1e1e" stroke="#59a8dd"/>
+          <text x="120" y="92" text-anchor="middle" fill="#59a8dd" font-size="13">iPad — Safari / PWA</text>
+          <text x="120" y="116" text-anchor="middle" fill="#a0a0a0" font-size="11">full desktop UI</text>
+          <text x="120" y="134" text-anchor="middle" fill="#a0a0a0" font-size="11">touch · soft keyboard</text>
+          <text x="120" y="152" text-anchor="middle" fill="#a0a0a0" font-size="11">dictation · palette</text>
+
+          <!-- link -->
+          <line x1="210" y1="120" x2="320" y2="120" stroke="#4ec9b0" stroke-width="2"/>
+          <polygon points="320,120 312,116 312,124" fill="#4ec9b0"/>
+          <text x="265" y="110" text-anchor="middle" fill="#4ec9b0" font-size="10">Tailscale</text>
+          <text x="265" y="140" text-anchor="middle" fill="#666666" font-size="10">TLS, token auth</text>
+
+          <!-- machine -->
+          <rect x="320" y="60" width="200" height="120" rx="8" fill="#1e1e1e" stroke="#dcdcaa"/>
+          <text x="420" y="92" text-anchor="middle" fill="#dcdcaa" font-size="13">your machine</text>
+          <text x="420" y="116" text-anchor="middle" fill="#a0a0a0" font-size="11">TUIC HTTP server</text>
+          <text x="420" y="134" text-anchor="middle" fill="#a0a0a0" font-size="11">serves the same dist/</text>
+          <text x="420" y="152" text-anchor="middle" fill="#a0a0a0" font-size="11">+ live PTY sessions</text>
+
+          <!-- agents -->
+          <line x1="520" y1="120" x2="600" y2="120" stroke="#59a8dd" stroke-width="2"/>
+          <polygon points="600,120 592,116 592,124" fill="#59a8dd"/>
+          <rect x="600" y="78" width="130" height="84" rx="6" fill="#1e1e1e" stroke="#4ec9b0"/>
+          <text x="665" y="108" text-anchor="middle" fill="#4ec9b0" font-size="12">agents</text>
+          <text x="665" y="128" text-anchor="middle" fill="#a0a0a0" font-size="11">Claude · Codex</text>
+          <text x="665" y="144" text-anchor="middle" fill="#a0a0a0" font-size="11">Gemini · …</text>
+        </svg>
+        <figcaption>No second app to maintain. The iPad loads the same frontend the desktop renders, over an encrypted Tailscale link, and talks to the live PTY sessions on your machine.</figcaption>
+      </figure>
+
+      <p>That decision is also why "make it work on iPad" turned into a list of small, specific bugs rather than a rewrite. Once the same UI runs in mobile Safari instead of a desktop WebView, every assumption it made about having a mouse, a hardware keyboard, and a native menu becomes a paper cut. v1.5.1 is mostly the story of removing those paper cuts.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The things that stood between us and the couch</h2>
+      <p>Each of these was the difference between "almost usable" and "actually usable" on the iPad.</p>
+      <ul>
+        <li><strong>Settings wouldn't load.</strong> Over Tailscale, every config request came back <code>403 — only accessible from localhost</code>. The guard checked the socket address and nothing else, so a request that had already authenticated with a valid session token was still rejected just for arriving from a non-loopback IP. The app booted without its saved layout, and a duplicate tab appeared because session state never hydrated. We made a token-authenticated request first-class: the auth middleware marks every request that passes a gate, and the route guard now accepts loopback <em>or</em> an authenticated caller. On a Tailscale link (encrypted, device-pinned) that's exactly the trust model you want.</li>
+        <li><strong>Scrolling went the wrong way.</strong> Touch-dragging the terminal scrolled it backwards — because the touch path reused the wheel's sign convention, and direct manipulation is the opposite of a wheel. Drag up, content goes up now.</li>
+        <li><strong>The keyboard covered what you were typing, and typing barely worked.</strong> The on-screen keyboard slid up over the prompt; dictation and soft-keyboard input wrote nothing because the desktop relies on <code>keydown</code> + <code>preventDefault</code>, which mobile IME doesn't deliver; and holding Backspace deleted a single character. We lift only the focused terminal above the keyboard with a pure transform (no PTY resize, no SIGWINCH churn), forward IME input events straight to the PTY, and keep a tiny buffer so key-repeat actually repeats.</li>
+        <li><strong>Scrolling the sidebar grabbed a repo.</strong> The repo list is drag-to-reorder, and on touch a 5-pixel vertical swipe — i.e. the start of a scroll — was enough to pick up a repo and start dragging it. Touch drags now arm on a long-press, the standard mobile gesture, so a swipe scrolls and a hold reorders. The mouse path is untouched.</li>
+        <li><strong>The "needs you" signal was unreliable.</strong> An agent parked at an interactive menu sometimes showed a calm green tab instead of the amber question state — the one cue you're relying on from across the room. The backend always knew; the frontend was re-deriving it and second-guessing itself. We made the backend the single source of truth and had the tab, the repo star, and notifications all mirror it.</li>
+        <li><strong>New tabs doubled.</strong> Opening a terminal in the browser sometimes spawned a second, phantom "PTY:" tab — a race where the server's "session created" broadcast beat the create call's own reply, so the client didn't recognize its own session. The browser now reserves the session id before it asks, and the echo is recognized instead of duplicated.</li>
+        <li><strong>No keyboard meant no shortcuts.</strong> On a tablet you don't have <code>Cmd+K</code>, and the browser eats many shortcuts anyway — so half the app, which lives behind the command palette, was unreachable. The toolbar's external-editor button can't do anything in a browser (it launches local apps), so in that slot we now show a <strong>Command Palette</strong> button instead. One tap opens the palette, and everything reachable through it — commands, smart prompts, navigation — comes back.</li>
+      </ul>
+    </div>
+
+    <div class="blog-section">
+      <h2>The tradeoffs we took on purpose</h2>
+      <p>Two of these are worth naming, because we chose them deliberately rather than stumbling into them.</p>
+      <p><strong>Trusting an authenticated remote.</strong> Unlocking config (and agent/prompt actions) for any token-authenticated caller means the session token is the boundary. Over Tailscale that's fine — the link is encrypted and the device is pinned to your tailnet. Over plain HTTP on a local network the token travels in cleartext and could be sniffed, so that's a setup we flag rather than recommend. The default posture is unchanged: loopback always works, unauthenticated remotes are still refused, and the one true remote-code-execution surface (the debug JS-eval endpoint) stays loopback-only regardless.</p>
+      <p><strong>Long-press to drag on touch.</strong> Making touch drags wait for a hold adds a beat before a reorder starts. But it's the only way scroll and reorder can share the same vertical gesture, it matches what every mobile OS already trains your thumb to expect, and it costs the desktop nothing — mouse and trackpad keep their instant 5-pixel threshold.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What it feels like now</h2>
+      <p>You start a run at the desk, walk to the sofa, and open the Home Screen icon. The same sidebar is there with the same repos in the same order. You scroll a terminal with your thumb and it goes the right way. An agent hits a menu and the tab turns amber from across the room; you tap the terminal, dictate a reply, and the keyboard slides the prompt into view instead of burying it. Need to switch branches or fire a smart prompt? Tap the palette button. It is, deliberately, boring — which is the whole point. The couch should be a place you can actually work from, not a place where you squint at a read-only mirror and get up anyway.</p>
+      <p>Almost every desktop function is now within reach on the iPad. The gaps that remain are the genuinely physical ones — drag-and-drop to Finder, launching a local editor — and those belong to the desk by definition. Everything else came to the couch.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/ksg98/fastaf/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

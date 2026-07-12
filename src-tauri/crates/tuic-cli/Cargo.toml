@@ -1,0 +1,22 @@
+[package]
+name = "tuic-cli"
+version.workspace = true
+description = "CLI companion for FastAF — editor opener, session multiplexer, tmux replacement"
+authors = ["Stefano Straus <github.com/sstraus>"]
+edition = "2024"
+
+[[bin]]
+name = "tuic"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

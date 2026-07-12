@@ -1,0 +1,220 @@
+{
+  "posts": [
+    {
+      "slug": "ipad-couch",
+      "title": "Running your agents from the couch, on an iPad",
+      "date": "2026-06-27",
+      "status": "published",
+      "feature": "iPad / browser-desktop (v1.5.1) — full desktop UI over Tailscale",
+      "summary": "Not a cut-down mobile view — the whole desktop UI, in Safari on an iPad, over Tailscale. The fixes in v1.5.1 (config hydration over Tailscale, touch scroll, keyboard occlusion + dictation, sidebar scroll-vs-reorder, the awaiting badge, duplicate tabs, and a Command Palette button) that made couch-mode supervision feel like sitting at the desk.",
+      "screenshots": []
+    },
+    {
+      "slug": "near-native-performance",
+      "title": "Making a WebView terminal feel native",
+      "date": "2026-06-26",
+      "status": "published",
+      "feature": "Performance & usability (v1.5) — near-native terminal latency study",
+      "summary": "A cargo build shouldn't make your terminal stutter. The engineering study behind v1.5's near-native input latency: off-main-thread rendering, a binary frame protocol, and the Apple Silicon QoS discovery that closed the gap — plus the usability sharpening that shipped alongside.",
+      "screenshots": []
+    },
+    {
+      "slug": "ai-chat",
+      "title": "AI Chat: an agent that reads your terminal, not its screenshot",
+      "date": "2026-06-02",
+      "status": "published",
+      "feature": "AI Chat",
+      "summary": "Most chat sidebars are blind to your terminal. AI Chat reads structured OSC 133 state — commands, outputs, exit codes, links — runs local (Ollama) or cloud models, and can arm approval-gated reactive watchers. In beta behind the Experimental toggle.",
+      "screenshots": []
+    },
+    {
+      "slug": "command-blocks",
+      "title": "Command blocks for agent terminals",
+      "date": "2026-05-28",
+      "status": "published",
+      "feature": "Command block system",
+      "summary": "An AI agent's terminal is a wall of text. We segmented it into navigable command blocks — with detection that works even for agents that emit no markers, via heuristic ⏺ tool-call recognition alongside OSC 133 / OSC 7770.",
+      "screenshots": []
+    },
+    {
+      "slug": "auto-standby",
+      "title": "Auto-standby: SIGSTOP for idle agent terminals",
+      "date": "2026-05-23",
+      "status": "published",
+      "feature": "Auto-standby",
+      "summary": "Dozens of idle agent terminals quietly burn CPU and battery. Auto-standby SIGSTOPs the whole process group when a tab is unfocused and idle, and SIGCONTs it the instant you look back or a message arrives.",
+      "screenshots": []
+    },
+    {
+      "slug": "process-monitor",
+      "title": "A built-in process monitor for your terminal trees",
+      "date": "2026-05-18",
+      "status": "published",
+      "feature": "Process stats & monitor",
+      "summary": "When one of a dozen agents pins a core, which one is it? A process monitor reports CPU and RSS for TUIC and every child process tree — over MCP, over HTTP, and as a self-contained dashboard.",
+      "screenshots": []
+    },
+    {
+      "slug": "beta-features",
+      "title": "SSH tunnels, remote access, and the beta features you can try today",
+      "date": "2026-05-10",
+      "status": "published",
+      "feature": "SSH tunnels / tuicommander-remote / AI Triage / AI Watchers / AI Chat / beta",
+      "summary": "A tour of the features behind the Experimental toggle: SSH tunnel management, the tuicommander-remote daemon, AI-powered code triage, terminal watchers, and chat. All in beta — feedback welcome.",
+      "screenshots": []
+    },
+    {
+      "slug": "tuic-remote",
+      "title": "One daemon, every environment: meet tuicommander-remote",
+      "date": "2026-05-08",
+      "status": "published",
+      "feature": "tuicommander-remote / headless daemon / WSL / Docker / remote servers",
+      "summary": "A headless Rust daemon that runs inside WSL, Docker dev containers, and remote servers. The desktop app drives them as if they were local — same protocol, no path translation, no cross-OS shims.",
+      "screenshots": []
+    },
+    {
+      "slug": "ai-triage",
+      "title": "AI Triage: code review that understands what changed",
+      "date": "2026-05-05",
+      "status": "published",
+      "feature": "AI Diff Triage",
+      "summary": "Every AI IDE can generate code. None of them review the diff before you commit. AI Triage classifies every changed file by risk, relevance, and category — streaming results as the LLM works through your changes.",
+      "screenshots": ["hero.png", "command-palette.png"]
+    },
+    {
+      "slug": "cross-agent-orchestration",
+      "title": "Using Codex to orchestrate Claude Code through FastAF",
+      "date": "2026-05-04",
+      "status": "published",
+      "feature": "Cross-agent orchestration / MCP bridge / drive_agent tool",
+      "summary": "Cross-agent orchestration without screen-scraping. FastAF's MCP bridge gives external agents structured terminal state instead of raw ANSI bytes. Here's how to set it up and why it beats tmux.",
+      "screenshots": []
+    },
+    {
+      "slug": "native-terminal",
+      "title": "Why we replaced xterm.js with a native terminal",
+      "date": "2026-05-04",
+      "status": "published",
+      "feature": "Alacritty-based CanvasTerminal / xterm.js removal",
+      "summary": "After months of patching WebGL atlas corruption, scroll jump races, and scrollbar visibility hacks, we replaced xterm.js with an Alacritty-based terminal rendered to Canvas. Fewer workaround files than we had bug fixes.",
+      "screenshots": []
+    },
+    {
+      "slug": "producthunt-launch",
+      "title": "Launched on Product Hunt — and what real users say",
+      "date": "2026-04-26",
+      "status": "published",
+      "feature": "Product Hunt launch",
+      "summary": "FastAF is live on Product Hunt this week. Early reviews from daily users name the same patterns: multi-agent terminal sprawl, worktree isolation, blocking Y/n prompts, and couch-mode supervision from mobile. If you use TUIC, your review moves the needle.",
+      "screenshots": []
+    },
+    {
+      "slug": "one-month-retrospective",
+      "title": "What one person can ship in a month",
+      "date": "2026-04-15",
+      "status": "published",
+      "feature": "Engineering Retrospective — April 2026",
+      "summary": "Fifteen releases, 226 changelog entries, nearly 90,000 lines of code — shipped solo in evenings and weekends. A retrospective on what Claude Code actually compresses, and what it can't.",
+      "screenshots": []
+    },
+    {
+      "slug": "global-workspace",
+      "title": "Global Workspace: one view for all your agents",
+      "date": "2026-04-08",
+      "status": "published",
+      "feature": "Global Workspace / Cross-repo terminal aggregation",
+      "summary": "When you run agents across multiple repos, you lose track of who's doing what. Global Workspace pulls the terminals that matter into a single split-pane view — without moving them.",
+      "screenshots": ["activity-dashboard.png", "sidebar-entry.png"]
+    },
+    {
+      "slug": "integrated-viewers",
+      "title": "Read, diff, and edit without leaving the terminal",
+      "date": "2026-03-29",
+      "status": "published",
+      "feature": "Markdown viewer / Code editor / Side-by-side diff / Clickable paths",
+      "summary": "AI agents reference files constantly. Instead of alt-tabbing to an editor every time, we built markdown, code, and diff viewers right into the terminal workspace.",
+      "screenshots": ["markdown-viewer.png", "code-editor.png", "diff-viewer.png"]
+    },
+    {
+      "slug": "agent-observability",
+      "title": "Knowing what your agents are doing without looking",
+      "date": "2026-03-28",
+      "status": "published",
+      "feature": "Agent status detection / Sound notifications / Activity Dashboard",
+      "summary": "When you run 5 agents in parallel, you can't watch every terminal. We built status detection, sound notifications, and an activity dashboard so you don't have to.",
+      "screenshots": ["status-legend.png", "activity-dashboard.png", "tab-status-dots.png"]
+    },
+    {
+      "slug": "sidebar-workspace",
+      "title": "One sidebar, all your repos",
+      "date": "2026-03-27",
+      "status": "published",
+      "feature": "Sidebar / Multi-repo workspace / PR management",
+      "summary": "When you work across 10+ repositories every day, you need a single place to see branches, worktrees, PRs, and diff stats — without switching tools.",
+      "screenshots": ["sidebar-pr.png"]
+    },
+    {
+      "slug": "remote-mobile",
+      "title": "From the couch to 5G: how we built remote access",
+      "date": "2026-03-26",
+      "status": "published",
+      "feature": "Remote Access / PWA / Tailscale",
+      "summary": "We wanted to check on AI agents without sitting at the desk. After trying session logs, remote proxies, and SSH, we ended up building a full mobile experience.",
+      "screenshots": ["pwa-sessions.png", "pwa-terminal.png", "settings.png", "desktop-remote.png", "pwa-activity.png"]
+    },
+    {
+      "slug": "smart-prompts",
+      "title": "Why we built Smart Prompts",
+      "date": "2026-03-25",
+      "status": "published",
+      "feature": "Smart Prompts",
+      "summary": "We were copy-pasting the same instructions to AI agents every day. So we turned them into one-click actions that know your context.",
+      "screenshots": ["library.png", "editor.png", "git-panel.png"]
+    },
+    {
+      "slug": "terminal-power",
+      "title": "A terminal built for 8-hour sessions",
+      "date": "2026-03-24",
+      "status": "published",
+      "feature": "Split panes / Detach to window / Persistent sessions / Find / Tab management",
+      "summary": "Split panes, detachable windows, persistent sessions, find in content, and up to 50 concurrent terminals. We built a terminal for people who live in it all day.",
+      "screenshots": ["multi-agent-tabs.png", "split-pane.png", "detached-window.png"]
+    },
+    {
+      "slug": "claude-usage",
+      "title": "Tracking your AI usage before the rate limit hits",
+      "date": "2026-03-23",
+      "status": "published",
+      "feature": "Claude Usage Dashboard / Rate limits / Token tracking",
+      "summary": "Running multiple AI agents burns through rate limits fast. We built a usage dashboard so you can see exactly where you stand — and plan your work accordingly.",
+      "screenshots": ["dashboard.png"]
+    },
+    {
+      "slug": "performance",
+      "title": "How we keep it fast with 10 repos and 8 terminals open",
+      "date": "2026-03-22",
+      "status": "published",
+      "feature": "Async git / PTY coalescing / Watcher cache / Bundle splitting",
+      "summary": "A desktop app that manages 10 repos, 8 terminals, and constant git operations can't afford to be slow. Here's the performance work we did under the hood.",
+      "screenshots": []
+    },
+    {
+      "slug": "dictation",
+      "title": "Talking to your AI agents instead of typing",
+      "date": "2026-03-21",
+      "status": "published",
+      "feature": "Voice dictation / Whisper / Push-to-talk",
+      "summary": "Hold a key, speak your instruction, release. The text appears in the terminal. No cloud service, no API key, no latency — Whisper runs locally on your machine.",
+      "screenshots": ["settings.png"]
+    },
+    {
+      "slug": "plugin-system",
+      "title": "Extend FastAF with plugins",
+      "date": "2026-03-20",
+      "status": "published",
+      "feature": "Plugin system / MCP / Sidebar panels / Context menus",
+      "summary": "Every workflow is different. We built a plugin system so you can extend FastAF with custom panels, context menu actions, and MCP integrations.",
+      "screenshots": ["plugins-panel.png"]
+    }
+  ]
+}

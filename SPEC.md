@@ -1,0 +1,372 @@
+# FastAF Specification
+
+**Version:** 1.5.1
+**Last Updated:** 2026-05-04
+
+## Overview
+
+FastAF is a multi-agent terminal orchestrator designed to manage multiple AI coding agents (Claude Code, Gemini CLI, OpenCode, Aider, Codex) in parallel. It provides per-pane zoom, git worktree isolation, and GitHub integration.
+
+## Goals
+
+1. **Parallel Agent Orchestration** - Run 50+ coding agents simultaneously
+2. **Git Worktree Isolation** - Each task gets its own isolated workspace
+3. **Per-Pane Font Control** - Independent zoom levels for each terminal
+4. **Rate Limit Resilience** - Detection and countdown display when agents hit rate limits
+5. **Productivity Features** - Prompt library, keyboard shortcuts, IDE integration
+
+## Architecture
+
+### Technology Stack
+
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| Frontend | SolidJS | Reactive UI with fine-grained reactivity |
+| Terminal | alacritty_terminal | Native VT engine with canvas rendering |
+| Backend | Rust + Tauri | Native PTY management, file system access |
+| Build | Vite | Fast HMR development, optimized production builds (bundle splitting via manualChunks) |
+
+### Backend Execution Model
+
+All Tauri commands that perform I/O (git subprocesses, network, bcrypt) are `async` and run inside `tokio::task::spawn_blocking` to avoid blocking Tokio worker threads. Git data is cached with a 60s TTL, invalidated immediately by `repo_watcher` on file system changes. PTY output is serialized once and reused for both Tauri IPC and event bus broadcast. Frontend coalesces paint triggers via `requestAnimationFrame` (~60 repaints/sec) to reduce canvas render passes during burst output.
+
+### Why SolidJS?
+
+- Fine-grained reactivity without virtual DOM
+- Direct DOM manipulation for terminal performance
+- Compile-time optimizations
+- Smaller bundle size than React/Vue
+- Familiar JSX syntax
+
+### Component Architecture
+
+```
+App
+├── Sidebar
+│   ├── Repository List
+│   └── Terminal List
+├── TabBar
+│   └── Terminal Tabs
+├── Terminal Container
+│   ├── Terminal (CanvasTerminal)
+│   ├── MarkdownPanel
+│   └── IdeasPanel
+├── GitPanel (side panel)
+├── StatusBar
+├── PromptOverlay
+└── PromptDrawer
+```
+
+## State Management
+
+### Stores (SolidJS createStore)
+
+#### terminalsStore
+Manages terminal instances and their state.
+
+```typescript
+interface TerminalState {
+  terminals: Record<string, TerminalData>;
+  activeId: string | null;
+  nextId: number;
+}
+
+interface TerminalData {
+  id: string;
+  sessionId: string | null;
+  fontSize: number;
+  name: string;
+  awaitingInput: AwaitingInputType;
+}
+
+type AwaitingInputType = "question" | "error" | null;
+```
+
+#### repositoriesStore
+Manages the list of git repositories.
+
+```typescript
+interface Repository {
+  path: string;
+  displayName: string;
+}
+```
+
+#### settingsStore
+User preferences with localStorage persistence.
+
+```typescript
+interface SettingsState {
+  ide: IdeType;
+  fontFamily: FontType;
+  defaultFontSize: number;
+}
+```
+
+#### promptLibraryStore
+Saved prompts with variable substitution.
+
+```typescript
+interface SavedPrompt {
+  id: string;
+  name: string;
+  content: string;
+  description?: string;
+  shortcut?: string;
+  category: PromptCategory;
+  isFavorite: boolean;
+  variables?: PromptVariable[];
+  lastUsed?: number;
+  useCount: number;
+}
+
+interface PromptVariable {
+  name: string;
+  description?: string;
+  defaultValue?: string;
+}
+```
+
+#### rateLimitStore
+Tracks rate limit status per session.
+
+```typescript
+interface RateLimitInfo {
+  sessionId: string;
+  agentType: AgentType;
+  detectedAt: number;
+  retryAfterMs: number | null;
+}
+```
+
+## Hooks
+
+Key hooks in `src/hooks/`:
+
+- **usePty** — PTY session lifecycle (spawn, write, resize, close, subscribe to data/exit events)
+- **useRepository** — Git operations (getInfo, getDiff, getDiffStats, openInApp with line/col, renameBranch)
+- **useGitHub** — Reactive wrapper over `githubStore`; returns `{ status, loading, error, refresh, startPolling, stopPolling }`
+- **useKeyboardRedirect** — Redirects keyboard input from non-terminal areas to active terminal
+- **useFileDrop** — External file drag & drop handling
+
+See `src/hooks/` for full signatures — the above is a representative summary.
+
+## Agent Types
+
+```typescript
+type AgentType = "claude" | "gemini" | "opencode" | "aider" | "codex" | "amp" | "cursor" | "goose" | "droid" | "git" | "api";
+```
+
+Full agent configuration (binary, resume command, session discovery, detection patterns) lives in `src/agents.ts`.
+
+## Rate Limit Detection
+
+Provider-specific patterns detect rate limits in terminal output:
+
+### Claude Code
+- `rate limit`
+- `API rate limit`
+- `overloaded`
+- `try again later`
+- Retry-after extraction from error messages
+
+### Gemini CLI
+- `429`
+- `quota exceeded`
+- `rate limit exceeded`
+- `resource exhausted`
+
+### Generic Patterns
+- `too many requests`
+- `rate limited`
+- `slow down`
+- `retry after`
+
+## Output Parser
+
+JSONL event parser for structured agent output:
+
+```typescript
+type OutputEventType = "result" | "assistant" | "error" | "tool" | "system" | "unknown";
+
+interface OutputEvent {
+  type: OutputEventType;
+  content: string;
+  timestamp: number;
+  raw?: unknown;
+}
+```
+
+Features:
+- Streaming parser with line buffering
+- 100KB buffer limit to prevent memory bloat
+- Handles partial lines across chunks
+
+## Keyboard Shortcuts
+
+### Global
+| Shortcut | Action |
+|----------|--------|
+| Cmd+T | New terminal |
+| Cmd+W | Close terminal |
+| Cmd+K | Open prompt library |
+| Cmd+Shift+D | Toggle Git Panel |
+| Cmd+G | Git Panel — Branches tab |
+| Cmd+M | Toggle markdown panel |
+| Cmd+Alt+N | Toggle Ideas panel |
+| Cmd+O | Open file… |
+| Cmd+N | New file… |
+| Cmd+1-9 | Switch to tab N |
+| Cmd++/- | Zoom in/out |
+| Cmd+0 | Reset zoom |
+| Cmd+F | Find in terminal |
+| Cmd+E | Toggle file browser |
+| Cmd+[ | Toggle sidebar |
+| Cmd+? | Toggle help panel |
+| Cmd+Shift+[ | Previous tab |
+| Cmd+Shift+] | Next tab |
+| Cmd+Shift+T | Reopen closed tab |
+| Cmd+P | Command palette |
+| Cmd+Shift+A | Activity dashboard |
+| Cmd+, | Settings |
+
+### Prompt Library
+| Shortcut | Action |
+|----------|--------|
+| ↑/↓ | Navigate prompts |
+| Enter | Insert prompt |
+| Ctrl+N | New prompt |
+| Ctrl+E | Edit selected |
+| Ctrl+F | Toggle favorite |
+| Esc | Close drawer |
+
+## Persistence
+
+All stores persist to localStorage:
+
+| Key | Store | Content |
+|-----|-------|---------|
+| `tui-commander-settings` | settingsStore | IDE, font, preferences |
+| `tui-commander-prompt-library` | promptLibraryStore | Saved prompts |
+
+## Feature Status
+
+### Completed (P1)
+- [x] Multi-agent support (Claude, Gemini, OpenCode, Aider, Codex)
+- [x] Git worktree management per task
+- [x] Agent spawning integration
+- [x] SolidJS migration
+
+### Completed (P2)
+- [x] Split pane layout
+- [x] Multi-repository sidebar
+- [x] Git diff panel
+- [x] Interactive agent prompts UI
+- [x] IDE launcher dropdown
+- [x] GitHub integration
+- [x] Parallel agent orchestration
+- [x] Font selection setting
+- [x] Tab bar with keyboard navigation
+- [x] Density modes for readability
+- [x] Status bar with branch and PR info
+- [x] Rate limit detection
+- [x] JSONL output parsing
+- [x] Prompt library with variables
+- [x] Keyboard redirect to terminal
+- [x] Ideas panel (formerly Notes) with send-to-terminal and delete actions
+- [x] Terminal session persistence across app restarts
+- [x] GitHub GraphQL API (replaces gh CLI for PR/CI data)
+- [x] Multi-account GitHub: multiple github.com logins + GitHub Enterprise Server (PAT), per-repo account bindings with ambiguity chooser, isolated per-account polling/rate-limits/circuit-breaker (see FEATURES.md 8.13)
+- [x] Auto-update via tauri-plugin-updater with progress badge
+- [x] Prevent system sleep while agents are working (keepawake)
+- [x] Usage limit detection for Claude Code (weekly/session) with status bar badge
+- [x] Repository groups with accordion UI (named, colored, collapsible, drag-and-drop)
+- [x] HEAD file watcher for branch change detection
+- [x] Git status via .git file reads (no subprocess)
+- [x] Lazy terminal restore (sessions materialize on branch click, not app startup)
+- [x] Windows compatibility (shell escaping, process detection, resolve_cli, IDE detection)
+- [x] Repo watcher for automatic panel refresh on `.git/` changes
+- [x] Git Panel (4 tabs: Changes with History/Blame sub-panels, Log with canvas commit graph, Stashes, Branches) — replaces Git Operations Panel and DiffPanel
+- [x] Branch Panel (4th tab in Git Panel): checkout, create, delete, rename, merge, rebase, push, pull, fetch, prefix folding, inline search, context menu, stale/merged indicators. `Cmd+G` opens directly on Branches tab
+- [x] Context menu submenus and "New Group..." via PromptDialog
+- [x] File Browser panel (`Cmd+E`) with content search (`Cmd+Shift+F`, case/regex/whole-word, streaming results)
+- [x] CodeMirror code editor
+- [x] Find in terminal (`Cmd+F`)
+- [x] Configurable keybindings system
+- [x] Command palette (`Cmd+P`)
+- [x] Activity dashboard (`Cmd+Shift+A`)
+- [x] Park repos feature
+- [x] Plugin system (see FEATURES.md section 17)
+- [x] Remote access / HTTP server
+- [x] Mobile Companion PWA (sessions, live output, question reply, activity feed)
+- [x] MCP Proxy Hub (aggregate upstream MCP servers via HTTP and stdio, tool namespace prefixing, circuit breaker, hot-reload, OS keyring credentials, tool filtering)
+- [x] Copy Path in Markdown panel
+- [x] Claude Usage Dashboard (native SolidJS component with API polling, session analytics, usage timeline)
+- [x] ConfirmDialog component (in-app dark-themed replacement for native OS dialogs)
+- [x] Status bar unified agent badge with priority cascade (rate limit > usage API > PTY usage > name)
+- [x] PR lifecycle filtering (CLOSED hidden, MERGED hidden after 5min user activity)
+- [x] Notes/Ideas: mark as used, badge count in status bar
+- [x] Notes/Ideas: image paste support (Ctrl+V), thumbnails, send absolute paths to terminal
+- [x] Inter-Agent Messaging (`messaging` MCP tool: register, list_peers, send, inbox with channel push + polling fallback)
+- [x] Smart Prompts (29 built-in AI prompts with context variable resolution, inject/headless/API execution, toolbar dropdown, SmartButtonStrip, Command Palette integration, direct LLM API mode via genai crate)
+- [x] AI Chat panel (`Cmd+Alt+A`) — streaming conversational AI with terminal context injection, multi-provider (Ollama/Anthropic/OpenAI/OpenRouter), conversation persistence, OS-keyring API keys
+- [x] AI Agent loop (ReAct) — terminal observe/act, filesystem, search, drive_agent, and reactive watch tools; pause/resume, destructive-command approval gate, tool-call cards
+- [x] Session knowledge store — per-session command outcomes, error→fix pairs, CWD history, TUI apps seen; fed by OSC 133 with silence-timer fallback; persisted with 2s debounce
+- [x] TUI app detection — alternate-screen tracking classifies terminal as Shell or FullscreenTui with app hint (vim/htop/lazygit/…)
+- [x] `ai_terminal_*` MCP tools — external agent surface (Claude Code, Cursor) driving FastAF terminals with user-confirmation gates
+- [x] ChoicePrompt parser variant — numbered confirmation menu detection with destructive-label flagging, PWA overlay, `sendPtyKey()` helper
+- [x] MCP OAuth 2.1 — RFC 9728 + RFC 8414 PKCE flow for upstream MCP servers, `tuic://oauth-callback` deep link, shared `TokenManager` with thundering-herd-safe refresh
+
+### Completed (Voice Dictation)
+- [x] Local Whisper inference via whisper-rs (Metal GPU acceleration)
+- [x] Audio capture (cpal, 16kHz mono resampling)
+- [x] Text correction map (longest-match-first dictionary)
+- [x] Model download from HuggingFace (large-v3-turbo)
+- [x] Push-to-talk mic button in StatusBar (blue pulsing animation)
+- [x] Configurable push-to-talk hotkey (keydown/keyup)
+- [x] Transcribed text injection into active terminal via PTY
+- [x] Settings > Dictation tab (model, hotkey, language, corrections)
+- [x] Shell integration inject_text stub (prepared for external triggers)
+- [x] Streaming transcription with adaptive sliding windows (1.5s→3s)
+- [x] VAD energy gate (ported from whisper.cpp vad_simple)
+- [x] Floating toast for partial transcription results
+- [x] Prompt token carry-forward across windows
+
+### Completed (P2)
+- [x] Task completion detection
+- [x] Audio notification when agent awaits input
+- [x] IDE launcher with app icons
+
+### Pending (P2)
+- [ ] Error handling strategy config
+
+### Agent Configuration (Done)
+- [x] Settings > Agents tab with per-agent run configurations
+- [x] MCP bridge install/remove for supported agents (Claude, Cursor, Windsurf, VS Code, Zed, Amp, Gemini)
+- [x] Terminal context menu > Agents submenu with run configs
+- [x] Agent binary detection and version display
+- [x] agents.json persistence for run configurations
+
+### Completed (P3)
+- [x] Markdown rendering (MarkdownPanel, not inline terminal)
+- [x] Task queue UI
+- [x] Advanced keyboard shortcuts
+
+### Pending (P3)
+- [ ] Agent stats display
+- [ ] Config file support
+- [ ] TypeScript PTY wrapper
+
+## Future Considerations
+
+### WebSocket Backend
+For web deployment without Tauri:
+- Go backend with PTY multiplexing
+- WebSocket protocol for PTY I/O
+- Session management
+
+## References
+
+- [SolidJS Documentation](https://www.solidjs.com/docs/latest)
+- [alacritty_terminal crate](https://crates.io/crates/alacritty_terminal)
+- [Tauri Documentation](https://tauri.app/v1/guides/)

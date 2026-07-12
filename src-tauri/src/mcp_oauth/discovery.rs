@@ -1,0 +1,864 @@
+//! OAuth discovery for upstream MCP servers.
+//!
+//! Implements:
+//! - RFC 9728: OAuth 2.0 Protected Resource Metadata
+//! - RFC 8414: OAuth 2.0 Authorization Server Metadata Discovery
+//! - OIDC Discovery fallback (/.well-known/openid-configuration)
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/// Metadata about a Protected Resource (RFC 9728).
+///
+/// Fetched from `{resource}/.well-known/oauth-protected-resource`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ProtectedResourceMetadata {
+    /// The resource identifier (MUST match the URL used for discovery).
+    pub(crate) resource: String,
+    /// Authorization servers that protect this resource.
+    pub(crate) authorization_servers: Vec<String>,
+    /// Scopes that may be used at this resource.
+    #[serde(default)]
+    pub(crate) scopes_supported: Option<Vec<String>>,
+}
+
+/// Metadata about an Authorization Server (RFC 8414 / OIDC).
+///
+/// Fetched from `{issuer}/.well-known/oauth-authorization-server` or
+/// `{issuer}/.well-known/openid-configuration` (fallback).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct AuthServerMetadata {
+    /// The issuer identifier (MUST match the URL used for discovery).
+    pub(crate) issuer: String,
+    /// URL of the authorization endpoint.
+    pub(crate) authorization_endpoint: String,
+    /// URL of the token endpoint.
+    pub(crate) token_endpoint: String,
+    /// Scopes supported by this AS.
+    #[serde(default)]
+    pub(crate) scopes_supported: Option<Vec<String>>,
+    /// PKCE code challenge methods supported.
+    #[serde(default)]
+    pub(crate) code_challenge_methods_supported: Option<Vec<String>>,
+    /// RFC 7591 Dynamic Client Registration endpoint (optional).
+    #[serde(default)]
+    pub(crate) registration_endpoint: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Discovery functions
+// ---------------------------------------------------------------------------
+
+/// Discover Protected Resource Metadata (RFC 9728).
+///
+/// Fetches `{resource_url}/.well-known/oauth-protected-resource` and returns
+/// the parsed metadata including the list of authorization servers.
+pub(crate) async fn discover_protected_resource(
+    client: &reqwest::Client,
+    resource_url: &str,
+) -> Result<ProtectedResourceMetadata> {
+    let url = format!(
+        "{}/.well-known/oauth-protected-resource",
+        resource_url.trim_end_matches('/')
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch protected resource metadata from {url}"))?;
+
+    if !resp.status().is_success() {
+        bail!(
+            "Protected resource metadata endpoint returned HTTP {}",
+            resp.status()
+        );
+    }
+
+    let meta: ProtectedResourceMetadata = resp
+        .json()
+        .await
+        .context("Failed to parse protected resource metadata JSON")?;
+
+    if meta.authorization_servers.is_empty() {
+        bail!("Protected resource metadata has no authorization_servers");
+    }
+
+    Ok(meta)
+}
+
+/// Discover Authorization Server Metadata (RFC 8414 with OIDC fallback).
+///
+/// Tries candidates in order until one returns 200:
+/// 1. `{issuer_url}/.well-known/oauth-authorization-server` (simple append)
+/// 2. `{origin}/.well-known/oauth-authorization-server{path}` (RFC 8414 §3.1 insertion form,
+///    only when issuer has a non-trivial path — e.g. `https://access.stripe.com/mcp`)
+/// 3. `{issuer_url}/.well-known/openid-configuration` (OIDC fallback)
+/// 4. `{origin}/.well-known/openid-configuration{path}` (OIDC insertion form)
+///
+/// After a successful fetch:
+/// - Validates that `issuer` in the response matches `issuer_url` (mix-up attack prevention)
+/// - Validates that authorization and token endpoints use HTTPS (localhost exempt)
+pub(crate) async fn discover_auth_server(
+    client: &reqwest::Client,
+    issuer_url: &str,
+) -> Result<AuthServerMetadata> {
+    discover_auth_server_inner(client, issuer_url, true).await
+}
+
+/// Variant that skips the issuer-match check — used when discovering the AS
+/// from the resource server's origin as a fallback (the AS may live on a
+/// different subdomain, e.g. `cf.mcp.atlassian.com` vs `mcp.atlassian.com`).
+pub(crate) async fn discover_auth_server_relaxed(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<AuthServerMetadata> {
+    discover_auth_server_inner(client, base_url, false).await
+}
+
+async fn discover_auth_server_inner(
+    client: &reqwest::Client,
+    issuer_url: &str,
+    strict_issuer: bool,
+) -> Result<AuthServerMetadata> {
+    // Reject non-HTTPS issuers before any network I/O. A compromised resource
+    // server could otherwise point `authorization_servers` at an attacker-
+    // controlled http:// endpoint; the previous check only validated the
+    // `authorization_endpoint` / `token_endpoint` returned by discovery,
+    // which is too late — the discovery request itself would already have
+    // been sent in cleartext.
+    validate_issuer_https(issuer_url)?;
+
+    let base = issuer_url.trim_end_matches('/');
+
+    // RFC 8414 §3.1: for issuers with a path component (e.g.
+    // `https://access.stripe.com/mcp`), the well-known URL is formed by
+    // *inserting* `/.well-known/oauth-authorization-server` between the host
+    // and the path, not appending it at the end. Build the insertion-form
+    // candidates when the issuer has a non-trivial path.
+    //
+    // Candidate order (tried in sequence until one succeeds):
+    //   1. {issuer}/.well-known/oauth-authorization-server  (simple append, most servers)
+    //   2. {origin}/.well-known/oauth-authorization-server{path}  (RFC 8414 insertion form)
+    //   3. {issuer}/.well-known/openid-configuration  (OIDC simple append)
+    //   4. {origin}/.well-known/openid-configuration{path}  (OIDC RFC 8414 insertion form)
+    let parsed = url::Url::parse(issuer_url)
+        .with_context(|| format!("Invalid issuer URL '{issuer_url}'"))?;
+    let path = parsed.path();
+    let has_path = path != "/" && !path.is_empty();
+    let origin = parsed.origin().unicode_serialization();
+
+    let mut candidates: Vec<String> = Vec::with_capacity(4);
+    candidates.push(format!("{base}/.well-known/oauth-authorization-server"));
+    if has_path {
+        candidates.push(format!(
+            "{origin}/.well-known/oauth-authorization-server{path}"
+        ));
+    }
+    candidates.push(format!("{base}/.well-known/openid-configuration"));
+    if has_path {
+        candidates.push(format!("{origin}/.well-known/openid-configuration{path}"));
+    }
+
+    let mut last_status = String::new();
+    for url in &candidates {
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch AS metadata from {url}"))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            last_status = "HTTP 404 Not Found".to_string();
+            continue;
+        }
+        if !resp.status().is_success() {
+            bail!(
+                "AS metadata endpoint returned HTTP {} for {url}",
+                resp.status()
+            );
+        }
+
+        let meta = resp
+            .json::<AuthServerMetadata>()
+            .await
+            .with_context(|| format!("Failed to parse AS metadata JSON from {url}"))?;
+
+        // Issuer validation (prevents mix-up attack)
+        if strict_issuer {
+            let expected_issuer = base.to_string();
+            if meta.issuer != expected_issuer {
+                bail!(
+                    "Issuer mismatch: expected \"{expected_issuer}\", got \"{}\". \
+                     This may indicate an authorization server mix-up attack.",
+                    meta.issuer
+                );
+            }
+        }
+
+        // HTTPS enforcement for endpoints (localhost exempt for dev)
+        validate_endpoint_https(&meta.authorization_endpoint, "authorization_endpoint")?;
+        validate_endpoint_https(&meta.token_endpoint, "token_endpoint")?;
+        if let Some(ref reg) = meta.registration_endpoint {
+            validate_endpoint_https(reg, "registration_endpoint")?;
+        }
+
+        return Ok(meta);
+    }
+
+    bail!("Both RFC 8414 (404) and OIDC discovery ({last_status}) failed for {base}");
+}
+
+/// Validate that an endpoint URL uses HTTPS.
+/// `http://localhost` and `http://127.0.0.1` are allowed for development.
+fn validate_endpoint_https(endpoint: &str, field_name: &str) -> Result<()> {
+    if endpoint.starts_with("https://") {
+        return Ok(());
+    }
+    if endpoint.starts_with("http://localhost") || endpoint.starts_with("http://127.0.0.1") {
+        return Ok(());
+    }
+    bail!(
+        "{field_name} must use HTTPS (got \"{endpoint}\"). \
+         Only http://localhost and http://127.0.0.1 are exempt."
+    );
+}
+
+/// Validate that a discovered issuer URL uses HTTPS before we talk to it.
+/// A compromised resource server can put any string into `authorization_servers`;
+/// if we follow an `http://` URL, the entire discovery exchange (including
+/// client_id and redirect_uri) leaks in cleartext, and nothing stops a MITM
+/// from returning a phishing authorization endpoint. `localhost` / `127.0.0.1`
+/// remain exempt for local-dev AS instances.
+pub(crate) fn validate_issuer_https(issuer_url: &str) -> Result<()> {
+    if issuer_url.starts_with("https://") {
+        return Ok(());
+    }
+    if issuer_url.starts_with("http://localhost") || issuer_url.starts_with("http://127.0.0.1") {
+        return Ok(());
+    }
+    bail!(
+        "Authorization server issuer must use HTTPS (got \"{issuer_url}\"). \
+         Only http://localhost and http://127.0.0.1 are exempt."
+    );
+}
+
+/// Extract the registrable domain (heuristic: last two labels) from a URL's
+/// hostname. Returns `None` for IP addresses and malformed URLs.
+///
+/// NOTE: Does not handle multi-label public suffixes like `co.uk` correctly —
+/// the MCP upstream space is overwhelmingly `api.example.com` style TLDs, and
+/// adding a full `publicsuffix` dependency for one edge case isn't worth it.
+/// When in doubt the hostname comparison errs on the side of "mismatch" and
+/// surfaces the full AS URL to the user, which is the desired UX anyway.
+pub(crate) fn registrable_domain(url: &str) -> Option<String> {
+    let host = url::Url::parse(url).ok()?.host_str()?.to_lowercase();
+    // Don't try to reduce IP literals to a "registrable domain".
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Some(host);
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() <= 2 {
+        return Some(host);
+    }
+    Some(labels[labels.len() - 2..].join("."))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- discover_protected_resource --
+
+    #[tokio::test]
+    async fn discover_protected_resource_happy_path() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/.well-known/oauth-protected-resource")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "resource": server.url(),
+                    "authorization_servers": ["https://auth.example.com"],
+                    "scopes_supported": ["read", "write"]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_protected_resource(&client, &server.url())
+            .await
+            .unwrap();
+
+        assert_eq!(meta.resource, server.url());
+        assert_eq!(meta.authorization_servers, vec!["https://auth.example.com"]);
+        assert_eq!(
+            meta.scopes_supported,
+            Some(vec!["read".to_string(), "write".to_string()])
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn discover_protected_resource_empty_auth_servers() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/.well-known/oauth-protected-resource")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "resource": server.url(),
+                    "authorization_servers": []
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_protected_resource(&client, &server.url())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("no authorization_servers"),
+            "expected 'no authorization_servers', got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_protected_resource_404() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/.well-known/oauth-protected-resource")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_protected_resource(&client, &server.url())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("HTTP 404"),
+            "expected HTTP 404 error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_protected_resource_malformed_json() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/.well-known/oauth-protected-resource")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not valid json {{{")
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_protected_resource(&client, &server.url())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("parse"),
+            "expected parse error, got: {err}"
+        );
+    }
+
+    // -- discover_auth_server --
+
+    #[tokio::test]
+    async fn discover_auth_server_rfc8414_happy_path() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "https://auth.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token",
+                    "scopes_supported": ["openid", "profile"],
+                    "code_challenge_methods_supported": ["S256"]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+
+        assert_eq!(meta.issuer, issuer);
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://auth.example.com/authorize"
+        );
+        assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
+        assert_eq!(
+            meta.code_challenge_methods_supported,
+            Some(vec!["S256".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_oidc_fallback_on_404() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+
+        // RFC 8414 returns 404
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        // OIDC fallback succeeds
+        server
+            .mock("GET", "/.well-known/openid-configuration")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "https://oidc.example.com/authorize",
+                    "token_endpoint": "https://oidc.example.com/token"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+
+        assert_eq!(meta.issuer, issuer);
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://oidc.example.com/authorize"
+        );
+        assert_eq!(meta.token_endpoint, "https://oidc.example.com/token");
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_issuer_mismatch() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": "https://evil.example.com",
+                    "authorization_endpoint": "https://evil.example.com/authorize",
+                    "token_endpoint": "https://evil.example.com/token"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_auth_server(&client, &issuer).await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("Issuer mismatch"),
+            "expected issuer mismatch error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("mix-up attack"),
+            "should mention mix-up attack, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_malformed_json() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{invalid json")
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_auth_server(&client, &server.url())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("parse") || err.to_string().contains("Parse"),
+            "expected parse error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_both_endpoints_fail() {
+        let mut server = mockito::Server::new_async().await;
+
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        server
+            .mock("GET", "/.well-known/openid-configuration")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_auth_server(&client, &server.url())
+            .await
+            .unwrap_err();
+
+        // RFC 8414 → 404 (skipped), OIDC → 500 (hard failure)
+        assert!(
+            err.to_string().contains("500"),
+            "should mention the 500 failure, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_rfc8414_path_insertion_form() {
+        // Simulates Stripe: issuer = https://access.stripe.com/mcp
+        // RFC 8414 §3.1 insertion form: {origin}/.well-known/oauth-authorization-server{path}
+        // i.e. /.well-known/oauth-authorization-server/mcp
+        let mut server = mockito::Server::new_async().await;
+        let origin = server.url(); // e.g. http://127.0.0.1:PORT
+        let issuer = format!("{origin}/mcp");
+
+        // Simple-append form → 404 (Stripe doesn't support this)
+        server
+            .mock("GET", "/mcp/.well-known/oauth-authorization-server")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        // RFC 8414 insertion form → 200
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server/mcp")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "https://access.stripe.com/mcp/oauth2/authorize",
+                    "token_endpoint": "https://access.stripe.com/mcp/oauth2/token",
+                    "code_challenge_methods_supported": ["S256"]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        // Use relaxed variant since mockito runs on http://127.0.0.1 (localhost exempt)
+        let meta = discover_auth_server_relaxed(&client, &issuer)
+            .await
+            .unwrap();
+
+        assert_eq!(meta.issuer, issuer);
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://access.stripe.com/mcp/oauth2/authorize"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_all_candidates_404() {
+        let mut server = mockito::Server::new_async().await;
+        let origin = server.url();
+        let issuer = format!("{origin}/mcp");
+
+        // All four candidates → 404
+        server
+            .mock("GET", "/mcp/.well-known/oauth-authorization-server")
+            .with_status(404)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/mcp/.well-known/openid-configuration")
+            .with_status(404)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/.well-known/openid-configuration/mcp")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_auth_server_relaxed(&client, &issuer)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("RFC 8414") && err.to_string().contains("OIDC"),
+            "should mention both RFC 8414 and OIDC in final error, got: {err}"
+        );
+    }
+
+    // -- HTTPS enforcement --
+
+    #[tokio::test]
+    async fn discover_auth_server_rejects_http_endpoints() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "http://insecure.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_auth_server(&client, &issuer).await.unwrap_err();
+
+        assert!(
+            err.to_string().contains("HTTPS"),
+            "should require HTTPS, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_allows_localhost_http() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "http://localhost:8080/authorize",
+                    "token_endpoint": "http://127.0.0.1:9090/token"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+
+        assert_eq!(
+            meta.authorization_endpoint,
+            "http://localhost:8080/authorize"
+        );
+        assert_eq!(meta.token_endpoint, "http://127.0.0.1:9090/token");
+    }
+
+    // -- validate_endpoint_https unit tests --
+
+    #[test]
+    fn validate_https_accepts_https() {
+        assert!(validate_endpoint_https("https://example.com/token", "test").is_ok());
+    }
+
+    #[test]
+    fn validate_https_accepts_localhost() {
+        assert!(validate_endpoint_https("http://localhost:8080/token", "test").is_ok());
+        assert!(validate_endpoint_https("http://127.0.0.1:9090/token", "test").is_ok());
+    }
+
+    #[test]
+    fn validate_https_rejects_plain_http() {
+        let err =
+            validate_endpoint_https("http://evil.example.com/token", "token_endpoint").unwrap_err();
+        assert!(err.to_string().contains("HTTPS"));
+        assert!(err.to_string().contains("token_endpoint"));
+    }
+
+    // -- AS mix-up defence (#1268-40e8) --
+
+    #[test]
+    fn validate_issuer_https_accepts_https() {
+        assert!(validate_issuer_https("https://auth.example.com").is_ok());
+        assert!(validate_issuer_https("https://auth.example.com/").is_ok());
+    }
+
+    #[test]
+    fn validate_issuer_https_accepts_localhost() {
+        assert!(validate_issuer_https("http://localhost:8080").is_ok());
+        assert!(validate_issuer_https("http://127.0.0.1:9090").is_ok());
+    }
+
+    #[test]
+    fn validate_issuer_https_rejects_plain_http() {
+        let err = validate_issuer_https("http://evil.example.com").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("HTTPS"), "msg: {msg}");
+        assert!(msg.contains("evil.example.com"), "msg: {msg}");
+    }
+
+    #[test]
+    fn registrable_domain_extracts_last_two_labels() {
+        assert_eq!(
+            registrable_domain("https://auth.example.com/path"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            registrable_domain("https://deeply.nested.sub.example.org/"),
+            Some("example.org".into())
+        );
+    }
+
+    #[test]
+    fn registrable_domain_keeps_two_label_hosts() {
+        assert_eq!(
+            registrable_domain("https://example.com/"),
+            Some("example.com".into())
+        );
+    }
+
+    #[test]
+    fn registrable_domain_preserves_ip_literal() {
+        assert_eq!(
+            registrable_domain("http://127.0.0.1:9000/"),
+            Some("127.0.0.1".into())
+        );
+    }
+
+    #[test]
+    fn registrable_domain_matches_across_subdomains() {
+        assert_eq!(
+            registrable_domain("https://api.example.com"),
+            registrable_domain("https://auth.example.com"),
+        );
+    }
+
+    #[test]
+    fn registrable_domain_differs_across_unrelated_hosts() {
+        assert_ne!(
+            registrable_domain("https://api.example.com"),
+            registrable_domain("https://attacker.example.org"),
+        );
+    }
+
+    // -- registration_endpoint --
+
+    #[tokio::test]
+    async fn discover_auth_server_parses_registration_endpoint() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "https://auth.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token",
+                    "registration_endpoint": "https://auth.example.com/register"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+        assert_eq!(
+            meta.registration_endpoint,
+            Some("https://auth.example.com/register".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_registration_endpoint_none_when_missing() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "https://auth.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+        assert_eq!(meta.registration_endpoint, None);
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_rejects_http_registration_endpoint() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": "https://auth.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token",
+                    "registration_endpoint": "http://insecure.example.com/register"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = discover_auth_server(&client, &issuer).await.unwrap_err();
+        assert!(
+            err.to_string().contains("HTTPS"),
+            "should reject non-HTTPS registration_endpoint, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_rejects_plain_http_issuer_before_network_io() {
+        let client = reqwest::Client::new();
+        // No mock server needed — the HTTPS check must fire BEFORE any fetch.
+        let err = discover_auth_server(&client, "http://evil.example.com")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("HTTPS"), "err: {err}");
+    }
+}

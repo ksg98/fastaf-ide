@@ -1,0 +1,12 @@
+export { AgentsTab } from "./AgentsTab";
+export { AiChatTab } from "./AiChatTab";
+export { AppearanceTab } from "./AppearanceTab";
+export { GeneralTab } from "./GeneralTab";
+export { GitHubTab } from "./GitHubTab";
+export { KeyboardShortcutsTab } from "./KeyboardShortcutsTab";
+export { NotificationsTab } from "./NotificationsTab";
+export { PluginsTab } from "./PluginsTab";
+export { RepoScriptsTab } from "./RepoScriptsTab";
+export type { RepoTabProps } from "./RepoWorktreeTab";
+export { RepoWorktreeTab } from "./RepoWorktreeTab";
+export { ServicesTab } from "./ServicesTab";

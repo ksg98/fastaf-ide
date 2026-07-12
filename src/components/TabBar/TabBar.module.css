@@ -1,0 +1,640 @@
+@keyframes pulse-opacity {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+/* TabBar wrapper — flex row with scroll region + new-tab button */
+.tabBarWrapper {
+  display: flex;
+  flex: 1;
+  align-items: stretch;
+  min-width: 0;
+}
+
+/* File drag-over highlight (applied by dragDrop.ts via global class) */
+.tabBarWrapper:global(.drop-target-hover) {
+  background: rgba(var(--accent-rgb, 99, 102, 241), 0.18);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Scroll region — contains arrows, fades, and the scrollable tab list */
+.scrollRegion {
+  display: flex;
+  flex: 1;
+  align-items: stretch;
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* Scrollable tab list */
+.tabs {
+  display: flex;
+  flex: 1;
+  gap: 0;
+  overflow-x: auto;
+  align-items: stretch;
+  /* Hide scrollbar but keep scroll functional */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+
+.tabs::-webkit-scrollbar {
+  display: none; /* Chrome/Safari/WebKit */
+}
+
+/* Scroll arrow buttons */
+.scrollArrow {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  border: none;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  z-index: 5;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.scrollArrow.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.scrollArrow:hover {
+  color: var(--fg-primary);
+  background: var(--bg-highlight);
+}
+
+.scrollArrowLeft {
+  left: 0;
+  border-right: 1px solid var(--border);
+}
+
+.scrollArrowRight {
+  right: 0;
+  border-left: 1px solid var(--border);
+}
+
+/* Fade gradients to indicate more tabs */
+.fadeGradient {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 32px;
+  pointer-events: none;
+  z-index: 4;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.fadeGradient.visible {
+  opacity: 1;
+}
+
+.fadeLeft {
+  left: 24px;
+  background: linear-gradient(to right, var(--bg-secondary), transparent);
+}
+
+.fadeRight {
+  right: 24px;
+  background: linear-gradient(to left, var(--bg-secondary), transparent);
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  min-width: 80px;
+  flex-shrink: 0;
+  background: transparent;
+  border-radius: 0;
+  cursor: pointer;
+  transition: background 0.1s;
+  border-right: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+}
+
+@media (hover: hover) {
+  .tab:hover {
+    background: var(--bg-highlight);
+  }
+}
+
+.tab.active {
+  background: var(--bg-primary);
+}
+
+.tab.active::before {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  z-index: 1;
+}
+
+.tabIcon {
+  font-size: 6px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  opacity: 0.3;
+}
+
+.tabName {
+  font-size: var(--font-md);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.tab.active .tabName {
+  color: var(--fg-primary);
+}
+
+.tabNameInput {
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-xs);
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  font-family: inherit;
+  padding: 0 4px;
+  min-width: 40px;
+  max-width: 200px;
+  outline: none;
+}
+
+.tabClose {
+  background: none;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: var(--font-lg);
+  line-height: 1;
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  transition: background 0.1s, color 0.1s;
+  opacity: 0;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+@media (hover: hover) {
+  .tab:hover .tabClose {
+    opacity: 1;
+  }
+}
+
+@media (hover: hover) {
+  .tabClose:hover {
+    color: var(--fg-primary);
+  }
+}
+
+.newBtn {
+  width: 28px;
+  min-width: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--fg-secondary);
+  font-size: var(--font-xl);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  align-self: stretch;
+}
+
+.newBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+/* Multiview toggle + hover preview */
+.mvBtnActive {
+  color: var(--accent);
+}
+
+.mvPreview {
+  position: fixed;
+  z-index: 1000;
+  width: 240px;
+  padding: 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--bg-highlight);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.mvPreviewGrid {
+  display: grid;
+  gap: 3px;
+}
+
+.mvPreviewTile {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 5px;
+  min-width: 0;
+  height: 34px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+  border: 1px solid var(--bg-highlight);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+}
+
+.mvPreviewName {
+  font-size: var(--font-2xs);
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mvPreviewRepo {
+  font-size: var(--font-3xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mvPreviewHint {
+  padding: 4px 2px 0;
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+/* Globe icon for promoted terminal tabs */
+.globeIcon {
+  background: none;
+  border: none;
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+  opacity: 0.8;
+  transition: opacity 0.1s;
+}
+
+.globeIcon:hover {
+  opacity: 1;
+}
+
+/* Repo name badge shown on tab hover in global workspace */
+.repoOverlay {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fg-muted);
+  background: var(--bg-tertiary, var(--bg-secondary));
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+  pointer-events: none;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+/* Pin icon for pinned tabs */
+.pinIcon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-muted);
+  margin-right: 2px;
+  opacity: 0.7;
+}
+
+/* Tab busy/idle indicators */
+.tab.shellBusy .tabIcon {
+  color: var(--activity);
+  opacity: 1;
+  font-size: var(--font-3xs);
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+.tab.shellIdle .tabIcon {
+  color: var(--success);
+  opacity: 1;
+  font-size: var(--font-3xs);
+}
+
+.tab.shellUnseen .tabIcon {
+  color: var(--unseen);
+  opacity: 1;
+  font-size: var(--font-3xs);
+}
+
+.tab.shellExited .tabIcon {
+  color: var(--fg-muted);
+  opacity: 0.45;
+  font-size: var(--font-3xs);
+}
+
+.tab.standby {
+  opacity: 0.5;
+}
+
+.standbyBadge {
+  opacity: 0.6;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+/* Awaiting input — override tabIcon to show state via left dot */
+.tab.awaitingInput .tabIcon {
+  opacity: 1;
+  font-size: var(--font-3xs);
+  color: var(--warning);
+  animation: pulse-opacity 1.5s ease-in-out infinite;
+}
+
+.tab.awaitingQuestion .tabIcon {
+  color: var(--attention);
+}
+
+.tab.awaitingError .tabIcon {
+  color: var(--error);
+}
+
+
+/* Repo color tint — bottom-to-center gradient in global workspace */
+.tab[style*="--repo-color"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, color-mix(in srgb, var(--repo-color) 12%, transparent), transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.tab[style*="--repo-color"].active::after {
+  background: linear-gradient(to top, color-mix(in srgb, var(--repo-color) 18%, transparent), transparent 60%);
+}
+
+/* Diff tabs */
+.tab.diffTab {
+  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.1), rgba(var(--tab-diff-rgb), 0.05));
+  border-bottom: 2px solid rgba(var(--tab-diff-rgb), 0.3);
+}
+
+@media (hover: hover) {
+  .tab.diffTab:hover {
+    background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.15), rgba(var(--tab-diff-rgb), 0.08));
+  }
+}
+
+.tab.diffTab.active {
+  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.25), rgba(var(--tab-diff-rgb), 0.15));
+  border-bottom-color: rgb(var(--tab-diff-rgb));
+}
+
+.tab.diffTab.active::before {
+  display: none;
+}
+
+.tab.diffTab .tabIcon {
+  color: rgb(var(--tab-diff-rgb));
+  opacity: 0.8;
+  display: flex;
+  align-items: center;
+}
+
+/* Editor tabs */
+.tab.editTab {
+  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.1), rgba(var(--tab-edit-rgb), 0.05));
+  border-bottom: 2px solid rgba(var(--tab-edit-rgb), 0.3);
+}
+
+@media (hover: hover) {
+  .tab.editTab:hover {
+    background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.15), rgba(var(--tab-edit-rgb), 0.08));
+  }
+}
+
+.tab.editTab.active {
+  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.25), rgba(var(--tab-edit-rgb), 0.15));
+  border-bottom-color: var(--accent);
+}
+
+.tab.editTab.active::before {
+  display: none;
+}
+
+.tab.editTab .tabIcon {
+  color: var(--accent);
+  opacity: 0.8;
+  display: flex;
+  align-items: center;
+}
+
+/* Markdown tabs */
+.tab.mdTab {
+  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.1) 0%, rgba(var(--tab-md-rgb), 0.05) 100%);
+  border-bottom: 2px solid rgba(var(--tab-md-rgb), 0.3);
+}
+
+@media (hover: hover) {
+  .tab.mdTab:hover {
+    background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.15) 0%, rgba(var(--tab-md-rgb), 0.08) 100%);
+    border-bottom-color: rgba(var(--tab-md-rgb), 0.5);
+  }
+}
+
+.tab.mdTab.active {
+  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.2) 0%, rgba(var(--tab-md-rgb), 0.1) 100%);
+  border-bottom-color: var(--success);
+}
+
+.tab.mdTab.active::before {
+  display: none;
+}
+
+.tab.mdTab .tabIcon {
+  color: var(--success);
+  opacity: 0.8;
+  display: flex;
+  align-items: center;
+}
+
+/* Panel tabs (non-file md tabs: Claude Usage, plugins, etc.) */
+.tab.panelTab {
+  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.1) 0%, rgba(var(--tab-panel-rgb), 0.05) 100%);
+  border-bottom: 2px solid rgba(var(--tab-panel-rgb), 0.3);
+}
+
+@media (hover: hover) {
+  .tab.panelTab:hover {
+    background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.15) 0%, rgba(var(--tab-panel-rgb), 0.08) 100%);
+    border-bottom-color: rgba(var(--tab-panel-rgb), 0.5);
+  }
+}
+
+.tab.panelTab.active {
+  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.2) 0%, rgba(var(--tab-panel-rgb), 0.1) 100%);
+  border-bottom-color: var(--merged);
+}
+
+.tab.panelTab.active::before {
+  display: none;
+}
+
+.tab.panelTab .tabIcon {
+  color: var(--merged);
+  opacity: 0.8;
+  display: flex;
+  align-items: center;
+}
+
+/* Remote/PTY tabs — subtle cyan tint */
+.tab.remoteTab {
+  border-bottom: 2px solid rgba(var(--tab-remote-rgb), 0.3);
+}
+
+.tab.remoteTab.active {
+  border-bottom-color: rgb(var(--tab-remote-rgb));
+}
+
+.tab.remoteTab.active::before {
+  display: none;
+}
+
+.tab.remoteTab:not(.shellBusy):not(.shellIdle):not(.shellUnseen):not(.shellExited) .tabIcon {
+  color: rgb(var(--tab-remote-rgb));
+  opacity: 0.8;
+}
+
+/* Detached to floating window — dim name but keep status dot colors */
+.tab.detached {
+  border-bottom: 2px dashed var(--fg-secondary);
+}
+
+.tab.detached .tabName {
+  opacity: 0.5;
+}
+
+.tab.detached:hover .tabName {
+  opacity: 0.75;
+}
+
+.detachedIcon {
+  margin-left: 4px;
+  opacity: 0.6;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+/* Drag & drop */
+.tab.dragging {
+  opacity: 0.4;
+}
+
+.tab.dragOverLeft {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.tab.dragOverRight {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+
+.tab.dragOverLeft.dragInvalid {
+  box-shadow: inset 2px 0 0 var(--error);
+}
+
+.tab.dragOverRight.dragInvalid {
+  box-shadow: inset -2px 0 0 var(--error);
+}
+
+/* Quick switcher shortcut badges */
+.shortcutBadge {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  padding: 1px 5px;
+  background: var(--bg-tertiary);
+  color: var(--fg-muted);
+  border-radius: var(--radius-md);
+  font-family: var(--font-ui);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  z-index: 10;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* Progress indicator */
+.progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--success) 0%, color-mix(in srgb, var(--success) 70%, white) 50%, var(--success) 100%);
+  background-size: 200% 100%;
+  width: 100%;
+  transform-origin: left;
+  animation: progressShimmer 1.5s ease-in-out infinite;
+  transition: transform 0.3s ease;
+}
+
+@keyframes progressShimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.progressLabel {
+  font-size: var(--font-2xs);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  margin-left: 4px;
+}
+
+/* Pane position mini-map icon */
+.panePositionIcon {
+  flex-shrink: 0;
+  margin-left: 4px;
+  opacity: 0.5;
+}
+
+.tab.active .panePositionIcon {
+  opacity: 0.85;
+}
+
+/* VSCode-style split alignment: docked file tabs start at the split line,
+   above their pane, flowing left-to-right. The spacer (order 99) is sized
+   in JS to the pane's left edge. */
+.tabSpacer {
+  order: 99;
+  flex: 0 0 auto;
+}
+
+.tab.dockedRight {
+  order: 100;
+}

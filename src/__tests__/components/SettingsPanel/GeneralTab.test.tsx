@@ -1,0 +1,224 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import "../../mocks/tauri";
+import { fireEvent, render } from "@solidjs/testing-library";
+
+const {
+	mockSetBaseBranch,
+	mockSetCopyIgnoredFiles,
+	mockSetCopyUntrackedFiles,
+	mockSetSetupScript,
+	mockSetRunScript,
+	mockSetAutoFetchIntervalMinutes,
+	mockSetAutoDeleteOnPrClose,
+} = vi.hoisted(() => ({
+	mockSetBaseBranch: vi.fn(),
+	mockSetCopyIgnoredFiles: vi.fn(),
+	mockSetCopyUntrackedFiles: vi.fn(),
+	mockSetSetupScript: vi.fn(),
+	mockSetRunScript: vi.fn(),
+	mockSetAutoFetchIntervalMinutes: vi.fn(),
+	mockSetAutoDeleteOnPrClose: vi.fn(),
+}));
+
+vi.mock("../../../stores/settings", () => ({
+	settingsStore: {
+		state: {
+			ide: "vscode",
+			font: "JetBrains Mono",
+			defaultFontSize: 12,
+			shell: "",
+			splitTabMode: "separate",
+			confirmBeforeQuit: true,
+			confirmBeforeClosingTab: true,
+			preventSleepWhenBusy: false,
+			autoUpdateEnabled: true,
+			autoShowPrPopover: false,
+			theme: "dark",
+		},
+		setIde: vi.fn(),
+		setFont: vi.fn(),
+		setShell: vi.fn(),
+		setSplitTabMode: vi.fn(),
+		setConfirmBeforeQuit: vi.fn(),
+		setConfirmBeforeClosingTab: vi.fn(),
+		setPreventSleepWhenBusy: vi.fn(),
+		setAutoUpdateEnabled: vi.fn(),
+		setAutoShowPrPopover: vi.fn(),
+		setTheme: vi.fn(),
+		setDefaultFontSize: vi.fn(),
+	},
+	IDE_NAMES: { vscode: "VS Code" },
+	FONT_FAMILIES: { "JetBrains Mono": "JetBrains Mono" },
+}));
+
+vi.mock("../../../stores/updater", () => ({
+	updaterStore: {
+		state: { checking: false, downloading: false, available: false, version: null, error: null },
+		checkForUpdate: vi.fn(),
+	},
+}));
+
+vi.mock("../../../themes", () => ({
+	getThemeNames: () => ({ dark: "Dark" }),
+}));
+
+vi.mock("../../../stores/repoDefaults", () => ({
+	repoDefaultsStore: {
+		state: {
+			baseBranch: "automatic",
+			copyIgnoredFiles: false,
+			copyUntrackedFiles: false,
+			setupScript: "",
+			runScript: "",
+			archiveScript: "",
+			worktreeStorage: "sibling",
+			promptOnCreate: true,
+			deleteBranchOnRemove: true,
+			autoArchiveMerged: false,
+			orphanCleanup: "ask",
+			prMergeStrategy: "merge",
+			afterMerge: "archive",
+			autoFetchIntervalMinutes: 0,
+			autoDeleteOnPrClose: "off",
+		},
+		setBaseBranch: mockSetBaseBranch,
+		setCopyIgnoredFiles: mockSetCopyIgnoredFiles,
+		setCopyUntrackedFiles: mockSetCopyUntrackedFiles,
+		setSetupScript: mockSetSetupScript,
+		setRunScript: mockSetRunScript,
+		setWorktreeStorage: vi.fn(),
+		setPromptOnCreate: vi.fn(),
+		setDeleteBranchOnRemove: vi.fn(),
+		setAutoArchiveMerged: vi.fn(),
+		setOrphanCleanup: vi.fn(),
+		setPrMergeStrategy: vi.fn(),
+		setAfterMerge: vi.fn(),
+		setArchiveScript: vi.fn(),
+		setAutoFetchIntervalMinutes: mockSetAutoFetchIntervalMinutes,
+		setAutoDeleteOnPrClose: mockSetAutoDeleteOnPrClose,
+	},
+}));
+
+// GitHubTab calls rpc() in onMount — mock it to resolve with authenticated state
+// so all sections (including auth-gated PR settings) render
+vi.mock("../../../transport", () => ({
+	rpc: vi
+		.fn()
+		.mockResolvedValue({ authenticated: true, login: "testuser", avatar_url: null, source: "oauth", scopes: "repo" }),
+}));
+
+vi.mock("../../../utils/openUrl", () => ({
+	handleOpenUrl: vi.fn(),
+}));
+
+// Repository Defaults section moved from GeneralTab to GitHubTab
+import { GitHubTab } from "../../../components/SettingsPanel/tabs/GitHubTab";
+
+describe("GitHubTab — Repository Defaults section", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	// rpc mock is async — auth-gated sections only render after microtask settles
+	const waitForAuth = () => new Promise((r) => setTimeout(r, 0));
+
+	it("renders Repository Defaults heading", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const headings = Array.from(container.querySelectorAll("h3")).map((h) => h.textContent);
+		expect(headings).toContain("Repository Defaults");
+	});
+
+	it("shows baseBranch dropdown with current global default selected", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+		const baseBranchSelect = selects.find((s) => Array.from(s.options).some((o) => o.text.includes("Automatic")));
+		expect(baseBranchSelect).not.toBeUndefined();
+		expect(baseBranchSelect!.value).toBe("automatic");
+	});
+
+	it("calls setBaseBranch when dropdown changes", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+		const baseBranchSelect = selects.find((s) => Array.from(s.options).some((o) => o.text.includes("Automatic")))!;
+		fireEvent.change(baseBranchSelect, { target: { value: "main" } });
+		expect(mockSetBaseBranch).toHaveBeenCalledWith("main");
+	});
+
+	it("shows copyIgnoredFiles and copyUntrackedFiles toggles", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const checkboxes = container.querySelectorAll("input[type=checkbox]");
+		expect(checkboxes.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("calls setCopyIgnoredFiles when toggle changes", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const checkboxes = Array.from(container.querySelectorAll("input[type=checkbox]")) as HTMLInputElement[];
+		const repoDefaultsH3 = Array.from(container.querySelectorAll("h3")).find(
+			(h) => h.textContent === "Repository Defaults",
+		)!;
+		const h3Index = checkboxes.findIndex((cb) => {
+			return repoDefaultsH3.compareDocumentPosition(cb) & Node.DOCUMENT_POSITION_FOLLOWING;
+		});
+		expect(h3Index).toBeGreaterThanOrEqual(0);
+		fireEvent.change(checkboxes[h3Index], { target: { checked: true } });
+		expect(mockSetCopyIgnoredFiles).toHaveBeenCalledWith(true);
+	});
+
+	it("shows setupScript and runScript textareas", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const textareas = container.querySelectorAll("textarea");
+		expect(textareas.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("calls setSetupScript when first repo-defaults textarea changes", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		// Find the Setup Script textarea (after the "Repository Defaults" heading)
+		const textareas = container.querySelectorAll("textarea");
+		fireEvent.input(textareas[0], { target: { value: "npm install" } });
+		expect(mockSetSetupScript).toHaveBeenCalledWith("npm install");
+	});
+
+	it("renders auto-fetch interval dropdown with Disabled selected", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+		const fetchSelect = selects.find((s) => Array.from(s.options).some((o) => o.text === "Disabled"));
+		expect(fetchSelect).toBeDefined();
+		expect(fetchSelect!.value).toBe("0");
+	});
+
+	it("calls setAutoFetchIntervalMinutes when auto-fetch dropdown changes", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await waitForAuth();
+		const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+		const fetchSelect = selects.find((s) => Array.from(s.options).some((o) => o.text === "Disabled"))!;
+		fireEvent.change(fetchSelect, { target: { value: "15" } });
+		expect(mockSetAutoFetchIntervalMinutes).toHaveBeenCalledWith(15);
+	});
+
+	it("renders auto-delete on PR close dropdown with Off selected", async () => {
+		const { container } = render(() => <GitHubTab />);
+		// Wait for async auth status to settle (rpc mock resolves a microtask)
+		await new Promise((r) => setTimeout(r, 0));
+		const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+		const deleteSelect = selects.find((s) => Array.from(s.options).some((o) => o.text === "Ask before deleting"));
+		expect(deleteSelect).toBeDefined();
+		expect(deleteSelect!.value).toBe("off");
+	});
+
+	it("calls setAutoDeleteOnPrClose when auto-delete dropdown changes", async () => {
+		const { container } = render(() => <GitHubTab />);
+		await new Promise((r) => setTimeout(r, 0));
+		const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+		const deleteSelect = selects.find((s) => Array.from(s.options).some((o) => o.text === "Ask before deleting"))!;
+		fireEvent.change(deleteSelect, { target: { value: "ask" } });
+		expect(mockSetAutoDeleteOnPrClose).toHaveBeenCalledWith("ask");
+	});
+});

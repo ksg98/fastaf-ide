@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blog — FastAF</title>
+  <meta name="description" content="Deep-dives into FastAF features: why we built them, the problems they solve, and how they work." />
+
+  <meta property="og:title" content="Blog — FastAF" />
+  <meta property="og:description" content="Deep-dives into FastAF features." />
+  <meta property="og:image" content="/og.png" />
+  <meta property="og:type" content="website" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/ksg98/fastaf/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <section class="blog-index">
+    <div class="container">
+      <h1>Blog</h1>
+      <p class="blog-index-subtitle">Deep-dives into why we build what we build.</p>
+
+      <div class="blog-list">
+        <a href="/blog/ipad-couch.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>June 27, 2026</time></div>
+          <h3>Running your agents from the couch, on an iPad</h3>
+          <p>Not a cut-down mobile view — the whole desktop UI, in Safari on an iPad, over Tailscale. The fixes in v1.5.1 (config hydration over Tailscale, touch scroll, keyboard occlusion + dictation, sidebar scroll-vs-reorder, the awaiting badge, duplicate tabs, and a Command Palette button) that made couch-mode supervision feel like sitting at the desk.</p>
+        </a>
+        <a href="/blog/near-native-performance.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>June 26, 2026</time></div>
+          <h3>Making a WebView terminal feel native</h3>
+          <p>A cargo build shouldn't make your terminal stutter. The engineering study behind v1.5's near-native input latency: off-main-thread rendering, a binary frame protocol, and the Apple Silicon QoS discovery that closed the gap — plus the usability sharpening that shipped alongside.</p>
+        </a>
+        <a href="/blog/ai-chat.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>June 2, 2026</time></div>
+          <h3>AI Chat: an agent that reads your terminal, not its screenshot</h3>
+          <p>Most chat sidebars are blind to your terminal. AI Chat reads structured OSC 133 state — commands, outputs, exit codes, links — runs local (Ollama) or cloud models, and can arm approval-gated reactive watchers. In beta behind the Experimental toggle.</p>
+        </a>
+        <a href="/blog/command-blocks.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 28, 2026</time></div>
+          <h3>Command blocks for agent terminals</h3>
+          <p>An AI agent's terminal is a wall of text. We segmented it into navigable command blocks — with detection that works even for agents that emit no markers, via heuristic ⏺ tool-call recognition alongside OSC 133 / OSC 7770.</p>
+        </a>
+        <a href="/blog/auto-standby.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 23, 2026</time></div>
+          <h3>Auto-standby: SIGSTOP for idle agent terminals</h3>
+          <p>Dozens of idle agent terminals quietly burn CPU and battery. Auto-standby SIGSTOPs the whole process group when a tab is unfocused and idle, and SIGCONTs it the instant you look back or a message arrives.</p>
+        </a>
+        <a href="/blog/process-monitor.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 18, 2026</time></div>
+          <h3>A built-in process monitor for your terminal trees</h3>
+          <p>When one of a dozen agents pins a core, which one is it? A process monitor reports CPU and RSS for TUIC and every child process tree — over MCP, over HTTP, and as a self-contained dashboard.</p>
+        </a>
+        <a href="/blog/beta-features.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 10, 2026</time>          </div>
+          <h3>SSH tunnels, remote access, and the beta features you can try today</h3>
+          <p>A tour of the features behind the Experimental toggle: SSH tunnel management, the tuicommander-remote daemon, AI-powered code triage, terminal watchers, and chat. All in beta — feedback welcome.</p>
+        </a>
+        <a href="/blog/tuic-remote.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 8, 2026</time></div>
+          <h3>One daemon, every environment: meet tuicommander-remote</h3>
+          <p>A headless Rust daemon that runs inside WSL, Docker dev containers, and remote servers. The desktop app drives them as if they were local — same protocol, no path translation, no cross-OS shims.</p>
+        </a>
+        <a href="/blog/ai-triage.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 5, 2026</time></div>
+          <h3>AI Triage: code review that understands what changed</h3>
+          <p>Every AI IDE can generate code. None of them review the diff before you commit. AI Triage classifies every changed file by risk, relevance, and category — streaming results as the LLM works through your changes.</p>
+        </a>
+        <a href="/blog/cross-agent-orchestration.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 4, 2026</time>          </div>
+          <h3>Using Codex to orchestrate Claude Code through FastAF</h3>
+          <p>Cross-agent orchestration without screen-scraping. FastAF's MCP bridge gives external agents structured terminal state instead of raw ANSI bytes. Here's how to set it up and why it beats tmux.</p>
+        </a>
+        <a href="/blog/native-terminal.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 4, 2026</time>          </div>
+          <h3>Why we replaced xterm.js with a native terminal</h3>
+          <p>After months of patching WebGL atlas corruption, scroll jump races, and scrollbar visibility hacks, we replaced xterm.js with an Alacritty-based terminal rendered to Canvas. Fewer workaround files than we had bug fixes.</p>
+        </a>
+        <a href="/blog/producthunt-launch.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>April 26, 2026</time>          </div>
+          <h3>Launched on Product Hunt — and what real users say</h3>
+          <p>FastAF is live on Product Hunt this week. Early reviews from daily users name the same patterns: multi-agent terminal sprawl, worktree isolation, blocking Y/n prompts, and couch-mode supervision from mobile.</p>
+        </a>
+        <a href="/blog/global-workspace.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>April 8, 2026</time>          </div>
+          <h3>Global Workspace: one view for all your agents</h3>
+          <p>When you run agents across multiple repos, you lose track of who's doing what. Global Workspace pulls the terminals that matter into a single split-pane view — without moving them.</p>
+        </a>
+        <a href="/blog/one-month-retrospective.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>April 15, 2026</time>          </div>
+          <h3>What one person can ship in a month</h3>
+          <p>Fifteen releases, 226 changelog entries, nearly 90,000 lines of code — shipped solo in evenings and weekends. A retrospective on what Claude Code actually compresses, and what it can't.</p>
+        </a>
+        <a href="/blog/integrated-viewers.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 29, 2026</time>          </div>
+          <h3>Read, diff, and edit without leaving the terminal</h3>
+          <p>AI agents reference files constantly. Instead of alt-tabbing to an editor every time, we built markdown, code, and diff viewers right into the terminal workspace.</p>
+        </a>
+        <a href="/blog/agent-observability.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 28, 2026</time>          </div>
+          <h3>Knowing what your agents are doing without looking</h3>
+          <p>When you run 5 agents in parallel, you can't watch every terminal. We built status detection, sound notifications, and an activity dashboard so you don't have to.</p>
+        </a>
+        <a href="/blog/sidebar-workspace.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 27, 2026</time>          </div>
+          <h3>One sidebar, all your repos</h3>
+          <p>When you work across 10+ repositories every day, you need a single place to see branches, worktrees, PRs, and diff stats — without switching tools.</p>
+        </a>
+        <a href="/blog/remote-mobile.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 26, 2026</time>          </div>
+          <h3>From the couch to 5G: how we built remote access</h3>
+          <p>We wanted to check on AI agents without sitting at the desk. After trying session logs, remote proxies, and SSH, we ended up building a full mobile experience.</p>
+        </a>
+        <a href="/blog/smart-prompts.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 25, 2026</time>          </div>
+          <h3>Why we built Smart Prompts</h3>
+          <p>We were copy-pasting the same instructions to AI agents every day. So we turned them into one-click actions that know your context.</p>
+        </a>
+        <a href="/blog/terminal-power.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 24, 2026</time>          </div>
+          <h3>A terminal built for 8-hour sessions</h3>
+          <p>Split panes, detachable windows, persistent sessions, find in content, and up to 50 concurrent terminals. We built a terminal for people who live in it all day.</p>
+        </a>
+        <a href="/blog/claude-usage.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 23, 2026</time>          </div>
+          <h3>Tracking your AI usage before the rate limit hits</h3>
+          <p>Running multiple AI agents burns through rate limits fast. We built a usage dashboard so you can see exactly where you stand — and plan your work accordingly.</p>
+        </a>
+        <a href="/blog/performance.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 22, 2026</time>          </div>
+          <h3>How we keep it fast with 10 repos and 8 terminals open</h3>
+          <p>A desktop app that manages 10 repos, 8 terminals, and constant git operations can't afford to be slow. Here's the performance work we did under the hood.</p>
+        </a>
+        <a href="/blog/dictation.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 21, 2026</time>          </div>
+          <h3>Talking to your AI agents instead of typing</h3>
+          <p>Hold a key, speak your instruction, release. The text appears in the terminal. No cloud service, no API key, no latency — Whisper runs locally on your machine.</p>
+        </a>
+        <a href="/blog/plugin-system.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>March 20, 2026</time>          </div>
+          <h3>Extend FastAF with plugins</h3>
+          <p>Every workflow is different. We built a plugin system so you can extend FastAF with custom panels, context menu actions, and MCP integrations.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/ksg98/fastaf/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

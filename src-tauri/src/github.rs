@@ -1,0 +1,4764 @@
+use serde::Serialize;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
+#[cfg(feature = "desktop")]
+use tauri::State;
+
+use crate::error_classification::calculate_backoff_delay;
+use crate::state::AppState;
+
+fn extract_graphql_name(query: &str) -> &str {
+    // Extract name from "query FooBar {" or "mutation Baz(" patterns
+    for keyword in &["query ", "mutation "] {
+        if let Some(rest) = query.trim_start().strip_prefix(keyword) {
+            let rest = rest.trim_start();
+            let end = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                return &rest[..end];
+            }
+        }
+    }
+    "<inline>"
+}
+
+/// Resolve a GitHub API token from all available sources.
+/// Delegates to `github_auth::resolve_token_with_source()` — single source of truth
+/// for the priority chain: GH_TOKEN env → GITHUB_TOKEN env → keyring OAuth → gh_token crate → gh CLI.
+#[cfg(test)]
+pub(crate) fn resolve_github_token() -> Option<String> {
+    crate::github_auth::resolve_token_with_source().0
+}
+
+/// Collect all non-empty GitHub token candidates in priority order.
+/// Delegates to the single source of truth in `github_auth::resolve_all_candidates`.
+fn resolve_github_token_candidates() -> Vec<(String, crate::github_auth::TokenSource)> {
+    crate::github_auth::resolve_all_candidates()
+}
+
+/// Error type for GraphQL requests, distinguishing auth failures and rate limits from other errors.
+#[derive(Debug)]
+pub(crate) enum GqlError {
+    /// 401 Unauthorized — token is invalid or expired
+    Auth(String),
+    /// Rate limited by GitHub (429, 403 with exhausted limits, or GraphQL RATE_LIMITED)
+    RateLimit {
+        /// Unix epoch from `x-ratelimit-reset` header (primary limit reset time)
+        reset_at: Option<u64>,
+        /// Seconds from `retry-after` header (secondary/abuse limits)
+        retry_after: Option<u64>,
+        message: String,
+    },
+    /// Any other error (network, parse, non-401 HTTP status, GraphQL errors)
+    Other(String),
+}
+
+impl fmt::Display for GqlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GqlError::Auth(msg) => write!(f, "Auth error: {msg}"),
+            GqlError::RateLimit { message, .. } => write!(f, "Rate limited: {message}"),
+            GqlError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+/// Circuit breaker for GitHub API calls.
+/// Tracks consecutive failures and stops making requests after a threshold.
+/// Rate limits are tracked separately so they don't inflate the failure count.
+pub(crate) struct GitHubCircuitBreaker {
+    failure_count: AtomicU32,
+    open_until: parking_lot::RwLock<Option<Instant>>,
+    /// Separate backoff for rate limits — does not affect failure_count
+    rate_limit_until: parking_lot::RwLock<Option<Instant>>,
+}
+
+/// Consecutive failures before the circuit opens (tolerates occasional transient errors).
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+/// Initial backoff when the circuit opens (5 seconds).
+const CIRCUIT_BREAKER_BASE_MS: f64 = 5_000.0;
+/// Maximum backoff cap so the circuit eventually retries (5 minutes).
+const CIRCUIT_BREAKER_MAX_MS: f64 = 300_000.0;
+/// Exponential backoff multiplier (doubles each failure beyond threshold).
+const CIRCUIT_BREAKER_MULTIPLIER: f64 = 2.0;
+
+impl GitHubCircuitBreaker {
+    pub(crate) fn new() -> Self {
+        Self {
+            failure_count: AtomicU32::new(0),
+            open_until: parking_lot::RwLock::new(None),
+            rate_limit_until: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// Check if the circuit is open (failure-based or rate-limited).
+    /// Returns Ok(()) if closed (requests allowed), or Err with a message.
+    pub(crate) fn check(&self) -> Result<(), String> {
+        // Check rate limit backoff first (more specific message)
+        let rl_guard = self.rate_limit_until.read();
+        if let Some(until) = *rl_guard
+            && Instant::now() < until
+        {
+            let remaining = until.duration_since(Instant::now());
+            return Err(format!(
+                "rate-limit: backing off for {:.0}s",
+                remaining.as_secs_f64()
+            ));
+        }
+        drop(rl_guard);
+
+        // Check failure-based circuit breaker
+        let guard = self.open_until.read();
+        if let Some(until) = *guard
+            && Instant::now() < until
+        {
+            let remaining = until.duration_since(Instant::now());
+            return Err(format!(
+                "GitHub API circuit breaker open — retrying in {:.0}s",
+                remaining.as_secs_f64()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Record a successful API call. Resets failure count and closes the circuit.
+    pub(crate) fn record_success(&self) {
+        self.failure_count.store(0, Ordering::Relaxed);
+        *self.open_until.write() = None;
+    }
+
+    /// Reset the circuit breaker entirely — clears failures, backoff, and rate limits.
+    /// Used after a new token is obtained (e.g. OAuth login).
+    pub(crate) fn reset(&self) {
+        self.failure_count.store(0, Ordering::Relaxed);
+        *self.open_until.write() = None;
+        *self.rate_limit_until.write() = None;
+    }
+
+    /// Record a rate limit response. Sets a dedicated backoff timer
+    /// without inflating the failure count.
+    pub(crate) fn record_rate_limit(&self, wait_secs: u64) {
+        let delay = std::time::Duration::from_secs(wait_secs);
+        *self.rate_limit_until.write() = Some(Instant::now() + delay);
+        tracing::warn!(
+            source = "github",
+            backoff_secs = wait_secs,
+            "Rate limited — backing off"
+        );
+    }
+
+    /// Record a failed API call. Opens the circuit after threshold failures.
+    pub(crate) fn record_failure(&self) {
+        let count = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= CIRCUIT_BREAKER_THRESHOLD {
+            let delay_ms = calculate_backoff_delay(
+                count - CIRCUIT_BREAKER_THRESHOLD,
+                CIRCUIT_BREAKER_BASE_MS,
+                CIRCUIT_BREAKER_MAX_MS,
+                CIRCUIT_BREAKER_MULTIPLIER,
+            );
+            let delay = std::time::Duration::from_millis(delay_ms as u64);
+            *self.open_until.write() = Some(Instant::now() + delay);
+            tracing::warn!(
+                source = "github",
+                failures = count,
+                backoff_secs = delay.as_secs_f64(),
+                "Circuit breaker open"
+            );
+        }
+    }
+}
+
+/// Parse a git remote URL into (owner, repo) for GitHub repos.
+/// Supports HTTPS (github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git).
+pub(crate) fn parse_remote_url(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+
+    // SSH: git@github.com:owner/repo.git
+    if let Some(path) = url.strip_prefix("git@github.com:") {
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let parts: Vec<&str> = path.splitn(2, '/').collect();
+        if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return Some((parts[0].to_string(), parts[1].to_string()));
+        }
+    }
+
+    // HTTPS: https://github.com/owner/repo.git
+    if url.contains("github.com") {
+        // Strip protocol and host
+        let path = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_start_matches("github.com/");
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let parts: Vec<&str> = path.splitn(3, '/').collect();
+        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return Some((parts[0].to_string(), parts[1].to_string()));
+        }
+    }
+
+    None
+}
+
+/// Build the per-repo cooldown-cache key.
+///
+/// The ambient github.com default keeps the host-agnostic `owner/name` key
+/// (unchanged, so a single-account user's diagnostics/cooldown behavior is
+/// identical). Every other account — a GHE PAT or an additional named
+/// github.com account — prefixes with the account id (`{id}:owner/name`) so the
+/// same owner/name across accounts never collides, and the `:` discriminates the
+/// ambient default's keys from named-account keys when scoping resets. (A GitHub
+/// login can't contain `:`, so `{login}:owner/name` stays unambiguous.)
+pub(crate) fn cooldown_key(
+    account: &crate::github_account::GitHubAccount,
+    owner: &str,
+    name: &str,
+) -> String {
+    if account.is_ambient_default() {
+        format!("{owner}/{name}")
+    } else {
+        format!("{}:{owner}/{name}", account.id)
+    }
+}
+
+/// Per-account GitHub runtime state for non-github.com (GHE) accounts.
+///
+/// github.com uses the global `AppState` fields (unchanged); each GHE account
+/// gets its own breaker + viewer-login cache + rate budget here so a failing or
+/// rate-limited GHE account is fully isolated from github.com and from other
+/// GHE accounts.
+pub(crate) struct GheAccountState {
+    pub(crate) circuit_breaker: GitHubCircuitBreaker,
+    pub(crate) viewer_login: parking_lot::RwLock<Option<String>>,
+    pub(crate) rate_limit_remaining: AtomicU32,
+}
+
+impl GheAccountState {
+    pub(crate) fn new() -> Self {
+        Self {
+            circuit_breaker: GitHubCircuitBreaker::new(),
+            viewer_login: parking_lot::RwLock::new(None),
+            rate_limit_remaining: AtomicU32::new(u32::MAX),
+        }
+    }
+}
+
+/// Run a closure with the circuit breaker for `account` (the ambient github.com
+/// default → the global breaker; every named account, GHE or additional
+/// github.com → its per-account breaker keyed by id).
+pub(crate) fn with_account_breaker<R>(
+    state: &AppState,
+    account: &crate::github_account::GitHubAccount,
+    f: impl FnOnce(&GitHubCircuitBreaker) -> R,
+) -> R {
+    if account.is_ambient_default() {
+        f(&state.github_circuit_breaker)
+    } else {
+        let entry = state
+            .ghe_state
+            .entry(account.id.clone())
+            .or_insert_with(GheAccountState::new);
+        f(&entry.circuit_breaker)
+    }
+}
+
+/// The most-constrained GitHub rate budget across all active accounts: the
+/// ambient default's global budget and every named account's per-account budget.
+///
+/// The poller runs a single global loop that polls every account in one batch,
+/// so it must pace for the tightest constraint — otherwise a low-budget named
+/// account would be drained by the shared cadence. (Each account also
+/// self-protects via its own breaker once it actually hits the limit; this just
+/// keeps the proactive throttle honest.)
+pub(crate) fn min_rate_budget(state: &AppState) -> u32 {
+    let mut min = state
+        .github_rate_limit_remaining
+        .load(std::sync::atomic::Ordering::Relaxed);
+    for entry in state.ghe_state.iter() {
+        let b = entry
+            .value()
+            .rate_limit_remaining
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if b < min {
+            min = b;
+        }
+    }
+    min
+}
+
+/// Parse a header value as a u64, returning None if missing or unparseable.
+fn header_as_u64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+    headers.get(name)?.to_str().ok()?.parse().ok()
+}
+
+/// Check a GraphQL JSON response for errors.
+///
+/// - Rate-limited errors always fail.
+/// - Non-rate-limit errors fail only when `data` is absent (pure error).
+///   When `data` is present alongside errors (partial success, e.g. one repo
+///   not found in a batch query), the caller receives `Ok(())` so it can
+///   process the valid portion.  The `get_all_pr_statuses_impl` loop already
+///   handles null repos gracefully.
+pub(crate) fn check_graphql_errors(
+    json: &serde_json::Value,
+    ratelimit_reset: Option<u64>,
+    retry_after: Option<u64>,
+) -> Result<(), GqlError> {
+    let errors = match json["errors"].as_array() {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => return Ok(()),
+    };
+
+    // Rate-limit errors always bubble up — partial data is stale anyway
+    let has_rate_limit_error = errors
+        .iter()
+        .any(|e| e["type"].as_str() == Some("RATE_LIMITED"));
+    if has_rate_limit_error {
+        let msg = errors[0]["message"]
+            .as_str()
+            .unwrap_or("GraphQL rate limit");
+        return Err(GqlError::RateLimit {
+            reset_at: ratelimit_reset,
+            retry_after,
+            message: msg.to_string(),
+        });
+    }
+
+    // If the response includes valid data alongside the errors, treat as
+    // partial success — the caller will skip null repos individually.
+    if json["data"].is_object() {
+        return Ok(());
+    }
+
+    let msg = errors[0]["message"]
+        .as_str()
+        .unwrap_or("Unknown GraphQL error");
+    Err(GqlError::Other(format!("GraphQL error: {msg}")))
+}
+
+/// Execute a GraphQL query against the GitHub API.
+/// Returns the parsed JSON response or a typed error.
+/// Detects rate limits from HTTP status codes, headers, and GraphQL error types.
+pub(crate) async fn graphql_request(
+    client: &reqwest::Client,
+    token: &str,
+    url: &str,
+    query: &str,
+    variables: &serde_json::Value,
+) -> Result<serde_json::Value, GqlError> {
+    let body = serde_json::json!({
+        "query": query,
+        "variables": variables,
+    });
+
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "tuicommander")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| GqlError::Other(format!("GraphQL request failed: {e}")))?;
+
+    let status = response.status();
+
+    // Extract rate limit headers before consuming the response body
+    let ratelimit_remaining = header_as_u64(response.headers(), "x-ratelimit-remaining");
+    let ratelimit_reset = header_as_u64(response.headers(), "x-ratelimit-reset");
+    let retry_after = header_as_u64(response.headers(), "retry-after");
+
+    // 1. HTTP 429 → always a rate limit
+    if status.as_u16() == 429 {
+        return Err(GqlError::RateLimit {
+            reset_at: ratelimit_reset,
+            retry_after,
+            message: "HTTP 429 Too Many Requests".to_string(),
+        });
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| GqlError::Other(format!("Failed to parse GraphQL response: {e}")))?;
+
+    if !status.is_success() {
+        let msg = json["message"].as_str().unwrap_or("Unknown error");
+        let err_msg = format!("GitHub API error ({status}): {msg}");
+
+        if status.as_u16() == 401 {
+            return Err(GqlError::Auth(err_msg));
+        }
+
+        // 2. HTTP 403 + x-ratelimit-remaining: 0 → primary rate limit exhausted
+        if status.as_u16() == 403 && ratelimit_remaining == Some(0) {
+            return Err(GqlError::RateLimit {
+                reset_at: ratelimit_reset,
+                retry_after,
+                message: format!("Primary rate limit exhausted: {msg}"),
+            });
+        }
+
+        // 3. HTTP 403 + body mentions "secondary rate" → secondary/abuse rate limit
+        if status.as_u16() == 403 {
+            let msg_lower = msg.to_lowercase();
+            if msg_lower.contains("secondary rate") || msg_lower.contains("abuse") {
+                return Err(GqlError::RateLimit {
+                    reset_at: ratelimit_reset,
+                    retry_after,
+                    message: format!("Secondary rate limit: {msg}"),
+                });
+            }
+        }
+
+        return Err(GqlError::Other(err_msg));
+    }
+
+    // 4. HTTP 200 + GraphQL errors
+    check_graphql_errors(&json, ratelimit_reset, retry_after)?;
+
+    Ok(json)
+}
+
+/// Calculate how long to wait for a rate limit, in seconds.
+/// Prefers `retry-after` (secondary limits), falls back to `reset_at - now + 1`,
+/// defaults to 60s if neither header is available.
+fn rate_limit_wait_secs(reset_at: Option<u64>, retry_after: Option<u64>) -> u64 {
+    if let Some(secs) = retry_after {
+        return secs;
+    }
+    if let Some(reset) = reset_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if reset > now {
+            return reset - now + 1;
+        }
+    }
+    60 // Default: wait 60 seconds
+}
+
+/// Synthesize the implicit github.com default account from the current token
+/// source + cached viewer login. github.com keeps resolving with zero user
+/// action, so all existing call sites pass this.
+pub(crate) fn github_com_account(state: &AppState) -> crate::github_account::GitHubAccount {
+    use crate::github_account::AccountKind;
+    use crate::github_auth::TokenSource;
+    let kind = match *state.github_token_source.read() {
+        TokenSource::Env => AccountKind::GithubComEnv,
+        TokenSource::GhCli => AccountKind::GithubComGhCli,
+        // OAuth, Pat (n/a for cloud), and None all map to the OAuth default.
+        TokenSource::OAuth | TokenSource::Pat | TokenSource::None => AccountKind::GithubComOauth,
+    };
+    let login = state.github_viewer_login.read().clone();
+    crate::github_account::GitHubAccount::github_com(kind, login)
+}
+
+/// Resolve a repo to `(account, token, owner, repo)` for a REST API call.
+///
+/// Preserves github.com behavior: a github.com repo resolves to the implicit
+/// default account and uses the cached/rotated `state.github_token` (NOT a fresh
+/// chain resolve), exactly as the old per-command preamble did. GHE-bound repos
+/// use their account's PAT + host. Errors when the repo is unbound, ambiguous,
+/// or unauthenticated.
+fn resolve_repo_for_rest(
+    state: &AppState,
+    repo_path: &str,
+) -> Result<(crate::github_account::GitHubAccount, String, String, String), String> {
+    use crate::github_account::{
+        GitHubAccountRegistry, RepoBindingStore, RepoResolution, resolve_repo_account,
+    };
+    let path = std::path::Path::new(repo_path);
+    let registry = GitHubAccountRegistry::load();
+    let bindings = RepoBindingStore::load();
+    let default = github_com_account(state);
+    let resolution = resolve_repo_account(path, &registry, &bindings, Some(&default));
+
+    let (account, owner, repo) = match resolution {
+        RepoResolution::Bound {
+            account,
+            owner,
+            repo,
+        } => (account, owner, repo),
+        // Exactly one candidate is the obvious choice (e.g. a github.com repo
+        // with no explicit binding yet) — resolve it without prompting.
+        RepoResolution::NeedsBind(mut candidates) if candidates.len() == 1 => {
+            let c = candidates.remove(0);
+            let account = if c.account_id == default.id {
+                default.clone()
+            } else {
+                registry
+                    .get(&c.account_id)
+                    .cloned()
+                    .ok_or_else(|| format!("GitHub account '{}' not found", c.account_id))?
+            };
+            (account, c.owner, c.repo)
+        }
+        RepoResolution::NeedsBind(_) => {
+            return Err(
+                "Repository matches multiple GitHub accounts — bind it to one first".to_string(),
+            );
+        }
+        RepoResolution::NeedsAccount => {
+            return Err("No GitHub account configured for this repository".to_string());
+        }
+        RepoResolution::Unmonitored => {
+            return Err("No GitHub remote URL found for this repository".to_string());
+        }
+    };
+
+    // Token: the ambient default uses the cached/rotated global token
+    // (unchanged); every named account (GHE PAT or additional github.com) uses
+    // its own per-account vault token.
+    let token = if account.is_ambient_default() {
+        state.github_token.read().clone()
+    } else {
+        crate::github_auth::resolve_token_for_account(&account).0
+    }
+    .ok_or_else(|| "No GitHub token available".to_string())?;
+
+    Ok((account, token, owner, repo))
+}
+
+/// Execute a GraphQL query with token fallback and circuit breaker protection.
+/// On 401, tries remaining token candidates and updates the stored token on success.
+/// Rate limits are handled separately from failures — they don't inflate the failure count.
+pub(crate) async fn graphql_with_retry(
+    state: &AppState,
+    account: &crate::github_account::GitHubAccount,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // Check circuit breaker first
+    with_account_breaker(state, account, |b| b.check())?;
+
+    let url = account.host.graphql_url();
+
+    if crate::github_debug::enabled() {
+        let query_name = extract_graphql_name(query);
+        tracing::info!(
+            source = "github_api",
+            method = "POST",
+            url = %url,
+            query = query_name,
+            "GraphQL request"
+        );
+    }
+
+    // Named accounts (GHE PAT, or an additional github.com account): a single
+    // explicit per-account token, its own endpoint, NO candidate fallback. The
+    // ambient env→OAuth→gh chain applies only to the ambient default — so
+    // `gh auth switch` can never drift a named account's identity.
+    if !account.is_ambient_default() {
+        let token = match crate::github_auth::resolve_token_for_account(account).0 {
+            Some(t) => t,
+            None => return Err("No GitHub token available".to_string()),
+        };
+        return match graphql_request(&state.http_client, &token, &url, query, &variables).await {
+            Ok(response) => {
+                with_account_breaker(state, account, |b| b.record_success());
+                Ok(response)
+            }
+            Err(GqlError::RateLimit {
+                reset_at,
+                retry_after,
+                message,
+            }) => {
+                let wait = rate_limit_wait_secs(reset_at, retry_after);
+                with_account_breaker(state, account, |b| b.record_rate_limit(wait));
+                Err(format!("rate-limit: {message}"))
+            }
+            Err(GqlError::Auth(msg)) => {
+                with_account_breaker(state, account, |b| b.record_failure());
+                Err(msg)
+            }
+            Err(GqlError::Other(msg)) => {
+                with_account_breaker(state, account, |b| b.record_failure());
+                Err(msg)
+            }
+        };
+    }
+
+    // github.com path — cached/rotated token + 401 candidate fallback. Unchanged.
+    let mut current_token = state.github_token.read().clone();
+    // Lazy resolution: boot skips keychain, resolve on first use.
+    if current_token.is_none() {
+        let (t, s) = tokio::task::spawn_blocking(crate::github_auth::resolve_token_with_source)
+            .await
+            .map_err(|e| format!("token resolve task panicked: {e}"))?;
+        if t.is_some() {
+            *state.github_token.write() = t.clone();
+            *state.github_token_source.write() = s;
+        }
+        current_token = t;
+    }
+    let token = match current_token.as_deref() {
+        Some(t) => t.to_string(),
+        None => return Err("No GitHub token available".to_string()),
+    };
+
+    match graphql_request(&state.http_client, &token, &url, query, &variables).await {
+        Ok(response) => {
+            with_account_breaker(state, account, |b| b.record_success());
+            Ok(response)
+        }
+        Err(GqlError::RateLimit {
+            reset_at,
+            retry_after,
+            message,
+        }) => {
+            let wait = rate_limit_wait_secs(reset_at, retry_after);
+            with_account_breaker(state, account, |b| b.record_rate_limit(wait));
+            Err(format!("rate-limit: {message}"))
+        }
+        Err(GqlError::Auth(msg)) => {
+            tracing::warn!(
+                source = "github",
+                "401 with current token, trying fallback candidates"
+            );
+            // Try other candidates
+            let candidates = resolve_github_token_candidates();
+            for (candidate, candidate_source) in &candidates {
+                if candidate == &token {
+                    continue; // Skip the one that already failed
+                }
+                match graphql_request(&state.http_client, candidate, &url, query, &variables).await
+                {
+                    Ok(response) => {
+                        tracing::info!(source = "github", "Token fallback succeeded");
+                        *state.github_token.write() = Some(candidate.clone());
+                        *state.github_token_source.write() = *candidate_source;
+                        with_account_breaker(state, account, |b| b.record_success());
+                        return Ok(response);
+                    }
+                    Err(GqlError::Auth(_)) => continue, // Try next candidate
+                    Err(GqlError::RateLimit {
+                        reset_at,
+                        retry_after,
+                        message,
+                    }) => {
+                        let wait = rate_limit_wait_secs(reset_at, retry_after);
+                        with_account_breaker(state, account, |b| b.record_rate_limit(wait));
+                        return Err(format!("rate-limit: {message}"));
+                    }
+                    Err(GqlError::Other(e)) => {
+                        with_account_breaker(state, account, |b| b.record_failure());
+                        return Err(e);
+                    }
+                }
+            }
+            // All candidates failed with 401
+            with_account_breaker(state, account, |b| b.record_failure());
+            Err(msg)
+        }
+        Err(GqlError::Other(msg)) => {
+            with_account_breaker(state, account, |b| b.record_failure());
+            Err(msg)
+        }
+    }
+}
+
+/// Git remote + branch status (no PR/CI — those come from githubStore via batch query)
+#[derive(Clone, Serialize)]
+pub(crate) struct GitHubStatus {
+    pub(crate) has_remote: bool,
+    pub(crate) current_branch: String,
+    pub(crate) ahead: i32,
+    pub(crate) behind: i32,
+}
+
+/// Summary of CI check states for a PR
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct CheckSummary {
+    pub(crate) passed: u32,
+    pub(crate) failed: u32,
+    pub(crate) pending: u32,
+    pub(crate) total: u32,
+}
+
+/// Individual CI check detail
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CheckDetail {
+    pub(crate) context: String,
+    pub(crate) state: String,
+}
+
+/// Pre-computed merge/review state label for the UI
+#[derive(Clone, Serialize, Debug, PartialEq)]
+pub(crate) struct StateLabel {
+    pub(crate) label: String,
+    pub(crate) css_class: String,
+}
+
+/// Classify merge readiness from mergeable + merge_state_status fields
+pub(crate) fn classify_merge_state(
+    mergeable: Option<&str>,
+    merge_state_status: Option<&str>,
+) -> Option<StateLabel> {
+    // CONFLICTING takes priority (merge would fail)
+    if mergeable == Some("CONFLICTING") {
+        return Some(StateLabel {
+            label: "Conflicts".to_string(),
+            css_class: "conflicting".to_string(),
+        });
+    }
+
+    match merge_state_status {
+        Some("CLEAN") => Some(StateLabel {
+            label: "Ready to merge".to_string(),
+            css_class: "clean".to_string(),
+        }),
+        Some("BEHIND") => Some(StateLabel {
+            label: "Behind base".to_string(),
+            css_class: "behind".to_string(),
+        }),
+        Some("BLOCKED") => Some(StateLabel {
+            label: "Blocked".to_string(),
+            css_class: "blocked".to_string(),
+        }),
+        Some("UNSTABLE") => Some(StateLabel {
+            label: "Unstable".to_string(),
+            css_class: "blocked".to_string(),
+        }),
+        Some("DRAFT") => Some(StateLabel {
+            label: "Draft".to_string(),
+            css_class: "behind".to_string(),
+        }),
+        Some("DIRTY") => Some(StateLabel {
+            label: "Conflicts".to_string(),
+            css_class: "conflicting".to_string(),
+        }),
+        _ => None, // UNKNOWN, HAS_HOOKS — don't show
+    }
+}
+
+/// Classify review decision into display label
+pub(crate) fn classify_review_state(review_decision: Option<&str>) -> Option<StateLabel> {
+    match review_decision {
+        Some("APPROVED") => Some(StateLabel {
+            label: "Approved".to_string(),
+            css_class: "approved".to_string(),
+        }),
+        Some("CHANGES_REQUESTED") => Some(StateLabel {
+            label: "Changes requested".to_string(),
+            css_class: "changes-requested".to_string(),
+        }),
+        Some("REVIEW_REQUIRED") => Some(StateLabel {
+            label: "Review required".to_string(),
+            css_class: "review-required".to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Parse r/g/b from a 6-char hex color string, returning (0,0,0) for invalid input
+fn parse_hex_rgb(hex: &str) -> (u8, u8, u8) {
+    if hex.len() < 6 {
+        return (0, 0, 0);
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+    (r, g, b)
+}
+
+/// Opacity used for GitHub label backgrounds in PR and issue display
+const LABEL_BG_OPACITY: f64 = 0.7;
+
+/// Convert a 6-char hex color to an rgba() CSS string with the given alpha
+pub(crate) fn hex_to_rgba(hex: &str, alpha: f64) -> String {
+    let (r, g, b) = parse_hex_rgb(hex);
+    format!("rgba({r}, {g}, {b}, {alpha})")
+}
+
+/// Determine if a hex color is light (needs dark text) using BT.601 luma
+pub(crate) fn is_light_color(hex: &str) -> bool {
+    let (r, g, b) = parse_hex_rgb(hex);
+    let (r, g, b) = (r as u32, g as u32, b as u32);
+    (r * 299 + g * 587 + b * 114) / 1000 > 128
+}
+
+/// PR label with name, hex color, and pre-computed display colors
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PrLabel {
+    name: String,
+    color: String,
+    text_color: String,
+    background_color: String,
+}
+
+/// PR status for a branch, returned by batch endpoint
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BranchPrStatus {
+    pub(crate) branch: String,
+    pub(crate) number: i32,
+    pub(crate) title: String,
+    pub(crate) state: String,
+    pub(crate) url: String,
+    pub(crate) additions: i32,
+    pub(crate) deletions: i32,
+    pub(crate) checks: CheckSummary,
+    pub(crate) check_details: Vec<CheckDetail>,
+    pub(crate) author: String,
+    pub(crate) commits: i32,
+    pub(crate) mergeable: String,
+    pub(crate) merge_state_status: String,
+    pub(crate) review_decision: String,
+    /// Whether the authenticated viewer's latest review on this PR is APPROVED.
+    /// Used to hide the Approve button once the current user has already approved,
+    /// even when the overall `review_decision` is still REVIEW_REQUIRED.
+    pub(crate) viewer_did_approve: bool,
+    pub(crate) labels: Vec<PrLabel>,
+    pub(crate) is_draft: bool,
+    pub(crate) base_ref_name: String,
+    pub(crate) head_ref_oid: String,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) merge_state_label: Option<StateLabel>,
+    pub(crate) review_state_label: Option<StateLabel>,
+    /// Repo-level: merge commits allowed
+    pub(crate) merge_commit_allowed: bool,
+    /// Repo-level: squash merge allowed
+    pub(crate) squash_merge_allowed: bool,
+    /// Repo-level: rebase merge allowed
+    pub(crate) rebase_merge_allowed: bool,
+}
+
+/// Classification of a single check node for summary counting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CheckCategory {
+    Passed,
+    Failed,
+    Pending,
+}
+
+/// Map a deduped statusCheckRollup node (CheckRun or StatusContext) to a summary category.
+fn classify_check_node(node: &serde_json::Value) -> CheckCategory {
+    if node["__typename"].as_str() == Some("CheckRun") {
+        // `conclusion` is only meaningful once `status` is COMPLETED.
+        if node["status"].as_str().unwrap_or("").to_uppercase() != "COMPLETED" {
+            return CheckCategory::Pending;
+        }
+        match node["conclusion"]
+            .as_str()
+            .unwrap_or("")
+            .to_uppercase()
+            .as_str()
+        {
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => CheckCategory::Passed,
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "STARTUP_FAILURE"
+            | "ACTION_REQUIRED" => CheckCategory::Failed,
+            _ => CheckCategory::Pending,
+        }
+    } else {
+        // StatusContext
+        match node["state"].as_str().unwrap_or("").to_uppercase().as_str() {
+            "SUCCESS" => CheckCategory::Passed,
+            "FAILURE" | "ERROR" => CheckCategory::Failed,
+            _ => CheckCategory::Pending,
+        }
+    }
+}
+
+/// Deduplicate statusCheckRollup context nodes by check name.
+///
+/// GitHub attaches every check suite to the head commit, so when a workflow runs
+/// more than once on the same commit (e.g. a stale run cancelled by a `concurrency`
+/// group, or a re-run after the base branch advanced) the rollup lists each check
+/// name multiple times. We keep only the most recently started entry per name —
+/// matching what `gh pr checks` displays. Insertion order is preserved for a stable
+/// list. Expects the `contexts` object (reads its `nodes` array).
+fn dedup_rollup_nodes(contexts: &serde_json::Value) -> Vec<serde_json::Value> {
+    let nodes = match contexts["nodes"].as_array() {
+        Some(arr) => arr,
+        None => return vec![],
+    };
+
+    // name -> (timestamp, node). Insertion order tracked separately for stable output.
+    let mut latest: std::collections::HashMap<String, (String, serde_json::Value)> =
+        std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+
+    for node in nodes {
+        let name = node["name"]
+            .as_str()
+            .or_else(|| node["context"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let ts = node["startedAt"]
+            .as_str()
+            .or_else(|| node["createdAt"].as_str())
+            .unwrap_or("")
+            .to_string();
+        match latest.get(&name) {
+            // Keep the newest entry; ISO-8601 timestamps sort lexicographically.
+            Some((existing_ts, _)) if existing_ts.as_str() >= ts.as_str() => {}
+            _ => {
+                if !latest.contains_key(&name) {
+                    order.push(name.clone());
+                }
+                latest.insert(name, (ts, node.clone()));
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|name| latest.remove(&name).map(|(_, node)| node))
+        .collect()
+}
+
+/// Shared logic for extracting fields from a single PR node.
+fn parse_pr_node(v: &serde_json::Value) -> Option<BranchPrStatus> {
+    let branch = v["headRefName"].as_str()?.to_string();
+    let number = v["number"].as_i64()? as i32;
+    let title = v["title"].as_str().unwrap_or("").to_string();
+    let state = v["state"].as_str().unwrap_or("").to_string();
+    let url = v["url"].as_str().unwrap_or("").to_string();
+    let additions = v["additions"].as_i64().unwrap_or(0) as i32;
+    let deletions = v["deletions"].as_i64().unwrap_or(0) as i32;
+    let author = v["author"]["login"].as_str().unwrap_or("").to_string();
+    let commits = v["commits"]["totalCount"].as_i64().unwrap_or(0) as i32;
+
+    // Parse CI check summary from GraphQL statusCheckRollup. GitHub attaches every
+    // check suite to the head commit, so a re-run (or a stale run cancelled by a
+    // `concurrency` group) duplicates a check name in the rollup. Dedup to the
+    // newest entry per name — matching `gh pr checks` — before tallying, otherwise
+    // passed/failed/pending double-count the stale duplicates.
+    let rollup_contexts = &v["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
+    let mut passed: u32 = 0;
+    let mut failed: u32 = 0;
+    let mut pending: u32 = 0;
+    for node in dedup_rollup_nodes(rollup_contexts) {
+        match classify_check_node(&node) {
+            CheckCategory::Passed => passed += 1,
+            CheckCategory::Failed => failed += 1,
+            CheckCategory::Pending => pending += 1,
+        }
+    }
+
+    let total = passed + failed + pending;
+
+    let mergeable = v["mergeable"].as_str().unwrap_or("UNKNOWN").to_string();
+    let merge_state_status = v["mergeStateStatus"]
+        .as_str()
+        .unwrap_or("UNKNOWN")
+        .to_string();
+    let review_decision = v["reviewDecision"].as_str().unwrap_or("").to_string();
+    let viewer_did_approve = v["viewerLatestReview"]["state"].as_str() == Some("APPROVED");
+    let is_draft = v["isDraft"].as_bool().unwrap_or(false);
+
+    let labels = v["labels"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| {
+                    let color = l["color"].as_str().unwrap_or("").to_string();
+                    let (text_color, background_color) = if color.len() == 6 {
+                        let text = if is_light_color(&color) {
+                            "#1e1e1e"
+                        } else {
+                            "#e5e5e5"
+                        };
+                        (text.to_string(), hex_to_rgba(&color, LABEL_BG_OPACITY))
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    Some(PrLabel {
+                        name: l["name"].as_str()?.to_string(),
+                        color,
+                        text_color,
+                        background_color,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let base_ref_name = v["baseRefName"].as_str().unwrap_or("").to_string();
+    let head_ref_oid = v["headRefOid"].as_str().unwrap_or("").to_string();
+    let created_at = v["createdAt"].as_str().unwrap_or("").to_string();
+    let updated_at = v["updatedAt"].as_str().unwrap_or("").to_string();
+
+    let merge_state_label =
+        classify_merge_state(Some(mergeable.as_str()), Some(merge_state_status.as_str()));
+    let review_state_label = classify_review_state(if review_decision.is_empty() {
+        None
+    } else {
+        Some(review_decision.as_str())
+    });
+
+    Some(BranchPrStatus {
+        branch,
+        number,
+        title,
+        state,
+        url,
+        additions,
+        deletions,
+        checks: CheckSummary {
+            passed,
+            failed,
+            pending,
+            total,
+        },
+        check_details: vec![], // Populated on-demand via per-PR query
+        author,
+        commits,
+        mergeable,
+        merge_state_status,
+        review_decision,
+        viewer_did_approve,
+        labels,
+        is_draft,
+        base_ref_name,
+        head_ref_oid,
+        created_at,
+        updated_at,
+        merge_state_label,
+        review_state_label,
+        // Defaults — stamped with real values from repo-level response after parsing
+        merge_commit_allowed: true,
+        squash_merge_allowed: true,
+        rebase_merge_allowed: true,
+    })
+}
+
+/// Stamp merge policy from a GraphQL repository object onto parsed PR nodes.
+fn stamp_merge_policy(nodes: &mut [BranchPrStatus], repo_json: &serde_json::Value) {
+    let merge = repo_json["mergeCommitAllowed"].as_bool().unwrap_or(true);
+    let squash = repo_json["squashMergeAllowed"].as_bool().unwrap_or(true);
+    let rebase = repo_json["rebaseMergeAllowed"].as_bool().unwrap_or(true);
+    for pr in nodes.iter_mut() {
+        pr.merge_commit_allowed = merge;
+        pr.squash_merge_allowed = squash;
+        pr.rebase_merge_allowed = rebase;
+    }
+}
+
+/// Fetch the authenticated user's GitHub login via `query { viewer { login } }`.
+/// Cached after first successful call for the session lifetime.
+pub(crate) async fn get_viewer_login(state: &AppState) -> Result<String, String> {
+    // Check cached value first
+    if let Some(login) = state.github_viewer_login.read().as_ref() {
+        return Ok(login.clone());
+    }
+    let response = graphql_with_retry(
+        state,
+        &github_com_account(state),
+        "query { viewer { login } }",
+        serde_json::Value::Null,
+    )
+    .await?;
+    let login = response["data"]["viewer"]["login"]
+        .as_str()
+        .ok_or_else(|| "Could not resolve viewer login".to_string())?
+        .to_string();
+    *state.github_viewer_login.write() = Some(login.clone());
+    Ok(login)
+}
+
+/// Like [`get_viewer_login`] but for a specific account. The ambient github.com
+/// default delegates to the global cache (unchanged); every named account (GHE
+/// or an additional github.com account) caches its own viewer login in
+/// `ghe_state` so viewer search terms never cross-contaminate between accounts.
+pub(crate) async fn get_viewer_login_for(
+    state: &AppState,
+    account: &crate::github_account::GitHubAccount,
+) -> Result<String, String> {
+    if account.is_ambient_default() {
+        return get_viewer_login(state).await;
+    }
+    // Per-account cache check (guard dropped before the await).
+    {
+        let entry = state
+            .ghe_state
+            .entry(account.id.clone())
+            .or_insert_with(crate::github::GheAccountState::new);
+        if let Some(login) = entry.viewer_login.read().as_ref() {
+            return Ok(login.clone());
+        }
+    }
+    let response = graphql_with_retry(
+        state,
+        account,
+        "query { viewer { login } }",
+        serde_json::Value::Null,
+    )
+    .await?;
+    let login = response["data"]["viewer"]["login"]
+        .as_str()
+        .ok_or_else(|| "Could not resolve viewer login".to_string())?
+        .to_string();
+    {
+        let entry = state
+            .ghe_state
+            .entry(account.id.clone())
+            .or_insert_with(crate::github::GheAccountState::new);
+        *entry.viewer_login.write() = Some(login.clone());
+    }
+    Ok(login)
+}
+
+// ── GitHub Issues ────────────────────────────────────────────────────────────
+
+/// GitHub Issue status, analogous to BranchPrStatus for PRs.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct GitHubIssue {
+    pub(crate) number: i32,
+    pub(crate) title: String,
+    pub(crate) state: String, // OPEN, CLOSED
+    pub(crate) url: String,
+    pub(crate) author: String,
+    pub(crate) labels: Vec<PrLabel>, // Reuse PrLabel — same GitHub schema
+    pub(crate) assignees: Vec<String>,
+    pub(crate) milestone: Option<String>,
+    pub(crate) comments_count: i32,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
+/// Parse a single issue node from GraphQL JSON.
+fn parse_issue_node(v: &serde_json::Value) -> Option<GitHubIssue> {
+    let number = v["number"].as_i64()? as i32;
+    let title = v["title"].as_str().unwrap_or("").to_string();
+    let state = v["state"].as_str().unwrap_or("").to_string();
+    let url = v["url"].as_str().unwrap_or("").to_string();
+    let author = v["author"]["login"].as_str().unwrap_or("").to_string();
+
+    let labels = v["labels"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| {
+                    let color = l["color"].as_str().unwrap_or("").to_string();
+                    let (text_color, background_color) = if color.len() == 6 {
+                        let text = if is_light_color(&color) {
+                            "#1e1e1e"
+                        } else {
+                            "#e5e5e5"
+                        };
+                        (text.to_string(), hex_to_rgba(&color, LABEL_BG_OPACITY))
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    Some(PrLabel {
+                        name: l["name"].as_str()?.to_string(),
+                        color,
+                        text_color,
+                        background_color,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let assignees = v["assignees"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a["login"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let milestone = v["milestone"]["title"].as_str().map(String::from);
+    let comments_count = v["comments"]["totalCount"].as_i64().unwrap_or(0) as i32;
+    let created_at = v["createdAt"].as_str().unwrap_or("").to_string();
+    let updated_at = v["updatedAt"].as_str().unwrap_or("").to_string();
+
+    Some(GitHubIssue {
+        number,
+        title,
+        state,
+        url,
+        author,
+        labels,
+        assignees,
+        milestone,
+        comments_count,
+        created_at,
+        updated_at,
+    })
+}
+
+/// Build `filterBy` clause for `repository().issues()` based on filter mode.
+fn issues_filter_clause(filter_mode: &str, viewer: &str) -> String {
+    match filter_mode {
+        "assigned" => format!(", filterBy: {{ assignee: \"{viewer}\" }}"),
+        "created" => format!(", filterBy: {{ createdBy: \"{viewer}\" }}"),
+        "mentioned" => format!(", filterBy: {{ mentioned: \"{viewer}\" }}"),
+        _ => String::new(), // "all" — no user filter
+    }
+}
+
+/// The issues sub-selection for embedding inside a repository alias.
+fn issues_repo_section(filter_mode: &str, viewer: &str) -> String {
+    let filter = issues_filter_clause(filter_mode, viewer);
+    let node_fields = r#"number title state url createdAt updatedAt
+        author { login }
+        labels(first: 10) { nodes { name color } }
+        assignees(first: 5) { nodes { login } }
+        milestone { title }
+        comments { totalCount }"#;
+    format!(
+        "    issues(first: 30, states: [OPEN]{filter}, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{\n      nodes {{ {node_fields} }}\n    }}"
+    )
+}
+
+/// Build a batched GraphQL query for issues only (on-demand Tauri command path).
+/// Uses `repository().issues()` — cheaper than `search()` in GraphQL points.
+fn build_multi_repo_issues_query(
+    repos: &[(String, String, String)],
+    viewer: &str,
+    filter_mode: &str,
+) -> (String, Vec<(String, String)>) {
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    let mut parts = vec!["query BatchRepoIssues {".to_string()];
+
+    for (i, (path, owner, name)) in repos.iter().enumerate() {
+        let alias = format!("r{i}");
+        parts.push(format!(
+            "  {alias}: repository(owner: \"{owner}\", name: \"{name}\") {{\n{}\n  }}",
+            issues_repo_section(filter_mode, viewer),
+        ));
+        aliases.push((alias, path.clone()));
+    }
+    parts.push("  rateLimit { cost remaining resetAt }".to_string());
+    parts.push("}".to_string());
+
+    (parts.join("\n"), aliases)
+}
+
+/// Fetch issues for all repos in a single batched GraphQL call.
+pub(crate) async fn get_all_issues_impl(
+    paths: &[String],
+    filter_mode: &str,
+    state: &AppState,
+) -> Result<std::collections::HashMap<String, Vec<GitHubIssue>>, String> {
+    if state.github_token.read().is_none() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let now = Instant::now();
+    state
+        .git_cache
+        .github_repo_cooldown
+        .retain(|_key, expiry| *expiry > now);
+
+    // This is the github.com-only issues path (get_github_remote_url filters to
+    // github.com); cooldown keys use the github.com default account.
+    let gh_account = github_com_account(state);
+    let repos: Vec<(String, String, String)> = paths
+        .iter()
+        .filter_map(|path| {
+            let repo_path = PathBuf::from(path);
+            let url = get_github_remote_url(&repo_path)?;
+            let (owner, name) = parse_remote_url(&url)?;
+            let cooldown_key = cooldown_key(&gh_account, &owner, &name);
+            if state
+                .git_cache
+                .github_repo_cooldown
+                .contains_key(&cooldown_key)
+            {
+                return None;
+            }
+            Some((path.clone(), owner, name))
+        })
+        .collect();
+
+    if repos.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let viewer = if !matches!(filter_mode, "all") {
+        get_viewer_login(state).await.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let (query, aliases) = build_multi_repo_issues_query(&repos, &viewer, filter_mode);
+
+    let response = graphql_with_retry(
+        state,
+        &github_com_account(state),
+        &query,
+        serde_json::Value::Null,
+    )
+    .await?;
+
+    let mut results = std::collections::HashMap::new();
+    for (alias, path) in &aliases {
+        // Response is now repository.issues.nodes, not search.nodes
+        let nodes = match response["data"][alias]["issues"]["nodes"].as_array() {
+            Some(arr) => arr,
+            None => continue,
+        };
+        let issues: Vec<GitHubIssue> = nodes.iter().filter_map(parse_issue_node).collect();
+        results.insert(path.clone(), issues);
+    }
+    Ok(results)
+}
+
+// ── Unified batch query (PRs + Issues in one HTTP call) ──────────────────────
+
+/// Build a batched GraphQL query fetching PRs and (optionally) Issues for all
+/// repos in a single HTTP request.  When `filter_mode` is "disabled" the issues
+/// section is omitted entirely, saving GraphQL points.
+pub(crate) fn build_unified_batch_query(
+    repos: &[(String, String, String)],
+    include_merged: bool,
+    filter_mode: &str,
+    viewer: &str,
+    hide_drafts: bool,
+) -> (String, Vec<(String, String)>) {
+    let states = if include_merged {
+        "[OPEN, MERGED]"
+    } else {
+        "[OPEN]"
+    };
+    // Fetch more items when drafts are hidden so filtering leaves enough valid PRs.
+    let pr_first = if hide_drafts { 40 } else { 20 };
+    let pr_node_fields = r#"number title state url headRefName headRefOid baseRefName isDraft
+        additions deletions mergeable mergeStateStatus reviewDecision
+        viewerLatestReview { state }
+        createdAt updatedAt
+        author { login }
+        labels(first: 10) { nodes { name color } }
+        commits(last: 1) {
+          totalCount
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name status conclusion startedAt }
+                    ... on StatusContext { context state createdAt }
+                  }
+                }
+              }
+            }
+          }
+        }"#;
+
+    let include_issues = !matches!(filter_mode, "" | "disabled");
+
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    let mut parts = vec!["query BatchPoll {".to_string()];
+
+    for (i, (path, owner, name)) in repos.iter().enumerate() {
+        let alias = format!("r{i}");
+        let issues_section = if include_issues {
+            format!("\n{}", issues_repo_section(filter_mode, viewer))
+        } else {
+            String::new()
+        };
+        parts.push(format!(
+            "  {alias}: repository(owner: \"{owner}\", name: \"{name}\") {{\n    mergeCommitAllowed\n    squashMergeAllowed\n    rebaseMergeAllowed\n    pullRequests(first: {pr_first}, states: {states}, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{\n      nodes {{ {pr_node_fields} }}\n    }}{issues_section}\n  }}"
+        ));
+        aliases.push((alias, path.clone()));
+    }
+
+    // Supplemental search for viewer's own open PRs across all queried repos.
+    // Guarantees the current user's PRs appear even if outside the top-20 by activity.
+    if !viewer.is_empty() {
+        let repo_filters: String = repos
+            .iter()
+            .map(|(_, owner, name)| format!("repo:{owner}/{name}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let draft_filter = if hide_drafts { " -is:draft" } else { "" };
+        let search_query = format!("is:pr is:open author:{viewer}{draft_filter} {repo_filters}");
+        parts.push(format!(
+            "  viewerPrs: search(query: \"{search_query}\", type: ISSUE, first: 30) {{\n    nodes {{\n      ... on PullRequest {{\n        repository {{ nameWithOwner }}\n        {pr_node_fields}\n      }}\n    }}\n  }}"
+        ));
+    }
+
+    parts.push("  rateLimit { cost remaining resetAt }".to_string());
+    parts.push("}".to_string());
+
+    (parts.join("\n"), aliases)
+}
+
+/// Result of a unified batch poll.
+pub(crate) struct BatchPollResult {
+    pub(crate) prs: std::collections::HashMap<String, Vec<BranchPrStatus>>,
+    /// Non-empty only when filter_mode != "disabled".
+    pub(crate) issues: std::collections::HashMap<String, Vec<GitHubIssue>>,
+}
+
+/// Fetch PRs + Issues for all repos in a single batched GraphQL call per
+/// account.
+///
+/// Groups the given paths by the GitHub account they resolve to (github.com
+/// default + any GHE accounts), then runs one batched query per account against
+/// that account's endpoint with its own token + viewer. A github.com-only user
+/// has exactly one group and sees identical behavior. A failing/rate-limited or
+/// breaker-open GHE account is skipped without affecting the others; a
+/// github.com error still propagates (zero-change), GHE errors are isolated.
+pub(crate) async fn get_all_batch_impl(
+    paths: &[String],
+    include_merged: bool,
+    filter_mode: &str,
+    pr_hide_drafts: bool,
+    state: &AppState,
+) -> Result<BatchPollResult, String> {
+    use crate::github_account::{
+        GitHubAccountRegistry, RepoBindingStore, RepoResolution, resolve_repo_account,
+    };
+
+    let now = Instant::now();
+    state
+        .git_cache
+        .github_repo_cooldown
+        .retain(|_key, expiry| *expiry > now);
+
+    // Group paths by resolved account, carrying (path, owner, repo).
+    let registry = GitHubAccountRegistry::load();
+    let bindings = RepoBindingStore::load();
+    let default = github_com_account(state);
+    type Group = (
+        crate::github_account::GitHubAccount,
+        Vec<(String, String, String)>,
+    );
+    let mut by_account: std::collections::HashMap<String, Group> = std::collections::HashMap::new();
+
+    for path in paths {
+        let p = std::path::Path::new(path);
+        let (account, owner, repo) =
+            match resolve_repo_account(p, &registry, &bindings, Some(&default)) {
+                RepoResolution::Bound {
+                    account,
+                    owner,
+                    repo,
+                } => (account, owner, repo),
+                RepoResolution::NeedsBind(mut candidates) if candidates.len() == 1 => {
+                    let cand = candidates.remove(0);
+                    let account = if cand.account_id == default.id {
+                        default.clone()
+                    } else {
+                        match registry.get(&cand.account_id) {
+                            Some(a) => a.clone(),
+                            None => continue,
+                        }
+                    };
+                    (account, cand.owner, cand.repo)
+                }
+                // Ambiguous / no account / not a GitHub repo → not polled.
+                _ => continue,
+            };
+        by_account
+            .entry(account.id.clone())
+            .or_insert_with(|| (account, Vec::new()))
+            .1
+            .push((path.clone(), owner, repo));
+    }
+
+    let mut pr_results: std::collections::HashMap<String, Vec<BranchPrStatus>> = Default::default();
+    let mut issue_results: std::collections::HashMap<String, Vec<GitHubIssue>> = Default::default();
+
+    for (_id, (account, repos_all)) in by_account {
+        // Skip accounts with no token or an open breaker (per-account isolation).
+        let has_token = if account.is_ambient_default() {
+            state.github_token.read().is_some()
+        } else {
+            crate::github_auth::resolve_token_for_account(&account)
+                .0
+                .is_some()
+        };
+        if !has_token {
+            continue;
+        }
+        if with_account_breaker(state, &account, |b| b.check()).is_err() {
+            continue;
+        }
+
+        // Drop repos already in cooldown for THIS account.
+        let repos: Vec<(String, String, String)> = repos_all
+            .into_iter()
+            .filter(|(_p, owner, name)| {
+                !state
+                    .git_cache
+                    .github_repo_cooldown
+                    .contains_key(&cooldown_key(&account, owner, name))
+            })
+            .collect();
+        if repos.is_empty() {
+            continue;
+        }
+
+        match poll_one_account(
+            state,
+            &account,
+            &repos,
+            include_merged,
+            filter_mode,
+            pr_hide_drafts,
+            &mut pr_results,
+            &mut issue_results,
+        )
+        .await
+        {
+            Ok(()) => {}
+            // The ambient default's errors propagate (zero-change); every named
+            // account's fault is isolated so it can't abort the whole poll.
+            Err(e) if account.is_ambient_default() => return Err(e),
+            Err(e) => {
+                tracing::warn!(source = "github", account = %account.id, error = %e, "named account poll failed (isolated)");
+            }
+        }
+    }
+
+    Ok(BatchPollResult {
+        prs: pr_results,
+        issues: issue_results,
+    })
+}
+
+/// Run one batched poll for a single account, merging its PRs/issues into the
+/// shared result maps. Stores the account's rate budget and cooldowns null repos.
+#[allow(clippy::too_many_arguments)]
+async fn poll_one_account(
+    state: &AppState,
+    account: &crate::github_account::GitHubAccount,
+    repos: &[(String, String, String)],
+    include_merged: bool,
+    filter_mode: &str,
+    pr_hide_drafts: bool,
+    pr_results: &mut std::collections::HashMap<String, Vec<BranchPrStatus>>,
+    issue_results: &mut std::collections::HashMap<String, Vec<GitHubIssue>>,
+) -> Result<(), String> {
+    let include_issues = !matches!(filter_mode, "" | "disabled");
+    // Always fetch viewer login — needed for both issue filtering and viewer PR search.
+    let viewer = get_viewer_login_for(state, account)
+        .await
+        .unwrap_or_default();
+
+    let (query, aliases) =
+        build_unified_batch_query(repos, include_merged, filter_mode, &viewer, pr_hide_drafts);
+    let response = graphql_with_retry(state, account, &query, serde_json::Value::Null).await?;
+
+    // Store rate-limit budget for proactive throttling in the poller.
+    if let Some(remaining) = response["data"]["rateLimit"]["remaining"].as_u64() {
+        let budget = remaining as u32;
+        if account.is_ambient_default() {
+            state
+                .github_rate_limit_remaining
+                .store(budget, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            state
+                .ghe_state
+                .entry(account.id.clone())
+                .or_insert_with(crate::github::GheAccountState::new)
+                .rate_limit_remaining
+                .store(budget, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let alias_repo_names: std::collections::HashMap<&str, (&str, &str)> = repos
+        .iter()
+        .enumerate()
+        .map(|(i, (_path, owner, name))| (aliases[i].0.as_str(), (owner.as_str(), name.as_str())))
+        .collect();
+
+    for (alias, path) in &aliases {
+        let repo_json = &response["data"][alias];
+
+        if repo_json.is_null() {
+            if let Some((owner, name)) = alias_repo_names.get(alias.as_str()) {
+                let cooldown_key = cooldown_key(account, owner, name);
+                let was_known = state
+                    .git_cache
+                    .github_repo_cooldown
+                    .contains_key(&cooldown_key);
+                let expiry = Instant::now() + std::time::Duration::from_secs(24 * 3600);
+                state
+                    .git_cache
+                    .github_repo_cooldown
+                    .insert(cooldown_key, expiry);
+                if !was_known {
+                    let msg =
+                        format!("Repository {owner}/{name} not found on GitHub — cooldown 24h");
+                    let mut buf = state.log_buffer.lock();
+                    buf.push("warn".into(), "github".into(), msg, None);
+                }
+            }
+            continue;
+        }
+
+        if let Some(nodes) = repo_json["pullRequests"]["nodes"].as_array() {
+            let mut statuses: Vec<BranchPrStatus> =
+                nodes.iter().filter_map(parse_pr_node).collect();
+            stamp_merge_policy(&mut statuses, repo_json);
+
+            if include_merged && statuses.iter().any(|s| s.state == "MERGED") {
+                let branch_tips = local_branch_tips(Path::new(path));
+                statuses.retain(|s| {
+                    if s.state != "MERGED" || s.head_ref_oid.is_empty() {
+                        return true;
+                    }
+                    match branch_tips.get(&s.branch) {
+                        Some(tip) => tip == &s.head_ref_oid,
+                        None => true,
+                    }
+                });
+            }
+
+            state
+                .git_cache
+                .github_status
+                .insert(path.clone(), Arc::new(statuses.clone()));
+            pr_results.insert(path.clone(), statuses);
+        }
+
+        if include_issues && let Some(nodes) = repo_json["issues"]["nodes"].as_array() {
+            let issues: Vec<GitHubIssue> = nodes.iter().filter_map(parse_issue_node).collect();
+            issue_results.insert(path.clone(), issues);
+        }
+    }
+
+    // Merge viewer's own PRs (from supplemental search) into pr_results.
+    // These may be outside the top-20 by activity so would otherwise be missing.
+    if !viewer.is_empty() {
+        // Multiple local paths can map to the same owner/name (e.g. two worktrees
+        // of the same repo imported as separate workspace entries).
+        let mut name_to_paths: std::collections::HashMap<String, Vec<&str>> =
+            std::collections::HashMap::new();
+        for (path, owner, name) in repos {
+            name_to_paths
+                .entry(format!("{owner}/{name}"))
+                .or_default()
+                .push(path.as_str());
+        }
+
+        if let Some(nodes) = response["data"]["viewerPrs"]["nodes"].as_array() {
+            for node in nodes {
+                let repo_name = node["repository"]["nameWithOwner"].as_str().unwrap_or("");
+                let Some(paths) = name_to_paths.get(repo_name) else {
+                    continue;
+                };
+                let Some(pr) = parse_pr_node(node) else {
+                    continue;
+                };
+                for path in paths {
+                    let entry = pr_results.entry(path.to_string()).or_default();
+                    if !entry.iter().any(|existing| existing.branch == pr.branch) {
+                        entry.push(pr.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Fetch issues for multiple repos (Tauri command).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn get_all_issues(
+    state: State<'_, Arc<AppState>>,
+    paths: Vec<String>,
+    filter_mode: String,
+) -> Result<std::collections::HashMap<String, Vec<GitHubIssue>>, String> {
+    let state = state.inner().clone();
+    get_all_issues_impl(&paths, &filter_mode, &state).await
+}
+
+/// Close a GitHub issue via REST API.
+pub(crate) async fn close_issue_impl(
+    repo_path: &str,
+    issue_number: i64,
+    state: &AppState,
+) -> Result<(), String> {
+    let (account, token, owner, repo) = resolve_repo_for_rest(state, repo_path)?;
+
+    let url = crate::github_account::github_rest_url(
+        &account.host,
+        &format!("/repos/{owner}/{repo}/issues/{issue_number}"),
+    );
+    crate::github_debug::log_api("PATCH", &url, "close_issue_impl");
+    let body = serde_json::json!({ "state": "closed" });
+
+    let response = state
+        .http_client
+        .patch(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "tuicommander")
+        .header("Accept", "application/vnd.github+json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+
+    let status = response.status().as_u16();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        let json: serde_json::Value = response.json().await.unwrap_or_default();
+        let msg = json["message"].as_str().unwrap_or("Unknown error");
+        Err(format!("Failed to close issue ({status}): {msg}"))
+    }
+}
+
+/// Close a GitHub issue (Tauri command).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn close_issue(
+    repo_path: String,
+    issue_number: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    close_issue_impl(&repo_path, issue_number, &state).await
+}
+
+/// Reopen a GitHub issue via REST API.
+pub(crate) async fn reopen_issue_impl(
+    repo_path: &str,
+    issue_number: i64,
+    state: &AppState,
+) -> Result<(), String> {
+    let (account, token, owner, repo) = resolve_repo_for_rest(state, repo_path)?;
+
+    let url = crate::github_account::github_rest_url(
+        &account.host,
+        &format!("/repos/{owner}/{repo}/issues/{issue_number}"),
+    );
+    crate::github_debug::log_api("PATCH", &url, "reopen_issue_impl");
+    let body = serde_json::json!({ "state": "open" });
+
+    let response = state
+        .http_client
+        .patch(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "tuicommander")
+        .header("Accept", "application/vnd.github+json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+
+    let status = response.status().as_u16();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        let json: serde_json::Value = response.json().await.unwrap_or_default();
+        let msg = json["message"].as_str().unwrap_or("Unknown error");
+        Err(format!("Failed to reopen issue ({status}): {msg}"))
+    }
+}
+
+/// Reopen a GitHub issue (Tauri command).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn reopen_issue(
+    repo_path: String,
+    issue_number: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    reopen_issue_impl(&repo_path, issue_number, &state).await
+}
+
+// ── End GitHub Issues ────────────────────────────────────────────────────────
+
+/// Parse a GraphQL batch PR response into BranchPrStatus entries.
+/// Input: full GraphQL response JSON (with data.repository.pullRequests.nodes).
+#[cfg(test)]
+pub(crate) fn parse_graphql_prs(response: &serde_json::Value) -> Vec<BranchPrStatus> {
+    let nodes = match response["data"]["repository"]["pullRequests"]["nodes"].as_array() {
+        Some(arr) => arr,
+        None => return vec![],
+    };
+
+    nodes.iter().filter_map(parse_pr_node).collect()
+}
+
+#[cfg(test)]
+const BATCH_PR_QUERY: &str = r#"
+query RepoPRs($owner: String!, $repo: String!, $first: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(first: $first, states: [OPEN, CLOSED, MERGED],
+                 orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title state url headRefName baseRefName isDraft
+        additions deletions mergeable mergeStateStatus reviewDecision
+        viewerLatestReview { state }
+        createdAt updatedAt
+        author { login }
+        labels(first: 10) { nodes { name color } }
+        commits(last: 1) {
+          totalCount
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name status conclusion startedAt }
+                    ... on StatusContext { context state createdAt }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  rateLimit { cost remaining resetAt }
+}
+"#;
+
+/// Get the remote URL for a repo, if it has a GitHub origin.
+/// Reads directly from .git/config (no subprocess).
+fn get_github_remote_url(repo_path: &Path) -> Option<String> {
+    let url = crate::git::read_remote_url(repo_path)?;
+    if url.contains("github.com") {
+        Some(url)
+    } else {
+        None
+    }
+}
+
+/// Core logic for fetching PR statuses via GitHub GraphQL API (no caching).
+/// Returns Err for rate limits (prefixed with "rate-limit:") so callers can handle them.
+pub(crate) async fn get_repo_pr_statuses_impl(
+    path: &str,
+    include_merged: bool,
+    state: &AppState,
+) -> Result<Vec<BranchPrStatus>, String> {
+    let repo_path = PathBuf::from(path);
+
+    if state.github_token.read().is_none() {
+        return Ok(vec![]); // No token = no GitHub API access
+    }
+
+    let remote_url = match get_github_remote_url(&repo_path) {
+        Some(url) => url,
+        None => return Ok(vec![]),
+    };
+
+    let (owner, repo) = match parse_remote_url(&remote_url) {
+        Some(pair) => pair,
+        None => return Ok(vec![]),
+    };
+
+    // Reuse the multi-repo query builder for consistent state filtering
+    let repos = vec![(path.to_string(), owner, repo)];
+    let (query, aliases) = build_multi_repo_pr_query(&repos, include_merged);
+
+    match graphql_with_retry(
+        state,
+        &github_com_account(state),
+        &query,
+        serde_json::Value::Null,
+    )
+    .await
+    {
+        Ok(response) => {
+            let alias = &aliases[0].0;
+            let repo_json = &response["data"][alias];
+            let mut nodes: Vec<BranchPrStatus> = repo_json["pullRequests"]["nodes"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(parse_pr_node).collect())
+                .unwrap_or_default();
+
+            stamp_merge_policy(&mut nodes, repo_json);
+
+            // Filter stale merged PRs (same logic as batch endpoint)
+            if include_merged && nodes.iter().any(|s| s.state == "MERGED") {
+                let branch_tips = local_branch_tips(&repo_path);
+                nodes.retain(|s| {
+                    if s.state != "MERGED" || s.head_ref_oid.is_empty() {
+                        return true;
+                    }
+                    match branch_tips.get(&s.branch) {
+                        Some(tip) => tip == &s.head_ref_oid,
+                        None => true,
+                    }
+                });
+            }
+
+            Ok(nodes)
+        }
+        Err(e) if e.starts_with("rate-limit:") => Err(e),
+        Err(e) => {
+            tracing::warn!(source = "github", %path, "GraphQL PR query failed: {e}");
+            Ok(vec![])
+        }
+    }
+}
+
+/// Get PR statuses for a repository (cached, 30s TTL).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn get_repo_pr_statuses(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+    include_merged: Option<bool>,
+) -> Result<Vec<BranchPrStatus>, String> {
+    let include_merged = include_merged.unwrap_or(false);
+    let state = state.inner().clone();
+    // Skip cache when include_merged is true (startup poll only). The loader is
+    // async (network GraphQL), so this cache uses plain get/insert (TTL + bound)
+    // rather than coalescing get_with.
+    if !include_merged && let Some(cached) = state.git_cache.github_status.get(&path) {
+        return Ok((*cached).clone());
+    }
+
+    let statuses = get_repo_pr_statuses_impl(&path, include_merged, &state).await?;
+    state
+        .git_cache
+        .github_status
+        .insert(path.clone(), Arc::new(statuses.clone()));
+    Ok(statuses)
+}
+
+/// Read local branch tips (name → commit SHA) via `git for-each-ref`.
+/// Returns an empty map on any error (no git, not a repo, etc.).
+fn local_branch_tips(repo_path: &Path) -> std::collections::HashMap<String, String> {
+    let mut tips = std::collections::HashMap::new();
+    let output = crate::git_cli::git_cmd(repo_path)
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)\t%(objectname)",
+            "refs/heads/",
+        ])
+        .run_silent();
+    if let Some(out) = output {
+        for line in out.stdout.lines() {
+            if let Some((name, sha)) = line.split_once('\t') {
+                tips.insert(name.to_string(), sha.to_string());
+            }
+        }
+    }
+    tips
+}
+
+/// Build a single aliased GraphQL query that fetches PRs for multiple repos in one HTTP call.
+/// Each repo gets an alias `r{i}` to avoid field name collisions.
+/// Returns (query_string, Vec<(alias, repo_path)>) for result extraction.
+fn build_multi_repo_pr_query(
+    repos: &[(String, String, String)], // Vec<(path, owner, name)>
+    include_merged: bool,
+) -> (String, Vec<(String, String)>) {
+    let states = if include_merged {
+        "[OPEN, MERGED]"
+    } else {
+        "[OPEN]"
+    };
+    let node_fields = r#"number title state url headRefName headRefOid baseRefName isDraft
+        additions deletions mergeable mergeStateStatus reviewDecision
+        viewerLatestReview { state }
+        createdAt updatedAt
+        author { login }
+        labels(first: 10) { nodes { name color } }
+        commits(last: 1) {
+          totalCount
+          nodes {
+            commit {
+              statusCheckRollup {
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name status conclusion startedAt }
+                    ... on StatusContext { context state createdAt }
+                  }
+                }
+              }
+            }
+          }
+        }"#;
+
+    let mut aliases: Vec<(String, String)> = Vec::new();
+    let mut parts = vec!["query BatchRepoPRs {".to_string()];
+
+    for (i, (path, owner, name)) in repos.iter().enumerate() {
+        let alias = format!("r{i}");
+        parts.push(format!(
+            "  {alias}: repository(owner: \"{owner}\", name: \"{name}\") {{\n    mergeCommitAllowed\n    squashMergeAllowed\n    rebaseMergeAllowed\n    pullRequests(first: 20, states: {states}, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{\n      nodes {{ {node_fields} }}\n    }}\n  }}"
+        ));
+        aliases.push((alias, path.clone()));
+    }
+    parts.push("  rateLimit { cost remaining resetAt }".to_string());
+    parts.push("}".to_string());
+
+    (parts.join("\n"), aliases)
+}
+
+/// Fetch PR statuses for all repos in a single batched GraphQL call.
+/// Delegates to `get_all_batch_impl` with issues disabled (PR-only path for Tauri command).
+pub(crate) async fn get_all_pr_statuses_impl(
+    paths: &[String],
+    include_merged: bool,
+    state: &AppState,
+) -> Result<std::collections::HashMap<String, Vec<BranchPrStatus>>, String> {
+    let result = get_all_batch_impl(paths, include_merged, "disabled", false, state).await?;
+    Ok(result.prs)
+}
+
+/// Fetch PR statuses for all repos in a single batched GraphQL call.
+/// On failure, the frontend should retry with per-repo individual calls.
+/// `include_merged` is true for the startup poll to detect offline transitions.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn get_all_pr_statuses(
+    state: State<'_, Arc<AppState>>,
+    paths: Vec<String>,
+    include_merged: bool,
+) -> Result<std::collections::HashMap<String, Vec<BranchPrStatus>>, String> {
+    let state = state.inner().clone();
+    get_all_pr_statuses_impl(&paths, include_merged, &state).await
+}
+
+/// Get git remote + branch status for a repository (implementation).
+/// PR and CI data now comes from the batch githubStore (GraphQL),
+/// so this only returns has_remote, current_branch, ahead, and behind.
+pub(crate) fn get_github_status_impl(path: &str) -> GitHubStatus {
+    let repo_path = PathBuf::from(path);
+
+    let has_remote = get_github_remote_url(&repo_path).is_some();
+
+    // Read current branch from .git/HEAD (no subprocess)
+    let current_branch = crate::git::read_branch_from_head(&repo_path).unwrap_or_default();
+
+    if !has_remote {
+        return GitHubStatus {
+            has_remote: false,
+            current_branch,
+            ahead: 0,
+            behind: 0,
+        };
+    }
+
+    // Get ahead/behind counts
+    let rev_range = format!("origin/{current_branch}...HEAD");
+    let (ahead, behind) = crate::git_cli::git_cmd(&repo_path)
+        .args(["rev-list", "--left-right", "--count", &rev_range])
+        .run_silent()
+        .and_then(|o| {
+            let parts: Vec<&str> = o.stdout.split_whitespace().collect();
+            if parts.len() == 2 {
+                let behind = parts[0].parse::<i32>().unwrap_or(0);
+                let ahead = parts[1].parse::<i32>().unwrap_or(0);
+                Some((ahead, behind))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((0, 0));
+
+    GitHubStatus {
+        has_remote,
+        current_branch,
+        ahead,
+        behind,
+    }
+}
+
+/// Cached github status for synchronous callers (MCP handlers, etc.).
+pub(crate) fn get_github_status_cached(state: &AppState, path: &str) -> GitHubStatus {
+    let p = path.to_string();
+    (*state
+        .git_cache
+        .git_status
+        .get_with(path.to_string(), || Arc::new(get_github_status_impl(&p))))
+    .clone()
+}
+
+/// Tauri command wrapper — cached with GIT_CACHE_TTL to avoid spawning git subprocesses every poll.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn get_github_status(
+    path: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<GitHubStatus, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let p = path.clone();
+        (*state
+            .git_cache
+            .git_status
+            .get_with(path, || Arc::new(get_github_status_impl(&p))))
+        .clone()
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))
+}
+
+/// Get the authenticated GitHub viewer's login (username).
+/// Cached after first successful call.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn get_github_viewer_login(
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    get_viewer_login(&state).await
+}
+
+const PR_CHECKS_QUERY: &str = r#"
+query PRChecks($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name status conclusion detailsUrl startedAt }
+                  ... on StatusContext { context state targetUrl createdAt }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+/// Parse GraphQL PR check contexts into frontend-compatible CiCheckDetail objects.
+fn parse_pr_check_contexts(data: &serde_json::Value) -> Vec<serde_json::Value> {
+    let nodes = &data["data"]["repository"]["pullRequest"]["commits"]["nodes"];
+    let contexts = match nodes.as_array().and_then(|a| a.first()) {
+        Some(node) => &node["commit"]["statusCheckRollup"]["contexts"],
+        None => return vec![],
+    };
+
+    // GitHub lists a check name multiple times on the head commit when a workflow
+    // re-runs (a stale run cancelled by a `concurrency` group, or a re-run after the
+    // base advanced). Dedup to the newest entry per name — the same strategy the
+    // summary tally uses in `parse_pr_node` — so the detail list shows no duplicates
+    // and agrees with the passed/failed counts.
+    dedup_rollup_nodes(contexts)
+        .iter()
+        .map(|ctx| {
+            let typename = ctx["__typename"].as_str().unwrap_or("");
+            if typename == "CheckRun" {
+                serde_json::json!({
+                    "name": ctx["name"].as_str().unwrap_or(""),
+                    "status": ctx["status"].as_str().unwrap_or("").to_lowercase(),
+                    "conclusion": ctx["conclusion"].as_str().unwrap_or("").to_lowercase(),
+                    "html_url": ctx["detailsUrl"].as_str().unwrap_or(""),
+                })
+            } else {
+                // StatusContext
+                let state = ctx["state"].as_str().unwrap_or("").to_lowercase();
+                let conclusion = match state.as_str() {
+                    "success" => "success",
+                    "failure" | "error" => "failure",
+                    "pending" | "expected" => "",
+                    _ => "",
+                };
+                serde_json::json!({
+                    "name": ctx["context"].as_str().unwrap_or(""),
+                    "status": if conclusion.is_empty() { "in_progress" } else { "completed" },
+                    "conclusion": conclusion,
+                    "html_url": ctx["targetUrl"].as_str().unwrap_or(""),
+                })
+            }
+        })
+        .collect()
+}
+
+/// Core logic for fetching CI check details via GitHub GraphQL API (no caching).
+pub(crate) async fn get_ci_checks_impl(
+    path: &str,
+    pr_number: i64,
+    state: &AppState,
+) -> Vec<serde_json::Value> {
+    let repo_path = PathBuf::from(path);
+
+    if state.github_token.read().is_none() {
+        return vec![];
+    }
+
+    let remote_url = match get_github_remote_url(&repo_path) {
+        Some(url) => url,
+        None => return vec![],
+    };
+
+    let (owner, repo) = match parse_remote_url(&remote_url) {
+        Some(pair) => pair,
+        None => return vec![],
+    };
+
+    let variables = serde_json::json!({
+        "owner": owner,
+        "repo": repo,
+        "number": pr_number,
+    });
+
+    match graphql_with_retry(
+        state,
+        &github_com_account(state),
+        PR_CHECKS_QUERY,
+        variables,
+    )
+    .await
+    {
+        Ok(data) => parse_pr_check_contexts(&data),
+        Err(e) => {
+            tracing::warn!(source = "github", "GraphQL PR checks query failed: {e}");
+            vec![]
+        }
+    }
+}
+
+/// Merge a PR via GitHub REST API using the specified merge method.
+pub(crate) async fn merge_pr_github_impl(
+    repo_path: &str,
+    pr_number: i64,
+    merge_method: &str,
+    state: &AppState,
+) -> Result<String, String> {
+    let (account, token, owner, repo) = resolve_repo_for_rest(state, repo_path)?;
+
+    let url = crate::github_account::github_rest_url(
+        &account.host,
+        &format!("/repos/{owner}/{repo}/pulls/{pr_number}/merge"),
+    );
+    crate::github_debug::log_api("PUT", &url, "merge_pr_github_impl");
+    let body = serde_json::json!({ "merge_method": merge_method });
+
+    let response = state
+        .http_client
+        .put(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "tuicommander")
+        .header("Accept", "application/vnd.github+json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+
+    let status = response.status().as_u16();
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse GitHub API response: {e}"))?;
+
+    if (200..300).contains(&status) {
+        Ok(json["sha"].as_str().unwrap_or("").to_string())
+    } else {
+        let msg = json["message"]
+            .as_str()
+            .unwrap_or("Unknown error")
+            .to_string();
+        Err(format!("GitHub merge failed ({status}): {msg}"))
+    }
+}
+
+/// Merge a PR via GitHub REST API (Tauri command).
+/// Supports merge_method: "merge", "squash", "rebase".
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn merge_pr_via_github(
+    repo_path: String,
+    pr_number: i64,
+    merge_method: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    merge_pr_github_impl(&repo_path, pr_number, &merge_method, &state).await
+}
+
+/// Get CI check details for a PR via GitHub GraphQL API (Story 060).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn get_ci_checks(
+    path: String,
+    pr_number: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let state = state.inner().clone();
+    Ok(get_ci_checks_impl(&path, pr_number, &state).await)
+}
+
+/// Approve a PR via GitHub REST API.
+/// Creates a review with event=APPROVE.
+pub(crate) async fn approve_pr_impl(
+    repo_path: &str,
+    pr_number: i64,
+    state: &AppState,
+) -> Result<(), String> {
+    let (account, token, owner, repo) = resolve_repo_for_rest(state, repo_path)?;
+
+    let url = crate::github_account::github_rest_url(
+        &account.host,
+        &format!("/repos/{owner}/{repo}/pulls/{pr_number}/reviews"),
+    );
+    crate::github_debug::log_api("POST", &url, "approve_pr_impl");
+    let body = serde_json::json!({ "event": "APPROVE" });
+
+    let response = state
+        .http_client
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "tuicommander")
+        .header("Accept", "application/vnd.github+json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .unwrap_or_else(|_| serde_json::json!({"message": "Unknown error"}));
+        let raw = json["message"].as_str().unwrap_or("Unknown error");
+        Err(friendly_approve_error(status.as_u16(), raw))
+    }
+}
+
+/// Map a GitHub approve-review API failure to a short, human-friendly message.
+/// GitHub's raw responses ("Unprocessable Entity") are opaque to users; the most
+/// common 422 is self-approval, which we surface explicitly.
+fn friendly_approve_error(status: u16, raw: &str) -> String {
+    match status {
+        422 => {
+            // 422 on a review POST is almost always "can't approve your own PR".
+            // GitHub doesn't give a machine-readable code, so match on the message.
+            let lower = raw.to_lowercase();
+            if lower.contains("can not approve")
+                || lower.contains("cannot approve")
+                || lower.contains("own pull request")
+            {
+                "You can't approve your own pull request.".to_string()
+            } else {
+                "GitHub couldn't process this approval (it may already be approved or not reviewable).".to_string()
+            }
+        }
+        401 | 403 => "You don't have permission to approve this pull request.".to_string(),
+        404 => "Pull request not found.".to_string(),
+        // Cap the raw GitHub body so a verbose 5xx error blob doesn't spill
+        // into the UI toast verbatim.
+        _ => {
+            let snippet: String = raw.trim().chars().take(120).collect();
+            if snippet.is_empty() {
+                format!("Approve failed (HTTP {status}).")
+            } else {
+                format!("Approve failed (HTTP {status}): {snippet}")
+            }
+        }
+    }
+}
+
+/// Approve a PR via GitHub REST API (Tauri command).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn approve_pr(
+    repo_path: String,
+    pr_number: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    approve_pr_impl(&repo_path, pr_number, &state).await
+}
+
+/// Fetch the unified diff for a PR via GitHub REST API.
+/// Uses Accept: application/vnd.github.diff to get raw diff text.
+pub(crate) async fn get_pr_diff_impl(
+    repo_path: &str,
+    pr_number: i64,
+    state: &AppState,
+) -> Result<String, String> {
+    let (account, token, owner, repo) = resolve_repo_for_rest(state, repo_path)?;
+
+    let url = crate::github_account::github_rest_url(
+        &account.host,
+        &format!("/repos/{owner}/{repo}/pulls/{pr_number}"),
+    );
+    crate::github_debug::log_api("GET", &url, "get_pr_diff_impl");
+
+    let response = state
+        .http_client
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "tuicommander")
+        .header("Accept", "application/vnd.github.diff")
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+
+    let status = response.status();
+    if status.is_success() {
+        response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read diff body: {e}"))
+    } else {
+        let body = response.text().await.unwrap_or_default();
+        Err(format!("GitHub diff request failed ({status}): {body}"))
+    }
+}
+
+/// Maximum characters returned from CI failure logs to avoid overwhelming
+/// the agent's context window.
+const CI_LOG_MAX_CHARS: usize = 4000;
+
+/// Truncate log text to the last [`CI_LOG_MAX_CHARS`] characters, splitting
+/// at a newline boundary to avoid cutting mid-line.
+fn truncate_ci_logs(logs: &str) -> String {
+    let logs = logs.trim();
+    if logs.len() <= CI_LOG_MAX_CHARS {
+        return logs.to_string();
+    }
+    // Keep the tail — the most relevant failures are usually at the end
+    let truncated = &logs[logs.len() - CI_LOG_MAX_CHARS..];
+    let start = truncated.find('\n').map(|i| i + 1).unwrap_or(0);
+    format!(
+        "[… truncated to last ~{CI_LOG_MAX_CHARS} chars …]\n{}",
+        &truncated[start..]
+    )
+}
+
+/// Find the most recent failed workflow run for a branch, then fetch its logs.
+/// Uses `gh run list` to find the run ID, then `gh run view --log-failed`.
+/// Resolves the GitHub repo slug from the local repo path.
+fn fetch_ci_failure_logs_impl(repo_path: &str, branch: &str) -> Result<String, String> {
+    let repo_path_buf = PathBuf::from(repo_path);
+
+    // gh-CLI-assisted CI log fetch is only available for github.com in v1. If
+    // the repo is explicitly bound to a GitHub Enterprise Server account, say so
+    // clearly instead of falling through to a confusing "no remote" error.
+    {
+        let registry = crate::github_account::GitHubAccountRegistry::load();
+        let bindings = crate::github_account::RepoBindingStore::load();
+        if let Some(binding) = bindings.get_binding(&repo_path_buf)
+            && let Some(account) = registry.get(&binding.account_id)
+            && !account.is_cloud()
+        {
+            return Err(
+                "CI log fetch uses the gh CLI and is only available for github.com accounts in this version."
+                    .to_string(),
+            );
+        }
+    }
+
+    let remote_url = get_github_remote_url(&repo_path_buf)
+        .ok_or_else(|| "No GitHub remote found for this repo".to_string())?;
+    let (owner, repo) = parse_remote_url(&remote_url)
+        .ok_or_else(|| format!("Cannot parse GitHub owner/repo from remote URL: {remote_url}"))?;
+    let repo_slug = format!("{owner}/{repo}");
+    let gh = crate::agent::resolve_cli("gh");
+
+    // Step 1: find the latest failed run for the branch
+    crate::github_debug::log_api(
+        "CLI",
+        &format!("gh run list --repo {repo_slug} --branch {branch}"),
+        "fetch_ci_failure_logs_impl",
+    );
+    let mut list_cmd = Command::new(&gh);
+    list_cmd.args([
+        "run",
+        "list",
+        "--repo",
+        &repo_slug,
+        "--branch",
+        branch,
+        "--status",
+        "failure",
+        "--limit",
+        "1",
+        "--json",
+        "databaseId",
+    ]);
+    crate::cli::apply_no_window(&mut list_cmd);
+
+    let list_output = list_cmd
+        .output()
+        .map_err(|e| format!("Failed to run gh: {e}"))?;
+    if !list_output.status.success() {
+        let stderr = String::from_utf8_lossy(&list_output.stderr);
+        return Err(format!("gh run list failed: {stderr}"));
+    }
+
+    let list_json: serde_json::Value = serde_json::from_slice(&list_output.stdout)
+        .map_err(|e| format!("Failed to parse gh run list output: {e}"))?;
+    let run_id = list_json
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|obj| obj.get("databaseId"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "No failed workflow runs found for this branch".to_string())?;
+
+    // Step 2: fetch failure logs for that run
+    crate::github_debug::log_api(
+        "CLI",
+        &format!("gh run view {run_id} --repo {repo_slug} --log-failed"),
+        "fetch_ci_failure_logs_impl",
+    );
+    let mut view_cmd = Command::new(&gh);
+    view_cmd.args([
+        "run",
+        "view",
+        &run_id.to_string(),
+        "--repo",
+        &repo_slug,
+        "--log-failed",
+    ]);
+    crate::cli::apply_no_window(&mut view_cmd);
+
+    let view_output = view_cmd
+        .output()
+        .map_err(|e| format!("Failed to run gh: {e}"))?;
+    if !view_output.status.success() {
+        let stderr = String::from_utf8_lossy(&view_output.stderr);
+        return Err(format!("gh run view failed: {stderr}"));
+    }
+
+    let logs = String::from_utf8_lossy(&view_output.stdout);
+    Ok(truncate_ci_logs(&logs))
+}
+
+/// Tauri command: fetch CI failure logs for the latest failed run on a branch.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) async fn fetch_ci_failure_logs(
+    repo_path: String,
+    branch: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || fetch_ci_failure_logs_impl(&repo_path, &branch))
+        .await
+        .map_err(|e| format!("Task failed: {e}"))
+        .and_then(|r| r)
+}
+
+/// Fetch PR diff via GitHub REST API (Tauri command).
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn get_pr_diff(
+    repo_path: String,
+    pr_number: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    get_pr_diff_impl(&repo_path, pr_number, &state).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- hex_to_rgba tests ---
+
+    #[test]
+    fn test_hex_to_rgba_red_label() {
+        assert_eq!(hex_to_rgba("d73a4a", 0.3), "rgba(215, 58, 74, 0.3)");
+    }
+
+    #[test]
+    fn test_hex_to_rgba_light_blue_label() {
+        assert_eq!(hex_to_rgba("a2eeef", 0.3), "rgba(162, 238, 239, 0.3)");
+    }
+
+    #[test]
+    fn test_hex_to_rgba_black() {
+        assert_eq!(hex_to_rgba("000000", 0.3), "rgba(0, 0, 0, 0.3)");
+    }
+
+    #[test]
+    fn test_hex_to_rgba_white() {
+        assert_eq!(hex_to_rgba("ffffff", 0.3), "rgba(255, 255, 255, 0.3)");
+    }
+
+    #[test]
+    fn test_hex_to_rgba_full_opacity() {
+        assert_eq!(hex_to_rgba("ff0000", 1.0), "rgba(255, 0, 0, 1)");
+    }
+
+    // --- is_light_color tests ---
+
+    #[test]
+    fn test_is_light_color_dark_red() {
+        // d73a4a: (215*299+58*587+74*114)/1000 = 106.767 < 128
+        assert!(!is_light_color("d73a4a"));
+    }
+
+    #[test]
+    fn test_is_light_color_light_blue() {
+        // a2eeef: (162*299+238*587+239*114)/1000 = 215.39 > 128
+        assert!(is_light_color("a2eeef"));
+    }
+
+    #[test]
+    fn test_is_light_color_black() {
+        assert!(!is_light_color("000000"));
+    }
+
+    #[test]
+    fn test_is_light_color_white() {
+        assert!(is_light_color("ffffff"));
+    }
+
+    #[test]
+    fn test_is_light_color_mid_gray() {
+        // 808080: (128*299+128*587+128*114)/1000 = 128.0, NOT > 128 => dark
+        assert!(!is_light_color("808080"));
+    }
+
+    #[test]
+    fn test_is_light_color_just_above_threshold() {
+        // 818181: (129*299+129*587+129*114)/1000 = 129.0 > 128
+        assert!(is_light_color("818181"));
+    }
+
+    // --- classify_merge_state tests ---
+
+    #[test]
+    fn test_classify_merge_state_conflicting_overrides_status() {
+        let result = classify_merge_state(Some("CONFLICTING"), Some("CLEAN"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Conflicts".to_string(),
+                css_class: "conflicting".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_merge_state_clean() {
+        let result = classify_merge_state(Some("MERGEABLE"), Some("CLEAN"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Ready to merge".to_string(),
+                css_class: "clean".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_merge_state_behind() {
+        let result = classify_merge_state(Some("MERGEABLE"), Some("BEHIND"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Behind base".to_string(),
+                css_class: "behind".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_merge_state_blocked() {
+        let result = classify_merge_state(Some("MERGEABLE"), Some("BLOCKED"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Blocked".to_string(),
+                css_class: "blocked".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_merge_state_unstable() {
+        let result = classify_merge_state(Some("MERGEABLE"), Some("UNSTABLE"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Unstable".to_string(),
+                css_class: "blocked".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_merge_state_draft() {
+        let result = classify_merge_state(Some("MERGEABLE"), Some("DRAFT"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Draft".to_string(),
+                css_class: "behind".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_merge_state_dirty() {
+        let result = classify_merge_state(Some("MERGEABLE"), Some("DIRTY"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Conflicts".to_string(),
+                css_class: "conflicting".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_merge_state_unknown_returns_none() {
+        assert!(classify_merge_state(Some("MERGEABLE"), Some("UNKNOWN")).is_none());
+    }
+
+    #[test]
+    fn test_classify_merge_state_has_hooks_returns_none() {
+        assert!(classify_merge_state(Some("MERGEABLE"), Some("HAS_HOOKS")).is_none());
+    }
+
+    #[test]
+    fn test_classify_merge_state_none_none_returns_none() {
+        assert!(classify_merge_state(None, None).is_none());
+    }
+
+    // --- classify_review_state tests ---
+
+    #[test]
+    fn test_classify_review_state_approved() {
+        let result = classify_review_state(Some("APPROVED"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Approved".to_string(),
+                css_class: "approved".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_review_state_changes_requested() {
+        let result = classify_review_state(Some("CHANGES_REQUESTED"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Changes requested".to_string(),
+                css_class: "changes-requested".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_review_state_review_required() {
+        let result = classify_review_state(Some("REVIEW_REQUIRED"));
+        assert_eq!(
+            result,
+            Some(StateLabel {
+                label: "Review required".to_string(),
+                css_class: "review-required".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_classify_review_state_none_returns_none() {
+        assert!(classify_review_state(None).is_none());
+    }
+
+    #[test]
+    fn test_classify_review_state_empty_returns_none() {
+        assert!(classify_review_state(Some("")).is_none());
+    }
+
+    // --- statusCheckRollup dedup + classification tests ---
+
+    #[test]
+    fn classify_check_node_maps_each_category() {
+        let cr = |status: &str, conclusion: serde_json::Value| serde_json::json!({"__typename": "CheckRun", "status": status, "conclusion": conclusion});
+        assert_eq!(
+            classify_check_node(&cr("COMPLETED", "SUCCESS".into())),
+            CheckCategory::Passed
+        );
+        assert_eq!(
+            classify_check_node(&cr("COMPLETED", "SKIPPED".into())),
+            CheckCategory::Passed
+        );
+        assert_eq!(
+            classify_check_node(&cr("COMPLETED", "FAILURE".into())),
+            CheckCategory::Failed
+        );
+        assert_eq!(
+            classify_check_node(&cr("COMPLETED", "TIMED_OUT".into())),
+            CheckCategory::Failed
+        );
+        // ACTION_REQUIRED is a blocking conclusion (e.g. security gate) — must
+        // count as Failed, NOT Pending, or a blocked PR renders as clean.
+        assert_eq!(
+            classify_check_node(&cr("COMPLETED", "ACTION_REQUIRED".into())),
+            CheckCategory::Failed
+        );
+        // Not yet COMPLETED → pending regardless of (absent) conclusion.
+        assert_eq!(
+            classify_check_node(&cr("IN_PROGRESS", serde_json::Value::Null)),
+            CheckCategory::Pending
+        );
+        // StatusContext is classified by its `state`.
+        let sc = |state: &str| serde_json::json!({"__typename": "StatusContext", "state": state});
+        assert_eq!(classify_check_node(&sc("SUCCESS")), CheckCategory::Passed);
+        assert_eq!(classify_check_node(&sc("FAILURE")), CheckCategory::Failed);
+        assert_eq!(classify_check_node(&sc("PENDING")), CheckCategory::Pending);
+    }
+
+    #[test]
+    fn dedup_rollup_keeps_newest_entry_per_check_name() {
+        // Same check name run twice (stale FAILURE, then newer SUCCESS) plus one
+        // distinct check. GitHub lists all three; we keep the newest per name.
+        let contexts = serde_json::json!({
+            "nodes": [
+                {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "2025-01-01T00:00:00Z"},
+                {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2025-01-01T01:00:00Z"},
+                {"__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": serde_json::Value::Null, "startedAt": "2025-01-01T00:00:00Z"},
+            ]
+        });
+        let nodes = dedup_rollup_nodes(&contexts);
+        assert_eq!(nodes.len(), 2, "duplicate 'build' must collapse to one");
+        let build = nodes.iter().find(|n| n["name"] == "build").unwrap();
+        assert_eq!(
+            build["conclusion"], "SUCCESS",
+            "newest 'build' entry (by startedAt) must win"
+        );
+        // The deduped set tallies as 1 passed (build) + 1 pending (test), not 3.
+        let mut passed = 0;
+        let mut pending = 0;
+        for n in &nodes {
+            match classify_check_node(n) {
+                CheckCategory::Passed => passed += 1,
+                CheckCategory::Pending => pending += 1,
+                CheckCategory::Failed => unreachable!(),
+            }
+        }
+        assert_eq!((passed, pending), (1, 1));
+    }
+
+    #[test]
+    fn dedup_rollup_handles_missing_nodes() {
+        assert!(dedup_rollup_nodes(&serde_json::json!({})).is_empty());
+        assert!(dedup_rollup_nodes(&serde_json::json!({"nodes": []})).is_empty());
+    }
+
+    // --- parse_graphql_prs tests ---
+
+    /// Helper to build a GraphQL PR node for testing
+    #[expect(clippy::too_many_arguments)]
+    fn graphql_pr_node(
+        number: i64,
+        title: &str,
+        state: &str,
+        branch: &str,
+        additions: i64,
+        deletions: i64,
+        author: &str,
+        commits_count: i64,
+        check_run_counts: &[(&str, u64)],
+        status_context_counts: &[(&str, u64)],
+        mergeable: &str,
+        merge_state_status: &str,
+        review_decision: Option<&str>,
+        viewer_review_state: Option<&str>,
+        is_draft: bool,
+        labels: &[(&str, &str)],
+        base_ref_name: &str,
+    ) -> serde_json::Value {
+        // Expand the (state, count) fixtures into individual statusCheckRollup
+        // nodes — one per check, each with a unique name (dedup is by name) so the
+        // counts map 1:1 onto nodes. Terminal conclusions are COMPLETED CheckRuns;
+        // transient states stay non-COMPLETED (classified pending).
+        let is_terminal_conclusion = |s: &str| {
+            matches!(
+                s.to_uppercase().as_str(),
+                "SUCCESS"
+                    | "NEUTRAL"
+                    | "SKIPPED"
+                    | "FAILURE"
+                    | "ERROR"
+                    | "TIMED_OUT"
+                    | "CANCELLED"
+                    | "STARTUP_FAILURE"
+            )
+        };
+        let mut rollup_nodes: Vec<serde_json::Value> = Vec::new();
+        let mut idx = 0u32;
+        for (s, c) in check_run_counts {
+            for _ in 0..*c {
+                idx += 1;
+                let node = if is_terminal_conclusion(s) {
+                    serde_json::json!({
+                        "__typename": "CheckRun",
+                        "name": format!("check-{idx}"),
+                        "status": "COMPLETED",
+                        "conclusion": s,
+                        "startedAt": format!("2025-01-01T00:{:02}:00Z", idx % 60),
+                    })
+                } else {
+                    serde_json::json!({
+                        "__typename": "CheckRun",
+                        "name": format!("check-{idx}"),
+                        "status": s,
+                        "conclusion": serde_json::Value::Null,
+                        "startedAt": format!("2025-01-01T00:{:02}:00Z", idx % 60),
+                    })
+                };
+                rollup_nodes.push(node);
+            }
+        }
+        for (s, c) in status_context_counts {
+            for _ in 0..*c {
+                idx += 1;
+                rollup_nodes.push(serde_json::json!({
+                    "__typename": "StatusContext",
+                    "context": format!("status-{idx}"),
+                    "state": s,
+                    "createdAt": format!("2025-01-01T00:{:02}:00Z", idx % 60),
+                }));
+            }
+        }
+        let labels_json: Vec<serde_json::Value> = labels
+            .iter()
+            .map(|(name, color)| serde_json::json!({"name": name, "color": color}))
+            .collect();
+
+        serde_json::json!({
+            "number": number,
+            "title": title,
+            "state": state,
+            "url": format!("https://github.com/org/repo/pull/{number}"),
+            "headRefName": branch,
+            "headRefOid": format!("abc{number:04}"),
+            "baseRefName": base_ref_name,
+            "isDraft": is_draft,
+            "additions": additions,
+            "deletions": deletions,
+            "mergeable": mergeable,
+            "mergeStateStatus": merge_state_status,
+            "reviewDecision": review_decision,
+            "viewerLatestReview": viewer_review_state.map(|s| serde_json::json!({"state": s})),
+            "createdAt": "2025-01-01T00:00:00Z",
+            "updatedAt": "2025-01-02T00:00:00Z",
+            "author": {"login": author},
+            "labels": {"nodes": labels_json},
+            "commits": {
+                "totalCount": commits_count,
+                "nodes": [{
+                    "commit": {
+                        "statusCheckRollup": {
+                            "contexts": {
+                                "nodes": rollup_nodes,
+                            }
+                        }
+                    }
+                }]
+            }
+        })
+    }
+
+    /// Wrap PR nodes into a full GraphQL response
+    fn graphql_response(nodes: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequests": {
+                        "nodes": nodes
+                    }
+                }
+            },
+            "rateLimit": {"cost": 1, "remaining": 4999, "resetAt": "2025-01-01T01:00:00Z"}
+        })
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_basic() {
+        let response = graphql_response(vec![
+            graphql_pr_node(
+                42,
+                "Add feature X",
+                "OPEN",
+                "feature/x",
+                150,
+                30,
+                "alice",
+                5,
+                &[("SUCCESS", 2), ("FAILURE", 1)],
+                &[("PENDING", 1)],
+                "MERGEABLE",
+                "BLOCKED",
+                Some("CHANGES_REQUESTED"),
+                None,
+                false,
+                &[],
+                "main",
+            ),
+            graphql_pr_node(
+                43,
+                "Fix bug Y",
+                "OPEN",
+                "fix/y",
+                10,
+                5,
+                "bob",
+                1,
+                &[("SUCCESS", 2)],
+                &[],
+                "MERGEABLE",
+                "CLEAN",
+                Some("APPROVED"),
+                None,
+                false,
+                &[],
+                "main",
+            ),
+        ]);
+
+        let result = parse_graphql_prs(&response);
+        assert_eq!(result.len(), 2);
+
+        let pr1 = &result[0];
+        assert_eq!(pr1.branch, "feature/x");
+        assert_eq!(pr1.number, 42);
+        assert_eq!(pr1.title, "Add feature X");
+        assert_eq!(pr1.state, "OPEN");
+        assert_eq!(pr1.additions, 150);
+        assert_eq!(pr1.deletions, 30);
+        assert_eq!(pr1.author, "alice");
+        assert_eq!(pr1.commits, 5);
+        assert_eq!(pr1.checks.passed, 2);
+        assert_eq!(pr1.checks.failed, 1);
+        assert_eq!(pr1.checks.pending, 1);
+        assert_eq!(pr1.checks.total, 4);
+        assert!(pr1.check_details.is_empty()); // Empty for batch query
+
+        let pr2 = &result[1];
+        assert_eq!(pr2.branch, "fix/y");
+        assert_eq!(pr2.number, 43);
+        assert_eq!(pr2.checks.passed, 2);
+        assert_eq!(pr2.checks.failed, 0);
+        assert_eq!(pr2.checks.pending, 0);
+        assert_eq!(pr2.checks.total, 2);
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_viewer_did_approve() {
+        // viewerLatestReview.state == APPROVED => viewer_did_approve true,
+        // even when overall reviewDecision is still REVIEW_REQUIRED.
+        let approved = graphql_pr_node(
+            1,
+            "Already approved by me",
+            "OPEN",
+            "mine/approved",
+            1,
+            0,
+            "alice",
+            1,
+            &[],
+            &[],
+            "MERGEABLE",
+            "BLOCKED",
+            Some("REVIEW_REQUIRED"),
+            Some("APPROVED"),
+            false,
+            &[],
+            "main",
+        );
+        // No viewer review => viewer_did_approve false.
+        let not_reviewed = graphql_pr_node(
+            2,
+            "Not reviewed by me",
+            "OPEN",
+            "other/pr",
+            1,
+            0,
+            "bob",
+            1,
+            &[],
+            &[],
+            "MERGEABLE",
+            "BLOCKED",
+            Some("REVIEW_REQUIRED"),
+            None,
+            false,
+            &[],
+            "main",
+        );
+        // Viewer left a non-approving review => viewer_did_approve false.
+        let commented = graphql_pr_node(
+            3,
+            "Commented only",
+            "OPEN",
+            "other/pr2",
+            1,
+            0,
+            "carol",
+            1,
+            &[],
+            &[],
+            "MERGEABLE",
+            "BLOCKED",
+            Some("REVIEW_REQUIRED"),
+            Some("COMMENTED"),
+            false,
+            &[],
+            "main",
+        );
+        let result = parse_graphql_prs(&graphql_response(vec![approved, not_reviewed, commented]));
+        assert_eq!(result.len(), 3);
+        assert!(result[0].viewer_did_approve);
+        assert!(!result[1].viewer_did_approve);
+        assert!(!result[2].viewer_did_approve);
+    }
+
+    #[test]
+    fn test_friendly_approve_error_self_approve() {
+        let msg = friendly_approve_error(
+            422,
+            "Unprocessable Entity: Can not approve your own pull request",
+        );
+        assert!(msg.contains("your own pull request"));
+        assert!(!msg.contains("Unprocessable"));
+    }
+
+    #[test]
+    fn test_friendly_approve_error_generic_422() {
+        let msg = friendly_approve_error(422, "Validation Failed");
+        assert!(!msg.contains("Validation Failed"));
+        assert!(msg.to_lowercase().contains("approval"));
+    }
+
+    #[test]
+    fn test_friendly_approve_error_forbidden() {
+        let msg = friendly_approve_error(403, "Resource not accessible");
+        assert!(msg.to_lowercase().contains("permission"));
+    }
+
+    #[test]
+    fn test_friendly_approve_error_other_passthrough() {
+        let msg = friendly_approve_error(500, "Internal Server Error");
+        assert!(msg.contains("Internal Server Error"));
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_empty_nodes() {
+        let response = graphql_response(vec![]);
+        let result = parse_graphql_prs(&response);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_no_data() {
+        let response = serde_json::json!({"errors": [{"message": "something went wrong"}]});
+        let result = parse_graphql_prs(&response);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_missing_branch_skips() {
+        let mut node = graphql_pr_node(
+            1,
+            "No branch",
+            "OPEN",
+            "test",
+            0,
+            0,
+            "alice",
+            1,
+            &[],
+            &[],
+            "UNKNOWN",
+            "UNKNOWN",
+            None,
+            None,
+            false,
+            &[],
+            "main",
+        );
+        // Remove headRefName
+        node.as_object_mut().unwrap().remove("headRefName");
+        let response = graphql_response(vec![node]);
+        let result = parse_graphql_prs(&response);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_no_checks() {
+        let response = graphql_response(vec![graphql_pr_node(
+            10,
+            "Draft PR",
+            "OPEN",
+            "draft/feature",
+            0,
+            0,
+            "carol",
+            1,
+            &[],
+            &[],
+            "UNKNOWN",
+            "DRAFT",
+            None,
+            None,
+            true,
+            &[],
+            "main",
+        )]);
+
+        let result = parse_graphql_prs(&response);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].checks.total, 0);
+        assert!(result[0].is_draft);
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_labels_with_colors() {
+        let response = graphql_response(vec![graphql_pr_node(
+            1,
+            "Labels PR",
+            "OPEN",
+            "label-branch",
+            0,
+            0,
+            "alice",
+            1,
+            &[],
+            &[],
+            "UNKNOWN",
+            "UNKNOWN",
+            None,
+            None,
+            false,
+            &[("bug", "d73a4a"), ("enhancement", "a2eeef")],
+            "main",
+        )]);
+
+        let result = parse_graphql_prs(&response);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].labels.len(), 2);
+
+        let bug = &result[0].labels[0];
+        assert_eq!(bug.name, "bug");
+        assert_eq!(bug.color, "d73a4a");
+        assert_eq!(bug.background_color, "rgba(215, 58, 74, 0.7)");
+        assert_eq!(bug.text_color, "#e5e5e5"); // dark label => light text
+
+        let enh = &result[0].labels[1];
+        assert_eq!(enh.name, "enhancement");
+        assert_eq!(enh.text_color, "#1e1e1e"); // light label => dark text
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_merge_and_review_labels() {
+        let response = graphql_response(vec![
+            graphql_pr_node(
+                1,
+                "Clean PR",
+                "OPEN",
+                "clean-branch",
+                0,
+                0,
+                "alice",
+                1,
+                &[],
+                &[],
+                "MERGEABLE",
+                "CLEAN",
+                Some("APPROVED"),
+                None,
+                false,
+                &[],
+                "main",
+            ),
+            graphql_pr_node(
+                2,
+                "Conflicting PR",
+                "OPEN",
+                "conflict-branch",
+                0,
+                0,
+                "bob",
+                1,
+                &[],
+                &[],
+                "CONFLICTING",
+                "DIRTY",
+                Some("CHANGES_REQUESTED"),
+                None,
+                false,
+                &[],
+                "main",
+            ),
+        ]);
+
+        let result = parse_graphql_prs(&response);
+        assert_eq!(result.len(), 2);
+
+        assert_eq!(
+            result[0].merge_state_label,
+            Some(StateLabel {
+                label: "Ready to merge".to_string(),
+                css_class: "clean".to_string()
+            })
+        );
+        assert_eq!(
+            result[0].review_state_label,
+            Some(StateLabel {
+                label: "Approved".to_string(),
+                css_class: "approved".to_string()
+            })
+        );
+
+        assert_eq!(
+            result[1].merge_state_label,
+            Some(StateLabel {
+                label: "Conflicts".to_string(),
+                css_class: "conflicting".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_error_check_states() {
+        let response = graphql_response(vec![graphql_pr_node(
+            99,
+            "Error checks",
+            "OPEN",
+            "error-branch",
+            0,
+            0,
+            "eve",
+            1,
+            &[("ERROR", 1), ("TIMED_OUT", 1), ("CANCELLED", 1)],
+            &[("ERROR", 1)],
+            "UNKNOWN",
+            "UNKNOWN",
+            None,
+            None,
+            false,
+            &[],
+            "main",
+        )]);
+
+        let result = parse_graphql_prs(&response);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].checks.failed, 4); // ERROR + TIMED_OUT + CANCELLED + status ERROR
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_merged_and_closed() {
+        let response = graphql_response(vec![
+            graphql_pr_node(
+                10,
+                "Merged feature",
+                "MERGED",
+                "feature/merged",
+                0,
+                0,
+                "alice",
+                3,
+                &[],
+                &[],
+                "UNKNOWN",
+                "UNKNOWN",
+                None,
+                None,
+                false,
+                &[],
+                "main",
+            ),
+            graphql_pr_node(
+                11,
+                "Closed PR",
+                "CLOSED",
+                "feature/closed",
+                0,
+                0,
+                "bob",
+                1,
+                &[],
+                &[],
+                "UNKNOWN",
+                "UNKNOWN",
+                None,
+                None,
+                false,
+                &[],
+                "main",
+            ),
+        ]);
+
+        let result = parse_graphql_prs(&response);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].state, "MERGED");
+        assert_eq!(result[1].state, "CLOSED");
+    }
+
+    #[test]
+    fn test_parse_graphql_prs_head_ref_oid() {
+        let response = graphql_response(vec![graphql_pr_node(
+            42,
+            "With OID",
+            "OPEN",
+            "feature/oid",
+            0,
+            0,
+            "alice",
+            1,
+            &[],
+            &[],
+            "UNKNOWN",
+            "UNKNOWN",
+            None,
+            None,
+            false,
+            &[],
+            "main",
+        )]);
+        let result = parse_graphql_prs(&response);
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].head_ref_oid, "abc0042",
+            "headRefOid must be parsed"
+        );
+    }
+
+    // --- parse_remote_url tests ---
+
+    #[test]
+    fn test_parse_remote_url_https() {
+        let result = parse_remote_url("https://github.com/owner/repo.git");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_remote_url_https_no_git_suffix() {
+        let result = parse_remote_url("https://github.com/owner/repo");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_remote_url_ssh() {
+        let result = parse_remote_url("git@github.com:owner/repo.git");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_remote_url_ssh_no_git_suffix() {
+        let result = parse_remote_url("git@github.com:owner/repo");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_remote_url_with_trailing_newline() {
+        let result = parse_remote_url("https://github.com/owner/repo.git\n");
+        assert_eq!(result, Some(("owner".to_string(), "repo".to_string())));
+    }
+
+    #[test]
+    fn test_parse_remote_url_not_github() {
+        let result = parse_remote_url("https://gitlab.com/owner/repo.git");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_remote_url_empty() {
+        assert_eq!(parse_remote_url(""), None);
+    }
+
+    #[test]
+    fn test_parse_remote_url_malformed() {
+        assert_eq!(parse_remote_url("not-a-url"), None);
+    }
+
+    // --- resolve_github_token tests ---
+    // Must run serially: env vars are process-global state and gh_token crate
+    // also reads them internally, causing races when tests run in parallel.
+
+    #[test]
+    #[serial_test::serial]
+    fn test_resolve_github_token_env_priority() {
+        // Scenario 1: GH_TOKEN takes priority
+        unsafe {
+            std::env::set_var("GH_TOKEN", "gh-wins");
+            std::env::set_var("GITHUB_TOKEN", "github-loses");
+        }
+        assert_eq!(resolve_github_token(), Some("gh-wins".to_string()));
+
+        // Scenario 2: Falls back to GITHUB_TOKEN when GH_TOKEN absent
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::set_var("GITHUB_TOKEN", "github-token-456");
+        }
+        assert_eq!(resolve_github_token(), Some("github-token-456".to_string()));
+
+        // Scenario 3: Empty GH_TOKEN is skipped, falls back to GITHUB_TOKEN
+        unsafe {
+            std::env::set_var("GH_TOKEN", "");
+            std::env::set_var("GITHUB_TOKEN", "fallback");
+        }
+        assert_eq!(resolve_github_token(), Some("fallback".to_string()));
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    // --- parse_pr_check_contexts tests ---
+
+    #[test]
+    fn test_parse_pr_check_contexts_check_runs() {
+        let data = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "nodes": [
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": "build",
+                                                    "status": "COMPLETED",
+                                                    "conclusion": "SUCCESS",
+                                                    "detailsUrl": "https://github.com/runs/1"
+                                                },
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": "test",
+                                                    "status": "COMPLETED",
+                                                    "conclusion": "FAILURE",
+                                                    "detailsUrl": "https://github.com/runs/2"
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+
+        let result = parse_pr_check_contexts(&data);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["name"], "build");
+        assert_eq!(result[0]["conclusion"], "success");
+        assert_eq!(result[0]["html_url"], "https://github.com/runs/1");
+        assert_eq!(result[1]["name"], "test");
+        assert_eq!(result[1]["conclusion"], "failure");
+    }
+
+    #[test]
+    fn test_parse_pr_check_contexts_status_contexts() {
+        let data = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "commits": {
+                            "nodes": [{
+                                "commit": {
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "nodes": [
+                                                {
+                                                    "__typename": "StatusContext",
+                                                    "context": "ci/circleci",
+                                                    "state": "SUCCESS",
+                                                    "targetUrl": "https://circleci.com/build/1"
+                                                },
+                                                {
+                                                    "__typename": "StatusContext",
+                                                    "context": "ci/jenkins",
+                                                    "state": "PENDING",
+                                                    "targetUrl": "https://jenkins.io/build/2"
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+
+        let result = parse_pr_check_contexts(&data);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["name"], "ci/circleci");
+        assert_eq!(result[0]["conclusion"], "success");
+        assert_eq!(result[0]["status"], "completed");
+        assert_eq!(result[0]["html_url"], "https://circleci.com/build/1");
+        assert_eq!(result[1]["name"], "ci/jenkins");
+        assert_eq!(result[1]["conclusion"], "");
+        assert_eq!(result[1]["status"], "in_progress");
+    }
+
+    #[test]
+    fn test_parse_pr_check_contexts_dedups_reruns_by_name() {
+        // Reproduces the duplicate-checks bug: GitHub lists "Socket Security" twice
+        // on the head commit (a stale cancelled run + the current failing run). The
+        // detail list must collapse to the newest entry per name, like the summary.
+        let data = serde_json::json!({
+            "data": { "repository": { "pullRequest": { "commits": { "nodes": [{
+                "commit": { "statusCheckRollup": { "contexts": { "nodes": [
+                    {
+                        "__typename": "CheckRun",
+                        "name": "Socket Security",
+                        "status": "COMPLETED",
+                        "conclusion": "CANCELLED",
+                        "detailsUrl": "https://github.com/runs/stale",
+                        "startedAt": "2026-06-25T08:00:00Z"
+                    },
+                    {
+                        "__typename": "CheckRun",
+                        "name": "Socket Security",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                        "detailsUrl": "https://github.com/runs/current",
+                        "startedAt": "2026-06-25T10:00:00Z"
+                    },
+                    {
+                        "__typename": "CheckRun",
+                        "name": "Frontend",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "detailsUrl": "https://github.com/runs/fe",
+                        "startedAt": "2026-06-25T09:00:00Z"
+                    }
+                ] } } }
+            }] } } } }
+        });
+
+        let result = parse_pr_check_contexts(&data);
+        assert_eq!(
+            result.len(),
+            2,
+            "duplicate check name must collapse to one entry"
+        );
+        assert_eq!(result[0]["name"], "Socket Security");
+        // Newest run (FAILURE) wins over the stale CANCELLED one.
+        assert_eq!(result[0]["conclusion"], "failure");
+        assert_eq!(result[0]["html_url"], "https://github.com/runs/current");
+        assert_eq!(result[1]["name"], "Frontend");
+    }
+
+    #[test]
+    fn test_parse_pr_check_contexts_empty() {
+        let data = serde_json::json!({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "commits": { "nodes": [] }
+                    }
+                }
+            }
+        });
+        assert_eq!(parse_pr_check_contexts(&data).len(), 0);
+    }
+
+    #[test]
+    fn test_parse_pr_check_contexts_no_data() {
+        let data = serde_json::json!({});
+        assert_eq!(parse_pr_check_contexts(&data).len(), 0);
+    }
+
+    // --- Integration tests: GraphQL API vs gh CLI (requires network + token) ---
+    // Run with: cargo test --lib -- --ignored --test-threads=1
+
+    /// Test that our GraphQL batch PR query returns the same data as `gh pr list`.
+    /// Compares owner/repo extraction, token resolution, API call, and parsed results
+    /// against the gh CLI output on this repository.
+    #[tokio::test]
+    #[ignore] // Requires network + GitHub token
+    async fn test_graphql_pr_query_matches_gh_cli() {
+        // 1. Resolve token (same path our production code uses)
+        let token = resolve_github_token()
+            .expect("No GitHub token found — set GH_TOKEN or run `gh auth login`");
+
+        // 2. Get repo info from local .git (same as production code)
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let repo_root = PathBuf::from(manifest_dir).parent().unwrap().to_path_buf();
+        let remote_url = crate::git::read_remote_url(&repo_root).expect("No origin remote found");
+        let (owner, repo) =
+            parse_remote_url(&remote_url).expect("Failed to parse remote URL into owner/repo");
+
+        println!("Testing against {owner}/{repo}");
+
+        // 3. Call GraphQL API
+        let client = reqwest::Client::new();
+        let variables = serde_json::json!({
+            "owner": owner,
+            "repo": repo,
+            "first": 50,
+        });
+        let graphql_result = graphql_request(
+            &client,
+            &token,
+            "https://api.github.com/graphql",
+            BATCH_PR_QUERY,
+            &variables,
+        )
+        .await;
+        assert!(
+            graphql_result.is_ok(),
+            "GraphQL request failed: {:?}",
+            graphql_result.err()
+        );
+
+        let data = graphql_result.unwrap();
+
+        // 4. Verify response structure
+        assert!(
+            data["data"]["repository"].is_object(),
+            "Response should have data.repository: {}",
+            serde_json::to_string_pretty(&data).unwrap()
+        );
+        assert!(
+            data["data"]["repository"]["pullRequests"]["nodes"].is_array(),
+            "Response should have pullRequests.nodes array"
+        );
+        assert!(
+            data["data"]["rateLimit"]["remaining"].is_number(),
+            "Response should include rateLimit info"
+        );
+
+        let remaining = data["data"]["rateLimit"]["remaining"].as_i64().unwrap();
+        println!("GraphQL rate limit remaining: {remaining}");
+
+        // 5. Parse into BranchPrStatus (same as production code)
+        let graphql_prs = parse_graphql_prs(&data);
+        println!("GraphQL returned {} PRs", graphql_prs.len());
+
+        // 6. Compare with gh CLI (if available)
+        let gh_output = Command::new(crate::agent::resolve_cli("gh"))
+            .current_dir(&repo_root)
+            .args([
+                "pr",
+                "list",
+                "--state",
+                "all",
+                "--limit",
+                "50",
+                "--json",
+                "number,title,state,headRefName,additions,deletions,isDraft",
+            ])
+            .output()
+            .ok();
+
+        if let Some(output) = gh_output {
+            if output.status.success() {
+                let gh_json: Vec<serde_json::Value> =
+                    serde_json::from_slice(&output.stdout).unwrap_or_default();
+                println!("gh CLI returned {} PRs", gh_json.len());
+
+                // PR counts should match
+                assert_eq!(
+                    graphql_prs.len(),
+                    gh_json.len(),
+                    "GraphQL and gh CLI should return the same number of PRs"
+                );
+
+                // For each PR, verify key fields match
+                for gh_pr in &gh_json {
+                    let number = gh_pr["number"].as_i64().unwrap() as i32;
+                    let branch = gh_pr["headRefName"].as_str().unwrap();
+
+                    let gql_pr = graphql_prs.iter().find(|p| p.number == number);
+                    assert!(
+                        gql_pr.is_some(),
+                        "PR #{number} ({branch}) found in gh CLI but not in GraphQL"
+                    );
+
+                    let gql_pr = gql_pr.unwrap();
+                    assert_eq!(gql_pr.branch, branch, "PR #{number}: branch mismatch");
+                    assert_eq!(
+                        gql_pr.title,
+                        gh_pr["title"].as_str().unwrap(),
+                        "PR #{number}: title mismatch"
+                    );
+                    assert_eq!(
+                        gql_pr.state,
+                        gh_pr["state"].as_str().unwrap(),
+                        "PR #{number}: state mismatch"
+                    );
+                    assert_eq!(
+                        gql_pr.is_draft,
+                        gh_pr["isDraft"].as_bool().unwrap_or(false),
+                        "PR #{number}: isDraft mismatch"
+                    );
+                    assert_eq!(
+                        gql_pr.additions,
+                        gh_pr["additions"].as_i64().unwrap_or(0) as i32,
+                        "PR #{number}: additions mismatch"
+                    );
+                    assert_eq!(
+                        gql_pr.deletions,
+                        gh_pr["deletions"].as_i64().unwrap_or(0) as i32,
+                        "PR #{number}: deletions mismatch"
+                    );
+                }
+
+                println!("All {} PRs match between GraphQL and gh CLI", gh_json.len());
+            } else {
+                println!(
+                    "gh CLI not available — skipping comparison, GraphQL-only validation passed"
+                );
+            }
+        } else {
+            println!("gh CLI not installed — skipping comparison, GraphQL-only validation passed");
+        }
+    }
+
+    /// Test that GraphQL token resolution works and can authenticate.
+    #[tokio::test]
+    #[ignore] // Requires network + GitHub token
+    async fn test_graphql_auth_and_rate_limit() {
+        let token = resolve_github_token().expect("No GitHub token found");
+
+        let client = reqwest::Client::new();
+        // Minimal query just to verify auth works
+        let result = graphql_request(
+            &client,
+            &token,
+            "https://api.github.com/graphql",
+            "query { viewer { login } rateLimit { remaining resetAt } }",
+            &serde_json::json!({}),
+        )
+        .await;
+
+        assert!(result.is_ok(), "Auth failed: {:?}", result.err());
+        let data = result.unwrap();
+
+        let login = data["data"]["viewer"]["login"].as_str();
+        assert!(login.is_some(), "Should return authenticated user login");
+        println!("Authenticated as: {}", login.unwrap());
+
+        let remaining = data["data"]["rateLimit"]["remaining"].as_i64().unwrap();
+        println!("Rate limit remaining: {remaining}/5000");
+        assert!(remaining > 0, "Should have rate limit remaining");
+    }
+
+    // --- resolve_github_token_candidates tests ---
+
+    #[test]
+    #[serial_test::serial]
+    fn test_resolve_github_token_candidates() {
+        // Set both env vars to known values
+        unsafe {
+            std::env::set_var("GH_TOKEN", "gh-token-1");
+            std::env::set_var("GITHUB_TOKEN", "github-token-2");
+        }
+
+        let candidates = resolve_github_token_candidates();
+        let tokens: Vec<&str> = candidates.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(tokens.len() >= 2, "Should have at least 2 candidates");
+        assert_eq!(tokens[0], "gh-token-1");
+        assert_eq!(tokens[1], "github-token-2");
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    // --- Empty token filtering tests ---
+    // Env vars are process-global state, so all env-var scenarios run in a single
+    // test to avoid parallel race conditions.
+
+    #[test]
+    #[serial_test::serial] // mutates GH_TOKEN/GITHUB_TOKEN — must not race the other env tests
+    fn test_resolve_github_token_filters_empty_from_gh_token_crate() {
+        // Simulate Tauri GUI process: GITHUB_TOKEN="" (set but empty).
+        // gh_token crate's get() uses env::var_os() which returns Some("") for
+        // empty env vars without checking emptiness. Our resolve_github_token()
+        // must filter this and not return Some("").
+        unsafe {
+            std::env::set_var("GITHUB_TOKEN", "");
+            std::env::remove_var("GH_TOKEN");
+        }
+
+        let result = resolve_github_token();
+        // Result should be either None (no gh CLI) or a non-empty token from CLI
+        if let Some(ref token) = result {
+            assert!(
+                !token.is_empty(),
+                "resolve_github_token must never return an empty string"
+            );
+        }
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_resolve_github_token_candidates_filters_empty() {
+        unsafe {
+            std::env::set_var("GH_TOKEN", "");
+            std::env::set_var("GITHUB_TOKEN", "");
+        }
+
+        let candidates = resolve_github_token_candidates();
+        for (token, _source) in &candidates {
+            assert!(
+                !token.is_empty(),
+                "Candidates must never contain empty strings"
+            );
+        }
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("GH_TOKEN");
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    // --- Integration test: token resolution with gh CLI fallback ---
+    // Run with: cargo test --lib -- --ignored --test-threads=1
+
+    /// Verify that resolve_github_token works even when env vars are empty,
+    /// by falling through to `gh auth token` CLI.
+    /// This catches the exact bug where GITHUB_TOKEN="" in Tauri GUI processes
+    /// caused gh_token crate to return an empty string → 401 Bad credentials.
+    #[tokio::test]
+    #[ignore] // Requires gh CLI authenticated
+    async fn test_resolve_token_with_empty_env_falls_through_to_cli() {
+        // Save and clear env vars to simulate GUI context
+        let saved_gh = std::env::var("GH_TOKEN").ok();
+        let saved_github = std::env::var("GITHUB_TOKEN").ok();
+        unsafe {
+            std::env::set_var("GITHUB_TOKEN", "");
+            std::env::set_var("GH_TOKEN", "");
+        }
+
+        let token = resolve_github_token();
+        assert!(
+            token.is_some(),
+            "Should resolve token via gh CLI when env vars are empty"
+        );
+        let token = token.unwrap();
+        assert!(!token.is_empty(), "Token from CLI should not be empty");
+
+        // Verify the token actually works against GitHub API
+        let client = reqwest::Client::new();
+        let result = graphql_request(
+            &client,
+            &token,
+            "https://api.github.com/graphql",
+            "query { viewer { login } }",
+            &serde_json::json!({}),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "Token from gh CLI should authenticate successfully: {:?}",
+            result.err()
+        );
+
+        let data = result.unwrap();
+        let login = data["data"]["viewer"]["login"].as_str();
+        assert!(login.is_some(), "Should return authenticated user login");
+        println!("Authenticated via CLI fallback as: {}", login.unwrap());
+
+        // Restore env vars
+        unsafe {
+            match saved_gh {
+                Some(v) => std::env::set_var("GH_TOKEN", v),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+            match saved_github {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+        }
+    }
+
+    // --- GqlError display tests ---
+
+    #[test]
+    fn test_gql_error_display_auth() {
+        let err = GqlError::Auth("401 Unauthorized".to_string());
+        assert_eq!(format!("{err}"), "Auth error: 401 Unauthorized");
+    }
+
+    #[test]
+    fn test_gql_error_display_other() {
+        let err = GqlError::Other("network timeout".to_string());
+        assert_eq!(format!("{err}"), "network timeout");
+    }
+
+    // --- GitHubCircuitBreaker tests ---
+
+    #[test]
+    fn test_circuit_breaker_stays_closed_on_success() {
+        let cb = GitHubCircuitBreaker::new();
+        cb.record_success();
+        cb.record_success();
+        assert!(cb.check().is_ok());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_after_threshold() {
+        let cb = GitHubCircuitBreaker::new();
+        cb.record_failure();
+        cb.record_failure();
+        assert!(
+            cb.check().is_ok(),
+            "Should still be closed after 2 failures"
+        );
+        cb.record_failure();
+        assert!(cb.check().is_err(), "Should be open after 3 failures");
+    }
+
+    #[test]
+    fn test_circuit_breaker_resets_on_success() {
+        let cb = GitHubCircuitBreaker::new();
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_success(); // Reset before threshold
+        cb.record_failure();
+        cb.record_failure();
+        assert!(
+            cb.check().is_ok(),
+            "Should be closed — success reset the count"
+        );
+    }
+
+    #[test]
+    fn test_circuit_breaker_respects_open_until() {
+        let cb = GitHubCircuitBreaker::new();
+        // Force circuit open with a future instant
+        *cb.open_until.write() = Some(Instant::now() + std::time::Duration::from_secs(60));
+        let result = cb.check();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("circuit breaker open"));
+    }
+
+    // --- Rate limit circuit breaker tests ---
+
+    #[test]
+    fn test_circuit_breaker_rate_limit_blocks_requests() {
+        let cb = GitHubCircuitBreaker::new();
+        cb.record_rate_limit(60);
+        let result = cb.check();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().starts_with("rate-limit:"),
+            "Rate limit check should return error starting with 'rate-limit:'"
+        );
+    }
+
+    #[test]
+    fn test_circuit_breaker_rate_limit_does_not_increment_failure_count() {
+        let cb = GitHubCircuitBreaker::new();
+        // Record 2 failures (below threshold)
+        cb.record_failure();
+        cb.record_failure();
+        // Record a rate limit — this should NOT push us over the failure threshold
+        cb.record_rate_limit(1);
+        // Wait for rate limit to expire
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Should still be open for requests (only 2 failures, threshold is 3)
+        assert!(
+            cb.check().is_ok(),
+            "Rate limit should not inflate failure count"
+        );
+    }
+
+    #[test]
+    fn test_circuit_breaker_rate_limit_expires() {
+        let cb = GitHubCircuitBreaker::new();
+        // Set rate limit that expires in 1 second
+        *cb.rate_limit_until.write() = Some(Instant::now() + std::time::Duration::from_millis(50));
+        assert!(cb.check().is_err(), "Should be rate limited initially");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(
+            cb.check().is_ok(),
+            "Should be open after rate limit expires"
+        );
+    }
+
+    #[test]
+    fn test_circuit_breaker_rate_limit_takes_priority_over_open() {
+        let cb = GitHubCircuitBreaker::new();
+        // Set both circuit breaker open and rate limited
+        *cb.open_until.write() = Some(Instant::now() + std::time::Duration::from_secs(60));
+        *cb.rate_limit_until.write() = Some(Instant::now() + std::time::Duration::from_secs(60));
+        let result = cb.check();
+        assert!(result.is_err());
+        // Rate limit message should take priority
+        assert!(
+            result.unwrap_err().starts_with("rate-limit:"),
+            "Rate limit should take priority in error message"
+        );
+    }
+
+    // --- GqlError display tests for RateLimit ---
+
+    #[test]
+    fn test_gql_error_display_rate_limit() {
+        let err = GqlError::RateLimit {
+            reset_at: Some(1700000000),
+            retry_after: Some(60),
+            message: "API rate limit exceeded".to_string(),
+        };
+        assert_eq!(format!("{err}"), "Rate limited: API rate limit exceeded");
+    }
+
+    // --- rate_limit_wait_secs tests ---
+
+    #[test]
+    fn test_rate_limit_wait_secs_prefers_retry_after() {
+        // retry-after takes priority over reset_at
+        assert_eq!(rate_limit_wait_secs(Some(9999999999), Some(42)), 42);
+    }
+
+    #[test]
+    fn test_rate_limit_wait_secs_falls_back_to_reset_at() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset = now + 30;
+        let wait = rate_limit_wait_secs(Some(reset), None);
+        // Should be approximately 31 (30 + 1 safety margin)
+        assert!((30..=32).contains(&wait), "Expected ~31, got {wait}");
+    }
+
+    #[test]
+    fn test_rate_limit_wait_secs_defaults_to_60() {
+        assert_eq!(rate_limit_wait_secs(None, None), 60);
+    }
+
+    #[test]
+    fn test_rate_limit_wait_secs_reset_in_past() {
+        // If reset_at is in the past and no retry-after, default to 60
+        assert_eq!(rate_limit_wait_secs(Some(1000), None), 60);
+    }
+
+    // --- check_graphql_errors tests ---
+
+    #[test]
+    fn test_check_graphql_errors_no_errors_returns_ok() {
+        let json = serde_json::json!({
+            "data": { "r0": { "pullRequests": { "nodes": [] } } }
+        });
+        assert!(check_graphql_errors(&json, None, None).is_ok());
+    }
+
+    #[test]
+    fn test_check_graphql_errors_empty_errors_array_returns_ok() {
+        let json = serde_json::json!({
+            "data": { "r0": null },
+            "errors": []
+        });
+        assert!(check_graphql_errors(&json, None, None).is_ok());
+    }
+
+    #[test]
+    fn test_check_graphql_errors_rate_limited_always_fails() {
+        let json = serde_json::json!({
+            "data": { "r0": { "pullRequests": { "nodes": [] } } },
+            "errors": [{ "type": "RATE_LIMITED", "message": "rate limited" }]
+        });
+        let err = check_graphql_errors(&json, Some(9999), None).unwrap_err();
+        assert!(matches!(err, GqlError::RateLimit { .. }));
+    }
+
+    #[test]
+    fn test_check_graphql_errors_partial_data_returns_ok() {
+        // Errors + data present → partial success, should return Ok
+        let json = serde_json::json!({
+            "data": {
+                "r0": { "pullRequests": { "nodes": [] } },
+                "r1": null
+            },
+            "errors": [{
+                "type": "NOT_FOUND",
+                "message": "Could not resolve to a Repository with the name 'foo/bar'."
+            }]
+        });
+        assert!(check_graphql_errors(&json, None, None).is_ok());
+    }
+
+    #[test]
+    fn test_check_graphql_errors_no_data_returns_err() {
+        // Errors without data → pure error
+        let json = serde_json::json!({
+            "errors": [{ "message": "Something went wrong" }]
+        });
+        let err = check_graphql_errors(&json, None, None).unwrap_err();
+        match err {
+            GqlError::Other(msg) => assert!(msg.contains("Something went wrong")),
+            _ => panic!("Expected GqlError::Other, got {err:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_graphql_errors_data_null_returns_err() {
+        // data: null is not a valid object — treat as pure error
+        let json = serde_json::json!({
+            "data": null,
+            "errors": [{ "message": "Bad query" }]
+        });
+        let err = check_graphql_errors(&json, None, None).unwrap_err();
+        assert!(matches!(err, GqlError::Other(_)));
+    }
+
+    // --- github_repo_cooldown tests ---
+
+    #[test]
+    fn test_cooldown_evicts_expired_entries() {
+        let cache = crate::state::GitCacheState::new();
+        // Insert an already-expired entry
+        cache.github_repo_cooldown.insert(
+            "owner/expired".to_string(),
+            Instant::now() - std::time::Duration::from_secs(1),
+        );
+        // Insert a still-valid entry
+        cache.github_repo_cooldown.insert(
+            "owner/active".to_string(),
+            Instant::now() + std::time::Duration::from_secs(3600),
+        );
+        // Evict expired
+        let now = Instant::now();
+        cache
+            .github_repo_cooldown
+            .retain(|_k, expiry| *expiry > now);
+
+        assert!(!cache.github_repo_cooldown.contains_key("owner/expired"));
+        assert!(cache.github_repo_cooldown.contains_key("owner/active"));
+    }
+
+    // --- truncate_ci_logs tests ---
+
+    #[test]
+    fn test_ci_log_short_output_unchanged() {
+        let short = "Error: test failed\nassert_eq failed";
+        let result = truncate_ci_logs(short);
+        assert_eq!(result, short);
+    }
+
+    #[test]
+    fn test_ci_log_truncation_keeps_tail() {
+        let mut logs = String::new();
+        for i in 0..500 {
+            logs.push_str(&format!("line {i}: some log output here\n"));
+        }
+        let result = truncate_ci_logs(&logs);
+
+        assert!(result.starts_with("[… truncated"));
+        assert!(result.contains("line 499"));
+        assert!(!result.contains("line 0:"));
+        // Result length should be manageable
+        assert!(result.len() <= CI_LOG_MAX_CHARS + 100); // header adds a bit
+    }
+
+    #[test]
+    fn test_ci_log_empty_input() {
+        assert_eq!(truncate_ci_logs(""), "");
+        assert_eq!(truncate_ci_logs("  \n  "), "");
+    }
+
+    #[test]
+    fn ci_logs_disabled_for_ghe_bound_repo() {
+        use crate::github_account::{
+            GitHubAccount, GitHubAccountRegistry, GitHubHost, RepoBinding, RepoBindingStore,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(dir.path().join("cfg"));
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("mkdir .git");
+
+        let mut registry = GitHubAccountRegistry::default();
+        registry.upsert(GitHubAccount::ghe_pat(
+            GitHubHost::new("ghe.acme.com").unwrap(),
+            None,
+        ));
+        registry.save().unwrap();
+        let mut bindings = RepoBindingStore::default();
+        bindings.set_binding(
+            &repo,
+            RepoBinding {
+                account_id: "ghe.acme.com".into(),
+                owner: "team".into(),
+                repo: "project".into(),
+                remote_name: "origin".into(),
+            },
+        );
+        bindings.save().unwrap();
+
+        let err = fetch_ci_failure_logs_impl(repo.to_str().unwrap(), "main").unwrap_err();
+        assert!(
+            err.contains("github.com accounts"),
+            "expected gh-CLI-disabled message, got: {err}"
+        );
+    }
+
+    // --- Step 9: per-account state ---
+
+    use crate::github_account::{AccountKind, GitHubAccount, GitHubHost};
+
+    fn cloud_account() -> GitHubAccount {
+        GitHubAccount::github_com(AccountKind::GithubComOauth, None)
+    }
+    fn ghe_account() -> GitHubAccount {
+        GitHubAccount::ghe_pat(GitHubHost::new("ghe.acme.com").unwrap(), None)
+    }
+
+    #[test]
+    fn cooldown_key_is_account_scoped_for_ghe_only() {
+        assert_eq!(
+            cooldown_key(&cloud_account(), "octocat", "hello"),
+            "octocat/hello"
+        );
+        assert_eq!(
+            cooldown_key(&ghe_account(), "team", "project"),
+            "ghe.acme.com:team/project"
+        );
+    }
+
+    #[test]
+    fn per_account_breaker_is_isolated() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let cloud = cloud_account();
+        let ghe = ghe_account();
+
+        // Trip the GHE breaker (threshold = 3 consecutive failures).
+        with_account_breaker(&state, &ghe, |b| {
+            for _ in 0..3 {
+                b.record_failure();
+            }
+        });
+
+        assert!(
+            with_account_breaker(&state, &ghe, |b| b.check()).is_err(),
+            "GHE breaker should be open"
+        );
+        assert!(
+            with_account_breaker(&state, &cloud, |b| b.check()).is_ok(),
+            "github.com breaker must stay closed"
+        );
+    }
+
+    fn named_cloud_account() -> GitHubAccount {
+        GitHubAccount::github_com_named("octocat-named")
+    }
+
+    #[test]
+    fn named_github_com_cooldown_key_is_account_scoped() {
+        // The ambient default keeps bare keys; an additional named github.com
+        // account is colon-prefixed by login, so the login-cooldown-clear
+        // (`contains(':')`) preserves named-account cooldowns.
+        assert_eq!(
+            cooldown_key(&cloud_account(), "octocat", "hello"),
+            "octocat/hello"
+        );
+        assert_eq!(
+            cooldown_key(&named_cloud_account(), "octocat", "hello"),
+            "octocat-named:octocat/hello"
+        );
+    }
+
+    #[test]
+    fn named_github_com_breaker_isolated_from_ambient_default() {
+        // Two cloud accounts (the ambient default + a named github.com account)
+        // each get their own breaker. Tripping the named one must not open the
+        // ambient default's.
+        let state = crate::state::tests_support::make_test_app_state();
+        let ambient = cloud_account();
+        let named = named_cloud_account();
+
+        with_account_breaker(&state, &named, |b| {
+            for _ in 0..3 {
+                b.record_failure();
+            }
+        });
+        assert!(
+            with_account_breaker(&state, &named, |b| b.check()).is_err(),
+            "named github.com breaker should be open"
+        );
+        assert!(
+            with_account_breaker(&state, &ambient, |b| b.check()).is_ok(),
+            "ambient default breaker must stay closed — one cloud account's limit must not throttle the other"
+        );
+    }
+
+    #[test]
+    fn named_github_com_rate_budget_isolated() {
+        use std::sync::atomic::Ordering;
+        let state = crate::state::tests_support::make_test_app_state();
+        let named = named_cloud_account();
+        state
+            .github_rate_limit_remaining
+            .store(5000, Ordering::Relaxed);
+        state
+            .ghe_state
+            .entry(named.id.clone())
+            .or_insert_with(GheAccountState::new)
+            .rate_limit_remaining
+            .store(10, Ordering::Relaxed);
+
+        assert_eq!(
+            state.github_rate_limit_remaining.load(Ordering::Relaxed),
+            5000,
+            "ambient default budget unchanged"
+        );
+        assert_eq!(
+            state
+                .ghe_state
+                .get(&named.id)
+                .unwrap()
+                .rate_limit_remaining
+                .load(Ordering::Relaxed),
+            10,
+            "named account budget is isolated in its own ghe_state entry"
+        );
+    }
+
+    #[test]
+    fn min_rate_budget_paces_for_the_tightest_account() {
+        use std::sync::atomic::Ordering;
+        let state = crate::state::tests_support::make_test_app_state();
+        // Ambient default has plenty; a named account is nearly exhausted.
+        state
+            .github_rate_limit_remaining
+            .store(5000, Ordering::Relaxed);
+        let named = named_cloud_account();
+        state
+            .ghe_state
+            .entry(named.id.clone())
+            .or_insert_with(GheAccountState::new)
+            .rate_limit_remaining
+            .store(7, Ordering::Relaxed);
+
+        assert_eq!(
+            min_rate_budget(&state),
+            7,
+            "the global poll cadence must pace for the most-constrained account"
+        );
+    }
+
+    #[tokio::test]
+    async fn named_github_com_viewer_login_cached_per_account() {
+        // Viewer identity must be per-account: a named github.com account reads
+        // its OWN cached viewer login, not the global (ambient-default) one — so
+        // `author:@me` / issue filters never cross-contaminate between accounts.
+        let state = crate::state::tests_support::make_test_app_state();
+        let named = named_cloud_account();
+        state
+            .ghe_state
+            .entry(named.id.clone())
+            .or_insert_with(GheAccountState::new)
+            .viewer_login
+            .write()
+            .replace("named-viewer".to_string());
+        *state.github_viewer_login.write() = Some("ambient-viewer".to_string());
+
+        assert_eq!(
+            get_viewer_login_for(&state, &named).await.unwrap(),
+            "named-viewer",
+            "named account uses its own viewer cache"
+        );
+        assert_eq!(
+            get_viewer_login_for(&state, &cloud_account())
+                .await
+                .unwrap(),
+            "ambient-viewer",
+            "ambient default still uses the global viewer cache"
+        );
+    }
+
+    #[test]
+    fn github_login_cooldown_clear_preserves_ghe() {
+        // github.com login clears only cloud cooldowns ("owner/name"); GHE keys
+        // ("{id}:owner/name") survive. This mirrors github_poll_login's retain.
+        let state = crate::state::tests_support::make_test_app_state();
+        let future = Instant::now() + std::time::Duration::from_secs(3600);
+        state
+            .git_cache
+            .github_repo_cooldown
+            .insert(cooldown_key(&cloud_account(), "octocat", "hello"), future);
+        state
+            .git_cache
+            .github_repo_cooldown
+            .insert(cooldown_key(&ghe_account(), "team", "project"), future);
+
+        state
+            .git_cache
+            .github_repo_cooldown
+            .retain(|key, _| key.contains(':'));
+
+        assert!(
+            !state
+                .git_cache
+                .github_repo_cooldown
+                .contains_key("octocat/hello"),
+            "cloud cooldown should be cleared"
+        );
+        assert!(
+            state
+                .git_cache
+                .github_repo_cooldown
+                .contains_key("ghe.acme.com:team/project"),
+            "GHE cooldown should survive"
+        );
+    }
+
+    #[test]
+    fn remove_account_invalidates_only_its_caches() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let ghe = ghe_account();
+        let future = Instant::now() + std::time::Duration::from_secs(3600);
+        // Seed per-account state + cooldowns for both a GHE account and github.com.
+        state
+            .ghe_state
+            .entry(ghe.id.clone())
+            .or_insert_with(GheAccountState::new);
+        state
+            .git_cache
+            .github_repo_cooldown
+            .insert(cooldown_key(&ghe, "team", "project"), future);
+        state
+            .git_cache
+            .github_repo_cooldown
+            .insert(cooldown_key(&cloud_account(), "octocat", "hello"), future);
+
+        // Replicate github_remove_account's cache cleanup.
+        state.ghe_state.remove(&ghe.id);
+        let prefix = format!("{}:", ghe.id);
+        state
+            .git_cache
+            .github_repo_cooldown
+            .retain(|key, _| !key.starts_with(&prefix));
+
+        assert!(!state.ghe_state.contains_key("ghe.acme.com"));
+        assert!(
+            !state
+                .git_cache
+                .github_repo_cooldown
+                .contains_key("ghe.acme.com:team/project")
+        );
+        assert!(
+            state
+                .git_cache
+                .github_repo_cooldown
+                .contains_key("octocat/hello"),
+            "github.com cooldown must be untouched"
+        );
+    }
+
+    #[test]
+    fn diagnostics_flags_open_ghe_breaker() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let ghe = ghe_account();
+        with_account_breaker(&state, &ghe, |b| {
+            for _ in 0..3 {
+                b.record_failure();
+            }
+        });
+        let diag = crate::github_auth::compute_diagnostics(&state);
+        assert!(diag.circuit_breaker_open);
+        assert!(diag.circuit_breaker_status.contains("Enterprise"));
+    }
+
+    #[test]
+    fn test_cooldown_survives_clear_all() {
+        let cache = crate::state::GitCacheState::new();
+        cache.github_repo_cooldown.insert(
+            "owner/repo".to_string(),
+            Instant::now() + std::time::Duration::from_secs(3600),
+        );
+        cache.clear_all();
+        // Cooldowns must survive cache invalidation — only explicit user actions clear them
+        assert!(!cache.github_repo_cooldown.is_empty());
+    }
+
+    #[test]
+    fn test_parse_issue_node_full() {
+        let json = serde_json::json!({
+            "number": 42,
+            "title": "Bug: widget crashes",
+            "state": "OPEN",
+            "url": "https://github.com/owner/repo/issues/42",
+            "createdAt": "2026-01-15T10:00:00Z",
+            "updatedAt": "2026-04-10T12:00:00Z",
+            "author": { "login": "octocat" },
+            "labels": { "nodes": [
+                { "name": "bug", "color": "d73a49" },
+                { "name": "P1", "color": "ffffff" }
+            ]},
+            "assignees": { "nodes": [
+                { "login": "alice" },
+                { "login": "bob" }
+            ]},
+            "milestone": { "title": "v2.0" },
+            "comments": { "totalCount": 5 }
+        });
+        let issue = parse_issue_node(&json).expect("should parse");
+        assert_eq!(issue.number, 42);
+        assert_eq!(issue.title, "Bug: widget crashes");
+        assert_eq!(issue.state, "OPEN");
+        assert_eq!(issue.author, "octocat");
+        assert_eq!(issue.labels.len(), 2);
+        assert_eq!(issue.labels[0].name, "bug");
+        assert_eq!(issue.labels[0].background_color, "rgba(215, 58, 73, 0.7)");
+        assert_eq!(issue.labels[0].text_color, "#e5e5e5"); // dark label => light text
+        assert_eq!(issue.labels[1].name, "P1");
+        assert_eq!(issue.labels[1].text_color, "#1e1e1e"); // light label => dark text
+        assert_eq!(issue.assignees, vec!["alice", "bob"]);
+        assert_eq!(issue.milestone, Some("v2.0".to_string()));
+        assert_eq!(issue.comments_count, 5);
+    }
+
+    #[test]
+    fn test_parse_issue_node_minimal() {
+        let json = serde_json::json!({
+            "number": 1,
+            "title": "",
+            "state": "CLOSED",
+            "url": "",
+            "createdAt": "",
+            "updatedAt": "",
+            "author": { "login": "" },
+            "labels": { "nodes": [] },
+            "assignees": { "nodes": [] },
+            "milestone": null,
+            "comments": { "totalCount": 0 }
+        });
+        let issue = parse_issue_node(&json).expect("should parse");
+        assert_eq!(issue.number, 1);
+        assert_eq!(issue.milestone, None);
+        assert!(issue.labels.is_empty());
+        assert!(issue.assignees.is_empty());
+    }
+
+    #[test]
+    fn test_parse_issue_node_missing_number() {
+        let json = serde_json::json!({ "title": "no number" });
+        assert!(parse_issue_node(&json).is_none());
+    }
+
+    #[test]
+    fn test_build_multi_repo_issues_query_assigned() {
+        let repos = vec![("path1".to_string(), "owner".to_string(), "repo".to_string())];
+        let (query, aliases) = build_multi_repo_issues_query(&repos, "octocat", "assigned");
+        // New format uses repository().issues(filterBy:) instead of search()
+        assert!(query.contains("filterBy: { assignee: \"octocat\" }"));
+        assert!(query.contains("issues("));
+        assert!(query.contains("states: [OPEN]"));
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].0, "r0");
+    }
+
+    #[test]
+    fn test_build_multi_repo_issues_query_all() {
+        let repos = vec![("p".to_string(), "o".to_string(), "r".to_string())];
+        let (query, _) = build_multi_repo_issues_query(&repos, "viewer", "all");
+        // "all" mode should NOT include filterBy qualifier
+        assert!(!query.contains("filterBy"));
+        assert!(query.contains("issues("));
+    }
+
+    // --- build_unified_batch_query: hide_drafts tests ---
+
+    #[test]
+    fn test_build_unified_batch_query_hide_drafts_adds_filter() {
+        let repos = vec![("/path".to_string(), "owner".to_string(), "repo".to_string())];
+        let (query, _) = build_unified_batch_query(&repos, false, "disabled", "alice", true);
+        assert!(
+            query.contains("-is:draft"),
+            "draft filter should appear in viewer search"
+        );
+    }
+
+    #[test]
+    fn test_build_unified_batch_query_show_drafts_no_filter() {
+        let repos = vec![("/path".to_string(), "owner".to_string(), "repo".to_string())];
+        let (query, _) = build_unified_batch_query(&repos, false, "disabled", "alice", false);
+        assert!(
+            !query.contains("-is:draft"),
+            "draft filter should not appear when hide_drafts is false"
+        );
+    }
+
+    #[test]
+    fn test_build_unified_batch_query_hide_drafts_fetches_more() {
+        let repos = vec![("/path".to_string(), "owner".to_string(), "repo".to_string())];
+        let (query_hide, _) = build_unified_batch_query(&repos, false, "disabled", "", true);
+        let (query_show, _) = build_unified_batch_query(&repos, false, "disabled", "", false);
+        assert!(
+            query_hide.contains("first: 40"),
+            "hide_drafts should fetch 40 PRs"
+        );
+        assert!(
+            query_show.contains("first: 20"),
+            "show_drafts should fetch 20 PRs"
+        );
+    }
+
+    #[test]
+    fn test_build_unified_batch_query_no_viewer_prs_section_without_viewer() {
+        let repos = vec![("/path".to_string(), "owner".to_string(), "repo".to_string())];
+        let (query, _) = build_unified_batch_query(&repos, false, "disabled", "", true);
+        assert!(
+            !query.contains("viewerPrs"),
+            "no viewerPrs section when viewer is empty"
+        );
+    }
+
+    #[test]
+    fn test_build_unified_batch_query_viewer_prs_section_with_viewer() {
+        let repos = vec![("/path".to_string(), "owner".to_string(), "repo".to_string())];
+        let (query, _) = build_unified_batch_query(&repos, false, "disabled", "alice", false);
+        assert!(
+            query.contains("viewerPrs"),
+            "viewerPrs section present when viewer is set"
+        );
+        assert!(
+            query.contains("author:alice"),
+            "viewer search targets alice"
+        );
+    }
+
+    // --- extract_graphql_name tests ---
+
+    #[test]
+    fn test_extract_named_query() {
+        assert_eq!(
+            extract_graphql_name("query BatchPoll { viewer { login } }"),
+            "BatchPoll"
+        );
+    }
+
+    #[test]
+    fn test_extract_anonymous_query() {
+        assert_eq!(extract_graphql_name("{ viewer { login } }"), "<inline>");
+    }
+
+    #[test]
+    fn test_extract_mutation() {
+        assert_eq!(
+            extract_graphql_name("mutation ClosePR($id: ID!) { ... }"),
+            "ClosePR"
+        );
+    }
+
+    #[test]
+    fn test_extract_inline_query_keyword() {
+        assert_eq!(
+            extract_graphql_name("query { viewer { login } }"),
+            "<inline>"
+        );
+    }
+}

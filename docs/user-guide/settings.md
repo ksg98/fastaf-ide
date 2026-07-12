@@ -1,0 +1,178 @@
+# Settings
+
+Open settings with `Cmd+,`. Settings are organized into tabs.
+
+## General Tab
+
+| Setting | Description |
+|---------|-------------|
+| **Language** | UI language |
+| **Default IDE** | IDE for "Open in..." actions. Only installed apps are offered, grouped by category: Code Editors (VS Code, Cursor, Zed, Windsurf, Neovim, Xcode, `$EDITOR`), JetBrains (IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, PhpStorm, RubyMine, Rider, DataGrip, RustRover, Android Studio, Fleet), Terminals (Ghostty, WezTerm, Alacritty, Kitty, Warp, iTerm2), Git Tools (Sourcetree, GitHub Desktop, Fork, GitKraken, Sublime Merge, Tower), System (Terminal, Finder) |
+| **Custom Launchers** | Define your own tools for the "Open in" menu. Each launcher has a name, an executable (bare name resolved on `PATH`, or absolute path), and arguments (one per line). Arguments may use placeholders, expanded at launch: `{path}`/`{file}` (focused file, else repo root), `{fileDir}` (directory of the focused file), `{repo}` (repo/worktree root), `{cwd}` (focused terminal's working directory), `{home}` (your home directory), `{line}`/`{column}` (1-based editor cursor position). Args are passed verbatim (no shell parsing), so paths with spaces are safe. |
+| **Shell** | Custom shell path (e.g., `/bin/zsh`, `/usr/local/bin/fish`). Leave empty for system default. |
+| **Confirm before quitting** | Show dialog when closing app with active terminals |
+| **Confirm before closing tab** | Ask before closing terminal tab |
+| **Prevent sleep when busy** | Keep machine awake while agents are working |
+| **Auto-check for updates** | Check for new versions on startup |
+| **Auto-show PR popover** | Automatically display PR details when switching branches. Only shows for OPEN pull requests — CLOSED PRs are hidden, and MERGED PRs fade after 5 minutes of user activity. |
+| **Copy on Select** | Auto-copy terminal selection to clipboard. When text is selected in the terminal, it is immediately copied. A "Copied to clipboard" confirmation appears in the status bar. Enabled by default. Also configurable in Appearance tab. |
+| **Drag to select in full-screen apps** | Click-and-drag selects text even when an app (vim, htop, agent TUIs) captures the mouse; a plain click is still sent to the app on release. Shift+drag always selects. Enabled by default; turn off to always forward the mouse immediately. |
+| **Import from other tools** | Shows "Import from Claude Code / Codex / Cursor / superset.sh" in the sidebar's Add Repository menu. The import dialog discovers projects from those tools and can optionally restore recent Claude/Codex chat sessions as resumable terminals. Enabled by default. |
+| **Scroll sensitivity** | Terminal wheel/trackpad scroll speed, 20–200% (default 70%; 100% = raw device speed). |
+| **Repository defaults** | Base branch, file handling, setup/run scripts applied to new repos |
+| **Experimental Features** | Master toggle for experimental features. When enabled, shows sub-toggles: **AI Chat** (AI Chat panel, shortcuts, command palette entry), **Scroll History** (scrollback overlay with search when scrolling up in agent mode). |
+
+## Appearance Tab
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| **Terminal theme** | — | — | Color theme with preview swatches |
+| **File Type Colors** | `boolean` | `true` | Tint file browser icons by file type (VSCode-style pastel palette). Folders get a muted gray-blue; dotfiles and lockfiles are dimmed. |
+| **Open Files Beside Terminal** | `boolean` | `true` | Files opened from the file browser while a terminal is focused dock into a split pane (VSCode "open to the side") instead of replacing the view. Falls back to a normal tab when no terminal is active. |
+| **Align Docked File Tabs** | `boolean` | `true` | While split, docked file tabs cluster on the right of the tab bar above their pane (VSCode-style), with terminal tabs on the left. Clicking one focuses it inside its pane. |
+| **Terminal Multiview** | `boolean` | `true` | Cmd+Alt+M (or the grid button in the tab bar — hover it for a preview) tiles live terminals across all repos and branches into one auto-adjusting, drag-resizable grid (max 9 tiles, most recently active shown, "+N more" pill for the rest). Click a tile to type in place; double-click its header to open it full size; tile buttons remove-from-view/close; "+" opens a project search to add a terminal; Esc (outside a tile) exits. |
+| **Terminal font** | — | JetBrains Mono | 13 bundled monospace fonts: Fira Code, Hack, Cascadia Code, Source Code Pro, IBM Plex Mono, Inconsolata, Ubuntu Mono, Anonymous Pro, Roboto Mono, Space Mono, Monaspace Neon, Geist Mono |
+| **Default font size** | — | — | 8–32px slider. Applies to new terminals; existing terminals keep their zoom level. |
+| **Split tab mode** | — | — | Separate or unified tab appearance |
+| **Cycle All Tab Types** | — | Off | When on, next/prev-tab shortcuts also cycle file/diff/markdown/editor tabs (ordered like the tab bar). Off cycles terminals only. |
+| **Nested Terminal Tabs** | — | Off | When on, a branch with more than one terminal shows a collapsible list of its terminals under its sidebar row, each with a status dot. Off by default. |
+| **Max tab name length** | — | — | 10–60 slider |
+| **Repository groups** | — | — | Create, rename, delete, and color-code groups |
+| **Reset panel sizes** | — | — | Restore sidebar and panel widths to defaults |
+| **Copy on Select** | `boolean` | `true` | Auto-copy terminal selection to clipboard |
+| **Bell Style** | `none/visual/sound/both` | `visual` | Terminal bell behavior |
+
+## Agents Tab
+
+Each supported agent has an expandable row showing detection status, version, and MCP badge.
+
+| Setting | Description |
+|---------|-------------|
+| **Agent Detection** | Auto-detects running agents from terminal output patterns. Shows "Available" or "Not found" for each agent. |
+| **Run Configurations** | Custom launch configs (binary path, args, model, prompt) per agent. Add, set default, edit, or delete configurations (Edit / Delete live under the `···` menu on each row). A config named **"review"** enables the Review button in the PR Detail Popover — its args are interpolated with `{pr_number}`, `{branch}`, `{base_branch}`, `{repo}`, `{pr_url}`. The agent's **default run config** also drives resume: launching / resuming the agent swaps the agent's default binary (e.g. `claude`) for `command` and appends `args` after the resume flag. |
+| **MCP Integration** | Install/remove FastAF as MCP server for supported agents. Shows install status with a dot indicator. |
+| **Native agent hooks for status** | (Claude, Gemini, Codex, Grok, OpenCode) Toggle under each supported agent's expanded row. When enabled, TUIC writes lifecycle hooks into the agent's settings file / plugin directory so that busy/idle/awaiting state is driven directly by the agent's own hook events (OSC 7770) rather than inferred from terminal output. An install-state badge next to the toggle shows **"Hooks installed"** (current), **"Hooks: re-enable"** (outdated — TUIC version changed), or nothing (not installed). The effect takes place on the agent's **next launch**. See [AI Agents — Native Hook Instrumentation](ai-agents.md#native-hook-instrumentation) for details. |
+| **Claude Usage Dashboard** | (Claude Code only) Toggle under Features when the Claude row is expanded. Enables rate limit monitoring, session analytics, token usage charts, activity heatmap, and per-project breakdowns. Usage data appears in the status bar agent badge and in a dedicated dashboard tab. |
+| **Agent Model Overrides** | Per-task-phase model routing for the AI Agent loop. Four phases: `plan`, `search`, `read`, `write`. Each phase can use a different model (e.g. a cheaper model for search, a stronger model for write). Configure in Settings > AI Chat. |
+| **Unsafe Mode** | When enabled, the agent skips all approval prompts and operates without sandbox restrictions (`TrustLevel::Unrestricted`). Toggle via the lock icon in the AI Chat panel header. A confirmation dialog warns before activating. The header turns red to indicate unrestricted operation. |
+| **Cron Scheduler** | Time-triggered agent tasks. Define cron expressions with goals in Settings > AI Chat > Scheduler. Jobs are persisted to `ai-cron.json` and tick every 30 s. |
+
+See [AI Agents](ai-agents.md) for details on agent detection, rate limits, and the usage dashboard.
+
+## GitHub Tab
+
+GitHub authentication and token management:
+
+| Setting | Description |
+|---------|-------------|
+| **OAuth Login** | Device Flow login — click "Sign in with GitHub", enter code on github.com. Token stored in OS keyring. |
+| **Auth Status** | Shows current login, avatar, token source (OAuth/env/CLI), and available scopes |
+| **Disconnect** | Clear all GitHub tokens (keyring + env cache). Falls back to next available source. |
+| **Diagnostics** | Token source details, scope verification, API connectivity check |
+| **Issue Filter** | Which issues to show in the GitHub panel: Assigned (default), Created, Mentioned, All, or Disabled |
+| **Auto-show PR popover** | Automatically show PR detail popover when opening a branch with an active PR |
+| **Auto-delete on PR close** | Off (default), Ask, or Auto — controls branch cleanup when a PR is merged/closed |
+
+Token priority: `GH_TOKEN` env → `GITHUB_TOKEN` env → OAuth keyring → `gh` CLI config → `gh auth token` subprocess.
+
+## Services Tab
+
+### HTTP API Server
+
+Enable the HTTP API server for external tool integration:
+- Serves the REST API and MCP protocol for AI agents and automation tools
+- Local MCP connections use a Unix domain socket at `<config_dir>/mcp.sock` — no port configuration needed
+- AI agents connect via the `tuic-bridge` sidecar (auto-installed on first launch for Claude Code, Cursor, Windsurf, VS Code, Zed, Amp, Gemini)
+- Shows server status (running/stopped) and active session count
+
+### TUIC Tools
+
+Native tools exposed to AI agents via MCP. Each tool can be individually enabled or disabled to restrict what agents can access.
+
+**Manual MCP configuration** (expandable) — shows the `tuic-bridge` binary path and a ready-to-paste JSON snippet for manually configuring MCP clients that aren't auto-installed. Click "Copy" to copy the snippet to clipboard.
+
+**Collapse tools** (checkbox) — when enabled, replaces the full tool list sent to AI agents with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`). Cuts the baseline MCP context cost from ~35k tokens to ~500 tokens per agent turn; the agent fetches schemas on demand via BM25-ranked search. Default: off. Toggling refreshes connected clients via `notifications/tools/list_changed`.
+
+Tools:
+- **session** — PTY terminal session management
+- **git** — Repository state queries
+- **agent** — AI agent detection and spawning
+- **config** — App configuration read/write
+- **workspace** — Repo and worktree queries
+- **notify** — User notifications (toast, confirm)
+- **plugin_dev_guide** — Plugin authoring reference
+
+### Upstream MCP Servers
+
+Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
+- Add upstream servers via HTTP (Streamable MCP) or stdio (process) transport
+- API keys for HTTP upstreams are stored in the OS keychain
+- Live status (connecting, ready, circuit open, failed) with tool count and call metrics
+- Reconnect and remove controls per upstream
+- Per-repo scoping: each repo can define an allowlist of active upstream servers via **Cmd+Shift+M** popup (or repo settings). Empty/null allowlist = all servers active
+
+### Remote Access
+
+Enable HTTP/WebSocket access from other devices on your network. See [Remote Access](remote-access.md) for full setup guide.
+
+### Voice Dictation
+
+See [Voice Dictation](dictation.md) for full details.
+
+## Keyboard Shortcuts (Help panel)
+
+The keybinding UI lives in the **Help panel** (Help > Keyboard Shortcuts), not the Settings panel. Browse and rebind all app actions there:
+
+- Every registered action is listed with its current keybinding
+- Click any action row and press a new key combination to rebind it
+- Custom bindings are stored in `keybindings.json` in the platform config directory
+- Auto-populated from the action registry — new actions appear automatically
+
+See [Keyboard Shortcuts](keyboard-shortcuts.md) for the full reference and customization guide.
+
+## Plugins Tab
+
+Install, manage, and browse plugins. See [Plugins](plugins.md) for the full guide.
+
+- **Installed** — List all plugins with enable/disable toggle, logs viewer, uninstall
+- **Browse** — Discover and install from the community registry
+
+## Repository Settings
+
+Per-repository settings accessed via sidebar `⋯` → "Repo Settings".
+
+### Worktree Tab
+
+- **Display Name** — Custom name shown in sidebar
+- **Base Branch** — Branch to create worktrees from (auto-detect, main, master, develop)
+- **Copy ignored files** — Copy .gitignored files to new worktrees
+- **Copy untracked files** — Copy untracked files to new worktrees
+
+### Scripts Tab
+
+- **Setup Script** — Runs once after worktree creation (e.g., `npm install`)
+- **Run Script** — On-demand script launchable from toolbar with `Cmd+R`
+- **Archive Script** — Runs before a worktree is archived or deleted; non-zero exit blocks the operation
+
+### Repo-Local Config (`.tuic.json`)
+
+A `.tuic.json` file in the repository root provides team-shareable settings that override per-repo app settings and global defaults. The file is read-only from FastAF (edit it in your repo directly).
+
+**Precedence:** `.tuic.json` > per-repo app settings > global defaults
+
+Supported fields: `base_branch`, `copy_ignored_files`, `copy_untracked_files`, `setup_script`, `run_script`, `archive_script`, `worktree_storage`, `delete_branch_on_remove`, `auto_archive_merged`, `orphan_cleanup`, `pr_merge_strategy`, `after_merge`, `auto_delete_on_pr_close`.
+
+User-specific settings (`promptOnCreate`, `autoFetchIntervalMinutes`) are intentionally excluded from `.tuic.json`.
+
+## Notification Settings
+
+- **Enable Audio Notifications** — Master toggle
+- **Volume** — 0-100% (applied natively by the Rust playback path). Releasing the slider plays a short preview at the new level.
+- **Audio Output Device** — defaults to the system output. Click **Choose output device…** to enumerate available outputs and pick a specific one. Enumeration is deferred until you click, because on macOS the audio device scan triggers the microphone-permission prompt — notifications never record audio.
+- **Per-event toggles:**
+  - Agent asks question
+  - Error occurred
+  - Task completed
+  - Warning
+- **Test buttons** — Test each sound individually. The Test button bypasses the anti-spam rate limit, so rapid A/B volume comparisons always play.
+- **Reset to Defaults** — Restore default notification settings

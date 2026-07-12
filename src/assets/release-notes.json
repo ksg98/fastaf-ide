@@ -1,0 +1,86 @@
+{
+  "1.2.1": {
+    "highlights": [
+      "Terminal no longer snaps to bottom when clicking in scrolled-up output",
+      "OSC 8 hyperlinks now show hover underline across the full link span",
+      "Per-repo PR visibility filters: override global draft/conflicting/CI-failing settings per repository",
+      "Auto-heal CI toggle restyled to match the rest of the UI"
+    ],
+    "contributions": [
+      {
+        "text": "PR visibility filters and viewer PR guarantee",
+        "author": "paulovitin"
+      },
+      {
+        "text": "Fix zsh compinit with ZDOTDIR trick",
+        "author": "paulovitin"
+      },
+      {
+        "text": "Extract nextDefaultName() to eliminate tab naming duplication",
+        "author": "paulovitin"
+      }
+    ],
+    "date": "2026-05-12"
+  },
+  "1.2.0": {
+    "highlights": [
+      "AI Triage and AI Watchers are now independent experimental features with their own toggles",
+      "Watchers support a configurable cooldown to control minimum seconds between fires",
+      "AI prompt settings now have explicit Save and Revert to Default buttons",
+      "Code editor gains undo/redo, code folding, block selection, bracket auto-close, and CSS color previews",
+      "Watchers now correctly attach to PTY sessions and fire as expected",
+      "Search and filter inputs no longer get mangled by macOS autocorrect"
+    ],
+    "contributions": [
+      {
+        "text": "Dead-key composition (accents, quotes) now works correctly on macOS",
+        "author": "paulovitin"
+      }
+    ],
+    "date": "2026-05-08"
+  },
+  "1.2.9-nightly": {
+    "highlights": [
+      "Cmd/Ctrl+F search now works inside HTML previews and plugin panels",
+      "App recovers automatically if the main window config is missing or corrupted",
+      "File drops from Finder to File Browser now land on the correct panel on Retina displays",
+      "Plugin iframes no longer reload twice when pressing Cmd/Ctrl+R",
+      "Linux and Windows release builds no longer fail on macOS-only window APIs",
+      "UI freeze detector tracks main-thread stalls for diagnostics"
+    ],
+    "date": "2026-05-29"
+  },
+  "1.2.10-nightly": {
+    "highlights": [
+      "Git Panel log now shows the full commit message body when you expand a commit",
+      "GitHub login requests fewer permissions (dropped unnecessary read:org scope)",
+      "Background repo monitoring is now throttled to prevent file descriptor exhaustion with many repos",
+      "Terminal recovers from WebView stalls in 1s instead of 5s",
+      "macOS file descriptor limit raised at startup to prevent EMFILE crashes during git operations",
+      "Dead terminal tabs now correctly show grey instead of a misleading green indicator"
+    ],
+    "date": "2026-05-30"
+  },
+  "1.4.0": {
+    "highlights": [
+      "Native-feel smooth scrolling with momentum and a draggable scrollbar",
+      "VS Code-style change-overview ruler marks add/modify/delete lines on the editor scrollbar",
+      "Extended thinking from Claude Opus 4.7+ now shows live in AI Chat",
+      "Define your own \"Open in…\" launchers; iTerm2 and Tower added as built-ins",
+      "Faster git: in-process gix reads with a coalescing cache cut subprocess and FD pressure",
+      "Virtualized multi-file diffs and a stat-gated editor poll keep large diffs responsive",
+      "Terminal text is now readable on light themes"
+    ],
+    "date": "2026-06-09",
+    "contributions": [
+      {
+        "text": "fixed terminal text being unreadable on light themes",
+        "author": "jajugoguma"
+      },
+      {
+        "text": "added release-version checking to the macOS install.sh",
+        "author": "jklap"
+      }
+    ]
+  }
+}
