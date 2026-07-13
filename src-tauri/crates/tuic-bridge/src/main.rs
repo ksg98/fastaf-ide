@@ -1,4 +1,4 @@
-//! Resilient MCP stdio ↔ IPC transport adapter for FastAF.
+//! Resilient MCP stdio ↔ IPC transport adapter for fastestAF.
 //! Proxies JSON-RPC messages from stdin to POST /mcp on the local IPC endpoint,
 //! forwarding responses back to stdout. Stays alive even without TUIC running,
 //! reconnects automatically, and emits `notifications/tools/list_changed` when
@@ -384,7 +384,7 @@ fn emit_offline_response(method: &str, id: &Value) {
         "tools/call" => emit(&serde_json::json!({
             "jsonrpc": "2.0", "id": id,
             "result": {
-                "content": [{ "type": "text", "text": "FastAF is not running. Start it to use MCP tools." }],
+                "content": [{ "type": "text", "text": "fastestAF is not running. Start it to use MCP tools." }],
                 "isError": true
             }
         })),

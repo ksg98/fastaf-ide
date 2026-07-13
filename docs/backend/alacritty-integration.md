@@ -1,6 +1,6 @@
 # Alacritty Terminal Integration
 
-FastAF uses `alacritty_terminal` 0.26.0 as its terminal emulation backend. We maintain a local patch at `src-tauri/patches/alacritty_terminal/` referenced via `[patch.crates-io]` in `Cargo.toml`.
+fastestAF uses `alacritty_terminal` 0.26.0 as its terminal emulation backend. We maintain a local patch at `src-tauri/patches/alacritty_terminal/` referenced via `[patch.crates-io]` in `Cargo.toml`.
 
 ## Why a local patch
 

@@ -1,8 +1,8 @@
-# FastAF Architecture
+# fastestAF Architecture
 
 ## Overview
 
-FastAF is a Tauri application that provides a multi-terminal interface with git worktree support. It allows users to manage multiple coding sessions across different branches/worktrees of a repository.
+fastestAF is a Tauri application that provides a multi-terminal interface with git worktree support. It allows users to manage multiple coding sessions across different branches/worktrees of a repository.
 
 ## Tech Stack
 

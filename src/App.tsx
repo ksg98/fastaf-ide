@@ -447,7 +447,7 @@ const App: Component = () => {
 		const repos = paths.map((p) => pathBasename(p) || p).join(", ");
 		void dialogs.confirm({
 			title: "Permission denied",
-			message: `macOS blocked access to: ${repos}\n\nRepositories inside ~/Documents, ~/Desktop, or ~/Downloads require Full Disk Access.\n\nTo fix: System Settings → Privacy & Security → Full Disk Access → add FastAF.\n\nAlternatively, move your repositories to a non-protected folder (e.g. ~/Repositories).`,
+			message: `macOS blocked access to: ${repos}\n\nRepositories inside ~/Documents, ~/Desktop, or ~/Downloads require Full Disk Access.\n\nTo fix: System Settings → Privacy & Security → Full Disk Access → add fastestAF.\n\nAlternatively, move your repositories to a non-protected folder (e.g. ~/Repositories).`,
 			okLabel: "Got it",
 			cancelLabel: "Dismiss",
 			kind: "error",
@@ -735,7 +735,7 @@ const App: Component = () => {
 						const confirmed = await dialogs.confirm({
 							title: "Install tuic CLI?",
 							message:
-								"The tuic command lets you control FastAF from the terminal:\n\n" +
+								"The tuic command lets you control fastestAF from the terminal:\n\n" +
 								"• tuic open file.rs:42 — open files with line numbers\n" +
 								"• tuic ls / new / send — manage terminal sessions\n" +
 								"• tuic agent spawn claude — spawn AI agents\n" +
@@ -3081,7 +3081,7 @@ const App: Component = () => {
 			<Show when={quitDialogVisible()}>
 				<div class={qd.overlay} onClick={() => setQuitDialogVisible(false)}>
 					<div class={qd.dialog} onClick={(e) => e.stopPropagation()}>
-						<h3>Quit FastAF?</h3>
+						<h3>Quit fastestAF?</h3>
 						<p>
 							You have {terminalsStore.getIds().filter((id) => terminalsStore.get(id)?.sessionId).length} active
 							terminal session(s). Quitting will close all sessions.

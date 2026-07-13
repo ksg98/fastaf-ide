@@ -291,7 +291,7 @@ OAuth 2.1 authorization for upstream MCP servers. Full RFC 9728 (Protected Resou
 
 ## MCP Upstream Proxy (`mcp_upstream_config.rs`, `mcp_upstream_credentials.rs`)
 
-Commands for managing upstream MCP servers proxied through FastAF's `/mcp` endpoint.
+Commands for managing upstream MCP servers proxied through fastestAF's `/mcp` endpoint.
 
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
@@ -345,8 +345,8 @@ The live registry exposes status via SSE events (`upstream_status_changed`). Val
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
 | `get_agent_mcp_status` | `agent` | `AgentMcpStatus` | Check MCP config for an agent |
-| `install_agent_mcp` | `agent` | `String` | Install FastAF MCP entry |
-| `remove_agent_mcp` | `agent` | `String` | Remove FastAF MCP entry |
+| `install_agent_mcp` | `agent` | `String` | Install fastestAF MCP entry |
+| `remove_agent_mcp` | `agent` | `String` | Remove fastestAF MCP entry |
 | `get_agent_config_path` | `agent` | `String` | Get agent's MCP config file path |
 | `get_mcp_bridge_info` | — | `McpBridgeInfo` | Bridge path + ready-to-paste JSON config snippet |
 

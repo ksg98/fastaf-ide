@@ -1,7 +1,7 @@
-//! `tuic` — CLI companion for FastAF.
+//! `tuic` — CLI companion for fastestAF.
 //!
 //! Editor opener (like `code`/`zed`), session multiplexer (like `tmux`),
-//! and agent orchestrator. Communicates with a running FastAF
+//! and agent orchestrator. Communicates with a running fastestAF
 //! instance via IPC (Unix socket / Windows named pipe).
 //!
 //! When invoked as `tmux` (via symlink), enters tmux-compatibility mode
@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "tuic",
     version,
-    about = "FastAF CLI — editor, multiplexer, orchestrator"
+    about = "fastestAF CLI — editor, multiplexer, orchestrator"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open a file or directory in FastAF
+    /// Open a file or directory in fastestAF
     Open {
         /// Path to open (file or directory)
         path: Option<String>,
@@ -94,7 +94,7 @@ enum Command {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Show FastAF status
+    /// Show fastestAF status
     Status,
     /// Install the tuic CLI to system PATH
     InstallCli {
@@ -527,7 +527,7 @@ fn cmd_agent(action: AgentAction) -> Result<(), String> {
 fn cmd_status() -> Result<(), String> {
     let resp = ipc::get("/health").map_err(|e| e.to_string())?;
     if !resp.is_success() {
-        return Err("FastAF is not responding".to_string());
+        return Err("fastestAF is not responding".to_string());
     }
 
     let version_resp = ipc::get("/api/version").map_err(|e| e.to_string())?;
@@ -544,7 +544,7 @@ fn cmd_status() -> Result<(), String> {
         .and_then(|v| v.as_array().map(|a| a.len()))
         .unwrap_or(0);
 
-    println!("FastAF v{version}");
+    println!("fastestAF v{version}");
     println!("Status: running");
     println!("Sessions: {session_count}");
 
@@ -845,7 +845,7 @@ fn tmux_compat() {
             })
         }
         "attach-session" | "attach" | "a" => {
-            // Focus FastAF window
+            // Focus fastestAF window
             let _ = open_deep_link("tuic://focus");
             Ok(())
         }

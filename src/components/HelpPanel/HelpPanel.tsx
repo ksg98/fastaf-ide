@@ -92,7 +92,7 @@ export const HelpPanel: Component<HelpPanelProps> = (props) => {
 					<div class={s.content}>
 						<Show when={view() === "main"}>
 							<div class={s.section}>
-								<h3 class={s.sectionTitle}>{t("helpPanel.aboutApp", "FastAF")}</h3>
+								<h3 class={s.sectionTitle}>{t("helpPanel.aboutApp", "fastestAF")}</h3>
 								<p class={s.desc}>
 									{t(
 										"helpPanel.appDescription",

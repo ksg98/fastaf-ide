@@ -121,7 +121,7 @@ Creates a PTY session, blasts data through it, and measures throughput in MB/s. 
 
 ### Performance Recording
 
-1. Open DevTools in FastAF: `Cmd+Shift+I`
+1. Open DevTools in fastestAF: `Cmd+Shift+I`
 2. Go to **Performance** tab
 3. Click Record
 4. Exercise the scenario for 10-30 seconds

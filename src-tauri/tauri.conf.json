@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "FastAF",
+  "productName": "fastestAF",
   "version": "1.5.2",
   "identifier": "com.fastaf.ide",
   "build": {
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "FastAF",
+        "title": "fastestAF",
         "width": 1200,
         "height": 800,
         "minWidth": 800,

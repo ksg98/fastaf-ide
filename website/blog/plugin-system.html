@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Extend FastAF with plugins — FastAF Blog</title>
-  <meta name="description" content="Every workflow is different. We built a plugin system so you can extend FastAF with custom panels, context menu actions, and MCP integrations — without forking the app." />
+  <title>Extend fastestAF with plugins — fastestAF Blog</title>
+  <meta name="description" content="Every workflow is different. We built a plugin system so you can extend fastestAF with custom panels, context menu actions, and MCP integrations — without forking the app." />
 
-  <meta property="og:title" content="Extend FastAF with plugins" />
+  <meta property="og:title" content="Extend fastestAF with plugins" />
   <meta property="og:description" content="A plugin system for custom panels, context menu actions, terminal output parsing, and MCP integrations." />
   <meta property="og:image" content="/public/blog/plugin-system/plugins-panel.png" />
   <meta property="og:type" content="article" />
@@ -29,8 +29,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -45,19 +45,19 @@
     <header class="blog-post-header">
       <a href="/blog.html" class="blog-back">&larr; Blog</a>
       <time>March 20, 2026</time>
-      <h1>Extend FastAF with plugins</h1>
+      <h1>Extend fastestAF with plugins</h1>
       <p class="blog-post-summary">Every workflow is different. We built a plugin system so you can add custom panels, context menu actions, and MCP integrations — without forking the app.</p>
     </header>
 
     <div class="blog-section">
       <h2>The problem</h2>
       <p>No two development workflows are the same. One team tracks stories in Jira, another uses file-based task lists. One developer wants a repo dashboard in the sidebar, another wants Telegram notifications when agents finish. Building all of this into the core app would make it bloated and opinionated. Not building it means users hit a wall when their workflow doesn't match ours.</p>
-      <p>We needed a way for FastAF to be extended by anyone — including ourselves — without modifying the core codebase. The plugin system is that escape hatch.</p>
+      <p>We needed a way for fastestAF to be extended by anyone — including ourselves — without modifying the core codebase. The plugin system is that escape hatch.</p>
     </div>
 
     <div class="blog-section">
       <h2>What plugins can do</h2>
-      <p>Plugins are JavaScript bundles that run in a sandboxed environment with access to a structured PluginHost API. The capability system is explicit — each plugin declares what it needs in its <code>plugin.json</code> manifest, and FastAF grants only those permissions. A plugin that only reads terminal output can't access files. A plugin that renders markdown panels can't write to the terminal.</p>
+      <p>Plugins are JavaScript bundles that run in a sandboxed environment with access to a structured PluginHost API. The capability system is explicit — each plugin declares what it needs in its <code>plugin.json</code> manifest, and fastestAF grants only those permissions. A plugin that only reads terminal output can't access files. A plugin that renders markdown panels can't write to the terminal.</p>
       <p>The capabilities fall into tiers. Terminal output watching lets plugins parse agent output for patterns — the Claude Status plugin, for example, watches for rate limit events and tracks usage. File access capabilities (<code>invoke:read_file</code>, <code>invoke:list_markdown_files</code>) let plugins read project files. UI capabilities let plugins render markdown content in the Activity Center, add items to context menus, and register sidebar panels. MCP capabilities let plugins act as bridges to external tools and services.</p>
     </div>
 
@@ -72,7 +72,7 @@
       <p><strong>Wiz Reviews</strong> monitors code review output and links review markdown files in the Activity Center, so you can open review results with one click instead of hunting for the generated file.</p>
       <p><strong>Wiz Stories</strong> tracks the story lifecycle — creation, status changes, worklogs — and surfaces them as navigable items in the Activity Center with links to the story content.</p>
       <p><strong>Repo Dashboard</strong> renders a multi-repo status view using read-only host methods and adds entries to context menus for quick access.</p>
-      <p>Each of these started as a custom need. Instead of hardcoding them into FastAF, we built them as plugins — proving the API works for real use cases and keeping the core app focused.</p>
+      <p>Each of these started as a custom need. Instead of hardcoding them into fastestAF, we built them as plugins — proving the API works for real use cases and keeping the core app focused.</p>
     </div>
 
     <div class="blog-section">
@@ -83,7 +83,7 @@
 
     <div class="blog-section">
       <h2>MCP: connecting to external tools</h2>
-      <p>FastAF acts as an MCP (Model Context Protocol) server, exposing workspace state to AI agents. But it also connects to upstream MCP servers — and plugins can leverage this. Each repo can define which MCP servers are relevant via an allowlist, with a 3-layer scoping system: per-repo settings override <code>.tuic.json</code> project config, which overrides defaults.</p>
+      <p>fastestAF acts as an MCP (Model Context Protocol) server, exposing workspace state to AI agents. But it also connects to upstream MCP servers — and plugins can leverage this. Each repo can define which MCP servers are relevant via an allowlist, with a 3-layer scoping system: per-repo settings override <code>.tuic.json</code> project config, which overrides defaults.</p>
       <p>The Cmd+Shift+M popup lets you toggle MCP servers per repo with live status, transport badges, and tool counts. This means plugins that connect to external services (CI systems, project management tools, documentation platforms) can be scoped precisely — the Jira plugin activates for work repos, the internal dashboard plugin only for the monorepo.</p>
     </div>
 
@@ -95,7 +95,7 @@
 
     <div class="blog-section">
       <h2>What's next</h2>
-      <p>We're building out the Browse tab into a plugin marketplace where the community can share and discover plugins. The plugin API continues to grow with each release — recent additions include sidebar panels and multi-target context menus. The goal is for FastAF's core to stay lean while the plugin ecosystem handles the long tail of workflow-specific needs.</p>
+      <p>We're building out the Browse tab into a plugin marketplace where the community can share and discover plugins. The plugin API continues to grow with each release — recent additions include sidebar panels and multi-target context menus. The goal is for fastestAF's core to stay lean while the plugin ecosystem handles the long tail of workflow-specific needs.</p>
     </div>
   </article>
 

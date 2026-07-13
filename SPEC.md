@@ -1,11 +1,11 @@
-# FastAF Specification
+# fastestAF Specification
 
 **Version:** 1.5.1
 **Last Updated:** 2026-05-04
 
 ## Overview
 
-FastAF is a multi-agent terminal orchestrator designed to manage multiple AI coding agents (Claude Code, Gemini CLI, OpenCode, Aider, Codex) in parallel. It provides per-pane zoom, git worktree isolation, and GitHub integration.
+fastestAF is a multi-agent terminal orchestrator designed to manage multiple AI coding agents (Claude Code, Gemini CLI, OpenCode, Aider, Codex) in parallel. It provides per-pane zoom, git worktree isolation, and GitHub integration.
 
 ## Goals
 
@@ -313,7 +313,7 @@ All stores persist to localStorage:
 - [x] AI Agent loop (ReAct) — terminal observe/act, filesystem, search, drive_agent, and reactive watch tools; pause/resume, destructive-command approval gate, tool-call cards
 - [x] Session knowledge store — per-session command outcomes, error→fix pairs, CWD history, TUI apps seen; fed by OSC 133 with silence-timer fallback; persisted with 2s debounce
 - [x] TUI app detection — alternate-screen tracking classifies terminal as Shell or FullscreenTui with app hint (vim/htop/lazygit/…)
-- [x] `ai_terminal_*` MCP tools — external agent surface (Claude Code, Cursor) driving FastAF terminals with user-confirmation gates
+- [x] `ai_terminal_*` MCP tools — external agent surface (Claude Code, Cursor) driving fastestAF terminals with user-confirmation gates
 - [x] ChoicePrompt parser variant — numbered confirmation menu detection with destructive-label flagging, PWA overlay, `sendPtyKey()` helper
 - [x] MCP OAuth 2.1 — RFC 9728 + RFC 8414 PKCE flow for upstream MCP servers, `tuic://oauth-callback` deep link, shared `TokenManager` with thundering-herd-safe refresh
 

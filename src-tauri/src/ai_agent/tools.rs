@@ -268,7 +268,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "search_tools",
-            "description": "Discover upstream MCP tools (e.g. Jira, GitHub, Slack) registered with FastAF. Returns tool names and descriptions. Use before calling call_tool to find the exact prefixed name (format: upstream__tool_name).",
+            "description": "Discover upstream MCP tools (e.g. Jira, GitHub, Slack) registered with fastestAF. Returns tool names and descriptions. Use before calling call_tool to find the exact prefixed name (format: upstream__tool_name).",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>One daemon, every environment: meet tuicommander-remote — FastAF Blog</title>
-  <meta name="description" content="A headless Rust daemon that brings FastAF into WSL, Docker dev containers, and remote servers. One protocol, no path translation, no cross-OS shims." />
+  <title>One daemon, every environment: meet tuicommander-remote — fastestAF Blog</title>
+  <meta name="description" content="A headless Rust daemon that brings fastestAF into WSL, Docker dev containers, and remote servers. One protocol, no path translation, no cross-OS shims." />
 
-  <meta property="og:title" content="One daemon, every environment: meet tuicommander-remote — FastAF" />
-  <meta property="og:description" content="A headless Rust daemon that brings FastAF into WSL, Docker dev containers, and remote servers. One protocol, no path translation, no cross-OS shims." />
+  <meta property="og:title" content="One daemon, every environment: meet tuicommander-remote — fastestAF" />
+  <meta property="og:description" content="A headless Rust daemon that brings fastestAF into WSL, Docker dev containers, and remote servers. One protocol, no path translation, no cross-OS shims." />
   <meta property="og:type" content="article" />
 
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -49,9 +49,9 @@
     </header>
 
     <div class="blog-section">
-      <h2>The problem: FastAF only saw the local machine</h2>
+      <h2>The problem: fastestAF only saw the local machine</h2>
       <p>For most users, "where the agent runs" and "where the desktop app runs" are the same machine. For a growing chunk of users, they aren't.</p>
-      <p>The clearest case came in <a href="https://github.com/sstraus/tuicommander/issues/20" rel="noopener noreferrer">issue #20</a>: a Windows user with WSL2 as their development environment. Claude Code, Codex CLI, Gemini CLI — all installed inside WSL because that's where the toolchain, the repos, and the project's <code>node_modules</code> live. FastAF on Windows could spawn a <code>wsl.exe</code> shell, but that's where the integration ended:</p>
+      <p>The clearest case came in <a href="https://github.com/sstraus/tuicommander/issues/20" rel="noopener noreferrer">issue #20</a>: a Windows user with WSL2 as their development environment. Claude Code, Codex CLI, Gemini CLI — all installed inside WSL because that's where the toolchain, the repos, and the project's <code>node_modules</code> live. fastestAF on Windows could spawn a <code>wsl.exe</code> shell, but that's where the integration ended:</p>
       <ul>
         <li>Agent detection ran <code>where claude</code> on Windows paths and missed <code>~/.local/bin/claude</code> in WSL.</li>
         <li>MCP configs were written to <code>C:\Users\&lt;name&gt;\.claude.json</code> — the WSL agent reads from <code>/home/&lt;user&gt;/.claude.json</code> and never saw them.</li>
@@ -104,7 +104,7 @@
       <ol>
         <li>Build a container image with <code>tuicommander-remote</code> baked in (or <code>docker cp</code> it into a running one).</li>
         <li>Start it with the project mounted, port <code>9877</code> exposed to the host.</li>
-        <li>Add the connection in FastAF Settings.</li>
+        <li>Add the connection in fastestAF Settings.</li>
       </ol>
       <p>From there, agents you spawn against that repo run inside the container. Their <code>node_modules</code> is the container's. Their <code>$PATH</code> is the container's. Their MCP bridge is the container's. If you tear the container down, nothing leaks back to the host. Spin up three containers with three different toolchains, point the desktop at all three, and run agents against each in parallel — the desktop app doesn't care that they're separate userspaces.</p>
       <p>The daemon is small enough that this is reasonable: estimated ~15-20 MB, statically linked, no system dependencies. It runs on Alpine.</p>
@@ -155,7 +155,7 @@
       <p>Phase 2 is the connection manager UI — adding remote hosts in Settings, tagging repos with a connection, transport routing. That's the work that turns "the daemon runs" into "you can actually use it from the GUI without editing config files."</p>
       <p>Phase 3 is deployment ergonomics: <code>tuic remote install &lt;host&gt;</code> to copy the binary over SSH or <code>docker cp</code>, generate a one-time pairing token, register it in the desktop. The goal is that adding a new environment is a single command, not a checklist.</p>
       <p>And there are two quick wins from issue #20 that are independent of the daemon and worth shipping anyway: parsing shell arguments (so <code>wsl.exe -d Ubuntu -- /bin/zsh -l</code> works as a shell setting) and injecting <code>TERM_PROGRAM</code>/<code>COLORTERM</code>/<code>KITTY_WINDOW_ID</code> when spawning WSL shells. Those land sooner.</p>
-      <p>The bigger arc, though, is that "where FastAF runs" stops mattering. You have a single window. You have a sidebar with repos. Some of them happen to live on your laptop, some inside a container, some on a server in a different country. The agents run where the code is. The desktop drives them. The line between local and remote becomes a connection setting in the same panel as your theme.</p>
+      <p>The bigger arc, though, is that "where fastestAF runs" stops mattering. You have a single window. You have a sidebar with repos. Some of them happen to live on your laptop, some inside a container, some on a server in a different country. The agents run where the code is. The desktop drives them. The line between local and remote becomes a connection setting in the same panel as your theme.</p>
     </div>
   </article>
 

@@ -2,7 +2,7 @@
 name = "tuic-relay"
 version = "0.1.0"
 edition = "2021"
-description = "Blind E2E-encrypted WebSocket relay for FastAF mobile access"
+description = "Blind E2E-encrypted WebSocket relay for fastestAF mobile access"
 license = "MIT"
 
 [dependencies]

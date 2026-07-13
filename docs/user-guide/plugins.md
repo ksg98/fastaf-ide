@@ -1,6 +1,6 @@
 # Plugins
 
-FastAF has an Obsidian-style plugin system. Plugins can watch terminal output, push notifications to the Activity Center, render markdown panels, control PTY sessions, and more.
+fastestAF has an Obsidian-style plugin system. Plugins can watch terminal output, push notifications to the Activity Center, render markdown panels, control PTY sessions, and more.
 
 ## Installing Plugins
 
@@ -21,7 +21,7 @@ An "Update available" badge appears when a newer version exists in the registry.
 
 ### Via Deep Link
 
-Click a link like `tuic://install-plugin?url=https://example.com/plugin.zip` — FastAF shows a confirmation dialog, then downloads and installs the plugin. Only HTTPS URLs are accepted.
+Click a link like `tuic://install-plugin?url=https://example.com/plugin.zip` — fastestAF shows a confirmation dialog, then downloads and installs the plugin. Only HTTPS URLs are accepted.
 
 ### Manual Installation
 
@@ -47,7 +47,7 @@ Error count badges appear on plugins that have logged errors.
 
 ### Built-in Plugins
 
-FastAF ships with built-in plugins (e.g., Plan Tracker). These show a "Built-in" badge in the list. They can be disabled but not uninstalled.
+fastestAF ships with built-in plugins (e.g., Plan Tracker). These show a "Built-in" badge in the list. They can be disabled but not uninstalled.
 
 ## How Plugins Work
 
@@ -74,11 +74,11 @@ The bell shows a count badge when there are active items.
 
 ## Hot Reload
 
-When you edit a plugin's files, FastAF detects the change and automatically reloads the plugin — no restart needed. Save `main.js` and see changes in seconds.
+When you edit a plugin's files, fastestAF detects the change and automatically reloads the plugin — no restart needed. Save `main.js` and see changes in seconds.
 
 ## Example Plugins
 
-FastAF ships with example plugins in `examples/plugins/`:
+fastestAF ships with example plugins in `examples/plugins/`:
 
 | Plugin | What it does |
 |--------|-------------|
@@ -97,7 +97,7 @@ See the [Plugin Authoring Guide](../plugins.md) for the full API reference, mani
 | Problem | Fix |
 |---------|-----|
 | Plugin not appearing | Check that `manifest.json` exists and `id` matches the directory name |
-| "Requires app version X.Y.Z" | Update FastAF or lower `minAppVersion` in the manifest |
+| "Requires app version X.Y.Z" | Update fastestAF or lower `minAppVersion` in the manifest |
 | "Requires capability X" | Add the capability to the `capabilities` array in `manifest.json` |
 | Changes not taking effect | Save the file again to trigger hot reload, or restart the app |
 | Plugin errors | Check Settings → Plugins → Logs for the plugin's error log |

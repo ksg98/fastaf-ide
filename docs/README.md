@@ -1,4 +1,4 @@
-# FastAF Documentation
+# fastestAF Documentation
 
 - **[Complete Feature Reference](FEATURES.md)** — Canonical inventory of every feature, shortcut, and UI element
 

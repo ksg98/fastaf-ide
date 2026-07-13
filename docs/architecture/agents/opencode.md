@@ -197,7 +197,7 @@ Key elements:
 
 ---
 
-## Implications for FastAF
+## Implications for fastestAF
 
 ### Chrome Detection
 OpenCode is a full-screen TUI — every row changes on every update. The

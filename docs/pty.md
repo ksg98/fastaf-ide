@@ -1,16 +1,16 @@
 # MCP Bridge
 
-FastAF exposes terminal sessions, git operations, config, and agent spawning to external tools (Claude Code, Cursor, Windsurf, VS Code, Zed, Amp, Gemini) via the Model Context Protocol (MCP).
+fastestAF exposes terminal sessions, git operations, config, and agent spawning to external tools (Claude Code, Cursor, Windsurf, VS Code, Zed, Amp, Gemini) via the Model Context Protocol (MCP).
 
 ## Architecture
 
 ```
-AI Agent  <--stdio/JSON-RPC-->  tuic-bridge  <--HTTP over Unix socket-->  FastAF (axum)
+AI Agent  <--stdio/JSON-RPC-->  tuic-bridge  <--HTTP over Unix socket-->  fastestAF (axum)
 ```
 
 The system has two components:
 
-1. **HTTP API** — Embedded axum server inside FastAF, always listening on a Unix domain socket at `<config_dir>/mcp.sock`
+1. **HTTP API** — Embedded axum server inside fastestAF, always listening on a Unix domain socket at `<config_dir>/mcp.sock`
 2. **MCP Bridge** — Sidecar binary (`tuic-bridge`) shipped alongside the app, translating MCP stdio transport to HTTP calls over the Unix socket
 
 ## How It Works
@@ -18,16 +18,16 @@ The system has two components:
 The bridge binary (`tuic-bridge`) is a Tauri sidecar — it ships with the app and requires no manual build. It:
 
 - Reads JSON-RPC messages from stdin (MCP stdio transport)
-- Forwards them as `POST /mcp` requests over the Unix socket to FastAF
+- Forwards them as `POST /mcp` requests over the Unix socket to fastestAF
 - Returns responses on stdout
-- Handles `initialize` locally so it works even when FastAF is not running
-- Reconnects automatically every 3 seconds if FastAF is stopped or restarted
+- Handles `initialize` locally so it works even when fastestAF is not running
+- Reconnects automatically every 3 seconds if fastestAF is stopped or restarted
 - Maintains a persistent SSE connection (`GET /mcp`) to receive server-initiated `notifications/tools/list_changed` events, which it forwards to the AI agent
 - When disconnected, returns empty tool lists and graceful error messages instead of crashing
 
 ## Auto-Install
 
-On first launch, FastAF auto-installs the MCP bridge config into all supported agents:
+On first launch, fastestAF auto-installs the MCP bridge config into all supported agents:
 
 | Agent | Config File | Key Path |
 |-------|------------|----------|
@@ -59,7 +59,7 @@ If auto-install didn't run or you need to configure manually, add the entry to y
 {
   "mcpServers": {
     "tuicommander": {
-      "command": "/Applications/FastAF.app/Contents/MacOS/tuic-bridge"
+      "command": "/Applications/fastestAF.app/Contents/MacOS/tuic-bridge"
     }
   }
 }
@@ -222,11 +222,11 @@ Returns the complete plugin development reference (manifest format, PluginHost A
 
 | Problem | Fix |
 |---------|-----|
-| Bridge reports "TUIC not running" | Start FastAF. The bridge reconnects automatically every 3 seconds. |
-| Agent shows no tools | Ensure FastAF is running. The bridge returns empty tool lists when disconnected. |
+| Bridge reports "TUIC not running" | Start fastestAF. The bridge reconnects automatically every 3 seconds. |
+| Agent shows no tools | Ensure fastestAF is running. The bridge returns empty tool lists when disconnected. |
 | Config not auto-installed | Check if `~/.claude.json` (or equivalent) exists with a `tuicommander` entry. Reinstall from Settings > Agents. |
-| Socket permission denied | Verify `<config_dir>/mcp.sock` is owned by your user. Delete the stale socket and restart FastAF. |
-| Bridge binary not found | The bridge should be in the same directory as the main FastAF executable. Check your installation. |
+| Socket permission denied | Verify `<config_dir>/mcp.sock` is owned by your user. Delete the stale socket and restart fastestAF. |
+| Bridge binary not found | The bridge should be in the same directory as the main fastestAF executable. Check your installation. |
 
 ## Limitations
 

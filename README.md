@@ -1,8 +1,12 @@
 <p align="center">
-  <img src="assets/logo.png" alt="FastAF" width="128" />
+  <img src="assets/logo.png" alt="fastestAF" width="128" />
 </p>
 
-<h1 align="center">FastAF</h1>
+<h1 align="center">fastestAF</h1>
+
+<p align="center">
+  <em>"I'm fast as fuck boi"</em>
+</p>
 
 <p align="center">
   <strong>The multi-terminal, AI-native IDE that doesn't eat your RAM.<br>Run parallel agents on isolated branches, watch every session in one grid.</strong>
@@ -18,7 +22,7 @@
 
 <p align="center">
   <a href="docs/FEATURES.md"><strong>All Features</strong></a> &bull;
-  <a href="#-why-fastaf">Why FastAF</a> &bull;
+  <a href="#-why-fastestaf">Why fastestAF</a> &bull;
   <a href="docs/plugins.md"><strong>Plugin API</strong></a> &bull;
   <a href="docs/"><strong>Docs</strong></a>
 </p>
@@ -26,18 +30,18 @@
 ---
 
 <p align="center">
-  <img src="assets/tui-screenshot.png" alt="FastAF — multiple agents, split panes, sidebar with repos" width="900" />
+  <img src="assets/tui-screenshot.png" alt="fastestAF — multiple agents, split panes, sidebar with repos" width="900" />
 </p>
 
 ---
 
-## ⚡ Why FastAF?
+## ⚡ Why fastestAF?
 
 Most AI editors are Electron apps wearing a trench coat — every window is a full Chromium, so an editor like **Cursor** or **VS Code** can idle at **2–3 GB of RAM** before you've even opened a file.
 
-**FastAF is native Rust on Tauri.** No bundled browser — it uses your OS's webview for the UI and a Rust core for everything that matters: PTYs, Git, the filesystem, agent hooks.
+**fastestAF is native Rust on Tauri.** No bundled browser — it uses your OS's webview for the UI and a Rust core for everything that matters: PTYs, Git, the filesystem, agent hooks.
 
-| | FastAF | Typical Electron AI editor |
+| | fastestAF | Typical Electron AI editor |
 |---|---|---|
 | **Idle memory** | **~300 MB** | **2–3 GB** |
 | **Engine** | Native Rust + OS webview | Bundled Chromium per window |
@@ -58,7 +62,7 @@ The more sessions you run, the worse it gets. The tooling doesn't understand wha
 
 ## The solution
 
-**FastAF is an AI-native IDE** — designed from the ground up for multi-agent development. Agents, code, diffs, PRs, CI status, and usage analytics live in one window. No context switching. No lost threads.
+**fastestAF is an AI-native IDE** — designed from the ground up for multi-agent development. Agents, code, diffs, PRs, CI status, and usage analytics live in one window. No context switching. No lost threads.
 
 AI-native means the agents are not an afterthought. Rate limit detection, question recognition, session-aware resume, and usage tracking are core — not plugins.
 
@@ -76,7 +80,7 @@ Launch Claude Code on five branches at once — or mix agents. Each session runs
 
 ### Agent observability — not just terminals
 
-FastAF auto-detects **10 AI coding agents** (Claude Code, Codex CLI, Aider, Gemini CLI, Amp, Cursor Agent, OpenCode, Droid, Goose, Grok) and understands what they're doing:
+fastestAF auto-detects **10 AI coding agents** (Claude Code, Codex CLI, Aider, Gemini CLI, Amp, Cursor Agent, OpenCode, Droid, Goose, Grok) and understands what they're doing:
 
 - **Rate limit detection** — Provider-specific patterns with countdown timers per session.
 - **Question detection** — Y/N prompts, numbered options, inquirer-style menus. Tab indicator, notification sound, keyboard overlay.
@@ -88,7 +92,7 @@ No other tool knows that your agent is stuck.
 
 ### Git worktrees, fully managed
 
-Click a branch in the sidebar. FastAF auto-creates a git worktree — a fully isolated copy of the repo. The terminal opens *inside* it. Switch to another branch: your previous terminals are preserved. Switch back: they're exactly as you left them.
+Click a branch in the sidebar. fastestAF auto-creates a git worktree — a fully isolated copy of the repo. The terminal opens *inside* it. Switch to another branch: your previous terminals are preserved. Switch back: they're exactly as you left them.
 
 - Automatic worktree creation on branch click
 - Worktree Manager — PR status, dirty file counts, last commit at a glance
@@ -104,7 +108,7 @@ The feedback loop happens in the same window:
 - **PR management** — Merge via GitHub API with auto-detected merge method. Post-merge cleanup.
 - **Multiple GitHub accounts** — Run more than one github.com login *and* any number of GitHub Enterprise Server accounts side by side. Bind each repo to the account that monitors it; ambiguous repos ask instead of guessing. Every account polls independently — a rate limit on one never stalls the others.
 - **GitHub Issues** — Filter by assigned/created/mentioned, labels with colors, close/reopen.
-- **CI Auto-Heal** — When CI fails, FastAF fetches failure logs and injects them into the agent for automatic fix.
+- **CI Auto-Heal** — When CI fails, fastestAF fetches failure logs and injects them into the agent for automatic fix.
 - **Built-in code editor** — Syntax highlighting, find/replace, disk conflict detection, a VS Code-style change-overview ruler, and a Cmd/Ctrl+hover go-to-definition affordance.
 - **File browser** — Directory tree, content search (grep), git status indicators.
 
@@ -137,9 +141,9 @@ A **mobile companion PWA** lets you monitor agents from your phone, answer quest
 
 ### Agents that coordinate
 
-**Agent Teams** — Claude Code's sub-agents run as native FastAF tabs instead of tmux panes. Full session awareness, output parsing, and question detection for each sub-agent.
+**Agent Teams** — Claude Code's sub-agents run as native fastestAF tabs instead of tmux panes. Full session awareness, output parsing, and question detection for each sub-agent.
 
-**Inter-agent messaging** — When multiple agents work in parallel, they discover peers, send messages, and receive push notifications through FastAF as the coordination hub.
+**Inter-agent messaging** — When multiple agents work in parallel, they discover peers, send messages, and receive push notifications through fastestAF as the coordination hub.
 
 ### Automate repetitive workflows
 
@@ -171,7 +175,7 @@ On-device speech-to-text powered by whisper-rs. No cloud service, no API keys, n
 
 ### Built to be scripted — CLI, HTTP, and MCP control surface
 
-FastAF isn't a black box. Everything you click, you can also drive from a script, another tool, or an AI agent.
+fastestAF isn't a black box. Everything you click, you can also drive from a script, another tool, or an AI agent.
 
 - **`tuic` CLI companion** — Open files with cursor goto (`tuic src/main.rs:42:8`), manage sessions (`ls` / `new` / `kill` / `send`), orchestrate agents (`spawn` / `ls` / `send`), plus a tmux-compatibility alias mode. Installs from Settings, auto-updates on launch.
 - **HTTP API** — REST + WebSocket + SSE on a local port: list/create/close sessions, stream live output, spawn agents, read terminal grids and scrollback, query process CPU/RSS. Script TUIC from anything that can hit a socket.
@@ -184,7 +188,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 
 ## How it compares
 
-| Capability | Ghostty / Kitty | Warp | Cursor IDE | Claude Desktop | FastAF |
+| Capability | Ghostty / Kitty | Warp | Cursor IDE | Claude Desktop | fastestAF |
 |---|---|---|---|---|---|
 | Idle memory | ~50–150 MB | ~300–600 MB | 2–3 GB | 1–2 GB | **~300 MB** |
 | Terminal sessions | Yes | Yes | Yes | No | Yes (50) |
@@ -274,7 +278,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 
 ## Get started
 
-FastAF is built from source:
+fastestAF is built from source:
 
 **Prerequisites:** Node.js 24+, Rust toolchain, [Tauri CLI](https://tauri.app/start/)
 
@@ -289,10 +293,10 @@ See [docs/guides/development-setup.md](docs/guides/development-setup.md) for pla
 
 ## Installation (unsigned build)
 
-FastAF builds are not code-signed or notarized (we don't pay for an Apple Developer account), so macOS Gatekeeper quarantines the app and will report it as "damaged" on first launch. After copying FastAF.app to /Applications, remove the quarantine attribute BEFORE the first launch:
+fastestAF builds are not code-signed or notarized (we don't pay for an Apple Developer account), so macOS Gatekeeper quarantines the app and will report it as "damaged" on first launch. After copying fastestAF.app to /Applications, remove the quarantine attribute BEFORE the first launch:
 
 ```bash
-xattr -cr /Applications/FastAF.app
+xattr -cr /Applications/fastestAF.app
 ```
 
 ## Plugins
@@ -316,7 +320,7 @@ Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI,
 | [Getting Started](docs/user-guide/getting-started.md) | First-run guide |
 | [Features](docs/FEATURES.md) | Complete feature reference with all keyboard shortcuts |
 | [AI Agents](docs/user-guide/ai-agents.md) | Agent detection, rate limits, question detection |
-| [Plugin API](docs/plugins.md) | Build plugins for FastAF |
+| [Plugin API](docs/plugins.md) | Build plugins for fastestAF |
 | [HTTP API](docs/api/http-api.md) | REST/WebSocket/SSE endpoints |
 | [Architecture](docs/ARCHITECTURE.md) | System design and component overview |
 | [Development Setup](docs/guides/development-setup.md) | Build from source |
@@ -327,7 +331,7 @@ Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI,
 
 ## Acknowledgements
 
-FastAF is based on [TUICommander](https://github.com/sstraus/tuicommander) by sstraus — all credit for the core architecture to that project.
+fastestAF is based on [TUICommander](https://github.com/sstraus/tuicommander) by sstraus — all credit for the core architecture to that project.
 
 ## License
 

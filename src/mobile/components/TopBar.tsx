@@ -12,7 +12,7 @@ export function TopBar(props: TopBarProps) {
 		<header class={styles.topBar}>
 			<div class={styles.titleGroup}>
 				<div class={styles.titleRow}>
-					<span class={styles.appName}>FastAF</span>
+					<span class={styles.appName}>fastestAF</span>
 					<span
 						class={styles.connDot}
 						classList={{ [styles.connOnline]: connected(), [styles.connOffline]: !connected() }}

@@ -6,7 +6,7 @@ One-click AI automation for common git and code tasks. Smart Prompts inject cont
 
 Smart Prompts are context-aware automation shortcuts that turn repetitive developer workflows into single-click actions. They automatically resolve git context (branch, diff, changed files, PR data) and deliver a well-crafted prompt to your AI agent — no manual typing, no copy-pasting, no context switching.
 
-FastAF ships with **24 built-in prompts** covering commit workflows, code review, PR management, CI fixes, and code investigation. Each prompt includes a description explaining what it does, so you always know what will happen before clicking.
+fastestAF ships with **24 built-in prompts** covering commit workflows, code review, PR management, CI fixes, and code investigation. Each prompt includes a description explaining what it does, so you always know what will happen before clicking.
 
 ## How to Use
 
@@ -114,7 +114,7 @@ When a prompt contains variables that cannot be auto-resolved, a **Variable Inpu
 
 ### Inject Mode (Default)
 
-The resolved prompt is written directly into the active terminal's PTY — as if you typed it. The agent processes it like any other input. Before sending, FastAF checks that the agent is idle (configurable per prompt).
+The resolved prompt is written directly into the active terminal's PTY — as if you typed it. The agent processes it like any other input. Before sending, fastestAF checks that the agent is idle (configurable per prompt).
 
 ### Shell Script Mode
 

@@ -227,17 +227,17 @@ pub fn build_menu(app: &App) -> Result<tauri::menu::Menu<Wry>, tauri::Error> {
     if !is_macos {
         help = help.item(&item!("check-for-updates", "Check for Updates…"));
     }
-    let help = help.item(&item!("about", "About FastAF")).build()?;
+    let help = help.item(&item!("about", "About fastestAF")).build()?;
 
     // ---------- Assemble ----------
     let mut menu = MenuBuilder::new(app);
 
     if is_macos {
         // macOS: App menu with standard items
-        let app_menu = SubmenuBuilder::new(app, "FastAF")
+        let app_menu = SubmenuBuilder::new(app, "fastestAF")
             .item(&PredefinedMenuItem::about(
                 app,
-                Some("About FastAF"),
+                Some("About fastestAF"),
                 None,
             )?)
             .separator()
@@ -249,7 +249,7 @@ pub fn build_menu(app: &App) -> Result<tauri::menu::Menu<Wry>, tauri::Error> {
             .item(&PredefinedMenuItem::hide_others(app, None)?)
             .item(&PredefinedMenuItem::show_all(app, None)?)
             .separator()
-            .item(&item!("quit-app", "Quit FastAF", "CmdOrCtrl+Q"))
+            .item(&item!("quit-app", "Quit fastestAF", "CmdOrCtrl+Q"))
             .build()?;
         menu = menu.item(&app_menu);
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build FastAF with tokio-console support and launch both.
+# Build fastestAF with tokio-console support and launch both.
 # tokio-console connects automatically and shows live Tokio task stats.
 #
 # What to look for:
@@ -21,9 +21,9 @@ RUSTFLAGS="--cfg tokio_unstable" cargo build --features tokio-console 2>&1 | tai
 BINARY="$ROOT/src-tauri/target/debug/tuicommander"
 
 echo ""
-echo "=== Launching FastAF + tokio-console ==="
+echo "=== Launching fastestAF + tokio-console ==="
 echo "tokio-console will open in this terminal."
-echo "FastAF will open in a new window."
+echo "fastestAF will open in a new window."
 echo "Press Ctrl+C to stop both."
 echo ""
 

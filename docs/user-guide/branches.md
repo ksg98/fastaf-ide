@@ -1,6 +1,6 @@
 # Branch Management
 
-FastAF has a built-in Branches tab inside the Git Panel. It lets you view, create, delete, rename, merge, rebase, push, pull, and compare branches — all without leaving the app.
+fastestAF has a built-in Branches tab inside the Git Panel. It lets you view, create, delete, rename, merge, rebase, push, pull, and compare branches — all without leaving the app.
 
 ## Opening the Branch Panel
 
@@ -101,7 +101,7 @@ Right-click a branch → **Rebase Current onto This** to rebase the current bran
 
 ## Push
 
-Right-click a branch → **Push**. If no upstream is set, FastAF automatically configures the tracking relationship (`--set-upstream origin <branch>`).
+Right-click a branch → **Push**. If no upstream is set, fastestAF automatically configures the tracking relationship (`--set-upstream origin <branch>`).
 
 ## Pull
 

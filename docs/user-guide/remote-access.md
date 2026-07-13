@@ -1,6 +1,6 @@
 # Remote Access
 
-Access FastAF from a browser on another device on your network.
+Access fastestAF from a browser on another device on your network.
 
 ## Setup
 
@@ -18,7 +18,7 @@ Once enabled, the settings panel shows the access URL: `http://<your-ip>:<port>`
 1. Open a browser on any device on the same network
 2. Navigate to the URL shown in settings (e.g., `http://192.168.1.42:9876`)
 3. Enter the username and password you configured
-4. FastAF loads in the browser with full terminal access
+4. fastestAF loads in the browser with full terminal access
 
 ### QR Code
 
@@ -41,7 +41,7 @@ The browser client provides the same UI as the desktop app:
 
 ## MCP HTTP Server
 
-Separate from remote access, FastAF runs an **HTTP API server** for AI tool integration:
+Separate from remote access, fastestAF runs an **HTTP API server** for AI tool integration:
 
 - The server always listens on an IPC listener: Unix domain socket at `<config_dir>/mcp.sock` on macOS/Linux, or named pipe `\\.\pipe\tuicommander-mcp` on Windows
 - AI agents connect via the `tuic-bridge` sidecar binary, which translates MCP stdio transport to the IPC listener
@@ -53,7 +53,7 @@ The Unix socket is accessible only to the current user (filesystem permissions) 
 
 ## Mobile Companion
 
-FastAF includes a phone-optimized interface for monitoring agents from your phone.
+fastestAF includes a phone-optimized interface for monitoring agents from your phone.
 
 ### Accessing the Mobile UI
 
@@ -86,7 +86,7 @@ The app launches in standalone mode (no browser chrome) for a native-like experi
 
 ## SSH Tunnel Management
 
-FastAF can manage persistent SSH tunnels with automatic reconnection, port forwarding, and audit logging.
+fastestAF can manage persistent SSH tunnels with automatic reconnection, port forwarding, and audit logging.
 
 ### Creating a Tunnel Profile
 
@@ -106,7 +106,7 @@ Tunnel profiles are stored as TOML files. **Global profiles** live in `<config_d
 
 ### Auto-Connect
 
-Enable **Auto-Connect** on a tunnel profile to have it start automatically when FastAF launches. Useful for tunnels you always need (database access, internal services).
+Enable **Auto-Connect** on a tunnel profile to have it start automatically when fastestAF launches. Useful for tunnels you always need (database access, internal services).
 
 Toggle auto-connect in the tunnel editor — profiles marked with auto-connect are started during app hydration before you interact with the UI.
 
@@ -132,7 +132,7 @@ Open the command palette (`Cmd+P` / `Ctrl+P`) and type "tunnels" to toggle the T
 
 ### SSH Agent Detection
 
-FastAF automatically detects your SSH agent and shows the agent type and loaded keys in the tunnel editor. Supported agents:
+fastestAF automatically detects your SSH agent and shows the agent type and loaded keys in the tunnel editor. Supported agents:
 
 - **1Password** — Detected via the 1Password SSH agent socket
 - **Secretive** — Detected via the Secretive agent socket
@@ -177,7 +177,7 @@ The supervisor classifies SSH process exits to determine whether retry is approp
 
 ## Remote Connection Manager
 
-Remote connections let you manage `tuic-remote` daemons running on other machines. FastAF routes API calls to the correct host based on which repo/session is active.
+Remote connections let you manage `tuic-remote` daemons running on other machines. fastestAF routes API calls to the correct host based on which repo/session is active.
 
 ### Adding an SSH Connection
 
@@ -207,7 +207,7 @@ Connections are stored in `<config_dir>/connections.json` with SSH and Direct tr
 
 ## tuic-remote (Beta)
 
-A standalone headless daemon for running FastAF on a Linux server without a desktop environment. It exposes the same HTTP/WebSocket API as the desktop app's remote access feature, but runs as an independent binary — no Tauri, no GUI.
+A standalone headless daemon for running fastestAF on a Linux server without a desktop environment. It exposes the same HTTP/WebSocket API as the desktop app's remote access feature, but runs as an independent binary — no Tauri, no GUI.
 
 ### Installation
 
@@ -234,7 +234,7 @@ Set a password before first use:
 ./tuic-remote --set-password
 ```
 
-This stores a bcrypt hash in the FastAF config directory (`~/.config/tuicommander/` on Linux).
+This stores a bcrypt hash in the fastestAF config directory (`~/.config/tuicommander/` on Linux).
 
 ### Running
 
@@ -247,13 +247,13 @@ TUIC_PORT=8080 ./tuic-remote
 ```
 
 The daemon binds to `0.0.0.0:<port>` and serves:
-- The FastAF web UI (PWA-capable)
+- The fastestAF web UI (PWA-capable)
 - WebSocket terminal streaming
 - MCP tool integration (for AI agents)
 
 ### TLS
 
-Configure TLS via the FastAF config file (`~/.config/tuicommander/config.toml`):
+Configure TLS via the fastestAF config file (`~/.config/tuicommander/config.toml`):
 
 ```toml
 [services.tls]

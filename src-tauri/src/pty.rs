@@ -88,7 +88,7 @@ fn inject_unix_terminal_env(cmd: &mut CommandBuilder) {
     // CC also checks TERM_PROGRAM_VERSION — missing or matching /^[0-2]\./
     // causes rejection.  Use a value that passes the gate.
     cmd.env("TERM_PROGRAM_VERSION", "3.0.0");
-    // Prevent nested-session detection when FastAF itself runs
+    // Prevent nested-session detection when fastestAF itself runs
     // inside a Claude Code session (CLAUDECODE env var would propagate).
     cmd.env_remove("CLAUDECODE");
     if let Ok(lang) = std::env::var("LANG") {
@@ -5716,7 +5716,7 @@ pub(crate) fn collect_process_stats(state: &AppState) -> Vec<ProcessStats> {
 
     // TUIC's own process
     let own_pid = std::process::id();
-    pids.push((None, "FastAF".to_string(), own_pid));
+    pids.push((None, "fastestAF".to_string(), own_pid));
 
     // Collect child PIDs from all PTY sessions
     for entry in state.sessions.iter() {
@@ -8033,7 +8033,7 @@ mod tests {
         // false negative in exchange for not crossing the agent-turn boundary
         // and matching the user's own previous `?`-ending input.
         let rows = screen(&[
-            "⏺ FastAF v1.0.2 is connected.",
+            "⏺ fastestAF v1.0.2 is connected.",
             "  intent: await handshake then relay fixed response (Await ACK)",
             "  Do you want me to proceed with this fix?",
             "  suggest: 1) Screenshot overview panel | 2) Fix suggest scroll flicker | 3)",

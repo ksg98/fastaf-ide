@@ -175,7 +175,7 @@ cargo tauri build --bundles nsis
 
 The installer will be at:
 ```
-src-tauri\target\release\bundle\nsis\FastAF_0.x.x_x64-setup.exe
+src-tauri\target\release\bundle\nsis\fastestAF_0.x.x_x64-setup.exe
 ```
 
 ### Windows Known Issues

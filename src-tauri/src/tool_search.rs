@@ -125,7 +125,7 @@ mod tests {
             }),
             json!({
                 "name": "ui",
-                "description": "Control the FastAF UI: open panel tabs, show toast notifications, or prompt for user confirmation.\n\nActions: tab, toast, confirm.",
+                "description": "Control the fastestAF UI: open panel tabs, show toast notifications, or prompt for user confirmation.\n\nActions: tab, toast, confirm.",
                 "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } }, "required": ["action"] }
             }),
             json!({
@@ -140,7 +140,7 @@ mod tests {
             }),
             json!({
                 "name": "debug",
-                "description": "Dev-only diagnostics for debugging FastAF internals.",
+                "description": "Dev-only diagnostics for debugging fastestAF internals.",
                 "inputSchema": { "type": "object", "properties": { "action": { "type": "string" } }, "required": ["action"] }
             }),
             json!({

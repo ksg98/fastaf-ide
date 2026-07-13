@@ -373,7 +373,7 @@ fn encode_cell(buf: &mut Vec<u8>, cell: &Cell, colors: &Colors) {
     buf.push(attrs);
 }
 
-/// Wraps `alacritty_terminal::Term` with a FastAF-specific API.
+/// Wraps `alacritty_terminal::Term` with a fastestAF-specific API.
 ///
 /// Provides `process() → Vec<ChangedRow>` + `screen_text_rows()`
 /// interface that `VtLogBuffer` and HTTP/WS handlers use.

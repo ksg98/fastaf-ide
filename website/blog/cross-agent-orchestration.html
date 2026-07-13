@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Using Codex to orchestrate Claude Code through FastAF — FastAF Blog</title>
-  <meta name="description" content="How to use OpenAI Codex CLI to drive Claude Code sessions through FastAF's MCP bridge — with structured state, clean text, and fewer tokens than tmux." />
+  <title>Using Codex to orchestrate Claude Code through fastestAF — fastestAF Blog</title>
+  <meta name="description" content="How to use OpenAI Codex CLI to drive Claude Code sessions through fastestAF's MCP bridge — with structured state, clean text, and fewer tokens than tmux." />
 
-  <meta property="og:title" content="Using Codex to orchestrate Claude Code through FastAF" />
+  <meta property="og:title" content="Using Codex to orchestrate Claude Code through fastestAF" />
   <meta property="og:description" content="Cross-agent orchestration via MCP: structured terminal state instead of screen-scraping, at a fraction of the token cost." />
   <meta property="og:type" content="article" />
 
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -44,8 +44,8 @@
     <header class="blog-post-header">
       <a href="/blog.html" class="blog-back">&larr; Blog</a>
       <time>May 4, 2026</time>
-      <h1>Using Codex to orchestrate Claude Code through FastAF</h1>
-      <p class="blog-post-summary">Cross-agent orchestration without screen-scraping. FastAF's MCP bridge gives external agents structured terminal state — shell idle/busy, parsed questions, suggestion chips — instead of raw ANSI bytes. Here's how to set it up and why it beats tmux.</p>
+      <h1>Using Codex to orchestrate Claude Code through fastestAF</h1>
+      <p class="blog-post-summary">Cross-agent orchestration without screen-scraping. fastestAF's MCP bridge gives external agents structured terminal state — shell idle/busy, parsed questions, suggestion chips — instead of raw ANSI bytes. Here's how to set it up and why it beats tmux.</p>
     </header>
 
     <div class="blog-section">
@@ -55,8 +55,8 @@
     </div>
 
     <div class="blog-section">
-      <h2>What FastAF gives you instead</h2>
-      <p>FastAF runs an MCP server on localhost. Any MCP-compatible client (Claude Code, Codex with MCP config, custom agents) can connect and use structured tools for terminal interaction:</p>
+      <h2>What fastestAF gives you instead</h2>
+      <p>fastestAF runs an MCP server on localhost. Any MCP-compatible client (Claude Code, Codex with MCP config, custom agents) can connect and use structured tools for terminal interaction:</p>
 
       <table class="blog-table">
         <thead>
@@ -71,22 +71,22 @@
         </tbody>
       </table>
 
-      <p>The critical difference: <code>get_state</code> returns parsed events, not text. FastAF's output parser runs on every PTY chunk and extracts structured data from the terminal stream — questions, choice prompts, rate limits, progress, error states, suggestion chips. The orchestrating agent gets JSON, not a screenshot.</p>
+      <p>The critical difference: <code>get_state</code> returns parsed events, not text. fastestAF's output parser runs on every PTY chunk and extracts structured data from the terminal stream — questions, choice prompts, rate limits, progress, error states, suggestion chips. The orchestrating agent gets JSON, not a screenshot.</p>
     </div>
 
     <div class="blog-section">
-      <h2>Setup: connecting Codex to FastAF</h2>
-      <p>Codex CLI supports MCP servers as tool providers. FastAF auto-installs itself into Codex's TOML config when you enable the MCP bridge in Settings &gt; Services. The result in <code>~/.codex/config.toml</code>:</p>
+      <h2>Setup: connecting Codex to fastestAF</h2>
+      <p>Codex CLI supports MCP servers as tool providers. fastestAF auto-installs itself into Codex's TOML config when you enable the MCP bridge in Settings &gt; Services. The result in <code>~/.codex/config.toml</code>:</p>
       <pre><code># ~/.codex/config.toml
 [mcp_servers.tuicommander]
 command = "/path/to/tuic-bridge"</code></pre>
-      <p>That's it. Codex now has access to all <code>ai_terminal_*</code> tools. Every write tool (send_input, send_key, drive_agent) prompts you for confirmation before executing — FastAF never lets an external agent type into a terminal silently.</p>
-      <p>The bridge binary communicates with FastAF over the local Unix socket — no port configuration needed.</p>
+      <p>That's it. Codex now has access to all <code>ai_terminal_*</code> tools. Every write tool (send_input, send_key, drive_agent) prompts you for confirmation before executing — fastestAF never lets an external agent type into a terminal silently.</p>
+      <p>The bridge binary communicates with fastestAF over the local Unix socket — no port configuration needed.</p>
     </div>
 
     <div class="blog-section">
       <h2>Example: Codex reviews Claude Code's work</h2>
-      <p>You have Claude Code running in FastAF tab 1. The tab tooltip shows its alias: <code>tc-1</code> (derived from the repo name "tuicommander"). You start Codex in tab 2 and tell it:</p>
+      <p>You have Claude Code running in fastestAF tab 1. The tab tooltip shows its alias: <code>tc-1</code> (derived from the repo name "tuicommander"). You start Codex in tab 2 and tell it:</p>
       <pre><code>"Review what Claude Code produced in session tc-1. If there are
 test failures, tell Claude to fix them."</code></pre>
       <p>Here's what Codex does behind the scenes:</p>
@@ -153,7 +153,7 @@ tmux capture-pane -t 0 -p -S -100            // capture raw output
 tmux capture-pane -t 0 -p -S -100            // poll again to check
 // → same parsing overhead</code></pre>
       <p>The raw output from <code>capture-pane</code> includes Ink TUI redraws, progress spinners, ANSI color codes, and box-drawing characters. A typical Claude Code session dump is 60–70% visual noise that the orchestrating agent must tokenize and ignore.</p>
-      <p>With FastAF's MCP tools:</p>
+      <p>With fastestAF's MCP tools:</p>
       <pre><code>// MCP approach (1 tool call, ~500 tokens round-trip)
 ai_terminal_drive_agent({
   session_id: "tc-1",
@@ -167,7 +167,7 @@ ai_terminal_drive_agent({
 
       <table class="blog-table">
         <thead>
-          <tr><th></th><th>tmux</th><th>FastAF MCP</th></tr>
+          <tr><th></th><th>tmux</th><th>fastestAF MCP</th></tr>
         </thead>
         <tbody>
           <tr><td>Commands per cycle</td><td>3–5 (send + sleep + capture + parse + retry)</td><td>1 (<code>drive_agent</code>)</td></tr>
@@ -184,7 +184,7 @@ ai_terminal_drive_agent({
 
     <div class="blog-section">
       <h2>The parsed events advantage</h2>
-      <p>FastAF's output parser detects specific agent states in real time:</p>
+      <p>fastestAF's output parser detects specific agent states in real time:</p>
       <ul>
         <li><strong>question</strong> — the agent is waiting for user input (with a confidence flag that distinguishes explicit prompts from silence-based heuristics)</li>
         <li><strong>choice-prompt</strong> — numbered menu (edit confirmation, bash approval, apply patch). Includes the options as a structured array.</li>
@@ -195,19 +195,19 @@ ai_terminal_drive_agent({
         <li><strong>intent</strong> — what the agent says it's currently working on</li>
         <li><strong>active-subtasks</strong> — how many background workers the agent has running</li>
       </ul>
-      <p>None of this is available through tmux. With <code>capture-pane</code>, you get pixels. With FastAF, you get semantics.</p>
+      <p>None of this is available through tmux. With <code>capture-pane</code>, you get pixels. With fastestAF, you get semantics.</p>
     </div>
 
     <div class="blog-section">
       <h2>Security model</h2>
-      <p>Every write operation from an external MCP client triggers a confirmation dialog in FastAF. The user sees exactly what will be sent and to which session. This is non-negotiable — an external agent cannot silently type commands into your terminal.</p>
+      <p>Every write operation from an external MCP client triggers a confirmation dialog in fastestAF. The user sees exactly what will be sent and to which session. This is non-negotiable — an external agent cannot silently type commands into your terminal.</p>
       <p>Read operations (read_screen, get_state, get_context) don't require confirmation. Secrets are redacted server-side before the output reaches the MCP client — API keys, tokens, and passwords are replaced with <code>[REDACTED]</code>.</p>
       <p>Cross-session writes (one agent writing to another agent's terminal) are blocked by default. You must explicitly enable unrestricted mode for the orchestrating session. Read-only cross-session access (monitoring another session's state) is always allowed.</p>
     </div>
 
     <div class="blog-section">
       <h2>Session aliases: human-friendly names</h2>
-      <p>Raw session IDs are UUIDs — great for machines, terrible for prompts. When you tell Codex "check session <code>a1b2c3d4-e5f6-...</code>", you're burning tokens on noise. FastAF solves this with automatic session aliases.</p>
+      <p>Raw session IDs are UUIDs — great for machines, terrible for prompts. When you tell Codex "check session <code>a1b2c3d4-e5f6-...</code>", you're burning tokens on noise. fastestAF solves this with automatic session aliases.</p>
       <p>Every terminal session gets an alias derived from the repo directory name. The algorithm takes the first letter of each segment (split on <code>-</code>, <code>_</code>, <code>.</code>, or camelCase boundaries) and appends a per-repo counter:</p>
       <table class="blog-table">
         <thead>
@@ -220,16 +220,16 @@ ai_terminal_drive_agent({
           <tr><td>myProject</td><td><code>mp-1</code></td></tr>
         </tbody>
       </table>
-      <p>Aliases are visible in the tab tooltip and in the output of <code>ai_terminal_list_sessions</code>. Every tool that accepts a <code>session_id</code> also accepts an alias — FastAF resolves it to the full UUID internally. Counters reset on app restart, keeping numbers low.</p>
+      <p>Aliases are visible in the tab tooltip and in the output of <code>ai_terminal_list_sessions</code>. Every tool that accepts a <code>session_id</code> also accepts an alias — fastestAF resolves it to the full UUID internally. Counters reset on app restart, keeping numbers low.</p>
       <p>When two repo names collide on the same acronym (e.g. <code>my-app</code> and <code>my-api</code>), the alias extends with additional letters from the longest segment to disambiguate (<code>ma-1</code> vs <code>map-1</code>).</p>
     </div>
 
     <div class="blog-section">
       <h2>Getting started</h2>
       <ol>
-        <li>Open FastAF with at least two tabs — one for the agent to be orchestrated, one for the orchestrator</li>
+        <li>Open fastestAF with at least two tabs — one for the agent to be orchestrated, one for the orchestrator</li>
         <li>Hover any tab to see its alias in the tooltip (e.g. <code>tc-1</code>), or call <code>ai_terminal_list_sessions</code> to see all aliases</li>
-        <li>Configure your orchestrating agent (Codex, Claude Code, or custom) to connect to FastAF's MCP server at <code>http://127.0.0.1:{port}/mcp</code></li>
+        <li>Configure your orchestrating agent (Codex, Claude Code, or custom) to connect to fastestAF's MCP server at <code>http://127.0.0.1:{port}/mcp</code></li>
         <li>Use aliases in your prompts and tool calls — "check session <code>tc-1</code>" instead of a UUID</li>
       </ol>
       <p>The full tool reference is available via the MCP <code>tools/list</code> endpoint. Each tool includes an input schema that your agent can inspect at runtime.</p>
@@ -237,7 +237,7 @@ ai_terminal_drive_agent({
 
     <div class="blog-section">
       <h2>What's next</h2>
-      <p>The <code>drive_agent</code> tool is the beginning. We're exploring event-driven orchestration — instead of the orchestrator polling <code>get_state</code>, FastAF would push parsed events via the MCP SSE stream when an agent's state changes. That would enable fully reactive pipelines where the orchestrator only wakes up when something interesting happens.</p>
+      <p>The <code>drive_agent</code> tool is the beginning. We're exploring event-driven orchestration — instead of the orchestrator polling <code>get_state</code>, fastestAF would push parsed events via the MCP SSE stream when an agent's state changes. That would enable fully reactive pipelines where the orchestrator only wakes up when something interesting happens.</p>
       <p>We're also looking at session templates: "spawn a Claude Code session on this repo with these CLAUDE.md instructions" as a single MCP tool call. Combined with <code>drive_agent</code>, you'd be able to stand up and drive a full agent pipeline from a single orchestrating prompt.</p>
     </div>
   </article>

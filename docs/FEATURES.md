@@ -1,4 +1,4 @@
-# FastAF — Complete Feature Reference
+# fastestAF — Complete Feature Reference
 
 > Canonical feature inventory. Update this file when adding, changing, or removing features.
 > See [AGENTS.md](../AGENTS.md) for the maintenance requirement.
@@ -116,7 +116,7 @@
 - Multiple files can be dropped at once
 - Visual overlay with dashed border appears during drag hover
 - Global `dragover`/`drop` `preventDefault` prevents the Tauri webview from treating drops as browser navigation (which would replace the UI with a white screen)
-- macOS file association: `.md`/`.mdx` files registered with FastAF — double-click in Finder opens them directly
+- macOS file association: `.md`/`.mdx` files registered with fastestAF — double-click in Finder opens them directly
 - **Drag to external apps**: Drag files from the File Browser to external applications (Finder, email clients, etc.) using native OS-level drag via `tauri-plugin-drag`. Works alongside internal drag & drop (tab reorder, split panes)
 
 ### 1.14 Cross-Terminal Search
@@ -564,7 +564,7 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 | Git (background) | `git` | — |
 
 ### 6.1.1 Session-Aware Resume
-When an agent is detected running in a terminal, FastAF automatically discovers its session ID from the filesystem and stores it per-terminal (`agentSessionId`). On restore, this enables session-specific resume instead of generic fallback commands.
+When an agent is detected running in a terminal, fastestAF automatically discovers its session ID from the filesystem and stores it per-terminal (`agentSessionId`). On restore, this enables session-specific resume instead of generic fallback commands.
 
 - **Claude Code** — Sessions stored as `~/.claude/projects/<slug>/<uuid>.jsonl`; UUID from filename
 - **Gemini CLI** — Sessions stored in `~/.gemini/tmp/<hash>/chats/session-*.json`; `sessionId` field from JSON
@@ -579,8 +579,8 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 - **Automatic session binding**: Shell integration injects wrapper functions that transparently bind agent sessions to the current tab (zsh, bash, fish):
   - **Claude Code**: `claude()` adds `--session-id $TUIC_SESSION`; bypassed when `--session-id`, `--resume`, or `--continue` are explicit
   - **Goose**: `goose()` adds `--name $TUIC_SESSION` to `session` and `run` subcommands; bypassed when `--name`, `-n`, `--resume`, or `-r` are explicit
-  - **Session conflict handling**: When an agent reports a session conflict (in-use or not-found), FastAF creates a `no-session-inject.$TUIC_SESSION` flag file in the config directory. Shell wrappers check for this file and skip `--session-id` injection when it exists — avoiding PTY writes that could corrupt TUI output
-- **Automatic resume**: On restore, FastAF verifies if the session file exists on disk (`verify_agent_session`) before using `--resume $TUIC_SESSION`
+  - **Session conflict handling**: When an agent reports a session conflict (in-use or not-found), fastestAF creates a `no-session-inject.$TUIC_SESSION` flag file in the config directory. Shell wrappers check for this file and skip `--session-id` injection when it exists — avoiding PTY writes that could corrupt TUI output
+- **Automatic resume**: On restore, fastestAF verifies if the session file exists on disk (`verify_agent_session`) before using `--resume $TUIC_SESSION`
 - **UI spawn coherence**: When spawning agents via the context menu, `TUIC_SESSION` is used as `--session-id` automatically
 - **Custom scripts**: `$TUIC_SESSION` is available as a stable key for any tab-specific state
 
@@ -687,10 +687,10 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 - **Identity**: Each agent uses its `$TUIC_SESSION` env var (stable tab UUID) as its messaging identity
 - **Actions**: `register` (announce presence), `list_peers` (discover other agents), `send` (message a peer by tuic_session), `inbox` (poll for messages)
 - **Dual delivery**: Real-time push via MCP `notifications/claude/channel` over SSE when the client supports channels; polling fallback via `inbox` always available
-- **Channel support**: FastAF declares `experimental.claude/channel` capability; spawned Claude Code agents automatically get `--dangerously-load-development-channels server:tuicommander`
+- **Channel support**: fastestAF declares `experimental.claude/channel` capability; spawned Claude Code agents automatically get `--dangerously-load-development-channels server:tuicommander`
 - **Lifecycle**: Peer registrations cleaned up on MCP session delete and TTL reap; `PeerRegistered`/`PeerUnregistered` events broadcast via event bus for frontend visibility
 - **Limits**: 64 KB max message size, 100 messages per inbox (FIFO eviction), optional project filtering for `list_peers`
-- FastAF acts as the messaging hub — no external daemon needed
+- fastestAF acts as the messaging hub — no external daemon needed
 
 ### 6.14 AI Chat Panel (`Cmd+Alt+A`)
 - Conversational AI companion docked on the right, streaming markdown with syntax-highlighted code blocks. Every code block has *Run* (sends to the attached terminal via `sendCommand()`), *Copy*, and *Insert* actions
@@ -867,7 +867,7 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 - Click to open PR detail popover
 
 ### 8.7 Merge PR via GitHub API
-- Merge PRs directly from FastAF without switching to GitHub web
+- Merge PRs directly from fastestAF without switching to GitHub web
 - Configurable merge strategy per repo: merge commit, squash, or rebase (Settings > Repository > Worktree tab)
 - Merge method auto-detected from repo's allowed methods via GitHub API (`get_repo_merge_methods`); auto-fallback to squash on HTTP 405 rejection
 - Triggered from: PR detail popover (local branches), remote-only PR popover, Merge & Archive workflow (sidebar context menu)
@@ -922,7 +922,7 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 - On 401: auto-clears invalid OAuth token and prompts re-auth
 
 ### 8.13 Multiple Accounts (github.com + GitHub Enterprise)
-GitHub integration is **account-centric**: FastAF can manage N accounts and each workspace repo is explicitly bound to the account that monitors it (a persisted binding, not derived live from `origin`).
+GitHub integration is **account-centric**: fastestAF can manage N accounts and each workspace repo is explicitly bound to the account that monitors it (a persisted binding, not derived live from `origin`).
 
 **Account kinds**
 - **Ambient github.com default** — the account you authenticate with via the OAuth device flow above (or `GH_TOKEN`/`gh` CLI). Behaves exactly as before; a github.com-only user sees zero change.
@@ -1611,7 +1611,7 @@ Phone-optimized progressive web app for monitoring AI agents remotely. Separate 
 - PNG icons (192x192, 512x512) for PWA installability
 
 ### 18.8.1 Push Notifications
-- Web Push from FastAF directly to mobile PWA clients (no relay dependency)
+- Web Push from fastestAF directly to mobile PWA clients (no relay dependency)
 - VAPID ES256 key generation on first enable, persisted in config
 - Service worker (`sw.js`) handles push events and notification clicks
 - `PushManager.subscribe()` flow with user gesture (click handler) for iOS/Firefox
@@ -1646,7 +1646,7 @@ Phone-optimized progressive web app for monitoring AI agents remotely. Separate 
 
 ## 19. MCP Proxy Hub
 
-FastAF aggregates upstream MCP servers and exposes them through its own `/mcp` endpoint. Any MCP client (Claude Code, Cursor, VS Code) connecting to TUIC automatically gains access to all configured upstream tools.
+fastestAF aggregates upstream MCP servers and exposes them through its own `/mcp` endpoint. Any MCP client (Claude Code, Cursor, VS Code) connecting to TUIC automatically gains access to all configured upstream tools.
 
 ### 19.1 Architecture
 - TUIC acts as both an MCP server (to downstream clients) and an MCP client (to upstream servers)
@@ -1803,8 +1803,8 @@ FastAF aggregates upstream MCP servers and exposes them through its own `/mcp` e
 - Standalone Rust binary embedded as a sidecar, installed to system PATH
 - Combines VS Code-style file opening, tmux-style session management, and agent orchestration
 - Cross-platform: macOS, Linux, Windows
-- Communicates via IPC (Unix socket / Windows named pipe) with the running FastAF instance
-- Auto-launches FastAF if not running
+- Communicates via IPC (Unix socket / Windows named pipe) with the running fastestAF instance
+- Auto-launches fastestAF if not running
 
 ### 21.2 Editor Mode
 - `tuic [path]` — open file or directory (VS Code/Zed style)
@@ -1826,7 +1826,7 @@ FastAF aggregates upstream MCP servers and exposes them through its own `/mcp` e
 ### 21.5 tmux Compatibility Mode
 - `tuic alias` creates `tmux → tuic` symlink; `argv[0]` detection switches to compat mode
 - Supports: `new-session`, `list-sessions`, `kill-session`, `kill-server`, `send-keys`, `capture-pane`, `resize-pane`, `attach-session`, `has-session`
-- Tools expecting tmux (e.g. Claude Code `--tmux`) transparently use FastAF
+- Tools expecting tmux (e.g. Claude Code `--tmux`) transparently use fastestAF
 
 ### 21.6 Installation
 - First-run prompt on app launch (one-time, dismissible)
@@ -1838,7 +1838,7 @@ FastAF aggregates upstream MCP servers and exposes them through its own `/mcp` e
 ## 22. Remote Daemon (`tuic-remote`) — Beta
 
 ### 22.1 Overview
-- Standalone headless binary for running FastAF on servers without a desktop environment
+- Standalone headless binary for running fastestAF on servers without a desktop environment
 - Same HTTP/WebSocket API as the desktop app's remote access feature
 - No Tauri dependency — pure Rust binary
 - Available as GitHub Release artifacts for Linux x64/ARM64, macOS ARM, and Windows x64

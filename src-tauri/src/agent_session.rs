@@ -1,6 +1,6 @@
 //! Cross-platform session file discovery for AI coding agents.
 //!
-//! When a user launches an agent manually (without FastAF's `--session-id`
+//! When a user launches an agent manually (without fastestAF's `--session-id`
 //! injection), the session ID is unknown. This module scans known session storage
 //! directories to discover the most recently created, unclaimed session file.
 //!

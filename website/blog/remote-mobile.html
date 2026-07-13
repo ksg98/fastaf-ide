@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>From the couch to 5G: how we built remote access — FastAF Blog</title>
+  <title>From the couch to 5G: how we built remote access — fastestAF Blog</title>
   <meta name="description" content="We wanted to monitor AI agents away from the desk. After trying session logs, remote proxies, and SSH, we built native mobile access with Tailscale and PWA." />
 
-  <meta property="og:title" content="From the couch to 5G: how we built remote access — FastAF" />
+  <meta property="og:title" content="From the couch to 5G: how we built remote access — fastestAF" />
   <meta property="og:description" content="We wanted to monitor AI agents away from the desk. After trying session logs, remote proxies, and SSH, we built native mobile access with Tailscale and PWA." />
   <meta property="og:image" content="/public/blog/remote-mobile/pwa-sessions.png" />
   <meta property="og:type" content="article" />
@@ -29,8 +29,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -58,23 +58,23 @@
 
     <div class="blog-section">
       <h2>It started on the couch</h2>
-      <p>The first version wasn't about mobile at all. We wanted to work from the couch instead of the home office. An iPad with a real terminal session connected to FastAF, with the same repo list, the same agent status, the same ability to send commands.</p>
+      <p>The first version wasn't about mobile at all. We wanted to work from the couch instead of the home office. An iPad with a real terminal session connected to fastestAF, with the same repo list, the same agent status, the same ability to send commands.</p>
       <p>So we built a web interface — not a stripped-down dashboard, but a full remote session that mirrors the desktop experience. WebSocket-based PTY connections, native terminal rendering, repo switching, activity notifications. The same app, in a browser.</p>
     </div>
 
     <figure class="blog-figure">
-      <img src="/public/blog/remote-mobile/desktop-remote.png" alt="FastAF running in a browser via Tailscale remote access, showing the full interface with sidebar, terminal, and git panel" />
-      <figcaption>The full FastAF interface running in a browser over Tailscale — same sidebar, same terminal, same git panel. This is a remote session to the desktop app.</figcaption>
+      <img src="/public/blog/remote-mobile/desktop-remote.png" alt="fastestAF running in a browser via Tailscale remote access, showing the full interface with sidebar, terminal, and git panel" />
+      <figcaption>The full fastestAF interface running in a browser over Tailscale — same sidebar, same terminal, same git panel. This is a remote session to the desktop app.</figcaption>
     </figure>
 
     <div class="blog-section">
       <h2>Then we needed to leave the house</h2>
       <p>The couch version worked over the local network. But then you want to check from a coffee shop, or while commuting, or from a different office. The first approach was a remote proxy — port forwarding with authentication. It worked, but it required configuration, exposed ports, and felt fragile.</p>
-      <p>Then we integrated Tailscale. FastAF auto-detects the Tailscale daemon, provisions TLS certificates via the Local API, and serves the web interface over HTTPS on your private Tailscale network. No port forwarding, no firewall rules, no configuration. The settings page shows a QR code — scan it from your phone, and you're connected.</p>
+      <p>Then we integrated Tailscale. fastestAF auto-detects the Tailscale daemon, provisions TLS certificates via the Local API, and serves the web interface over HTTPS on your private Tailscale network. No port forwarding, no firewall rules, no configuration. The settings page shows a QR code — scan it from your phone, and you're connected.</p>
     </div>
 
     <figure class="blog-figure">
-      <img src="/public/blog/remote-mobile/settings.png" alt="FastAF Settings showing Remote Access configuration with Tailscale integration, QR code, and HTTPS URL" />
+      <img src="/public/blog/remote-mobile/settings.png" alt="fastestAF Settings showing Remote Access configuration with Tailscale integration, QR code, and HTTPS URL" />
       <figcaption>Remote Access settings — enable the toggle, pick the Tailscale network interface, and scan the QR code. HTTPS is automatic, authentication is token-based with configurable expiry.</figcaption>
     </figure>
 
@@ -85,18 +85,18 @@
     </div>
 
     <figure class="blog-figure">
-      <img src="/public/blog/remote-mobile/pwa-activity.png" alt="FastAF PWA showing 6 active sessions with agent status detection, task names, and an awaiting-input notification banner" />
-      <figcaption>6 agents running across different repos. FastAF recognizes what each agent is doing — "Check Active Stories", "Task Review" — and flags the one that needs input with a yellow banner. One glance tells you what's happening and what needs your attention.</figcaption>
+      <img src="/public/blog/remote-mobile/pwa-activity.png" alt="fastestAF PWA showing 6 active sessions with agent status detection, task names, and an awaiting-input notification banner" />
+      <figcaption>6 agents running across different repos. fastestAF recognizes what each agent is doing — "Check Active Stories", "Task Review" — and flags the one that needs input with a yellow banner. One glance tells you what's happening and what needs your attention.</figcaption>
     </figure>
 
     <figure class="blog-figure">
-      <img src="/public/blog/remote-mobile/pwa-terminal.png" alt="FastAF PWA terminal view showing an agent analyzing branch status and asking for next steps" />
+      <img src="/public/blog/remote-mobile/pwa-terminal.png" alt="fastestAF PWA terminal view showing an agent analyzing branch status and asking for next steps" />
       <figcaption>A live terminal session on mobile — the agent analyzed the branch state, found diverged commits, and is asking what to do. You can respond right from your phone with the shortcut bar or the command input.</figcaption>
     </figure>
 
     <div class="blog-section">
       <h2>Push notifications close the loop</h2>
-      <p>The final piece was notifications. Web Push from FastAF directly to your mobile PWA — when an agent finishes a task, hits an error, or asks a question, you get a push notification. Tap it, and you're in the terminal session ready to respond.</p>
+      <p>The final piece was notifications. Web Push from fastestAF directly to your mobile PWA — when an agent finishes a task, hits an error, or asks a question, you get a push notification. Tap it, and you're in the terminal session ready to respond.</p>
       <p>Notifications are rate-limited (one per session per 30 seconds) to avoid spam during burst output. They work on both Android and iOS standalone mode, with guidance for iOS users who need to add the PWA to their home screen first.</p>
     </div>
 

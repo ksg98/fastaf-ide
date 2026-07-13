@@ -160,7 +160,7 @@ jobs:
         with:
           tauriScript: pnpm tauri
           tagName: v__VERSION__
-          releaseName: 'FastAF v__VERSION__'
+          releaseName: 'fastestAF v__VERSION__'
           releaseBody: 'Download the appropriate installer for your platform.'
           releaseDraft: true
           prerelease: false
@@ -351,16 +351,16 @@ jobs:
             cat <<FILENAMES
 
           * 🍎 **macOS** (Apple Silicon)
-              \`FastAF_${VERSION}_aarch64.dmg\`
-              (alt: \`FastAF_aarch64.app.tar.gz\`)
+              \`fastestAF_${VERSION}_aarch64.dmg\`
+              (alt: \`fastestAF_aarch64.app.tar.gz\`)
           * 🪟 **Windows** (64-bit)
-              \`FastAF_${VERSION}_x64-setup.exe\`
+              \`fastestAF_${VERSION}_x64-setup.exe\`
           * 🐧 **Linux** (Debian / Ubuntu)
-              \`FastAF_${VERSION}_amd64.deb\`
+              \`fastestAF_${VERSION}_amd64.deb\`
           * 🐧 **Linux** (RHEL / Fedora / CentOS)
-              \`FastAF-${VERSION}-1.x86_64.rpm\`
+              \`fastestAF-${VERSION}-1.x86_64.rpm\`
           * 🐧 **Linux** (portable)
-              \`FastAF_${VERSION}_amd64.AppImage\`
+              \`fastestAF_${VERSION}_amd64.AppImage\`
           FILENAMES
             cat <<'FOOTER'
 
@@ -374,10 +374,10 @@ jobs:
 
           💻 **Install** (unsigned build)
 
-          macOS quarantines unsigned apps — after copying FastAF.app to /Applications, run before first launch:
+          macOS quarantines unsigned apps — after copying fastestAF.app to /Applications, run before first launch:
 
           ```bash
-          xattr -cr /Applications/FastAF.app
+          xattr -cr /Applications/fastestAF.app
           ```
           FOOTER
           } > /tmp/release-body.md

@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SSH tunnels, remote access, and the beta features you can try today — FastAF Blog</title>
+  <title>SSH tunnels, remote access, and the beta features you can try today — fastestAF Blog</title>
   <meta name="description" content="SSH tunnel manager, tuicommander-remote daemon, AI Triage, AI Watchers, and AI Chat — what they do, where they are, and why we want your feedback." />
 
-  <meta property="og:title" content="SSH tunnels, remote access, and the beta features you can try today — FastAF" />
+  <meta property="og:title" content="SSH tunnels, remote access, and the beta features you can try today — fastestAF" />
   <meta property="og:description" content="A tour of the features behind the Experimental toggle: SSH tunnels, remote daemon, AI-powered code review, terminal watchers, and chat." />
   <meta property="og:type" content="article" />
 
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -45,7 +45,7 @@
       <a href="/blog.html" class="blog-back">&larr; Blog</a>
       <time>May 10, 2026</time>
       <h1>SSH tunnels, remote access, and the beta features you can try today</h1>
-      <p class="blog-post-summary">FastAF has a growing set of features behind the Experimental toggle. SSH tunnel management, the <code>tuicommander-remote</code> daemon, AI-powered code triage, terminal watchers, and an AI chat panel. Here's what each one does, how to turn them on, and why your feedback matters.</p>
+      <p class="blog-post-summary">fastestAF has a growing set of features behind the Experimental toggle. SSH tunnel management, the <code>tuicommander-remote</code> daemon, AI-powered code triage, terminal watchers, and an AI chat panel. Here's what each one does, how to turn them on, and why your feedback matters.</p>
     </header>
 
     <div class="blog-section">
@@ -57,14 +57,14 @@
     <div class="blog-section">
       <h2>SSH tunnel manager</h2>
       <p>The SSH tunnel manager lives in the sidebar and is available without the experimental flag — it graduated to stable in v1.2.0. It lets you define named SSH port-forwarding profiles and keeps them alive automatically.</p>
-      <p>Each profile specifies a host, local/remote port pair, and optional SSH key. FastAF supervises the tunnel with exponential backoff (1s to 30s, with jitter) and classifies exit reasons — auth failure, host key mismatch, port conflict, network timeout — so the UI shows you what happened instead of a generic "disconnected."</p>
+      <p>Each profile specifies a host, local/remote port pair, and optional SSH key. fastestAF supervises the tunnel with exponential backoff (1s to 30s, with jitter) and classifies exit reasons — auth failure, host key mismatch, port conflict, network timeout — so the UI shows you what happened instead of a generic "disconnected."</p>
       <p>The sidebar shows each tunnel with a status badge: green for connected, yellow for reconnecting, red for failed. Click to edit or view the audit log. Every connect, disconnect, and error is recorded in a local SQLite database.</p>
       <p>The primary use case is port-forwarding to a <code>tuicommander-remote</code> daemon on a server you can only reach via SSH. But the tunnel manager is generic — it forwards any port for any service.</p>
     </div>
 
     <div class="blog-section">
       <h2>tuicommander-remote: your backend, anywhere</h2>
-      <p><code>tuicommander-remote</code> is a headless Rust binary that runs the FastAF backend without the desktop shell. Install it inside WSL, a Docker container, or a remote server, and the desktop app connects to it over HTTP/WebSocket — driving terminals, agents, git operations, and the MCP bridge as if everything were local.</p>
+      <p><code>tuicommander-remote</code> is a headless Rust binary that runs the fastestAF backend without the desktop shell. Install it inside WSL, a Docker container, or a remote server, and the desktop app connects to it over HTTP/WebSocket — driving terminals, agents, git operations, and the MCP bridge as if everything were local.</p>
       <p>We wrote a <a href="/blog/tuic-remote.html">deep dive on tuicommander-remote</a> that covers the architecture, the WSL/Docker/remote use cases, and the security model. The short version: the same Axum routes that power the PWA now power remote access, so there's no new protocol to learn or debug.</p>
       <p>What's in beta right now:</p>
       <ul>
@@ -93,7 +93,7 @@
 
     <div class="blog-section">
       <h2>AI Chat: conversation alongside the terminal</h2>
-      <p>The AI Chat panel gives you a conversational interface alongside your terminals. It has access to your current repository context — file tree, git state, recent changes — so you can ask questions about the codebase without leaving FastAF.</p>
+      <p>The AI Chat panel gives you a conversational interface alongside your terminals. It has access to your current repository context — file tree, git state, recent changes — so you can ask questions about the codebase without leaving fastestAF.</p>
       <p>This is the earliest of the experimental features. The interface and the context it has access to are both evolving. We're particularly interested in feedback on what context should be automatically included vs. explicitly attached.</p>
       <p>Enable it under <strong>Settings &gt; General &gt; Experimental Features &gt; AI Chat</strong>.</p>
     </div>

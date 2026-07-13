@@ -48,7 +48,7 @@ export interface AgentConfig {
 	description: string;
 	resumeCommand: string | null;
 	/**
-	 * Session file discovery config. When set, FastAF will scan the agent's
+	 * Session file discovery config. When set, fastestAF will scan the agent's
 	 * session storage directory to find the session ID for manually-launched agents.
 	 * Null for agents with no local session storage (cloud-only, single-file, SQLite, etc.).
 	 */

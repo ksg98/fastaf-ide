@@ -10,9 +10,9 @@ Research date: 2026-02-22
 
 ---
 
-## FastAF Current Shortcuts (for reference)
+## fastestAF Current Shortcuts (for reference)
 
-| Shortcut | FastAF |
+| Shortcut | fastestAF |
 |----------|---------------|
 | Cmd+Shift+D | Toggle git diff panel |
 | Cmd+E | Toggle file browser |
@@ -144,7 +144,7 @@ tmux uses a completely different model: prefix key (Ctrl+B by default) followed 
 
 ## Windows Platform Conventions
 
-FastAF is cross-platform: macOS uses Cmd, Windows/Linux use Ctrl. This section maps our shortcuts to their Ctrl equivalents and identifies Windows-specific conflicts.
+fastestAF is cross-platform: macOS uses Cmd, Windows/Linux use Ctrl. This section maps our shortcuts to their Ctrl equivalents and identifies Windows-specific conflicts.
 
 ### Windows System Reserved Shortcuts
 
@@ -244,7 +244,7 @@ These are reserved by Windows itself and **must never be used**:
 
 **Verdict: Cmd+D is the WORST possible choice for "toggle diff panel."** Every terminal uses it for splitting, and every code editor uses it for multi-select. Users embedded in any of these tools will have muscle memory conflicts.
 
-### 2. Other Current FastAF Conflicts
+### 2. Other Current fastestAF Conflicts
 
 | Our Shortcut | Conflicts With |
 |-------------|----------------|
@@ -291,11 +291,11 @@ Truly safe Cmd+Shift / Ctrl+Shift combos:
 
 **Option C: Cmd+U / Ctrl+U** -- Only VS Code uses it (undo cursor). Low conflict on both platforms. But "U" has no mnemonic connection to "diff."
 
-**Option D: Keep Cmd+D but document the conflict** -- Users in FastAF are not simultaneously in VS Code's editor or iTerm2's terminal; FastAF IS the terminal. However, users with iTerm2 muscle memory will instinctively hit Cmd+D to split.
+**Option D: Keep Cmd+D but document the conflict** -- Users in fastestAF are not simultaneously in VS Code's editor or iTerm2's terminal; fastestAF IS the terminal. However, users with iTerm2 muscle memory will instinctively hit Cmd+D to split.
 
 **Option E: Cmd+; / Ctrl+;** -- Unused across ALL tools on ALL platforms. Zero conflicts. No system-level reservation. Ergonomically less discoverable but completely safe.
 
-**Recommendation: Cmd+Shift+D / Ctrl+Shift+D** is the pragmatic choice. It's the "diff/debug" mental model (VS Code uses it for Debug/Run panel, which is conceptually adjacent). Terminal emulators use Cmd+Shift+D for horizontal split / duplicate tab, but FastAF already uses Cmd+\\ for splitting. The Windows Terminal "duplicate tab" conflict is minor. If you want absolute zero conflicts, use **Cmd+; / Ctrl+;**.
+**Recommendation: Cmd+Shift+D / Ctrl+Shift+D** is the pragmatic choice. It's the "diff/debug" mental model (VS Code uses it for Debug/Run panel, which is conceptually adjacent). Terminal emulators use Cmd+Shift+D for horizontal split / duplicate tab, but fastestAF already uses Cmd+\\ for splitting. The Windows Terminal "duplicate tab" conflict is minor. If you want absolute zero conflicts, use **Cmd+; / Ctrl+;**.
 
 ### 5. Alt+P and Alt+N Analysis
 
@@ -323,7 +323,7 @@ Alt+letter shortcuts are generally safe territory because:
 | Cmd+Space | Spotlight |
 | Cmd+, | Preferences (convention) |
 
-**Note on Cmd+M:** FastAF previously used Cmd+M for "toggle markdown panel" but this conflicted with macOS's "Minimize window" system shortcut, causing the panel to open unexpectedly when users tried to minimize. Changed to Cmd+Shift+M.
+**Note on Cmd+M:** fastestAF previously used Cmd+M for "toggle markdown panel" but this conflicted with macOS's "Minimize window" system shortcut, causing the panel to open unexpectedly when users tried to minimize. Changed to Cmd+Shift+M.
 
 #### Windows
 
@@ -337,7 +337,7 @@ Alt+letter shortcuts are generally safe territory because:
 | Ctrl+C | Copy / terminal interrupt (dual meaning) |
 | F11 | Toggle fullscreen (browsers, Explorer) |
 
-**Note on Ctrl+Shift+M:** The markdown panel shortcut maps to Ctrl+Shift+M on Windows/Linux. In VS Code, Ctrl+Shift+M opens the Problems panel — minor conflict but acceptable since FastAF is a different app context.
+**Note on Ctrl+Shift+M:** The markdown panel shortcut maps to Ctrl+Shift+M on Windows/Linux. In VS Code, Ctrl+Shift+M opens the Problems panel — minor conflict but acceptable since fastestAF is a different app context.
 
 #### Linux
 

@@ -149,7 +149,7 @@ export const GeneralTab: Component = () => {
 						<span class={s.infoBadgeTip}>
 							{t(
 								"general.hint.cliInfo",
-								"The TUIC CLI lets you control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions (create, list, send input, read output), and query repository status. Useful for scripting automation.",
+								"The TUIC CLI lets you control fastestAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions (create, list, send input, read output), and query repository status. Useful for scripting automation.",
 							)}
 						</span>
 					</span>
@@ -163,7 +163,7 @@ export const GeneralTab: Component = () => {
 								<p class={s.hint}>
 									{t(
 										"general.hint.cliNotInstalled",
-										"Install the TUIC CLI to control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions, and query repository status. Useful for scripting automation.",
+										"Install the TUIC CLI to control fastestAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions, and query repository status. Useful for scripting automation.",
 									)}
 								</p>
 								<button
@@ -213,7 +213,7 @@ export const GeneralTab: Component = () => {
 						<span class={s.infoBadgeTip}>
 							{t(
 								"general.hint.codeIntelligenceInfo",
-								"Integrates with MDKB to provide code navigation features in the editor: Cmd+Click go-to-definition, Shift+F12 find references, and symbol outline. Also serves as a persistent memory manager for AI agents, fully integrated with FastAF. MDKB indexes your repositories and exposes a local daemon for fast lookups.",
+								"Integrates with MDKB to provide code navigation features in the editor: Cmd+Click go-to-definition, Shift+F12 find references, and symbol outline. Also serves as a persistent memory manager for AI agents, fully integrated with fastestAF. MDKB indexes your repositories and exposes a local daemon for fast lookups.",
 							)}
 						</span>
 					</span>

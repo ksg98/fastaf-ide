@@ -48,7 +48,7 @@ echo ""
 echo "==> Generating AI release notes..."
 
 PROMPT=$(cat <<'PROMPTEOF'
-You are writing release notes for FastAF, a terminal session orchestrator for AI coding agents. The audience is developers who use this tool daily.
+You are writing release notes for fastestAF, a terminal session orchestrator for AI coding agents. The audience is developers who use this tool daily.
 
 Rewrite the following changelog entries as 3-8 concise, user-friendly bullet points. Rules:
 - Each bullet should be a single sentence, max 120 characters

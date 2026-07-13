@@ -1,4 +1,4 @@
-//! Global OS-level hotkey for toggling FastAF window visibility.
+//! Global OS-level hotkey for toggling fastestAF window visibility.
 //!
 //! Uses `tauri-plugin-global-shortcut` (Carbon RegisterEventHotKey on macOS,
 //! Win32 RegisterHotKey on Windows, X11 XGrabKey on Linux).

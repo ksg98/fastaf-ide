@@ -451,7 +451,7 @@ async fn push_test(
         .as_ref()
         .and_then(|b| b.get("title"))
         .and_then(|v| v.as_str())
-        .unwrap_or("FastAF Test");
+        .unwrap_or("fastestAF Test");
     let msg = body
         .as_ref()
         .and_then(|b| b.get("body"))

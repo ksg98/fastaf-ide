@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Tracking your AI usage before the rate limit hits — FastAF Blog</title>
+  <title>Tracking your AI usage before the rate limit hits — fastestAF Blog</title>
   <meta name="description" content="Running multiple AI agents burns through rate limits fast. We built a usage dashboard so you can see where you stand before you get throttled." />
 
-  <meta property="og:title" content="Tracking your AI usage before the rate limit hits — FastAF" />
+  <meta property="og:title" content="Tracking your AI usage before the rate limit hits — fastestAF" />
   <meta property="og:description" content="A usage dashboard for AI coding agents with rate limits, token tracking, and session history." />
   <meta property="og:image" content="/public/blog/claude-usage/dashboard.png" />
   <meta property="og:type" content="article" />
@@ -29,8 +29,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -57,7 +57,7 @@
 
     <div class="blog-section">
       <h2>The usage dashboard</h2>
-      <p>FastAF parses rate limit information from agent output in real time and aggregates it into a dedicated Claude Usage Dashboard. At the top, you see your current position against each limit — 5-hour window, 7-day window, and per-model limits — with progress bars and reset timers. One glance tells you how much runway you have.</p>
+      <p>fastestAF parses rate limit information from agent output in real time and aggregates it into a dedicated Claude Usage Dashboard. At the top, you see your current position against each limit — 5-hour window, 7-day window, and per-model limits — with progress bars and reset timers. One glance tells you how much runway you have.</p>
       <p>Below that, a 7-day usage chart shows your token consumption over time, split into input and output tokens. You can see your usage patterns: which days were heavy, when you hit peaks, and how the rolling windows are tracking. The project filter lets you break this down per repo if you want to see which project is burning the most capacity.</p>
     </div>
 
@@ -74,7 +74,7 @@
 
     <div class="blog-section">
       <h2>The status bar keeps you informed</h2>
-      <p>You don't need to open the dashboard constantly. The status bar at the bottom of FastAF shows a compact usage indicator: "5h: 28% · 7d: 45%". It's always visible, always current. When you're approaching a limit, you know it before launching another expensive agent task.</p>
+      <p>You don't need to open the dashboard constantly. The status bar at the bottom of fastestAF shows a compact usage indicator: "5h: 28% · 7d: 45%". It's always visible, always current. When you're approaching a limit, you know it before launching another expensive agent task.</p>
       <p>This changes how you schedule work. If you're at 80% on the 5-hour window, maybe you do the code review yourself instead of asking an agent. If you're at 10% on the 7-day window, you can confidently run multiple agents in parallel without worrying about hitting the ceiling.</p>
     </div>
 
@@ -85,7 +85,7 @@
 
     <div class="blog-section">
       <h2>What's next</h2>
-      <p>We're working on usage-aware scheduling — letting FastAF automatically balance agent workload across rate limit windows. If you queue up 3 tasks and the 5-hour window is nearly full, it could run the quick one now and defer the heavy ones until after the reset. Smart resource management for AI-first development.</p>
+      <p>We're working on usage-aware scheduling — letting fastestAF automatically balance agent workload across rate limit windows. If you queue up 3 tasks and the 5-hour window is nearly full, it could run the quick one now and defer the heavy ones until after the reset. Smart resource management for AI-first development.</p>
     </div>
   </article>
 

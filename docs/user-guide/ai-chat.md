@@ -178,7 +178,7 @@ Esc closes. Backed by the `list_knowledge_sessions` + `get_knowledge_session_det
 
 ## External MCP surface (`ai_terminal_*` tools)
 
-The same six ReAct tools are exposed to external MCP clients (Claude Code, Cursor, …) through the FastAF MCP server:
+The same six ReAct tools are exposed to external MCP clients (Claude Code, Cursor, …) through the fastestAF MCP server:
 
 | Tool | Purpose |
 |------|---------|

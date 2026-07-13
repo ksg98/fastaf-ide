@@ -106,7 +106,7 @@ export const WhatsNewDialog: Component<WhatsNewDialogProps> = (props) => {
 							>
 								<path d="M12 2l2.9 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14l-5-4.87 7.1-1.01L12 2z" />
 							</svg>
-							Enjoying FastAF? Star us on GitHub
+							Enjoying fastestAF? Star us on GitHub
 						</a>
 					</div>
 					<div class={d.actions}>

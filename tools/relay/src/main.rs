@@ -7,7 +7,7 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Blind E2E-encrypted WebSocket relay for FastAF mobile access.
+/// Blind E2E-encrypted WebSocket relay for fastestAF mobile access.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {

@@ -1,7 +1,7 @@
 [package]
 name = "tuic-bridge"
 version.workspace = true
-description = "MCP stdio-to-IPC bridge sidecar for FastAF"
+description = "MCP stdio-to-IPC bridge sidecar for fastestAF"
 authors = ["Stefano Straus <github.com/sstraus>"]
 edition = "2024"
 

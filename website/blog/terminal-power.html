@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>A terminal built for 8-hour sessions — FastAF Blog</title>
+  <title>A terminal built for 8-hour sessions — fastestAF Blog</title>
   <meta name="description" content="Split panes, detachable windows, find in content, tab pinning, and 50 concurrent sessions. We built a terminal for people who live in it." />
 
-  <meta property="og:title" content="A terminal built for 8-hour sessions — FastAF" />
+  <meta property="og:title" content="A terminal built for 8-hour sessions — fastestAF" />
   <meta property="og:description" content="Split panes, detachable windows, find in content, tab pinning, and 50 concurrent sessions." />
   <meta property="og:type" content="article" />
 
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -51,12 +51,12 @@
     <div class="blog-section">
       <h2>The problem</h2>
       <p>Most terminal emulators are built for running one thing at a time. Open a tab, run a command, close it. That's fine for quick tasks. But when you're orchestrating AI agents across multiple repos, you're staring at terminals for hours. You need to see two agents side by side. You need to find that error message from 500 lines ago. You need a terminal that survives accidental closes. You need one that doesn't become unusable after 20 tabs.</p>
-      <p>We use FastAF ourselves every day, for full workdays. Every feature here was born from actual friction — things that annoyed us at hour 4 and were unbearable by hour 8.</p>
+      <p>We use fastestAF ourselves every day, for full workdays. Every feature here was born from actual friction — things that annoyed us at hour 4 and were unbearable by hour 8.</p>
     </div>
 
     <figure class="blog-figure">
-      <img src="/public/blog/terminal-power/multi-agent-tabs.png" alt="FastAF with two tabs running different AI agents — Claude Code and OpenAI Codex side by side with status dots and agent detection" />
-      <figcaption>Two agents in separate tabs — Claude Code running a task in tab 1, OpenAI Codex starting up in tab 2. Each tab shows the agent name, status dot, and keyboard shortcut. FastAF detects the agent type automatically.</figcaption>
+      <img src="/public/blog/terminal-power/multi-agent-tabs.png" alt="fastestAF with two tabs running different AI agents — Claude Code and OpenAI Codex side by side with status dots and agent detection" />
+      <figcaption>Two agents in separate tabs — Claude Code running a task in tab 1, OpenAI Codex starting up in tab 2. Each tab shows the agent name, status dot, and keyboard shortcut. fastestAF detects the agent type automatically.</figcaption>
     </figure>
 
     <div class="blog-section">
@@ -66,24 +66,24 @@
     </div>
 
     <figure class="blog-figure">
-      <img src="/public/blog/terminal-power/split-pane.png" alt="FastAF with a vertical split — Claude Code agent on the left talking through a plan, lazygit on the right showing file changes and diff" />
+      <img src="/public/blog/terminal-power/split-pane.png" alt="fastestAF with a vertical split — Claude Code agent on the left talking through a plan, lazygit on the right showing file changes and diff" />
       <figcaption>A vertical split in action — Claude Code working through a task on the left, lazygit showing the resulting changes on the right. Two views of the same work, no tab switching needed.</figcaption>
     </figure>
 
     <div class="blog-section">
       <h2>Detach to window: the second monitor workflow</h2>
       <p>Right-click any tab and select "Detach to Window". The terminal pops out into its own floating OS window that you can move to a second monitor. The PTY session stays alive — it's the same session, just displayed in a different window. Close the floating window and the tab returns to the main window automatically.</p>
-      <p>This is how you use FastAF with a dual monitor setup: main window on screen 1 with the sidebar and git panel, detached agent terminals on screen 2 where you can watch them work full-screen.</p>
+      <p>This is how you use fastestAF with a dual monitor setup: main window on screen 1 with the sidebar and git panel, detached agent terminals on screen 2 where you can watch them work full-screen.</p>
     </div>
 
     <figure class="blog-figure">
       <img src="/public/blog/terminal-power/detached-window.png" alt="A lazygit terminal detached into its own floating OS window, showing file tree, diff, branches, and commits" />
-      <figcaption>A lazygit session detached to its own window — full-screen git management on a second monitor while the main FastAF window stays focused on agent terminals.</figcaption>
+      <figcaption>A lazygit session detached to its own window — full-screen git management on a second monitor while the main fastestAF window stays focused on agent terminals.</figcaption>
     </figure>
 
     <div class="blog-section">
       <h2>Sessions that survive everything</h2>
-      <p>Terminal sessions persist across app restarts. Close FastAF, reopen it, and your sessions are still there — same shell, same state. Sessions are restored lazily when you click the branch, so startup stays fast even with dozens of saved sessions.</p>
+      <p>Terminal sessions persist across app restarts. Close fastestAF, reopen it, and your sessions are still there — same shell, same state. Sessions are restored lazily when you click the branch, so startup stays fast even with dozens of saved sessions.</p>
       <p>Agent sessions get special treatment. If an AI agent was running when you closed the app, you get a clickable banner: "Agent session was active — click to resume." Press Space or Enter to resume, any other key to dismiss. No accidental re-injection of commands into a fresh shell.</p>
       <p>Even Vite HMR reloads (during development) don't kill sessions. The webview can reload without the Rust backend dropping your PTY connections.</p>
     </div>

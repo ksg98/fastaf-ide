@@ -1,4 +1,4 @@
-# FastAF — Project Rules
+# fastestAF — Project Rules
 
 ## Doc Sync
 
@@ -18,7 +18,7 @@ Read [`docs/sync-matrix.md`](docs/sync-matrix.md) before any feature/API/config 
 
 ## Test instance vs orchestrator instance — READ BEFORE TESTING
 
-There are TWO running FastAF instances; do not confuse them:
+There are TWO running fastestAF instances; do not confuse them:
 
 - **Orchestrator instance** — the one this agent is embedded in. The `tuicommander` MCP tools and `debug invoke_js` target THIS instance (Mission Control on `:14319`, app logs on `:9876`). It does **NOT** run your worktree build, so testing it proves nothing about your changes.
 - **Test instance** — the worktree dev build you start with `make dev`. Test your changes against it **only via its HTTP API on `http://127.0.0.1:9877`**. MCP/`invoke_js` cannot reach it.

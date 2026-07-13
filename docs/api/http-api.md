@@ -1291,5 +1291,5 @@ The following commands are accessible only via the Tauri `invoke()` bridge in th
 | `install_plugin_from_url` | `plugins.rs` | Install plugin from HTTPS URL |
 | `uninstall_plugin` | `plugins.rs` | Remove a plugin and all its files |
 | `get_agent_mcp_status` | `agent_mcp.rs` | Check MCP config status for an agent |
-| `install_agent_mcp` | `agent_mcp.rs` | Install FastAF MCP entry in agent config |
-| `remove_agent_mcp` | `agent_mcp.rs` | Remove FastAF MCP entry from agent config |
+| `install_agent_mcp` | `agent_mcp.rs` | Install fastestAF MCP entry in agent config |
+| `remove_agent_mcp` | `agent_mcp.rs` | Remove fastestAF MCP entry from agent config |

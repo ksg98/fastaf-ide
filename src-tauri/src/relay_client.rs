@@ -1,5 +1,5 @@
 //! Relay client: connects to the cloud relay server via WSS, bridging
-//! E2E-encrypted messages between FastAF's event bus and the mobile PWA.
+//! E2E-encrypted messages between fastestAF's event bus and the mobile PWA.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +27,7 @@ enum RelayMessage {
     #[serde(rename = "relay:status")]
     Status { peer: PeerStatus },
 
-    /// Push notification hint from FastAF to relay (echoed back).
+    /// Push notification hint from fastestAF to relay (echoed back).
     #[serde(rename = "relay:push")]
     Push {
         reason: String,

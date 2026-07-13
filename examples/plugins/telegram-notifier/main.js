@@ -231,7 +231,7 @@ function buildSettingsHtml() {
 <html>
 <head>
 <style>
-  /* Plugin-specific overrides — base styles inherited from FastAF */
+  /* Plugin-specific overrides — base styles inherited from fastestAF */
   body { padding: 16px; }
   .field { margin-bottom: 10px; }
   input[type="password"], input[type="text"] {
@@ -437,7 +437,7 @@ export default {
 
       if (data.type === "tg-test") {
         const ok = await sendTelegram(
-          `<b>FastAF</b>\nTest notification from <b>${escapeHtml(repoLabel())}</b>`,
+          `<b>fastestAF</b>\nTest notification from <b>${escapeHtml(repoLabel())}</b>`,
           false
         );
         panelHandle.send({

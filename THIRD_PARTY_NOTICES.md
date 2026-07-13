@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-FastAF uses the following open-source libraries. We are grateful to the
+fastestAF uses the following open-source libraries. We are grateful to the
 authors and communities behind each project.
 
 ---

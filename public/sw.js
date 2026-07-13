@@ -1,4 +1,4 @@
-// FastAF — Service Worker
+// fastestAF — Service Worker
 // Handles push notifications, offline splash, and auto-update lifecycle.
 
 const CACHE_NAME = "tuic-shell-v1";
@@ -66,7 +66,7 @@ self.addEventListener("push", (event) => {
       // Malformed push payload — show generic notification
     }
   }
-  const title = data.title || "FastAF";
+  const title = data.title || "fastestAF";
   const options = {
     body: data.body || "",
     icon: "/mobile-icon.svg?v=2",
@@ -120,7 +120,7 @@ const OFFLINE_SPLASH_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>FastAF — Offline</title>
+<title>fastestAF — Offline</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {

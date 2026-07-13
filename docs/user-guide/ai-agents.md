@@ -1,6 +1,6 @@
 # AI Agents
 
-FastAF detects, monitors, and manages AI coding agents running in your terminals.
+fastestAF detects, monitors, and manages AI coding agents running in your terminals.
 
 ## Supported Agents
 
@@ -17,7 +17,7 @@ FastAF detects, monitors, and manages AI coding agents running in your terminals
 
 ## Agent Detection
 
-FastAF auto-detects which agent is running in each terminal by matching output patterns. Detection uses agent-specific status line markers:
+fastestAF auto-detects which agent is running in each terminal by matching output patterns. Detection uses agent-specific status line markers:
 
 - **Claude Code**: Middle dot `·` (U+00B7), dingbat asterisks `✢` `✳` `✶` `✻` `✽` (U+2720–273F), or ASCII `*`
 - **Copilot CLI**: Therefore sign `∴` (U+2234), filled circle `●` (U+25CF), empty circle `○` (U+25CB)
@@ -35,7 +35,7 @@ Binary detection uses `resolve_cli()` — Rust probes well-known directories so 
 
 ## Rate Limit Detection
 
-When an agent hits a rate limit, FastAF detects it from terminal output:
+When an agent hits a rate limit, fastestAF detects it from terminal output:
 
 - **Status bar warning** — Shows a badge with the number of rate-limited sessions and a countdown timer
 - **Per-session tracking** — Each session's rate limit is tracked independently with automatic cleanup when expired
@@ -43,7 +43,7 @@ When an agent hits a rate limit, FastAF detects it from terminal output:
 
 ## Question Detection
 
-When an agent asks an interactive question (Y/N, multiple choice, numbered options), FastAF:
+When an agent asks an interactive question (Y/N, multiple choice, numbered options), fastestAF:
 
 1. Changes the **tab indicator** to a `?` icon
 2. Shows a **prompt overlay** with keyboard navigation:
@@ -57,7 +57,7 @@ For unrecognized agents, silence-based detection kicks in — if the terminal st
 
 ## Native Hook Instrumentation
 
-Instead of inferring busy/idle/waiting from terminal output, FastAF can drive an agent's status directly from the agent's **own hook system**. Enable it per agent in **Settings → Agents → (expand an agent) → "Use native agent hooks for status"**.
+Instead of inferring busy/idle/waiting from terminal output, fastestAF can drive an agent's status directly from the agent's **own hook system**. Enable it per agent in **Settings → Agents → (expand an agent) → "Use native agent hooks for status"**.
 
 When enabled, TUIC writes small shell hooks into the agent's settings file that emit `OSC 7770;state=…` on each lifecycle event (busy on prompt/tool start, `awaiting` on an approval/question prompt, idle on stop). The session state then follows the hooks precisely, and the heuristic question-detection above is suppressed for that agent (the silence-idle backstop stays on, so a crashed agent still recovers from "busy").
 
@@ -76,7 +76,7 @@ When enabled, TUIC writes small shell hooks into the agent's settings file that 
 
 ## Usage Limit Tracking
 
-For Claude Code, FastAF detects weekly and session usage limit messages from terminal output:
+For Claude Code, fastestAF detects weekly and session usage limit messages from terminal output:
 
 - **Unified agent badge** — When Claude is the active agent, the status bar shows a single badge combining the agent icon with usage data. The badge displays rate limit countdowns (when rate-limited), Claude Usage API data (5h/7d utilization percentages), or terminal-detected usage limits, in that priority order.
   - Blue: < 70% utilization
@@ -90,7 +90,7 @@ This helps you pace your usage across the week.
 
 A native feature (not a plugin) that provides detailed analytics for your Claude Code usage. Enable it in **Settings** > **Agents** > expand **Claude Code** > **Features** > **Usage Dashboard**.
 
-When enabled, FastAF polls the Claude API every 5 minutes and shows:
+When enabled, fastestAF polls the Claude API every 5 minutes and shows:
 
 - **Rate limits** — 5-hour and 7-day utilization bars with reset countdowns. Color-coded: green (OK), yellow (70%+), red (90%+).
 - **Usage Over Time** — 7-day token usage chart (input vs. output tokens) with hover tooltips.
@@ -132,7 +132,7 @@ claude                              # wrapper adds --session-id $TUIC_SESSION
 claude --session-id $TUIC_SESSION   # explicit, wrapper bypassed
 ```
 
-Claude Code stores the session locally. When you restart FastAF and switch to this branch, the session resumes automatically via `claude --resume <uuid>`.
+Claude Code stores the session locally. When you restart fastestAF and switch to this branch, the session resumes automatically via `claude --resume <uuid>`.
 
 **Automatic session binding (Goose):**
 
@@ -159,18 +159,18 @@ echo "Last run: $(date)" > "/tmp/tuic-$TUIC_SESSION.log"
 
 ### Automatic Resume
 
-When FastAF restores saved terminals after a restart, only tabs that had an active agent session (`agentType` set) are restored. Plain shell tabs are discarded and a fresh terminal is spawned instead. For agent tabs, FastAF checks whether the session file exists on disk before deciding the resume strategy:
+When fastestAF restores saved terminals after a restart, only tabs that had an active agent session (`agentType` set) are restored. Plain shell tabs are discarded and a fresh terminal is spawned instead. For agent tabs, fastestAF checks whether the session file exists on disk before deciding the resume strategy:
 
 1. **Verified session** — If `$TUIC_SESSION` maps to an existing session file (e.g. `~/.claude/projects/…/<uuid>.jsonl`), the agent resumes with `--resume <uuid>`
 2. **No session file** — Falls back to the agent's default resume behavior (e.g. `claude --continue` for the last session)
 
-The resume command honours the agent's **default run config**: FastAF swaps the binary in the resume command (`claude`) for the run config's `command` (e.g. `c2`) and appends the run config's args after the resume flag. So a user with the default run config `c2 --model claude-opus-4-6` will resume with `c2 --resume <uuid> --model claude-opus-4-6`, not `claude --resume <uuid>`.
+The resume command honours the agent's **default run config**: fastestAF swaps the binary in the resume command (`claude`) for the run config's `command` (e.g. `c2`) and appends the run config's args after the resume flag. So a user with the default run config `c2 --model claude-opus-4-6` will resume with `c2 --resume <uuid> --model claude-opus-4-6`, not `claude --resume <uuid>`.
 
 ### UI Agent Spawn
 
-When you spawn an agent via the context menu or command palette, FastAF automatically uses the tab's `TUIC_SESSION` as the `--session-id`. This ensures the spawned session is bound to the tab and will resume correctly on restart.
+When you spawn an agent via the context menu or command palette, fastestAF automatically uses the tab's `TUIC_SESSION` as the `--session-id`. This ensures the spawned session is bound to the tab and will resume correctly on restart.
 
-When the run config's command is a custom alias, symlink, or wrapper (e.g. `c2`, `c`), the foreground-process name no longer matches `"claude"` in `classify_agent`. FastAF compensates by pre-seeding the session's `agent_type` from the run config at PTY creation time, so intent/suggest parsing and tab-title binding work from the first output line. The foreground-process detector also falls back to the pre-seeded type whenever it sees a non-shell process it doesn't recognise, which covers aliases and wrapper scripts without requiring every name to be hardcoded.
+When the run config's command is a custom alias, symlink, or wrapper (e.g. `c2`, `c`), the foreground-process name no longer matches `"claude"` in `classify_agent`. fastestAF compensates by pre-seeding the session's `agent_type` from the run config at PTY creation time, so intent/suggest parsing and tab-title binding work from the first output line. The foreground-process detector also falls back to the pre-seeded type whenever it sees a non-shell process it doesn't recognise, which covers aliases and wrapper scripts without requiring every name to be hardcoded.
 
 ## Unsafe Mode (Unrestricted)
 
@@ -215,7 +215,7 @@ Tauri commands: `load_scheduler_config`, `save_scheduler_config`.
 
 ## Sleep Prevention
 
-When agents are actively working, FastAF can keep your machine awake:
+When agents are actively working, fastestAF can keep your machine awake:
 
 - Enable in **Settings** → **General** → **Prevent sleep when busy**
 - Uses the `keepawake` system integration

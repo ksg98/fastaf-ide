@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Benchmark IPC latency for key git commands via the HTTP API (Unix socket).
-# Requires FastAF to be running with at least one repo configured.
+# Requires fastestAF to be running with at least one repo configured.
 #
 # Measures:
 #   - repo_info (cached vs cold)
@@ -33,7 +33,7 @@ resolve_socket() {
 }
 
 SOCK=$(resolve_socket) || {
-  echo "ERROR: FastAF Unix socket not found."
+  echo "ERROR: fastestAF Unix socket not found."
   echo "Start the app first, then re-run this script."
   exit 1
 }
@@ -42,7 +42,7 @@ ITERATIONS="${2:-20}"
 
 # Verify health
 if ! curl -sf --unix-socket "$SOCK" "http://localhost/health" >/dev/null 2>&1; then
-  echo "ERROR: FastAF not responding on socket $SOCK"
+  echo "ERROR: fastestAF not responding on socket $SOCK"
   exit 1
 fi
 

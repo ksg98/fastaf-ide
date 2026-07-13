@@ -1,6 +1,6 @@
 # Plugin Dashboard Style Guide
 
-This document is the source of truth for plugin dashboard visuals. Every plugin that renders a dashboard (analytics, status, reports) MUST follow it so dashboards feel like a coherent part of FastAF rather than a patchwork of third-party panels.
+This document is the source of truth for plugin dashboard visuals. Every plugin that renders a dashboard (analytics, status, reports) MUST follow it so dashboards feel like a coherent part of fastestAF rather than a patchwork of third-party panels.
 
 The reference implementation is the built-in **Claude Usage** dashboard (`src/components/ClaudeUsageDashboard/`). New plugin dashboards should visually match it at a glance.
 
@@ -80,7 +80,7 @@ Generic classes from `PLUGIN_BASE_CSS` also apply inside dashboards: `.card`, `.
 - Don't introduce custom color tokens — pick one of: `--accent`, `--success`, `--warning`, `--error`, `--fg-primary`, `--fg-secondary`, `--fg-muted`, `--bg-primary`, `--bg-secondary`, `--bg-tertiary`, `--border`.
 - Don't set explicit `background: #...` anywhere.
 - Don't wrap the dashboard in max-width containers narrower than the panel — let it fill the iframe.
-- Don't use emoji icons. Use monochrome inline SVGs with `fill="currentColor"` (FastAF convention).
+- Don't use emoji icons. Use monochrome inline SVGs with `fill="currentColor"` (fastestAF convention).
 
 ## Registering the dashboard
 

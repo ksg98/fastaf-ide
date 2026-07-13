@@ -1,4 +1,4 @@
-/* FastAF — Global layout styles.
+/* fastestAF — Global layout styles.
    Only cross-component layout rules, JS-applied classes, and library overrides.
    Component-specific styles live in *.module.css next to each component. */
 
@@ -417,7 +417,7 @@
   line-height: 1.5;
 }
 
-/* @git-diff-view theme overrides — match FastAF palette */
+/* @git-diff-view theme overrides — match fastestAF palette */
 .diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root {
   --diff-border--: var(--border);
   --diff-plain-content--: var(--bg-primary);

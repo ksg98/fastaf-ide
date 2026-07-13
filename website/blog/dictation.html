@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Talking to your AI agents instead of typing — FastAF Blog</title>
+  <title>Talking to your AI agents instead of typing — fastestAF Blog</title>
   <meta name="description" content="We added local voice dictation powered by Whisper so you can talk to AI coding agents hands-free. No cloud, no latency, GPU-accelerated on Mac." />
 
-  <meta property="og:title" content="Talking to your AI agents instead of typing — FastAF" />
+  <meta property="og:title" content="Talking to your AI agents instead of typing — fastestAF" />
   <meta property="og:description" content="Local voice dictation with Whisper — talk to AI agents hands-free, no cloud required." />
   <meta property="og:image" content="/public/blog/dictation/settings.png" />
   <meta property="og:type" content="article" />
@@ -29,8 +29,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -52,12 +52,12 @@
     <div class="blog-section">
       <h2>The problem</h2>
       <p>AI coding agents are conversational — you give instructions in natural language and they execute. But typing those instructions can be slow, especially when you're explaining complex requirements or walking through a multi-step task. Sometimes you know exactly what you want but your typing speed is the bottleneck.</p>
-      <p>Cloud-based dictation services add latency and require sending your audio (potentially containing sensitive project details) to external servers. For a tool that runs locally and handles proprietary code, that's a non-starter. We needed voice input that was as private and fast as the rest of FastAF.</p>
+      <p>Cloud-based dictation services add latency and require sending your audio (potentially containing sensitive project details) to external servers. For a tool that runs locally and handles proprietary code, that's a non-starter. We needed voice input that was as private and fast as the rest of fastestAF.</p>
     </div>
 
     <div class="blog-section">
       <h2>Local Whisper inference</h2>
-      <p>FastAF integrates OpenAI's Whisper model directly via <code>whisper-rs</code> — the inference runs entirely on your machine. On macOS, it's GPU-accelerated through Metal, making transcription near-instant even with larger models. On Linux and Windows, it runs on CPU, which is slower but still practical with the smaller models.</p>
+      <p>fastestAF integrates OpenAI's Whisper model directly via <code>whisper-rs</code> — the inference runs entirely on your machine. On macOS, it's GPU-accelerated through Metal, making transcription near-instant even with larger models. On Linux and Windows, it runs on CPU, which is slower but still practical with the smaller models.</p>
       <p>You choose the model that fits your hardware. The range goes from Whisper Small (~488 MB, fast, good enough for short commands) to Whisper Large V3 Turbo (~1.5 GB, excellent accuracy for longer dictation). Models download once and stay on disk — no recurring network calls.</p>
     </div>
 
@@ -69,7 +69,7 @@
     <div class="blog-section">
       <h2>Push-to-talk with streaming</h2>
       <p>The interaction is simple: hold your hotkey, speak, release. Short presses pass through as normal input so the key isn't wasted. A configurable long-press threshold (default 200ms) prevents accidental triggers.</p>
-      <p>While you're speaking, FastAF shows real-time partial transcription in a floating toast above the status bar. It uses adaptive sliding windows — the first partial appears within ~1.5 seconds, then subsequent windows grow to 3 seconds for better quality. A voice activity detection (VAD) energy gate skips silence windows to prevent hallucination, and 200ms audio overlap between windows carries context for continuity.</p>
+      <p>While you're speaking, fastestAF shows real-time partial transcription in a floating toast above the status bar. It uses adaptive sliding windows — the first partial appears within ~1.5 seconds, then subsequent windows grow to 3 seconds for better quality. A voice activity detection (VAD) energy gate skips silence windows to prevent hallucination, and 200ms audio overlap between windows carries context for continuity.</p>
       <p>The transcribed text goes wherever makes sense: if a text input has focus (a textarea, input field, or contenteditable element), it inserts there. If no text input is focused, it writes directly to the active terminal PTY. The focus target is captured at key-press time, not release time, so you always know where the text will land.</p>
     </div>
 

@@ -1,5 +1,5 @@
 ---
-name: FastAF
+name: fastestAF
 description: AI-native IDE for multi-agent development
 colors:
   observation-blue: "#59a8dd"
@@ -49,13 +49,13 @@ spacing:
   xl: "32px"
 ---
 
-# Design System: FastAF
+# Design System: fastestAF
 
 ## 1. Overview
 
 **Creative North Star: "The Lab Workbench"**
 
-FastAF's design system is technical clarity achieved through earned simplicity. This is the workbench where experiments run in parallel, results visible at a glance. Every interface element answers "what's happening?" or "what can I do?" with precision. The system rejects decoration that doesn't inform, roundedness that softens edges for consumer comfort, and the ubiquitous Electron-IDE layout cliché (sidebar-left, tabs-top, panels-bottom).
+fastestAF's design system is technical clarity achieved through earned simplicity. This is the workbench where experiments run in parallel, results visible at a glance. Every interface element answers "what's happening?" or "what can I do?" with precision. The system rejects decoration that doesn't inform, roundedness that softens edges for consumer comfort, and the ubiquitous Electron-IDE layout cliché (sidebar-left, tabs-top, panels-bottom).
 
 Density is correct when users monitor many parallel sessions at once, but density without hierarchy is chaos. Typography scale, spacing rhythm, and restrained color use guide the eye. The UI assumes technical fluency: no tutorial overlays, no "simple mode" hiding power behind gentleness. Labels are direct, affordances are clear, and the interface stays out of the way until you need it.
 
@@ -118,7 +118,7 @@ A palette of cool, desaturated neutrals with a single technical accent. Dark by 
 
 **The Mono Primary Rule.** JetBrains Mono is not an accent face for code snippets; it's the primary face by visual weight. The terminal pane occupies 60–80% of screen area in typical use. System sans is the support player.
 
-**The Scale Compression Rule.** Font sizes range 12–14px for UI chrome. No large display sizes; FastAF has no hero headlines or marketing copy. The scale is compressed by design to maximize information density.
+**The Scale Compression Rule.** Font sizes range 12–14px for UI chrome. No large display sizes; fastestAF has no hero headlines or marketing copy. The scale is compressed by design to maximize information density.
 
 ## 4. Elevation
 
@@ -133,7 +133,7 @@ Structural, not decorative. Shadows signal functional elevation (dropdown menus,
 
 **The Flat-By-Default Rule.** Cards, panels, and containers at rest have no shadow. Elevation is state-driven: a dropdown appears on click, a modal overlays the app on open. Shadows are never used for "card depth" decoration.
 
-**The No-Glassmorphism Rule.** Blurs and translucent glass effects are prohibited. FastAF surfaces are opaque. Overlays use solid backgrounds + shadows, not backdrop-filter.
+**The No-Glassmorphism Rule.** Blurs and translucent glass effects are prohibited. fastestAF surfaces are opaque. Overlays use solid backgrounds + shadows, not backdrop-filter.
 
 ## 5. Components
 
@@ -186,15 +186,15 @@ Concrete, forceful guardrails derived from PRODUCT.md anti-references and the de
 - **Do** apply shadows only to functional overlays (dropdowns, modals, context menus). Never decorate cards with shadows.
 - **Do** give every interactive element clear hover/focus states. Tactile feedback is non-negotiable.
 - **Do** use status dots and semantic colors to reduce "where was that?" cognitive load. Make state visible at a glance.
-- **Do** keep borders crisp (1px) and corners minimal (2–4px). FastAF is precise, not soft.
+- **Do** keep borders crisp (1px) and corners minimal (2–4px). fastestAF is precise, not soft.
 - **Do** respect the mono-forward hierarchy. Terminal content is primary; UI chrome is support.
 
 ### Don't:
 - **Don't** use pill-shaped buttons (--radius-pill or --radius-full on buttons). Buttons are rectangular with subtle corners.
 - **Don't** apply gradient backgrounds or gradient text (`background-clip: text`). Solid colors only.
 - **Don't** use glassmorphism (backdrop-filter, translucent overlays). All surfaces are opaque.
-- **Don't** converge toward the VS Code / Electron-IDE layout reflex (sidebar-left, tabs-top, panels-bottom). FastAF's layout is distinct.
+- **Don't** converge toward the VS Code / Electron-IDE layout reflex (sidebar-left, tabs-top, panels-bottom). fastestAF's layout is distinct.
 - **Don't** soften edges with excessive rounding or rounded-everything. This is not a consumer app (no Slack-style chatty SaaS polish).
-- **Don't** hide power behind "simple mode" or tutorial overlays. Users chose FastAF because they outgrew simpler tools; trust them to learn.
+- **Don't** hide power behind "simple mode" or tutorial overlays. Users chose fastestAF because they outgrew simpler tools; trust them to learn.
 - **Don't** use side-stripe borders (border-left > 1px as colored accent on cards/list items). Use full borders, background tints, or leading icons instead.
 - **Don't** style for nostalgia (ncurses ASCII-art chrome, retro terminal aesthetics). Modern native UI with clean typography.

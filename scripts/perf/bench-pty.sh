@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Benchmark PTY throughput by blasting data through a terminal session.
-# Requires FastAF to be running with an open terminal tab.
+# Requires fastestAF to be running with an open terminal tab.
 #
-# This is a MANUAL benchmark — it prints commands to run in a FastAF
+# This is a MANUAL benchmark — it prints commands to run in a fastestAF
 # terminal and measures timing externally. The HTTP API does not support
 # session creation directly.
 #
@@ -16,7 +16,7 @@ LINES=$((SIZE_MB * 50000))
 
 echo "=== PTY Throughput Benchmark ==="
 echo ""
-echo "Run these commands in a FastAF terminal tab to measure throughput."
+echo "Run these commands in a fastestAF terminal tab to measure throughput."
 echo "Each command generates ~${SIZE_MB}MB of output through the full pipeline:"
 echo "  PTY read → UTF-8 decode → escape processing → VT100 parse → Tauri emit → xterm.js render"
 echo ""

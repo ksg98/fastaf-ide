@@ -7,7 +7,7 @@ import { storiesTickerPlugin } from "./storiesTickerPlugin";
 import type { TuiPlugin } from "./types";
 
 /**
- * Built-in plugins shipped with FastAF.
+ * Built-in plugins shipped with fastestAF.
  * Session prompts moved to native Rust (last_prompts in AppState, displayed in Activity Dashboard).
  * Claude Usage Dashboard was moved from plugin to native feature (src/features/claudeUsage.ts).
  */

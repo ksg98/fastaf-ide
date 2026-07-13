@@ -200,7 +200,7 @@ pub(crate) struct ConversationHandle {
 /// assistant code-block rules from the chat path.
 fn build_base_system_prompt(session_id: &str) -> String {
     format!(
-        "You are a terminal assistant and AI agent embedded in FastAF (session: {session_id}).\n\
+        "You are a terminal assistant and AI agent embedded in fastestAF (session: {session_id}).\n\
          You can see the user's terminal output and use tools to act on it.\n\n\
          ## Code block rules (for inline responses)\n\
          - Every fenced code block gets a ▶ Run button — put EXACTLY ONE command per block.\n\

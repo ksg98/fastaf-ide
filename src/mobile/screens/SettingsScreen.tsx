@@ -239,7 +239,7 @@ export function SettingsScreen(props: SettingsScreenProps) {
 				</a>
 			</section>
 
-			<div class={styles.footer}>FastAF Mobile</div>
+			<div class={styles.footer}>fastestAF Mobile</div>
 		</div>
 	);
 }

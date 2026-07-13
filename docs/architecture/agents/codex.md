@@ -237,7 +237,7 @@ Not observed: `/stats`, `/status` (CC-specific).
 ### Enter key handling
 
 Codex likely uses the kitty keyboard protocol to distinguish Enter
-(submit) from Enter (newline in multiline prompt). The FastAF
+(submit) from Enter (newline in multiline prompt). The fastestAF
 `session action=input special_key=enter` sends `\r` which Codex may
 interpret as newline. Workaround: send text and Enter in separate
 calls, but this is unreliable for multiline content.

@@ -1,14 +1,14 @@
 # Agent Teams
 
-Agent Teams let Claude Code spawn teammate agents that work in parallel, each in its own FastAF terminal tab. Teammates share a task list, communicate directly with each other, and coordinate autonomously.
+Agent Teams let Claude Code spawn teammate agents that work in parallel, each in its own fastestAF terminal tab. Teammates share a task list, communicate directly with each other, and coordinate autonomously.
 
 ## How It Works
 
-FastAF automatically injects `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` into every PTY session. This unlocks Claude Code's `TeamCreate`, `TaskCreate`, and `SendMessage` tools. When Claude Code spawns a teammate, FastAF creates a new terminal tab via its MCP `agent spawn` tool — no external dependencies required.
+fastestAF automatically injects `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` into every PTY session. This unlocks Claude Code's `TeamCreate`, `TaskCreate`, and `SendMessage` tools. When Claude Code spawns a teammate, fastestAF creates a new terminal tab via its MCP `agent spawn` tool — no external dependencies required.
 
 ## Setup
 
-No configuration needed. Agent Teams is enabled by default for all Claude Code sessions launched from FastAF.
+No configuration needed. Agent Teams is enabled by default for all Claude Code sessions launched from fastestAF.
 
 To verify it's active, check the environment inside any terminal:
 
@@ -28,7 +28,7 @@ Create an agent team with 3 teammates to review this PR:
 - One on test coverage
 ```
 
-Claude Code handles team creation, task assignment, and coordination. Each teammate appears as a separate tab in FastAF's sidebar.
+Claude Code handles team creation, task assignment, and coordination. Each teammate appears as a separate tab in fastestAF's sidebar.
 
 ### Navigating Teammates
 
@@ -39,7 +39,7 @@ Claude Code supports two display modes for teammates:
 | **In-process** | All teammates run inside the lead's terminal. Use `Shift+Down` to cycle between them. | None |
 | **Split panes** | Each teammate gets its own pane. | tmux or iTerm2 |
 
-FastAF works with both modes. In-process mode is the default and requires no extra setup. With split panes, each teammate appears as a separate FastAF tab.
+fastestAF works with both modes. In-process mode is the default and requires no extra setup. With split panes, each teammate appears as a separate fastestAF tab.
 
 ### Key Controls (In-process Mode)
 
@@ -78,7 +78,7 @@ Agent Teams is an experimental Claude Code feature. Current limitations:
 
 **Teammates not appearing as tabs:**
 - Verify the env var is set: `echo $CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` should print `1`
-- Check that FastAF's MCP server is running (status bar shows the MCP icon)
+- Check that fastestAF's MCP server is running (status bar shows the MCP icon)
 
 **Teammates not spawning at all:**
 - Claude Code decides whether to create a team based on task complexity. Be explicit: "Create an agent team with N teammates"
@@ -89,28 +89,28 @@ Agent Teams is an experimental Claude Code feature. Current limitations:
 
 ## Inter-Agent Messaging
 
-FastAF includes a built-in messaging system that lets agents in different terminal tabs communicate directly. This works alongside (and independently from) Claude Code's native Agent Teams messaging.
+fastestAF includes a built-in messaging system that lets agents in different terminal tabs communicate directly. This works alongside (and independently from) Claude Code's native Agent Teams messaging.
 
 ### How It Works
 
-Every PTY session gets a stable `TUIC_SESSION` UUID injected as an environment variable. Agents use this as their identity to register, discover peers, and exchange messages through FastAF's MCP `messaging` tool.
+Every PTY session gets a stable `TUIC_SESSION` UUID injected as an environment variable. Agents use this as their identity to register, discover peers, and exchange messages through fastestAF's MCP `messaging` tool.
 
 When both sender and recipient are connected via SSE (the default for Claude Code agents), messages are **pushed in real-time** as MCP channel notifications (`notifications/claude/channel`). They also land in a buffered inbox as a fallback.
 
 ### What Gets Injected Automatically
 
-FastAF injects these into every Claude Code PTY session — no manual configuration needed:
+fastestAF injects these into every Claude Code PTY session — no manual configuration needed:
 
 | Variable / Flag | Value | Purpose |
 |---|---|---|
 | `TUIC_SESSION` | Stable UUID per tab | Agent identity for messaging |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | Unlocks TeamCreate/TaskCreate/SendMessage |
-| `--dangerously-load-development-channels server:tuicommander` | *(CLI flag, agent spawn only)* | Enables real-time channel push from FastAF |
+| `--dangerously-load-development-channels server:tuicommander` | *(CLI flag, agent spawn only)* | Enables real-time channel push from fastestAF |
 
 ### Messaging Flow
 
 > **Identity is automatic.** The bridge asserts your `$TUIC_SESSION` at connect
-> (`x-tuic-session` header → server auto-bind), so an agent spawned inside FastAF
+> (`x-tuic-session` header → server auto-bind), so an agent spawned inside fastestAF
 > is already a registered peer. `agent action=register` is only needed to set a friendly
 > name/project, or from a standalone session where the env-var route is unavailable.
 
@@ -125,7 +125,7 @@ FastAF injects these into every Claude Code PTY session — no manual configurat
    agent action=register tuic_session="$TUIC_SESSION" name="worker-1" project="/path/to/repo"
    ```
 
-2. **Discover peers** — Find other agents connected to FastAF:
+2. **Discover peers** — Find other agents connected to fastestAF:
    ```
    agent action=list_peers
    agent action=list_peers project="/path/to/repo"   # filter by repo
@@ -153,7 +153,7 @@ Messages are always buffered in the inbox regardless of whether channel push suc
 
 ### Using Messaging from a Standalone Claude Code Session
 
-If you run Claude Code outside FastAF but still want to use TUIC messaging, you need to:
+If you run Claude Code outside fastestAF but still want to use TUIC messaging, you need to:
 
 1. **Set `TUIC_SESSION`** — export a stable UUID:
    ```bash
@@ -161,7 +161,7 @@ If you run Claude Code outside FastAF but still want to use TUIC messaging, you 
    ```
 
 2. **Connect to TUIC's MCP server** — the MCP channel is a Unix socket (Windows: named
-   pipe), reached through the `tuic-bridge` stdio adapter, **not** a TCP port. FastAF
+   pipe), reached through the `tuic-bridge` stdio adapter, **not** a TCP port. fastestAF
    auto-installs this entry into each supported agent's config; to add it by hand:
    ```json
    {
@@ -195,8 +195,8 @@ If you run Claude Code outside FastAF but still want to use TUIC messaging, you 
 | **Discovery** | `list_peers` with project filter | Team config file |
 | **Persistence** | In-memory ring buffer (lost on TUIC restart) | Files on disk (survives restart) |
 
-Both systems work simultaneously. Claude Code agents spawned by FastAF can use either or both.
+Both systems work simultaneously. Claude Code agents spawned by fastestAF can use either or both.
 
 ## Deprecated: it2 Shim
 
-Earlier versions of FastAF used an `it2` shell script shim that emulated iTerm2's CLI to intercept teammate creation. This approach is deprecated — teammate spawning now uses direct MCP tool calls (`agent spawn`). The shim at `~/.tuicommander/bin/it2` is no longer needed.
+Earlier versions of fastestAF used an `it2` shell script shim that emulated iTerm2's CLI to intercept teammate creation. This approach is deprecated — teammate spawning now uses direct MCP tool calls (`agent spawn`). The shim at `~/.tuicommander/bin/it2` is no longer needed.

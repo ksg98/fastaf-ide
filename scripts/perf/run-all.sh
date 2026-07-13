@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run all automated profiling benchmarks in sequence.
-# Requires FastAF to be running.
+# Requires fastestAF to be running.
 #
 # Usage: scripts/perf/run-all.sh [repo_path]
 set -euo pipefail
@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="${1:-}"
 
 echo "╔══════════════════════════════════════╗"
-echo "║  FastAF Performance Benchmark  ║"
+echo "║  fastestAF Performance Benchmark  ║"
 echo "╚══════════════════════════════════════╝"
 echo ""
 echo "Date: $(date)"

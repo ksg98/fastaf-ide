@@ -128,7 +128,7 @@ async fn open_secondary_window(app: tauri::AppHandle) -> Result<(), String> {
 
     let url = tauri::WebviewUrl::App("/?mode=secondary".into());
     tauri::WebviewWindowBuilder::new(&app, "secondary", url)
-        .title("FastAF — Secondary")
+        .title("fastestAF — Secondary")
         .inner_size(1200.0, 800.0)
         .min_inner_size(800.0, 600.0)
         .build()
@@ -1302,7 +1302,7 @@ pub fn run() {
                     "main",
                     tauri::WebviewUrl::App("index.html".into()),
                 )
-                .title("FastAF")
+                .title("fastestAF")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(800.0, 600.0)
                 .decorations(true)

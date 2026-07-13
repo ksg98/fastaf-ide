@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Why we built Smart Prompts — FastAF Blog</title>
+  <title>Why we built Smart Prompts — fastestAF Blog</title>
   <meta name="description" content="Every day we were copy-pasting the same instructions to AI agents. Smart Prompts turns repetitive prompts into one-click actions with automatic context." />
 
-  <meta property="og:title" content="Why we built Smart Prompts — FastAF" />
+  <meta property="og:title" content="Why we built Smart Prompts — fastestAF" />
   <meta property="og:description" content="Every day we were copy-pasting the same instructions to AI agents. Smart Prompts turns repetitive prompts into one-click actions with automatic context." />
   <meta property="og:image" content="/public/blog/smart-prompts/library.png" />
   <meta property="og:type" content="article" />
@@ -29,8 +29,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -52,14 +52,14 @@
     <div class="blog-section">
       <h2>The problem</h2>
       <p>If you work with AI coding agents in the terminal, you know the routine. You want the agent to commit your changes with a good message, so you type out the instructions. Again. You want it to review a PR, so you paste the same prompt you used yesterday — but first you need to look up the PR number, the branch name, and what files changed.</p>
-      <p>Every interaction required two things: remembering the right prompt, and manually gathering the context the agent needs to do its job. Branch name, diff stats, PR number, dirty file count — information that FastAF already has, but the agent doesn't.</p>
+      <p>Every interaction required two things: remembering the right prompt, and manually gathering the context the agent needs to do its job. Branch name, diff stats, PR number, dirty file count — information that fastestAF already has, but the agent doesn't.</p>
       <p>This wasn't a minor annoyance. It was a daily friction that added up. And when our community started asking for exactly this — a way to automate the repetitive parts of talking to agents — we knew it was time.</p>
     </div>
 
     <div class="blog-section">
       <h2>What Smart Prompts are</h2>
-      <p>Smart Prompts is a library of reusable, context-aware instructions that you can fire with a single click or keyboard shortcut. FastAF ships with 24 built-in prompts covering the most common workflows: committing, reviewing, explaining changes, creating PRs, addressing review comments, and more.</p>
-      <p>The key insight is that prompts shouldn't be static text. Each prompt is a template with variables like <code>{diff}</code>, <code>{branch}</code>, <code>{pr_number}</code>, and <code>{staged_diff}</code> — 31 context variables in total. When you trigger a prompt, FastAF resolves every variable automatically from your current git state. The agent gets a complete, ready-to-execute instruction without you typing a single character of context.</p>
+      <p>Smart Prompts is a library of reusable, context-aware instructions that you can fire with a single click or keyboard shortcut. fastestAF ships with 24 built-in prompts covering the most common workflows: committing, reviewing, explaining changes, creating PRs, addressing review comments, and more.</p>
+      <p>The key insight is that prompts shouldn't be static text. Each prompt is a template with variables like <code>{diff}</code>, <code>{branch}</code>, <code>{pr_number}</code>, and <code>{staged_diff}</code> — 31 context variables in total. When you trigger a prompt, fastestAF resolves every variable automatically from your current git state. The agent gets a complete, ready-to-execute instruction without you typing a single character of context.</p>
     </div>
 
     <figure class="blog-figure">
@@ -91,7 +91,7 @@
 
     <div class="blog-section">
       <h2>31 context variables, zero manual input</h2>
-      <p>Every prompt can reference variables that FastAF resolves automatically. The git layer provides <code>{branch}</code>, <code>{diff}</code>, <code>{staged_diff}</code>, <code>{changed_files}</code>, <code>{commit_log}</code>, <code>{last_commit}</code>, <code>{conflict_files}</code>, <code>{stash_list}</code>, <code>{remote_url}</code>, <code>{current_user}</code>, <code>{base_branch}</code>, <code>{repo_name}</code>, <code>{branch_status}</code>, and <code>{dirty_files_count}</code>.</p>
+      <p>Every prompt can reference variables that fastestAF resolves automatically. The git layer provides <code>{branch}</code>, <code>{diff}</code>, <code>{staged_diff}</code>, <code>{changed_files}</code>, <code>{commit_log}</code>, <code>{last_commit}</code>, <code>{conflict_files}</code>, <code>{stash_list}</code>, <code>{remote_url}</code>, <code>{current_user}</code>, <code>{base_branch}</code>, <code>{repo_name}</code>, <code>{branch_status}</code>, and <code>{dirty_files_count}</code>.</p>
       <p>The GitHub layer adds PR-specific context: <code>{pr_number}</code>, <code>{pr_title}</code>, <code>{pr_url}</code>, <code>{pr_state}</code>, <code>{merge_status}</code>, <code>{review_decision}</code>, <code>{pr_checks}</code>, <code>{pr_author}</code>, <code>{pr_labels}</code>, <code>{pr_additions}</code>, and <code>{pr_deletions}</code>. Terminal context includes <code>{agent_type}</code> and <code>{cwd}</code>.</p>
       <p>This opens up use cases beyond simple commits. A "Review PR" prompt can include the full diff, the PR checks status, and the review decision — the agent gets everything it needs to give a meaningful review. A "Resolve Conflicts" prompt can list the conflicting files and the base branch so the agent knows what it's merging into. A custom "Deploy Check" prompt could include the branch status (ahead/behind remote) and dirty file count to warn before pushing.</p>
     </div>
