@@ -8,7 +8,7 @@
 
 # To Test
 
-Features to test when FastAF is more usable.
+Features to test when fastestAF is more usable.
 
 ## File type colors in file browser (2026-07-11)
 
@@ -418,9 +418,9 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [x] Help Panel > Keyboard Shortcuts > Global Hotkey section visible (desktop only) _(verified + location corrected: KeyboardShortcutsTab is in HelpPanel.tsx:143, NOT the Settings panel — Settings has no "Keyboard Shortcuts" tab)_
 - [HUMAN] Click "Click to set hotkey" → capture mode activates
 - [HUMAN] Press a key combo → registers and shows in the field
-- [HUMAN] Switch to another app → press hotkey → FastAF appears focused
-- [HUMAN] Press hotkey again while focused → FastAF minimizes
-- [HUMAN] Press hotkey while visible but unfocused → FastAF gains focus
+- [HUMAN] Switch to another app → press hotkey → fastestAF appears focused
+- [HUMAN] Press hotkey again while focused → fastestAF minimizes
+- [HUMAN] Press hotkey while visible but unfocused → fastestAF gains focus
 - [HUMAN] Clear button removes the hotkey
 - [HUMAN] Hotkey persists across app restart
 - [x] Browser mode: Global Hotkey section is hidden _(verified: KeyboardShortcutsTab.tsx:491 Show when={isTauri()} guards entire Global Hotkey section; browser mode returns false)_
@@ -450,7 +450,7 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [x] Footer hints visible in all modes (command, filename, content) (MCP maccontrol verified 2026-04-10)
 
 ## Agent Detection Fix
-- [HUMAN] Launch Claude Code in a FastAF terminal → agent detected within 3 seconds (status bar shows agent badge)
+- [HUMAN] Launch Claude Code in a fastestAF terminal → agent detected within 3 seconds (status bar shows agent badge)
 - [HUMAN] Smart Commit and other inject-mode prompts become enabled when agent is detected
 - [HUMAN] After HMR reload (save a .tsx file), terminal session survives and agent is still detected
 
@@ -711,7 +711,7 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [x] View menu: Toggle Sidebar, Split Right/Down, Maximize/Restore Pane, Focus Mode, Zoom In/Out/Reset, Zoom All In/Out/Reset, File Browser, Diff/Markdown/Notes/Outline/AI Chat/Compose/Global Workspace panels
 - [x] Go menu: Next/Previous Tab, Switch to Tab 1-9
 - [x] Tools menu: Prompt Library, Run/Edit & Run Command, Search File Contents, Git Panel, Branches, Diff Scroll, Task Queue, SSH Tunnels, Process Manager
-- [x] Help menu: Help Panel, About FastAF (+ Check for Updates on non-macOS)
+- [x] Help menu: Help Panel, About fastestAF (+ Check for Updates on non-macOS)
 - [x] Clicking menu items triggers correct action (same as keyboard shortcut) _(verified: lib.rs:1113-1114 on_menu_event emits "menu-action" with item ID; App.tsx:2031-2250 exhaustive switch dispatches to same shortcutHandlers)_
 - [x] Accelerator labels show correct modifier key per platform (CmdOrCtrl in code → Tauri resolves)
 - [x] No double-firing: pressing Cmd+T creates one tab, not two

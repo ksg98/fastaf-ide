@@ -1,6 +1,6 @@
-/// AI-optimized plugin development reference for FastAF.
+/// AI-optimized plugin development reference for fastestAF.
 /// Compiled as a const so it's zero-cost at runtime.
-pub const PLUGIN_DOCS: &str = r###"# FastAF Plugin Development Reference
+pub const PLUGIN_DOCS: &str = r###"# fastestAF Plugin Development Reference
 
 ## Installation
 
@@ -115,7 +115,7 @@ Every `ui:panel` iframe gets two automatic injections: (1) a **base stylesheet**
 
 ## MANDATORY — Dashboard Style Guide
 
-**If your plugin renders a dashboard (analytics, status, reports, summaries) you MUST use the shared `.dashboard`/`.dash-*` classes from the base stylesheet.** Hand-rolling layout/card/stat CSS is forbidden — dashboards must look like a native part of FastAF, not a third-party widget. The built-in Claude Usage dashboard is the reference.
+**If your plugin renders a dashboard (analytics, status, reports, summaries) you MUST use the shared `.dashboard`/`.dash-*` classes from the base stylesheet.** Hand-rolling layout/card/stat CSS is forbidden — dashboards must look like a native part of fastestAF, not a third-party widget. The built-in Claude Usage dashboard is the reference.
 
 Rules:
 1. Wrap the entire dashboard in `<div class="dashboard">`.
@@ -145,7 +145,7 @@ Minimum dashboard skeleton:
 </div>
 ```
 
-Full reference, checklist, and do/don'ts: `docs/plugins-style.md` in the FastAF repo. Treat that file as authoritative — if it conflicts with this reference, it wins.
+Full reference, checklist, and do/don'ts: `docs/plugins-style.md` in the fastestAF repo. Treat that file as authoritative — if it conflicts with this reference, it wins.
 
 ## PluginHost API
 

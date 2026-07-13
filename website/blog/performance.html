@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>How we keep it fast with 10 repos and 8 terminals open — FastAF Blog</title>
+  <title>How we keep it fast with 10 repos and 8 terminals open — fastestAF Blog</title>
   <meta name="description" content="Running a desktop app with 10 repos, 8 terminals, and constant git operations requires serious performance work. Here's what we did under the hood." />
 
-  <meta property="og:title" content="How we keep it fast with 10 repos and 8 terminals open — FastAF" />
-  <meta property="og:description" content="Async git, PTY write coalescing, watcher-driven caches, and bundle splitting — the performance work behind FastAF." />
+  <meta property="og:title" content="How we keep it fast with 10 repos and 8 terminals open — fastestAF" />
+  <meta property="og:description" content="Async git, PTY write coalescing, watcher-driven caches, and bundle splitting — the performance work behind fastestAF." />
   <meta property="og:type" content="article" />
 
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -50,13 +50,13 @@
 
     <div class="blog-section">
       <h2>The challenge</h2>
-      <p>FastAF isn't a simple terminal emulator. At any given moment it might be tracking 10 repositories with file watchers, running 8 PTY sessions with real-time output parsing, polling GitHub for PR status, maintaining MCP connections to upstream servers, and rendering a WebGL-accelerated terminal — all in a desktop app built on Tauri.</p>
+      <p>fastestAF isn't a simple terminal emulator. At any given moment it might be tracking 10 repositories with file watchers, running 8 PTY sessions with real-time output parsing, polling GitHub for PR status, maintaining MCP connections to upstream servers, and rendering a WebGL-accelerated terminal — all in a desktop app built on Tauri.</p>
       <p>When we first started scaling to multiple repos and agents, things got sluggish. Branch switching would hang for seconds. Terminal output would stutter during burst output from agents. The sidebar would freeze while git commands ran. We had to rethink how every layer of the stack handles concurrency and I/O.</p>
     </div>
 
     <div class="blog-section">
       <h2>Async git: stop blocking the event loop</h2>
-      <p>The single biggest improvement came from converting all git operations to async. FastAF runs about 25 different git commands — status, diff, log, branch list, remote info, stash list, and more. Originally these ran synchronously, which meant a slow <code>git diff</code> on a large repo would block Tokio worker threads and freeze the entire UI.</p>
+      <p>The single biggest improvement came from converting all git operations to async. fastestAF runs about 25 different git commands — status, diff, log, branch list, remote info, stash list, and more. Originally these ran synchronously, which meant a slow <code>git diff</code> on a large repo would block Tokio worker threads and freeze the entire UI.</p>
       <p>Now every git command runs via <code>tokio::task::spawn_blocking</code>, keeping the async runtime free for IPC events and UI updates. We also merged sequential subprocess calls where possible — <code>get_changed_files</code> used to spawn 2 git processes in sequence, now it's 1. The result: git operations never block the UI, even on repos with thousands of changed files.</p>
     </div>
 
@@ -74,7 +74,7 @@
 
     <div class="blog-section">
       <h2>Process detection without fork-bombing</h2>
-      <p>FastAF detects which process is running in each terminal (to show the agent name in the tab). The old approach used <code>ps</code> — literally forking a new process to check each terminal. With 5 terminals polling every few seconds, that's ~100 fork+exec operations per minute, each spawning a shell to parse process tables.</p>
+      <p>fastestAF detects which process is running in each terminal (to show the agent name in the tab). The old approach used <code>ps</code> — literally forking a new process to check each terminal. With 5 terminals polling every few seconds, that's ~100 fork+exec operations per minute, each spawning a shell to parse process tables.</p>
       <p>Now we use direct syscalls: <code>proc_pidpath</code> on macOS, <code>/proc/pid/comm</code> on Linux. Zero forks, zero subprocess overhead. The process name comes from the kernel in microseconds instead of milliseconds.</p>
     </div>
 
@@ -98,21 +98,21 @@
 
     <div class="blog-section">
       <h2>Cross-platform without compromise</h2>
-      <p>FastAF runs on macOS, Windows, and Linux — and each platform has its own performance characteristics. Process detection uses <code>libproc</code> on macOS and <code>CreateToolhelp32Snapshot</code> on Windows — both native APIs, no shell forks. Shell escaping adapts to <code>cmd.exe</code> on Windows. IDE detection probes <code>.app</code> bundles on macOS, registry entries on Windows, and PATH on Linux.</p>
+      <p>fastestAF runs on macOS, Windows, and Linux — and each platform has its own performance characteristics. Process detection uses <code>libproc</code> on macOS and <code>CreateToolhelp32Snapshot</code> on Windows — both native APIs, no shell forks. Shell escaping adapts to <code>cmd.exe</code> on Windows. IDE detection probes <code>.app</code> bundles on macOS, registry entries on Windows, and PATH on Linux.</p>
       <p>Local MCP connections use Unix domain sockets on macOS/Linux and named pipes (<code>\\.\pipe\tuicommander-mcp</code>) on Windows — both faster than TCP for local IPC. TCP ports are reserved for remote access only, avoiding unnecessary network stack overhead for local operations.</p>
       <p>Credentials are stored in the OS keyring — macOS Keychain, Windows Credential Manager, Linux Secret Service — instead of plaintext files. Tailscale TLS certificate provisioning uses the Local API (Unix socket) on macOS/Linux and falls back to CLI on Windows. Every platform-specific path was chosen for the lowest overhead available on that OS.</p>
     </div>
 
     <div class="blog-section">
       <h2>Remote access: keeping it fast over the network</h2>
-      <p>When you access FastAF remotely (via Tailscale or direct connection), performance over the network becomes critical. Terminal output streams through WebSocket with a structured event format — parsed events (status changes, suggestions, questions) are extracted server-side so the client doesn't need to re-parse raw terminal output. This reduces bandwidth and client-side CPU.</p>
+      <p>When you access fastestAF remotely (via Tailscale or direct connection), performance over the network becomes critical. Terminal output streams through WebSocket with a structured event format — parsed events (status changes, suggestions, questions) are extracted server-side so the client doesn't need to re-parse raw terminal output. This reduces bandwidth and client-side CPU.</p>
       <p>The Activity Dashboard throttles its snapshot to every 10 seconds, preventing constant re-renders and WebSocket messages when multiple agents are active. New items and removals trigger immediate refreshes, but steady-state updates batch efficiently. The PTY read buffer at 64KB means burst output is sent in fewer, larger WebSocket frames instead of hundreds of tiny ones.</p>
       <p>For the mobile PWA specifically, the VT100-extracted clean line format strips escape codes server-side, sending only the visible text. The log view uses a 500-line rolling buffer — enough to see what's happening without sending the entire scrollback over a cellular connection.</p>
     </div>
 
     <div class="blog-section">
       <h2>The result</h2>
-      <p>FastAF today runs comfortably with 10+ repos and 8+ terminals open for full workdays. Branch switching is near-instant. Terminal output stays smooth during agent bursts. The sidebar and git panel respond within a frame. And it stays that way after 8 hours of continuous use — no progressive degradation, no memory creep, no accumulating event listeners.</p>
+      <p>fastestAF today runs comfortably with 10+ repos and 8+ terminals open for full workdays. Branch switching is near-instant. Terminal output stays smooth during agent bursts. The sidebar and git panel respond within a frame. And it stays that way after 8 hours of continuous use — no progressive degradation, no memory creep, no accumulating event listeners.</p>
       <p>Performance isn't a feature you ship once. It's a constraint you maintain every day. Every new feature gets measured against the baseline: does the sidebar still respond in one frame? Does branch switching still feel instant? If not, we optimize before we merge.</p>
     </div>
   </article>

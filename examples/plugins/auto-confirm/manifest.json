@@ -5,6 +5,6 @@
   "minAppVersion": "0.3.0",
   "main": "main.js",
   "description": "Auto-responds 'y' to [y/N] prompts in terminal output.",
-  "author": "FastAF",
+  "author": "fastestAF",
   "capabilities": ["pty:write"]
 }

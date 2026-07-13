@@ -28,14 +28,14 @@ install_macos() {
   local APP_HOME
   local APP_VER
 
-  if [ -d "$OSX_HOME/FastAF.app" ]; then
-    APP_HOME="$OSX_HOME/FastAF.app"
+  if [ -d "$OSX_HOME/fastestAF.app" ]; then
+    APP_HOME="$OSX_HOME/fastestAF.app"
   else
     # might not be in the usual place, but if the user has set up tuic we can find it from that
     if [ -e $(command -v tuic) ]; then
       local TUIC=$(readlink $(command -v tuic))
       APP_HOME="${TUIC%/Contents/MacOS/tuic}"
-      OSX_HOME="${APP_HOME%/FastAF.app}"
+      OSX_HOME="${APP_HOME%/fastestAF.app}"
     fi
   fi
 
@@ -112,7 +112,7 @@ install_macos() {
     exit 0
   fi
 
-  local ASSET="FastAF_aarch64.app.tar.gz"
+  local ASSET="fastestAF_aarch64.app.tar.gz"
   local URL="https://github.com/$REPO/releases/download/$WANTED_VER/$ASSET"
   echo "Downloading and installing version ${LATEST_VER}"
   curl -LSs "$URL" \
@@ -121,7 +121,7 @@ install_macos() {
     echo "Unable to download version ${WANTED_VER} from GitHub"
     exit 1
   fi
-  echo "Installed to ${OSX_HOME}/FastAF.app"
+  echo "Installed to ${OSX_HOME}/fastestAF.app"
   echo "Tip: you can also install via Homebrew: brew install sstraus/tap/tuicommander"
 }
 
@@ -146,7 +146,7 @@ install_linux() {
     echo "No dpkg or rpm found — installing AppImage..."
     URL=$(get_download_url 'amd64\.AppImage')
     if [ -z "$URL" ]; then echo "Error: AppImage asset not found in latest release"; exit 1; fi
-    DEST="${HOME}/.local/bin/FastAF.AppImage"
+    DEST="${HOME}/.local/bin/fastestAF.AppImage"
     mkdir -p "$(dirname "$DEST")"
     curl -fsSL "$URL" -o "$DEST"
     chmod +x "$DEST"
@@ -154,11 +154,11 @@ install_linux() {
     echo "Make sure ~/.local/bin is in your PATH"
     return
   fi
-  echo "FastAF installed successfully!"
+  echo "fastestAF installed successfully!"
 }
 
 OS=$(uname -s)
-echo "Installing FastAF for $OS..."
+echo "Installing fastestAF for $OS..."
 
 case "$OS" in
   Darwin) install_macos ;;

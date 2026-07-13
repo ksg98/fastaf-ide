@@ -39,7 +39,7 @@ The socket at `<config_dir>/mcp.sock` is managed with two safety layers to survi
 | **Retry bind** | 3 attempts × 100 ms, each removes stale file before trying | A crashed previous run leaves a dead socket file that blocks `bind(2)` — retrying clears it |
 | **Real liveness check** | `UnixStream::connect()` in `get_mcp_status` | `file.exists()` returns `true` for stale sockets; only a real connect reveals whether the server is alive |
 
-**Why this matters for AI tool integrations:** The `tuic-bridge` sidecar connects via the Unix socket to expose FastAF tools to Claude Code. If the socket is stale (app crashed, Tauri force-quit), the bridge cannot connect and returns `tools: []`, silently disabling all MCP tools in the agent session. The retry bind ensures the socket is always valid on restart; the real liveness check ensures the UI accurately reports the server state.
+**Why this matters for AI tool integrations:** The `tuic-bridge` sidecar connects via the Unix socket to expose fastestAF tools to Claude Code. If the socket is stale (app crashed, Tauri force-quit), the bridge cannot connect and returns `tools: []`, silently disabling all MCP tools in the agent session. The retry bind ensures the socket is always valid on restart; the real liveness check ensures the UI accurately reports the server state.
 
 ## REST API Endpoints
 
@@ -190,7 +190,7 @@ Custom URL schemes (`vscode://`, `x-devonthink://`, etc.) do **not** work inside
 ### MCP Tools: `ai_terminal_*` (external agent surface)
 
 Thirteen tools exposed to external MCP clients (e.g. Claude Code, Cursor) that let a
-remote AI agent observe and interact with a FastAF terminal, plus read/write/run
+remote AI agent observe and interact with a fastestAF terminal, plus read/write/run
 files in the session's sandboxed repo. All input and mutating
 operations (`send_input`, `send_key`, `drive_agent`, `write_file`, `edit_file`, `run_command`) require user confirmation and are
 rejected while an internal agent loop is active on the target session.
@@ -275,7 +275,7 @@ Non-Claude Code MCP clients do not receive this field.
 
 ## Upstream MCP Proxy
 
-FastAF can proxy upstream MCP servers (stdio or HTTP) and aggregate their tools into its own `tools/list` response. Configuration lives in `mcp-servers.json`.
+fastestAF can proxy upstream MCP servers (stdio or HTTP) and aggregate their tools into its own `tools/list` response. Configuration lives in `mcp-servers.json`.
 
 ### Stdio transport
 
@@ -301,7 +301,7 @@ Both transports log `warn!` when `tools/list` returns a response without `result
 
 ## OAuth 2.1 Upstream Authentication
 
-When an upstream MCP server requires OAuth instead of a static Bearer token, FastAF runs a full RFC 9728 (Protected Resource Metadata) + RFC 8414 (Authorization Server Discovery) flow with PKCE S256.
+When an upstream MCP server requires OAuth instead of a static Bearer token, fastestAF runs a full RFC 9728 (Protected Resource Metadata) + RFC 8414 (Authorization Server Discovery) flow with PKCE S256.
 
 ### Configuration
 
@@ -361,7 +361,7 @@ OAuth callbacks arrive exclusively through the OS-level `tuic://` deep link — 
 
 ## Inter-Agent Messaging
 
-The `agent` tool's messaging actions (`register`, `list_peers`, `send`, `inbox`) enable coordination between multiple AI agents connected to FastAF.
+The `agent` tool's messaging actions (`register`, `list_peers`, `send`, `inbox`) enable coordination between multiple AI agents connected to fastestAF.
 
 ### Protocol
 

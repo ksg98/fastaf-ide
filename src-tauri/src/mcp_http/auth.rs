@@ -308,7 +308,7 @@ pub async fn basic_auth_middleware(
         }
         AuthResult::MissingHeader | AuthResult::NotConfigured => (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Basic realm=\"FastAF\"")],
+            [(header::WWW_AUTHENTICATE, "Basic realm=\"fastestAF\"")],
             "Scan the QR code or authenticate with Basic Auth",
         )
             .into_response(),

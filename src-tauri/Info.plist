@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>FastAF uses the microphone for speech-to-text dictation into the terminal.</string>
+	<string>fastestAF uses the microphone for speech-to-text dictation into the terminal.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>FastAF runs a local HTTP server for MCP integration and remote terminal access.</string>
+	<string>fastestAF runs a local HTTP server for MCP integration and remote terminal access.</string>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>Terminal commands may need to access music files in your library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
@@ -25,7 +25,7 @@
 	<key>NSContactsUsageDescription</key>
 	<string>Terminal commands may need to access your contacts.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>FastAF needs to send Apple Events so terminal commands can control other apps (e.g. opening a diff in BBEdit).</string>
+	<string>fastestAF needs to send Apple Events so terminal commands can control other apps (e.g. opening a diff in BBEdit).</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

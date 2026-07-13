@@ -18,10 +18,10 @@ pub(crate) const OPENCODE_MARKER: &str = "/* tuic-managed */";
 pub(crate) fn opencode_plugin_source() -> String {
     format!(
         r#"{OPENCODE_MARKER}
-// FastAF native-hook instrumentation for OpenCode.
+// fastestAF native-hook instrumentation for OpenCode.
 // Drives busy/idle/awaiting by emitting OSC 7770 to the controlling tty.
 // Inert outside a TUIC session (guarded on TUIC_SESSION). Do not edit — this
-// file is managed by FastAF and is overwritten/removed by the Settings
+// file is managed by fastestAF and is overwritten/removed by the Settings
 // toggle.
 import {{ openSync, writeSync, closeSync }} from "node:fs";
 

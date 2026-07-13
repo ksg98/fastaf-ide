@@ -1,4 +1,4 @@
-//! HTTP-over-IPC client for communicating with a running FastAF instance.
+//! HTTP-over-IPC client for communicating with a running fastestAF instance.
 //!
 //! Unix: connects via Unix domain socket at `<config_dir>/mcp.sock`
 //! Windows: connects via named pipe at `\\.\pipe\tuicommander-mcp`
@@ -30,7 +30,7 @@ fn connect() -> io::Result<std::os::unix::net::UnixStream> {
     std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("Cannot connect to FastAF at {}: {e}", path.display()),
+            format!("Cannot connect to fastestAF at {}: {e}", path.display()),
         )
     })
 }
@@ -45,7 +45,7 @@ fn connect() -> io::Result<std::fs::File> {
         .map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("Cannot connect to FastAF at {path}: {e}"),
+                format!("Cannot connect to fastestAF at {path}: {e}"),
             )
         })
 }
@@ -173,12 +173,12 @@ pub fn delete(path: &str) -> io::Result<Response> {
     request("DELETE", path, None)
 }
 
-/// Check if FastAF is running
+/// Check if fastestAF is running
 pub fn is_running() -> bool {
     get("/health").is_ok()
 }
 
-/// Try to launch FastAF if not running
+/// Try to launch fastestAF if not running
 pub fn ensure_running() -> io::Result<()> {
     if is_running() {
         return Ok(());
@@ -188,9 +188,9 @@ pub fn ensure_running() -> io::Result<()> {
     {
         std::process::Command::new("open")
             .arg("-a")
-            .arg("FastAF")
+            .arg("fastestAF")
             .spawn()
-            .map_err(|e| io::Error::new(e.kind(), format!("Failed to launch FastAF: {e}")))?;
+            .map_err(|e| io::Error::new(e.kind(), format!("Failed to launch fastestAF: {e}")))?;
     }
 
     #[cfg(target_os = "linux")]
@@ -203,7 +203,7 @@ pub fn ensure_running() -> io::Result<()> {
             std::process::Command::new("tuicommander")
                 .spawn()
                 .map_err(|e| {
-                    io::Error::new(e.kind(), format!("Failed to launch FastAF: {e}"))
+                    io::Error::new(e.kind(), format!("Failed to launch fastestAF: {e}"))
                 })?;
         }
     }
@@ -211,9 +211,9 @@ pub fn ensure_running() -> io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        std::process::Command::new(format!("{local_app_data}\\FastAF\\FastAF.exe"))
+        std::process::Command::new(format!("{local_app_data}\\fastestAF\\fastestAF.exe"))
             .spawn()
-            .map_err(|e| io::Error::new(e.kind(), format!("Failed to launch FastAF: {e}")))?;
+            .map_err(|e| io::Error::new(e.kind(), format!("Failed to launch fastestAF: {e}")))?;
     }
 
     // Wait for socket to become available (up to 10s)
@@ -226,6 +226,6 @@ pub fn ensure_running() -> io::Result<()> {
 
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
-        "FastAF did not start within 10 seconds",
+        "fastestAF did not start within 10 seconds",
     ))
 }

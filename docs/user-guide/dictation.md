@@ -1,6 +1,6 @@
 # Voice Dictation
 
-FastAF includes local voice-to-text using Whisper AI. All processing happens on your machine — no cloud services.
+fastestAF includes local voice-to-text using Whisper AI. All processing happens on your machine — no cloud services.
 
 ## Setup
 
@@ -19,7 +19,7 @@ FastAF includes local voice-to-text using Whisper AI. All processing happens on 
 3. **Release** the key/button
 4. Transcribed text is inserted into the focused input element (textarea, input, or contenteditable). If no text input has focus, the text falls back to the active terminal PTY. The focus target is captured at key-press time.
 
-The hotkey works globally — even when FastAF is not focused.
+The hotkey works globally — even when fastestAF is not focused.
 
 ## Models
 

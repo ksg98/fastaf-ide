@@ -5,7 +5,7 @@
   "minAppVersion": "0.3.0",
   "main": "main.js",
   "description": "Watches terminal output for generated report files (from skills, hooks, or scripts) and shows them in the Activity Center with a markdown viewer.",
-  "author": "FastAF",
+  "author": "fastestAF",
   "capabilities": [
     "fs:read",
     "ui:markdown"

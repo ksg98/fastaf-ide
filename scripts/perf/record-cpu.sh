@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Record a CPU flamegraph of FastAF using samply.
+# Record a CPU flamegraph of fastestAF using samply.
 # Builds in release mode with debug info, then launches under samply.
 # When you close the app, the flamegraph opens in Firefox Profiler.
 #

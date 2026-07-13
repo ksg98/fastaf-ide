@@ -1,6 +1,6 @@
 # TUIC SDK
 
-The TUIC SDK provides `window.tuic` inside iframes hosted by FastAF, enabling plugins and external pages to interact with the host app: open files, read content, launch terminals, copy to clipboard, receive theme updates, and more.
+The TUIC SDK provides `window.tuic` inside iframes hosted by fastestAF, enabling plugins and external pages to interact with the host app: open files, read content, launch terminals, copy to clipboard, receive theme updates, and more.
 
 ## Two Injection Modes
 

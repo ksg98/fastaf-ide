@@ -1,4 +1,4 @@
-# FastAF — Visual Style Guide
+# fastestAF — Visual Style Guide
 
 Reference for all UI/CSS/layout work. Every visual change MUST follow this guide.
 

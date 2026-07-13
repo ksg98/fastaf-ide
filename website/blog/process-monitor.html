@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>A built-in process monitor for your terminal trees — FastAF Blog</title>
+  <title>A built-in process monitor for your terminal trees — fastestAF Blog</title>
   <meta name="description" content="When one of a dozen agents pins a core, which one is it? We added a process monitor that reports CPU and RSS for TUIC and every child process tree — over MCP, over HTTP, and as a self-contained dashboard." />
 
-  <meta property="og:title" content="A built-in process monitor for your terminal trees — FastAF" />
+  <meta property="og:title" content="A built-in process monitor for your terminal trees — fastestAF" />
   <meta property="og:description" content="When one of a dozen agents pins a core, which one is it? A process monitor reporting CPU and RSS for TUIC and every child tree — over MCP, HTTP, and a self-contained dashboard." />
   <meta property="og:type" content="article" />
 
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -55,7 +55,7 @@
 
     <div class="blog-section">
       <h2>CPU and memory, attributed to sessions</h2>
-      <p>FastAF already tracks which PTY belongs to which session, so it already knows the process-tree roots. The monitor walks those trees and, for every PID, reports resident memory (RSS) and CPU percent — each row tagged with the session it belongs to. On Unix it batches a single <code>ps -o pid,rss,%cpu</code> query across all the PIDs at once rather than stat-ing each process individually; on Windows it queries each process's working-set size through the platform API. The output is a flat list of <code>{ session_id, name, pid, rss_kb, cpu_pct }</code> — TUIC itself included, so you can see the app's own footprint alongside its children.</p>
+      <p>fastestAF already tracks which PTY belongs to which session, so it already knows the process-tree roots. The monitor walks those trees and, for every PID, reports resident memory (RSS) and CPU percent — each row tagged with the session it belongs to. On Unix it batches a single <code>ps -o pid,rss,%cpu</code> query across all the PIDs at once rather than stat-ing each process individually; on Windows it queries each process's working-set size through the platform API. The output is a flat list of <code>{ session_id, name, pid, rss_kb, cpu_pct }</code> — TUIC itself included, so you can see the app's own footprint alongside its children.</p>
     </div>
 
     <div class="blog-section">

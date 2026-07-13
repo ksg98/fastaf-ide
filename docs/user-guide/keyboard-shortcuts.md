@@ -28,13 +28,13 @@ The file is a JSON array of override objects. Only include shortcuts you want to
 - `"key"` uses `Cmd` as the platform-agnostic modifier (resolved to Meta on macOS, Ctrl on Win/Linux)
 - Set `"key": ""` or `"key": null` to unbind an action
 - Changes made via the UI are saved to this same file
-- The file is loaded at startup — restart FastAF to pick up manual edits
+- The file is loaded at startup — restart fastestAF to pick up manual edits
 
 See the action table below for all available action names.
 
 ## Global Hotkey
 
-A configurable OS-level shortcut to toggle FastAF's visibility from any application.
+A configurable OS-level shortcut to toggle fastestAF's visibility from any application.
 
 - **Configure:** Help > Keyboard Shortcuts > Global Hotkey (top of the tab)
 - **No default** — you must set it yourself (e.g., `Ctrl+Space`, `Cmd+\``)

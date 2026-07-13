@@ -169,7 +169,7 @@ Uses backspace (`\b`) to overwrite in place. No cursor positioning.
 
 ---
 
-## Implications for FastAF
+## Implications for fastestAF
 
 ### Parsing Strategy
 Aider is the ideal case for `chrome.rs` changed-rows detection:

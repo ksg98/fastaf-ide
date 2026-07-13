@@ -8,7 +8,7 @@ pub enum RelayMessage {
     #[serde(rename = "relay:status")]
     Status { peer: PeerStatus },
 
-    /// Push notification hint from FastAF to relay.
+    /// Push notification hint from fastestAF to relay.
     /// Not E2E-encrypted — contains only metadata.
     #[serde(rename = "relay:push")]
     Push {

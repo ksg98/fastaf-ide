@@ -50,7 +50,7 @@ Each supported agent has an expandable row showing detection status, version, an
 |---------|-------------|
 | **Agent Detection** | Auto-detects running agents from terminal output patterns. Shows "Available" or "Not found" for each agent. |
 | **Run Configurations** | Custom launch configs (binary path, args, model, prompt) per agent. Add, set default, edit, or delete configurations (Edit / Delete live under the `···` menu on each row). A config named **"review"** enables the Review button in the PR Detail Popover — its args are interpolated with `{pr_number}`, `{branch}`, `{base_branch}`, `{repo}`, `{pr_url}`. The agent's **default run config** also drives resume: launching / resuming the agent swaps the agent's default binary (e.g. `claude`) for `command` and appends `args` after the resume flag. |
-| **MCP Integration** | Install/remove FastAF as MCP server for supported agents. Shows install status with a dot indicator. |
+| **MCP Integration** | Install/remove fastestAF as MCP server for supported agents. Shows install status with a dot indicator. |
 | **Native agent hooks for status** | (Claude, Gemini, Codex, Grok, OpenCode) Toggle under each supported agent's expanded row. When enabled, TUIC writes lifecycle hooks into the agent's settings file / plugin directory so that busy/idle/awaiting state is driven directly by the agent's own hook events (OSC 7770) rather than inferred from terminal output. An install-state badge next to the toggle shows **"Hooks installed"** (current), **"Hooks: re-enable"** (outdated — TUIC version changed), or nothing (not installed). The effect takes place on the agent's **next launch**. See [AI Agents — Native Hook Instrumentation](ai-agents.md#native-hook-instrumentation) for details. |
 | **Claude Usage Dashboard** | (Claude Code only) Toggle under Features when the Claude row is expanded. Enables rate limit monitoring, session analytics, token usage charts, activity heatmap, and per-project breakdowns. Usage data appears in the status bar agent badge and in a dedicated dashboard tab. |
 | **Agent Model Overrides** | Per-task-phase model routing for the AI Agent loop. Four phases: `plan`, `search`, `read`, `write`. Each phase can use a different model (e.g. a cheaper model for search, a stronger model for write). Configure in Settings > AI Chat. |
@@ -104,7 +104,7 @@ Tools:
 
 ### Upstream MCP Servers
 
-Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
+Proxy external MCP servers through fastestAF. Their tools appear prefixed as `{name}__{tool}`:
 - Add upstream servers via HTTP (Streamable MCP) or stdio (process) transport
 - API keys for HTTP upstreams are stored in the OS keychain
 - Live status (connecting, ready, circuit open, failed) with tool count and call metrics
@@ -156,7 +156,7 @@ Per-repository settings accessed via sidebar `⋯` → "Repo Settings".
 
 ### Repo-Local Config (`.tuic.json`)
 
-A `.tuic.json` file in the repository root provides team-shareable settings that override per-repo app settings and global defaults. The file is read-only from FastAF (edit it in your repo directly).
+A `.tuic.json` file in the repository root provides team-shareable settings that override per-repo app settings and global defaults. The file is read-only from fastestAF (edit it in your repo directly).
 
 **Precedence:** `.tuic.json` > per-repo app settings > global defaults
 

@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Knowing what your agents are doing without looking — FastAF Blog</title>
+  <title>Knowing what your agents are doing without looking — fastestAF Blog</title>
   <meta name="description" content="When you run multiple AI agents in parallel, you can't watch every terminal. We built status detection, sound notifications, and an activity dashboard so you don't have to." />
 
-  <meta property="og:title" content="Knowing what your agents are doing without looking — FastAF" />
+  <meta property="og:title" content="Knowing what your agents are doing without looking — fastestAF" />
   <meta property="og:description" content="Status detection, sound notifications, and an activity dashboard for parallel AI agents." />
   <meta property="og:image" content="/public/blog/agent-observability/activity-dashboard.png" />
   <meta property="og:type" content="article" />
@@ -29,8 +29,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -57,7 +57,7 @@
 
     <div class="blog-section">
       <h2>Every tab tells you its state</h2>
-      <p>FastAF parses the terminal output stream in real time to detect what each agent is doing. Every terminal tab shows a colored status dot that updates automatically:</p>
+      <p>fastestAF parses the terminal output stream in real time to detect what each agent is doing. Every terminal tab shows a colored status dot that updates automatically:</p>
       <p><strong>Grey (Idle)</strong> — no session or nothing running. <strong>Blue pulsing (Busy)</strong> — the agent is producing output, actively working. <strong>Green (Done)</strong> — command completed successfully. <strong>Purple (Unseen)</strong> — the agent finished while you were looking at a different tab. <strong>Orange pulsing (Question)</strong> — the agent needs your input. <strong>Red pulsing (Error)</strong> — API error or agent stuck.</p>
       <p>This is the core of the observability system. You don't need to read the terminal output to know the state — the dot tells you. A quick scan of the tab bar shows you which agents are working, which are done, and which need you.</p>
     </div>
@@ -74,14 +74,14 @@
 
     <div class="blog-section">
       <h2>Sound notifications keep you in flow</h2>
-      <p>Visual indicators work when you're looking at FastAF. But the whole point of running agents in parallel is that you might be doing something else — reading docs, reviewing code in another app, or just thinking. That's where sound notifications come in.</p>
-      <p>FastAF plays distinct sounds for different events: a chime when an agent completes a task, a different tone when an agent asks a question, an alert for errors and rate limits. You learn the sounds quickly — after a day, you know the difference between "agent done, no rush" and "agent stuck, needs input now" without looking.</p>
+      <p>Visual indicators work when you're looking at fastestAF. But the whole point of running agents in parallel is that you might be doing something else — reading docs, reviewing code in another app, or just thinking. That's where sound notifications come in.</p>
+      <p>fastestAF plays distinct sounds for different events: a chime when an agent completes a task, a different tone when an agent asks a question, an alert for errors and rate limits. You learn the sounds quickly — after a day, you know the difference between "agent done, no rush" and "agent stuck, needs input now" without looking.</p>
       <p>This changes how you work with parallel agents. Instead of polling tabs every 30 seconds, you stay focused on what you're doing and respond to agents when they actually need you. The notification bell in the top bar collects events you might have missed — CI passed, agent completed, worktree created — so nothing falls through the cracks.</p>
     </div>
 
     <div class="blog-section">
       <h2>The Activity Dashboard</h2>
-      <p>When you need the full picture, the Activity Dashboard shows every terminal session in one view. Each row shows the session name (which FastAF derives from what the agent is doing — "Check active stories", "Task Review" — not just "Terminal 1"), the repo it's working on, the agent type (Claude, Shell), its current status, and when it was last active.</p>
+      <p>When you need the full picture, the Activity Dashboard shows every terminal session in one view. Each row shows the session name (which fastestAF derives from what the agent is doing — "Check active stories", "Task Review" — not just "Terminal 1"), the repo it's working on, the agent type (Claude, Shell), its current status, and when it was last active.</p>
       <p>Click any row and you switch to that terminal instantly. The dashboard is your air traffic control — you see all 8 sessions at once, spot the one that's been idle for 11 minutes (probably needs attention), and jump right in.</p>
     </div>
 
@@ -92,7 +92,7 @@
 
     <div class="blog-section">
       <h2>Intent recognition</h2>
-      <p>Notice that the dashboard doesn't just say "Terminal" or "Claude Code" — it shows what the agent is actually doing. "Check active stories", "Task Review", "spec-rewrite 2". FastAF parses the agent's output to extract the task name, the current activity (Architecting, Wrangling, Manifesting), and follow-up suggestions.</p>
+      <p>Notice that the dashboard doesn't just say "Terminal" or "Claude Code" — it shows what the agent is actually doing. "Check active stories", "Task Review", "spec-rewrite 2". fastestAF parses the agent's output to extract the task name, the current activity (Architecting, Wrangling, Manifesting), and follow-up suggestions.</p>
       <p>This is the same parsing that powers the status dots: the output parser understands agent-specific UI patterns — status lines, progress indicators, question prompts, error messages — and translates them into structured events. The result is that you get a meaningful summary of each agent's state without reading raw terminal output.</p>
     </div>
 

@@ -1,7 +1,7 @@
-# FastAF Makefile
+# fastestAF Makefile
 # Builds, signs, and packages the Tauri app for macOS distribution
 
-APP_NAME=FastAF
+APP_NAME=fastestAF
 BINARY_NAME=tuicommander
 BUNDLE_ID=com.fastaf.ide
 VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -42,12 +42,12 @@ test:
 
 # Build .app only (default, fast — skips DMG)
 build:
-	@echo "Building FastAF $(VERSION)..."
+	@echo "Building fastestAF $(VERSION)..."
 	pnpm tauri build
 
 # Build .app + DMG (for distribution)
 build-dmg:
-	@echo "Building FastAF $(VERSION) with DMG..."
+	@echo "Building fastestAF $(VERSION) with DMG..."
 	pnpm tauri build --bundles app,dmg
 
 # Auto-format frontend + Rust
@@ -113,13 +113,13 @@ verify-sign:
 	codesign -dvvv "$(APP_BUNDLE)"
 
 # Notarize with Apple (requires stored credentials).
-# First run: xcrun notarytool store-credentials "FastAF" --apple-id YOUR_ID --team-id YOUR_TEAM
+# First run: xcrun notarytool store-credentials "fastestAF" --apple-id YOUR_ID --team-id YOUR_TEAM
 notarize: sign
 	@echo "Creating zip for notarization..."
 	@mkdir -p $(DIST_DIR)
 	ditto -c -k --keepParent "$(APP_BUNDLE)" "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip"
 	@echo "Submitting to Apple notary service..."
-	xcrun notarytool submit "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip" --keychain-profile "FastAF" --wait
+	xcrun notarytool submit "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip" --keychain-profile "fastestAF" --wait
 	@echo "Stapling notarization ticket..."
 	xcrun stapler staple "$(APP_BUNDLE)"
 	@rm -f "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip"
@@ -217,7 +217,7 @@ github-release:
 
 # Build a debug preview with a different app name to avoid conflicts with the real app.
 # The resulting .app is named "TUIC-preview" with a separate bundle ID, so macOS and
-# tests won't confuse it with the production FastAF.
+# tests won't confuse it with the production fastestAF.
 # Uses --debug for fast iteration; full release build only on github-release.
 preview:
 	@echo "Building TUIC-preview $(VERSION) (debug mode)..."

@@ -46,7 +46,7 @@ function CrashScreen(props: { error: Error }) {
 				overflow: "auto",
 			}}
 		>
-			<h2 style={{ margin: "0 0 12px" }}>FastAF crashed</h2>
+			<h2 style={{ margin: "0 0 12px" }}>fastestAF crashed</h2>
 			<pre style={{ "white-space": "pre-wrap", color: "#ccc" }}>{props.error.message}</pre>
 			<pre style={{ "white-space": "pre-wrap", color: "#888", "font-size": "12px" }}>{props.error.stack}</pre>
 			<button

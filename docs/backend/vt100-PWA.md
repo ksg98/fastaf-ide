@@ -1,6 +1,6 @@
 # VT100-to-PWA Protocol
 
-How FastAF transforms raw PTY output into structured, styled terminal content for the mobile Progressive Web App.
+How fastestAF transforms raw PTY output into structured, styled terminal content for the mobile Progressive Web App.
 
 ## Architecture Overview
 

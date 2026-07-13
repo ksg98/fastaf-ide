@@ -262,7 +262,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 					viewBox="0 0 110 16"
 					width="110"
 					height="16"
-					aria-label="FastAF"
+					aria-label="fastestAF"
 				>
 					<defs>
 						<linearGradient id="toolbar-name-grad" x1="0" y1="0" x2="110" y2="0" gradientUnits="userSpaceOnUse">
@@ -282,7 +282,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 						dx="1"
 						dy="1"
 					>
-						FastAF
+						fastestAF
 					</text>
 					<text
 						x="0"
@@ -295,7 +295,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 						dx="-0.5"
 						dy="-0.5"
 					>
-						FastAF
+						fastestAF
 					</text>
 					<text
 						x="0"
@@ -306,7 +306,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 						letter-spacing="0.09em"
 						font-family="system-ui,-apple-system,sans-serif"
 					>
-						FastAF
+						fastestAF
 					</text>
 				</svg>
 				<svg
@@ -315,7 +315,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 					viewBox="0 0 38 16"
 					width="38"
 					height="16"
-					aria-label="FastAF"
+					aria-label="fastestAF"
 				>
 					<defs>
 						<linearGradient id="toolbar-name-grad-short" x1="0" y1="0" x2="38" y2="0" gradientUnits="userSpaceOnUse">

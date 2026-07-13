@@ -36,18 +36,18 @@ struct CallbackParams {
 }
 
 const SUCCESS_HTML: &str = r#"<!DOCTYPE html>
-<html><head><title>FastAF</title>
+<html><head><title>fastestAF</title>
 <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0}
 .card{text-align:center;padding:2rem;border-radius:12px;background:#16213e;box-shadow:0 4px 20px rgba(0,0,0,.3)}
 h1{color:#4ecca3;margin-bottom:.5rem}p{color:#a0a0b0}</style></head>
-<body><div class="card"><h1>&#10003; Authentication complete</h1><p>You can close this tab and return to FastAF.</p></div></body></html>"#;
+<body><div class="card"><h1>&#10003; Authentication complete</h1><p>You can close this tab and return to fastestAF.</p></div></body></html>"#;
 
 const ERROR_HTML: &str = r#"<!DOCTYPE html>
-<html><head><title>FastAF</title>
+<html><head><title>fastestAF</title>
 <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0}
 .card{text-align:center;padding:2rem;border-radius:12px;background:#16213e;box-shadow:0 4px 20px rgba(0,0,0,.3)}
 h1{color:#e74c3c;margin-bottom:.5rem}p{color:#a0a0b0}</style></head>
-<body><div class="card"><h1>&#10007; Authentication failed</h1><p>Check the FastAF logs for details.</p></div></body></html>"#;
+<body><div class="card"><h1>&#10007; Authentication failed</h1><p>Check the fastestAF logs for details.</p></div></body></html>"#;
 
 /// Handle returned by [`spawn`] — dropping triggers graceful shutdown.
 pub(crate) struct CallbackServer {

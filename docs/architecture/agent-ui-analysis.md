@@ -1,11 +1,11 @@
 # Agent UI Analysis — General Reference
 
-Cross-agent reference for parsing AI agent terminal UIs in FastAF.
+Cross-agent reference for parsing AI agent terminal UIs in fastestAF.
 Agent-specific layouts are documented in `agents/<name>.md`.
 
 ## Scope
 
-FastAF supports multiple AI coding agents. Each has a unique terminal
+fastestAF supports multiple AI coding agents. Each has a unique terminal
 UI with different rendering approaches, chrome patterns, and interaction
 models. This document covers:
 

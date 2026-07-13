@@ -1,12 +1,12 @@
 # tuic CLI
 
-The `tuic` command line tool lets you control FastAF from the terminal. It combines the best of VS Code's `code` CLI, Zed's editor integration, and tmux's session management into a single binary.
+The `tuic` command line tool lets you control fastestAF from the terminal. It combines the best of VS Code's `code` CLI, Zed's editor integration, and tmux's session management into a single binary.
 
 ## Installation
 
 **From the app:** Settings > General > Command Line Interface > Install tuic CLI
 
-**First launch:** FastAF offers to install the CLI on first run.
+**First launch:** fastestAF offers to install the CLI on first run.
 
 **From the CLI itself:** `tuic install-cli`
 
@@ -15,12 +15,12 @@ The binary is installed to:
 - **Linux:** `/usr/local/bin/tuic` (requires sudo)
 - **Windows:** `%LOCALAPPDATA%\Microsoft\WindowsApps\tuic.exe` (no admin needed)
 
-The CLI auto-updates silently when FastAF starts — no manual update needed.
+The CLI auto-updates silently when fastestAF starts — no manual update needed.
 
 ## Opening Files and Repos
 
 ```bash
-# Open a file (launches FastAF if not running)
+# Open a file (launches fastestAF if not running)
 tuic file.rs
 
 # Open at specific line and column
@@ -43,7 +43,7 @@ tuic diff old.rs new.rs
 
 ```bash
 export EDITOR="tuic open --wait"
-git commit  # opens commit message in FastAF
+git commit  # opens commit message in fastestAF
 ```
 
 ## Session Management
@@ -95,7 +95,7 @@ tuic agent send <id> "fix the tests"
 
 ## tmux Compatibility
 
-`tuic` can act as a drop-in replacement for tmux. When invoked as `tmux` (via symlink), it translates tmux commands to FastAF equivalents.
+`tuic` can act as a drop-in replacement for tmux. When invoked as `tmux` (via symlink), it translates tmux commands to fastestAF equivalents.
 
 ### Setting Up the Alias
 
@@ -121,7 +121,7 @@ When invoked as `tmux`, the following commands are supported:
 | `tmux send-keys -t target "cmd" Enter` | Send input |
 | `tmux capture-pane -t target` | Capture output |
 | `tmux resize-pane -t target -x 120 -y 40` | Resize |
-| `tmux attach-session` | Focus FastAF window |
+| `tmux attach-session` | Focus fastestAF window |
 | `tmux has-session -t target` | Check if session exists (exit code) |
 
 Key names are translated: `Enter`, `Space`, `Tab`, `Escape`, `C-c`, `C-d`, `C-z`, etc.
@@ -129,7 +129,7 @@ Key names are translated: `Enter`, `Space`, `Tab`, `Escape`, `C-c`, `C-d`, `C-z`
 ## System Commands
 
 ```bash
-# Check FastAF status
+# Check fastestAF status
 tuic status
 
 # Install CLI to system PATH
@@ -143,10 +143,10 @@ tuic alias --remove
 
 ## IPC Architecture
 
-The CLI communicates with FastAF via IPC:
+The CLI communicates with fastestAF via IPC:
 - **macOS/Linux:** Unix domain socket at `~/.config/com.fastaf.ide/mcp.sock`
 - **Windows:** Named pipe at `\\.\pipe\tuicommander-mcp`
 
 Override with `$TUIC_SOCKET` environment variable.
 
-If FastAF is not running, `tuic open` and `tuic new` will launch it automatically.
+If fastestAF is not running, `tuic open` and `tuic new` will launch it automatically.

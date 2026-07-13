@@ -14,7 +14,7 @@ New terminals inherit the working directory from the active branch's worktree pa
 
 ### CWD Tracking (OSC 7)
 
-When your shell reports directory changes via OSC 7, FastAF updates the terminal's working directory in real time. If the new directory falls inside a different worktree, the terminal tab is automatically reassigned to the corresponding branch in the sidebar.
+When your shell reports directory changes via OSC 7, fastestAF updates the terminal's working directory in real time. If the new directory falls inside a different worktree, the terminal tab is automatically reassigned to the corresponding branch in the sidebar.
 
 ### Terminal Lifecycle
 
@@ -198,7 +198,7 @@ When an AI agent emits a plan file path (e.g., `PLAN.md`), a button appears in t
 
 ## Working with AI Agents
 
-FastAF detects rate limits, prompts, and status messages from AI agents:
+fastestAF detects rate limits, prompts, and status messages from AI agents:
 
 - **Rate limit detection** — Recognizes rate limit messages from Claude, Aider, Gemini, OpenCode, Codex
 - **Prompt interception** — Detects when agents ask yes/no questions or multiple choice

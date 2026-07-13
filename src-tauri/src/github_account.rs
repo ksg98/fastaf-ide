@@ -615,7 +615,7 @@ pub(crate) async fn fetch_account_login(
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "FastAF")
+        .header("User-Agent", "fastestAF")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await

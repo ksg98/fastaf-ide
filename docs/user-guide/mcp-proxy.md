@@ -1,17 +1,17 @@
 # MCP Proxy Hub
 
-FastAF can act as a universal MCP (Model Context Protocol) proxy. Instead of configuring the same MCP servers in Claude Code, Cursor, and VS Code separately, you configure them once in FastAF. All your AI clients connect to FastAF's single `/mcp` endpoint and get access to every upstream tool automatically.
+fastestAF can act as a universal MCP (Model Context Protocol) proxy. Instead of configuring the same MCP servers in Claude Code, Cursor, and VS Code separately, you configure them once in fastestAF. All your AI clients connect to fastestAF's single `/mcp` endpoint and get access to every upstream tool automatically.
 
 ## How It Works
 
 ```
 Claude Code ──┐
-Cursor ───────┼──▶  FastAF /mcp  ──┬──▶ GitHub MCP
+Cursor ───────┼──▶  fastestAF /mcp  ──┬──▶ GitHub MCP
 VS Code ──────┘                           ├──▶ Filesystem MCP
                                           └──▶ Any MCP server
 ```
 
-When a tool call arrives at FastAF's MCP endpoint, it routes the request to the correct upstream server and returns the result. Upstream tools appear prefixed with the server name — for example, a tool called `search_code` from an upstream named `github` becomes `github__search_code`.
+When a tool call arrives at fastestAF's MCP endpoint, it routes the request to the correct upstream server and returns the result. Upstream tools appear prefixed with the server name — for example, a tool called `search_code` from an upstream named `github` becomes `github__search_code`.
 
 The MCP server must be enabled (Settings > Services > MCP Server).
 
@@ -44,7 +44,7 @@ Use this for locally installed MCP servers (npm packages, Python scripts, etc.) 
 | Env | `ALLOWED_PATHS=/home/user` | Optional extra environment variables |
 | Enabled | On | |
 
-Click **Save**. FastAF connects immediately — no restart required.
+Click **Save**. fastestAF connects immediately — no restart required.
 
 ## Server Names
 
@@ -97,17 +97,17 @@ Each upstream server has a status indicator:
 | Disabled | Disabled by you in config |
 | Failed | Permanently failed — manual reconnect needed |
 
-**Circuit breaker:** If an upstream fails 3 times consecutively, FastAF stops sending requests to it briefly. Retries use exponential backoff starting at 1 second, capping at 60 seconds. After 10 retry cycles without recovery, the server is marked Failed.
+**Circuit breaker:** If an upstream fails 3 times consecutively, fastestAF stops sending requests to it briefly. Retries use exponential backoff starting at 1 second, capping at 60 seconds. After 10 retry cycles without recovery, the server is marked Failed.
 
 To reconnect a Failed server, click **Reconnect** next to its name in the settings panel.
 
 ## Health Checks
 
-FastAF probes every `Ready` upstream every 60 seconds to verify it is still responding. If a probe fails, the circuit breaker activates. If a `Circuit Open` server's backoff has expired, the health check also attempts recovery.
+fastestAF probes every `Ready` upstream every 60 seconds to verify it is still responding. If a probe fails, the circuit breaker activates. If a `Circuit Open` server's backoff has expired, the health check also attempts recovery.
 
 ## Hot-Reload
 
-Adding, removing, or changing upstream servers takes effect immediately when you click Save. FastAF computes a diff and only reconnects servers that actually changed — unchanged servers are never interrupted.
+Adding, removing, or changing upstream servers takes effect immediately when you click Save. fastestAF computes a diff and only reconnects servers that actually changed — unchanged servers are never interrupted.
 
 ## Troubleshooting
 
@@ -126,7 +126,7 @@ Adding, removing, or changing upstream servers takes effect immediately when you
 
 ### "Circular proxy" error
 
-The HTTP URL you configured points to FastAF's own MCP port. This would create an infinite loop. Use a different URL or port.
+The HTTP URL you configured points to fastestAF's own MCP port. This would create an infinite loop. Use a different URL or port.
 
 ### "Invalid URL scheme" error
 

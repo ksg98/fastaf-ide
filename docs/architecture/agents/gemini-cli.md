@@ -102,7 +102,7 @@ Tips for getting started:
 ```
 
 - `✦` (U+2726, purple rgb 215,175,255) prefix for agent output
-- `suggest:` line follows response (FastAF protocol)
+- `suggest:` line follows response (fastestAF protocol)
 - No token/cost report
 
 ### Out-of-workspace write rejection
@@ -281,7 +281,7 @@ Spinner updates use the same `\033[1A]\033[2K]` erase-and-redraw pattern as the 
 
 ---
 
-## Implications for FastAF
+## Implications for fastestAF
 
 ### Parsing Strategy
 Gemini CLI is a **CLI inline agent** — changed-rows delta analysis works.

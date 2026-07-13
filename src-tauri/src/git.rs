@@ -2185,13 +2185,13 @@ pub(crate) fn ensure_askpass_script() -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     let content = r#"#!/bin/bash
-# FastAF SSH askpass helper — shows a native macOS dialog
+# fastestAF SSH askpass helper — shows a native macOS dialog
 exec osascript -e "display dialog \"$1\" default answer \"\" with hidden answer with title \"SSH Authentication\"" -e 'text returned of result'
 "#;
 
     #[cfg(target_os = "linux")]
     let content = r#"#!/bin/bash
-# FastAF SSH askpass helper — tries zenity, then kdialog
+# fastestAF SSH askpass helper — tries zenity, then kdialog
 if command -v zenity >/dev/null 2>&1; then
     exec zenity --password --title="SSH Authentication" --text="$1"
 elif command -v kdialog >/dev/null 2>&1; then
@@ -2203,7 +2203,7 @@ fi
 
     #[cfg(target_os = "windows")]
     let content = r#"@echo off
-REM FastAF SSH askpass — not supported on Windows without a helper
+REM fastestAF SSH askpass — not supported on Windows without a helper
 exit /b 1
 "#;
 

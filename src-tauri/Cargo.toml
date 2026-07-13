@@ -8,7 +8,7 @@ version = "1.5.1"
 [package]
 name = "tuicommander"
 version.workspace = true
-description = "FastAF - Native platform for AI coding agents"
+description = "fastestAF - Native platform for AI coding agents"
 authors = ["Stefano Straus <github.com/sstraus>"]
 edition = "2024"
 default-run = "tuicommander"

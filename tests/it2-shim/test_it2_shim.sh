@@ -65,7 +65,7 @@ echo "Running it2 shim integration tests..."
 echo ""
 echo "Test: --version"
 OUTPUT=$("$SHIM" --version 2>&1)
-if echo "$OUTPUT" | grep -q "it2 (FastAF shim)"; then
+if echo "$OUTPUT" | grep -q "it2 (fastestAF shim)"; then
   pass "--version returns version string"
 else
   fail "--version" "got: $OUTPUT"

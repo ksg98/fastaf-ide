@@ -83,11 +83,11 @@
     },
     {
       "slug": "cross-agent-orchestration",
-      "title": "Using Codex to orchestrate Claude Code through FastAF",
+      "title": "Using Codex to orchestrate Claude Code through fastestAF",
       "date": "2026-05-04",
       "status": "published",
       "feature": "Cross-agent orchestration / MCP bridge / drive_agent tool",
-      "summary": "Cross-agent orchestration without screen-scraping. FastAF's MCP bridge gives external agents structured terminal state instead of raw ANSI bytes. Here's how to set it up and why it beats tmux.",
+      "summary": "Cross-agent orchestration without screen-scraping. fastestAF's MCP bridge gives external agents structured terminal state instead of raw ANSI bytes. Here's how to set it up and why it beats tmux.",
       "screenshots": []
     },
     {
@@ -105,7 +105,7 @@
       "date": "2026-04-26",
       "status": "published",
       "feature": "Product Hunt launch",
-      "summary": "FastAF is live on Product Hunt this week. Early reviews from daily users name the same patterns: multi-agent terminal sprawl, worktree isolation, blocking Y/n prompts, and couch-mode supervision from mobile. If you use TUIC, your review moves the needle.",
+      "summary": "fastestAF is live on Product Hunt this week. Early reviews from daily users name the same patterns: multi-agent terminal sprawl, worktree isolation, blocking Y/n prompts, and couch-mode supervision from mobile. If you use TUIC, your review moves the needle.",
       "screenshots": []
     },
     {
@@ -209,11 +209,11 @@
     },
     {
       "slug": "plugin-system",
-      "title": "Extend FastAF with plugins",
+      "title": "Extend fastestAF with plugins",
       "date": "2026-03-20",
       "status": "published",
       "feature": "Plugin system / MCP / Sidebar panels / Context menus",
-      "summary": "Every workflow is different. We built a plugin system so you can extend FastAF with custom panels, context menu actions, and MCP integrations.",
+      "summary": "Every workflow is different. We built a plugin system so you can extend fastestAF with custom panels, context menu actions, and MCP integrations.",
       "screenshots": ["plugins-panel.png"]
     }
   ]

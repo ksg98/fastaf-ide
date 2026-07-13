@@ -1,21 +1,21 @@
-# FastAF Relay Server
+# fastestAF Relay Server
 
-A lightweight, blind WebSocket relay that enables secure remote access to FastAF from any network — no port forwarding, no VPN required.
+A lightweight, blind WebSocket relay that enables secure remote access to fastestAF from any network — no port forwarding, no VPN required.
 
 ## How It Works
 
-The relay server acts as a **blind intermediary** between your computer running FastAF and your phone's browser. It forwards encrypted blobs without ever being able to read their contents.
+The relay server acts as a **blind intermediary** between your computer running fastestAF and your phone's browser. It forwards encrypted blobs without ever being able to read their contents.
 
 ```
 Your Computer                    Relay Server                     Your Phone
-FastAF  ──── WSS ────►  tuic-relay  ◄──── WSS ────  Mobile PWA
+fastestAF  ──── WSS ────►  tuic-relay  ◄──── WSS ────  Mobile PWA
               encrypted                          encrypted
               blobs only                         blobs only
 ```
 
 ### End-to-End Encryption
 
-**The relay server has zero knowledge of your data.** All communication between FastAF and your phone is encrypted end-to-end with AES-256-GCM:
+**The relay server has zero knowledge of your data.** All communication between fastestAF and your phone is encrypted end-to-end with AES-256-GCM:
 
 - The encryption key is generated on your computer and delivered to your phone via QR code
 - The key is embedded in the URL **fragment** (`#`), which is [never sent to any server](https://www.rfc-editor.org/rfc/rfc3986#section-3.5) by the browser
@@ -44,7 +44,7 @@ Only connection metadata required for routing:
 
 ### Option 1: Use the hosted relay (easiest)
 
-FastAF ships pre-configured to use `relay.tuicommander.com`. Just enable it in **Settings → Services → Remote Relay** and scan the QR code with your phone. No server setup needed.
+fastestAF ships pre-configured to use `relay.tuicommander.com`. Just enable it in **Settings → Services → Remote Relay** and scan the QR code with your phone. No server setup needed.
 
 ### Option 2: Self-host with Docker Compose (recommended for self-hosting)
 
@@ -81,7 +81,7 @@ openssl ec -in vapid_private.pem -pubout -out vapid_public.pem
 docker run --rm tuic-relay generate-vapid
 ```
 
-Then point FastAF to your relay: **Settings → Services → Remote Relay → Relay URL** = `wss://your-domain.com`.
+Then point fastestAF to your relay: **Settings → Services → Remote Relay → Relay URL** = `wss://your-domain.com`.
 
 ### Option 3: Build from source
 
@@ -140,7 +140,7 @@ A $5/month VPS comfortably handles hundreds of concurrent users.
 
 ## Relationship to Direct Access
 
-The relay **does not replace** FastAF's existing direct HTTP access. If you're on the same network (LAN, Tailscale, VPN), the direct connection at `http://{ip}:9876/mobile` continues to work with no encryption overhead. The relay is an additional option for when you need access from any network without VPN setup.
+The relay **does not replace** fastestAF's existing direct HTTP access. If you're on the same network (LAN, Tailscale, VPN), the direct connection at `http://{ip}:9876/mobile` continues to work with no encryption overhead. The relay is an additional option for when you need access from any network without VPN setup.
 
 ## Security Model
 
@@ -154,4 +154,4 @@ The relay **does not replace** FastAF's existing direct HTTP access. If you're o
 
 ## License
 
-MIT — same as FastAF.
+MIT — same as fastestAF.

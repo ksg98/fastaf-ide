@@ -224,7 +224,7 @@ jobs:
         with:
           tauriScript: pnpm tauri
           tagName: nightly
-          releaseName: 'FastAF Nightly'
+          releaseName: 'fastestAF Nightly'
           releaseBody: |
             **Rolling build from `main` — always the latest code.**
 
@@ -318,7 +318,7 @@ jobs:
 
           gh release create "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "FastAF $TAG" \
+            --title "fastestAF $TAG" \
             --notes "Nightly build from \`main\`. Download the latest rolling build from the [nightly release](https://github.com/ksg98/fastaf/releases/tag/nightly)." \
             --prerelease
 

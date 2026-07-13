@@ -1,10 +1,10 @@
 # GitHub Integration
 
-FastAF monitors your GitHub PRs and CI status automatically.
+fastestAF monitors your GitHub PRs and CI status automatically.
 
 ## Authentication
 
-FastAF needs a GitHub token to access PRs and CI status. You have two options:
+fastestAF needs a GitHub token to access PRs and CI status. You have two options:
 
 ### Option 1: OAuth Login (Recommended)
 
@@ -19,11 +19,11 @@ This method automatically requests the correct scope (`repo`) and works with pri
 
 ### Option 2: gh CLI
 
-If you prefer, install the `gh` CLI and run `gh auth login`. FastAF will use the `gh` token automatically.
+If you prefer, install the `gh` CLI and run `gh auth login`. fastestAF will use the `gh` token automatically.
 
 ### Token Priority
 
-When multiple sources are available, FastAF uses this priority:
+When multiple sources are available, fastestAF uses this priority:
 
 1. `GH_TOKEN` environment variable
 2. `GITHUB_TOKEN` environment variable
@@ -32,7 +32,7 @@ When multiple sources are available, FastAF uses this priority:
 
 ## Multiple Accounts (github.com + GitHub Enterprise)
 
-FastAF is account-centric: you can monitor repos across **several GitHub accounts at once** — additional github.com logins and GitHub Enterprise Server (GHE) instances — and bind each repo to the account that should monitor it. If you only use one github.com account, nothing changes; skip this section.
+fastestAF is account-centric: you can monitor repos across **several GitHub accounts at once** — additional github.com logins and GitHub Enterprise Server (GHE) instances — and bind each repo to the account that should monitor it. If you only use one github.com account, nothing changes; skip this section.
 
 ### Adding accounts
 
@@ -48,7 +48,7 @@ Each account shows its login, avatar, and a source badge. Remove an account to d
 Open **Settings > GitHub > Repository Bindings**. Each workspace repo shows how it resolves:
 
 - **Bound** — the repo is monitored by the shown account. Click **Unbind** to detach it.
-- **Needs binding** — the repo matches more than one account or GitHub remote. FastAF does **not** guess `origin`; pick the right account/remote from the chooser to bind it.
+- **Needs binding** — the repo matches more than one account or GitHub remote. fastestAF does **not** guess `origin`; pick the right account/remote from the chooser to bind it.
 - **Needs account** — a github.com repo with no account configured yet; add one first.
 
 A repo with exactly one matching account is bound automatically. Worktrees share their main checkout's binding.
@@ -169,7 +169,7 @@ Polling starts automatically when a repository with a GitHub remote is active.
 
 ## Auto-Delete Branch on PR Close
 
-When a PR is merged or closed on GitHub, FastAF can automatically clean up the corresponding local branch. Configure per-repo in **Settings > Repository Settings** or set a global default in **Settings > General > Repository Defaults**.
+When a PR is merged or closed on GitHub, fastestAF can automatically clean up the corresponding local branch. Configure per-repo in **Settings > Repository Settings** or set a global default in **Settings > General > Repository Defaults**.
 
 | Mode | Behavior |
 |------|----------|

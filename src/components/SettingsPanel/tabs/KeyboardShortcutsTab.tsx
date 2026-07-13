@@ -535,7 +535,7 @@ export const KeyboardShortcutsTab: Component = () => {
 				<div class={s.group}>
 					<label>{t("settings.globalHotkey", "Global Hotkey (Toggle Window)")}</label>
 					<p class={s.hint} style={{ "margin-bottom": "8px" }}>
-						{t("settings.globalHotkeyHint", "Set an OS-level shortcut to show/hide FastAF from any application.")}
+						{t("settings.globalHotkeyHint", "Set an OS-level shortcut to show/hide fastestAF from any application.")}
 					</p>
 					<div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
 						<KeyComboCapture

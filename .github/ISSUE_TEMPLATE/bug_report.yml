@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug in FastAF
+description: Report a bug in fastestAF
 title: "[Bug] "
 labels: ["type: bug", "needs triage"]
 body:
@@ -23,7 +23,7 @@ body:
       label: Steps to reproduce
       description: How can we reproduce this?
       placeholder: |
-        1. Open FastAF
+        1. Open fastestAF
         2. Click on '...'
         3. See error
     validations:
@@ -60,7 +60,7 @@ body:
     id: build
     attributes:
       label: Build type
-      description: How are you running FastAF?
+      description: How are you running fastestAF?
       options:
         - Release build (compiled .app / .exe)
         - Dev mode (tauri dev)
@@ -71,7 +71,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: FastAF version (check Settings or About)
+      description: fastestAF version (check Settings or About)
       placeholder: "e.g. 0.3.0"
     validations:
       required: true

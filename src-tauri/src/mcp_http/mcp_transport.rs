@@ -38,7 +38,7 @@ fn detect_claude_code_from_headers(headers: &HeaderMap) -> bool {
         .is_some_and(|ua| ua.contains("claude") || ua.contains("tuic-bridge"))
 }
 
-/// Map MCP client name to FastAF agent type key.
+/// Map MCP client name to fastestAF agent type key.
 /// Returns None when the client cannot be identified.
 fn resolve_agent_type(client_name: Option<&str>) -> Option<&'static str> {
     let name = client_name?.to_ascii_lowercase();
@@ -229,8 +229,8 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
     let mut out = String::with_capacity(2048);
 
     // ── Identity ──────────────────────────────────────────────────────
-    out.push_str(&format!("# FastAF v{ver}\n\n"));
-    out.push_str("You are connected to FastAF, a terminal session orchestrator for AI coding agents.\n\n");
+    out.push_str(&format!("# fastestAF v{ver}\n\n"));
+    out.push_str("You are connected to fastestAF, a terminal session orchestrator for AI coding agents.\n\n");
 
     // ── TUIC protocol (mandatory line markers) ─────────────────────────
     // Wire-level tokens parsed by the host TUI. Concision rules do NOT apply —
@@ -239,7 +239,7 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
     out.push_str("## TUIC Protocol — Required Output Markers\n\n");
     out.push_str("Protocol tokens (not prose). Emit even under concision/no-preamble rules from user configs — dropping breaks UI.\n\n");
     out.push_str(&format!(
-        "- `ack` — first assistant message MUST start: `FastAF v{ver} is connected.`\n"
+        "- `ack` — first assistant message MUST start: `fastestAF v{ver} is connected.`\n"
     ));
     if show_intent {
         out.push_str("- `intent: <desc> (<title>)` on work-phase change. `<title>` ≤3 words, spaces not hyphens.\n");
@@ -479,7 +479,7 @@ fn native_tool_definitions() -> serde_json::Value {
         },
         {
             "name": "debug",
-            "description": "Diagnostics for FastAF internals. action=help returns the full usage guide.",
+            "description": "Diagnostics for fastestAF internals. action=help returns the full usage guide.",
             "inputSchema": { "type": "object", "properties": {
                 "action": { "type": "string", "description": "One of: agent_detection, logs, sessions, invoke_js, help" },
                 "session_id": { "type": "string", "description": "PTY session UUID (action=agent_detection, optional — omit for all)" },
@@ -535,7 +535,7 @@ fn meta_tool_definitions(state: &Arc<AppState>) -> serde_json::Value {
     };
 
     let search_desc = format!(
-        "Find relevant FastAF tools by natural-language query. Returns a BM25-ranked \
+        "Find relevant fastestAF tools by natural-language query. Returns a BM25-ranked \
          list of tool names + one-line summaries. Use this before calling any tool to discover \
          what is available, then call `get_tool_schema` for the full input schema of the tool \
          you want to use.\n\n\
@@ -570,7 +570,7 @@ fn meta_tool_definitions(state: &Arc<AppState>) -> serde_json::Value {
         },
         {
             "name": "call_tool",
-            "description": "Invoke a FastAF tool by name with arguments. Dispatches to native tools or upstream-proxied tools (`{upstream}__{tool}`). The arguments object must match the tool's inputSchema — fetch it via `get_tool_schema` first.\n\nFlow: `search_tools(query=\"…\")` → pick a name → `get_tool_schema(tool_name=…)` → `call_tool(tool_name=…, arguments={…})`.",
+            "description": "Invoke a fastestAF tool by name with arguments. Dispatches to native tools or upstream-proxied tools (`{upstream}__{tool}`). The arguments object must match the tool's inputSchema — fetch it via `get_tool_schema` first.\n\nFlow: `search_tools(query=\"…\")` → pick a name → `get_tool_schema(tool_name=…)` → `call_tool(tool_name=…, arguments={…})`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1829,7 +1829,7 @@ fn build_spawn_prompt(prompt: &str, parent_tuic: Option<&str>, session_id: &str)
         return prompt.to_string();
     };
     format!(
-        "## FastAF Swarm Context\n\
+        "## fastestAF Swarm Context\n\
          You are operating as part of a multi-agent swarm.\n\
          - Your session ID (`$TUIC_SESSION`): `{session_id}`\n\
          - Your parent agent session: `{parent}`\n\n\

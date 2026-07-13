@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Auto-standby: SIGSTOP for idle agent terminals — FastAF Blog</title>
+  <title>Auto-standby: SIGSTOP for idle agent terminals — fastestAF Blog</title>
   <meta name="description" content="Dozens of idle agent terminals quietly burn CPU and battery. Auto-standby SIGSTOPs the whole process group when a tab is unfocused and idle, and SIGCONTs it the instant you look back or a message arrives." />
 
-  <meta property="og:title" content="Auto-standby: SIGSTOP for idle agent terminals — FastAF" />
+  <meta property="og:title" content="Auto-standby: SIGSTOP for idle agent terminals — fastestAF" />
   <meta property="og:description" content="Dozens of idle agent terminals quietly burn CPU and battery. Auto-standby SIGSTOPs the process group when a tab is unfocused and idle, and wakes it the instant you return." />
   <meta property="og:type" content="article" />
 
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -50,7 +50,7 @@
 
     <div class="blog-section">
       <h2>The quiet CPU tax</h2>
-      <p>The whole point of FastAF is running many agents at once. But "many agents" means many process trees, and not all of them sit politely at zero when they have nothing to do. A watch loop here, a dev server there, a TUI that repaints on a timer — individually trivial, collectively a steady drain on CPU and, on a laptop, battery. You're paying for terminals you aren't even looking at.</p>
+      <p>The whole point of fastestAF is running many agents at once. But "many agents" means many process trees, and not all of them sit politely at zero when they have nothing to do. A watch loop here, a dev server there, a TUI that repaints on a timer — individually trivial, collectively a steady drain on CPU and, on a laptop, battery. You're paying for terminals you aren't even looking at.</p>
       <p>You could close them, but then you lose the session. You could remember to suspend them by hand, but you won't. The OS already has the right primitive for "pause this and let it resume exactly where it was" — job-control signals. We just needed to apply them automatically and safely.</p>
     </div>
 

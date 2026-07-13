@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev-install.sh — Symlink plugins from this repo into the FastAF plugins directory.
+# dev-install.sh — Symlink plugins from this repo into the fastestAF plugins directory.
 #
 # Usage:
 #   ./scripts/dev-install.sh              # symlink all plugins
@@ -7,7 +7,7 @@
 #   ./scripts/dev-install.sh --clean      # remove all symlinks
 #
 # Plugins are symlinked, so edits in this repo are immediately picked up
-# by FastAF's hot-reload system.
+# by fastestAF's hot-reload system.
 
 set -euo pipefail
 
@@ -95,4 +95,4 @@ for name in "${PLUGIN_NAMES[@]}"; do
 done
 
 echo ""
-echo "Restart FastAF or save a plugin file to trigger hot-reload."
+echo "Restart fastestAF or save a plugin file to trigger hot-reload."

@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $repo = "sstraus/tuicommander"
 $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
 
-Write-Host "Fetching latest FastAF release..." -ForegroundColor Cyan
+Write-Host "Fetching latest fastestAF release..." -ForegroundColor Cyan
 
 $release = Invoke-RestMethod -Uri $apiUrl
 $asset = $release.assets | Where-Object { $_.name -like '*x64-setup.exe' } | Select-Object -First 1
@@ -14,12 +14,12 @@ if (-not $asset) {
 }
 
 $version = $release.tag_name
-$outFile = Join-Path $env:TEMP "FastAF-setup.exe"
+$outFile = Join-Path $env:TEMP "fastestAF-setup.exe"
 
-Write-Host "Downloading FastAF $version..." -ForegroundColor Cyan
+Write-Host "Downloading fastestAF $version..." -ForegroundColor Cyan
 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $outFile
 
 Write-Host "Running installer..." -ForegroundColor Cyan
 Start-Process -FilePath $outFile -Wait
 
-Write-Host "FastAF $version installed successfully!" -ForegroundColor Green
+Write-Host "fastestAF $version installed successfully!" -ForegroundColor Green

@@ -2,7 +2,7 @@
 
 ## IPC Communication
 
-FastAF supports two IPC modes through a unified transport abstraction:
+fastestAF supports two IPC modes through a unified transport abstraction:
 
 ### Tauri Mode (Native Desktop)
 

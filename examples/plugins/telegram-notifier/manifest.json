@@ -5,7 +5,7 @@
   "minAppVersion": "0.3.0",
   "main": "main.js",
   "description": "Forwards terminal notifications to Telegram with per-event toggles and sound control.",
-  "author": "FastAF",
+  "author": "fastestAF",
   "capabilities": ["net:http", "ui:panel", "ui:ticker", "ui:context-menu"],
   "allowedUrls": ["https://api.telegram.org/*"]
 }

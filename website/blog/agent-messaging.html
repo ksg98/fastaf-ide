@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Agent-to-agent messaging: from terminal scraping to structured channels — FastAF Blog</title>
-  <meta name="description" content="Two ways for AI agents to communicate through FastAF: peer messaging for direct coordination, and MCP channels for real-time event push. No terminal scraping required." />
+  <title>Agent-to-agent messaging: from terminal scraping to structured channels — fastestAF Blog</title>
+  <meta name="description" content="Two ways for AI agents to communicate through fastestAF: peer messaging for direct coordination, and MCP channels for real-time event push. No terminal scraping required." />
 
   <meta property="og:title" content="Agent-to-agent messaging: from terminal scraping to structured channels" />
   <meta property="og:description" content="Peer messaging and MCP channels give AI agents a direct communication path — faster and cheaper than reading each other's terminal output." />
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -45,12 +45,12 @@
       <a href="/blog.html" class="blog-back">&larr; Blog</a>
       <time>May 16, 2026</time>
       <h1>Agent-to-agent messaging: from terminal scraping to structured channels</h1>
-      <p class="blog-post-summary">AI agents working together shouldn't have to read each other's terminal output. FastAF provides two direct communication paths: peer messaging for structured coordination, and MCP channels for real-time event push. Here's how they work and when to use each.</p>
+      <p class="blog-post-summary">AI agents working together shouldn't have to read each other's terminal output. fastestAF provides two direct communication paths: peer messaging for structured coordination, and MCP channels for real-time event push. Here's how they work and when to use each.</p>
     </header>
 
     <div class="blog-section">
       <h2>The evolution of agent communication</h2>
-      <p>In our <a href="/blog/cross-agent-orchestration.html">previous post</a>, we showed how one agent can drive another through FastAF's <code>ai_terminal_*</code> tools. That approach works well when the orchestrator needs to literally type commands and read terminal output. But it has a fundamental limitation: communication is mediated by the terminal.</p>
+      <p>In our <a href="/blog/cross-agent-orchestration.html">previous post</a>, we showed how one agent can drive another through fastestAF's <code>ai_terminal_*</code> tools. That approach works well when the orchestrator needs to literally type commands and read terminal output. But it has a fundamental limitation: communication is mediated by the terminal.</p>
       <p>When Agent A wants to tell Agent B "the tests pass, move on to the next file," it has to:</p>
       <ol>
         <li>Send the text as a terminal command to B's PTY</li>
@@ -62,7 +62,7 @@
 
     <div class="blog-section">
       <h2>Approach 1: Peer messaging</h2>
-      <p>FastAF maintains a peer registry. Any agent connected via MCP can register itself, discover other agents, and send messages directly — without touching their terminal.</p>
+      <p>fastestAF maintains a peer registry. Any agent connected via MCP can register itself, discover other agents, and send messages directly — without touching their terminal.</p>
 
       <h3>The protocol</h3>
       <pre><code>// Step 1: Register yourself (once, at session start)
@@ -83,7 +83,7 @@ agent({ action: "inbox", limit: 10, since: 1747400000000 })
 → [{ from_name: "orchestrator", content: "Review complete. Ship it.", timestamp: ... }]</code></pre>
 
       <h3>Delivery: push first, queue always</h3>
-      <p>When you send a message, FastAF does two things:</p>
+      <p>When you send a message, fastestAF does two things:</p>
       <ol>
         <li><strong>Channel push</strong> — if the recipient has an active SSE stream (which Claude Code always does), the message is delivered instantly as a <code>notifications/claude/channel</code> event. It appears in the recipient's context immediately, as if the system injected a note mid-conversation.</li>
         <li><strong>Inbox queue</strong> — the message is always stored in a FIFO queue (100 messages per agent, oldest evicted first). This handles cases where the push fails or the recipient reconnects later.</li>
@@ -93,8 +93,8 @@ agent({ action: "inbox", limit: 10, since: 1747400000000 })
 
     <div class="blog-section">
       <h2>Approach 2: MCP channels (event push)</h2>
-      <p>MCP channels are a lower-level mechanism. Instead of agent-to-agent messaging, they let FastAF push arbitrary events into an agent's context. The agent sees them as <code>&lt;channel&gt;</code> tags — structured metadata injected by the system.</p>
-      <p>FastAF declares the <code>claude/channel</code> experimental capability when any Claude Code client connects:</p>
+      <p>MCP channels are a lower-level mechanism. Instead of agent-to-agent messaging, they let fastestAF push arbitrary events into an agent's context. The agent sees them as <code>&lt;channel&gt;</code> tags — structured metadata injected by the system.</p>
+      <p>fastestAF declares the <code>claude/channel</code> experimental capability when any Claude Code client connects:</p>
       <pre><code>// In the MCP initialize response:
 {
   "capabilities": {
@@ -221,7 +221,7 @@ agent({ action: "inbox", since: last_check_timestamp })
     <div class="blog-section">
       <h2>Implementation details</h2>
       <h3>Registration</h3>
-      <p>When an agent calls <code>agent({ action: "register" })</code>, FastAF maps their MCP session ID to a <code>PeerAgent</code> record: display name, project path, and registration timestamp. The <code>TUIC_SESSION</code> environment variable (a stable UUID set when the terminal tab was created) serves as the peer's primary identifier.</p>
+      <p>When an agent calls <code>agent({ action: "register" })</code>, fastestAF maps their MCP session ID to a <code>PeerAgent</code> record: display name, project path, and registration timestamp. The <code>TUIC_SESSION</code> environment variable (a stable UUID set when the terminal tab was created) serves as the peer's primary identifier.</p>
 
       <h3>Message delivery</h3>
       <p>Messages are stored in a per-agent FIFO queue (100 messages max, oldest evicted on overflow). On send, TUIC checks whether the recipient has an active SSE stream. If yes, it pushes the message as a JSON-RPC notification over that stream — Claude Code's MCP client receives it as a <code>claude/channel</code> event and injects it into the conversation context.</p>

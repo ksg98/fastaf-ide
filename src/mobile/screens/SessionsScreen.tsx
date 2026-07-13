@@ -119,7 +119,7 @@ export function SessionsScreen(props: SessionsScreenProps) {
 						</svg>
 					</div>
 					<span class={styles.emptyTitle}>No active sessions</span>
-					<span class={styles.emptyHint}>Start an agent from FastAF to see it here</span>
+					<span class={styles.emptyHint}>Start an agent from fastestAF to see it here</span>
 				</div>
 			</Show>
 

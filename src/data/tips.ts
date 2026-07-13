@@ -84,7 +84,7 @@ export const TIPS: Tip[] = [
 	},
 	{
 		feature: "Deep Links",
-		description: "Use tuic://repo/path URLs in scripts or docs to open repos directly in FastAF.",
+		description: "Use tuic://repo/path URLs in scripts or docs to open repos directly in fastestAF.",
 		shortcut: null,
 	},
 	{
@@ -347,7 +347,7 @@ export const TIPS: Tip[] = [
 	{
 		feature: "WSL Support",
 		description:
-			"FastAF runs natively on Windows with WSL — shell arguments, environment, and CWD paths are translated automatically.",
+			"fastestAF runs natively on Windows with WSL — shell arguments, environment, and CWD paths are translated automatically.",
 		shortcut: null,
 	},
 	{
@@ -359,25 +359,25 @@ export const TIPS: Tip[] = [
 	{
 		feature: "tuic CLI",
 		description:
-			"Control FastAF from the terminal. Open files, manage sessions, spawn agents, and use it as a tmux replacement. Install from Settings > General.",
+			"Control fastestAF from the terminal. Open files, manage sessions, spawn agents, and use it as a tmux replacement. Install from Settings > General.",
 		shortcut: null,
 	},
 	{
 		feature: "tuic as tmux",
 		description:
-			"Run 'tuic alias' to create a tmux compatibility symlink. Any tool expecting tmux (like Claude Code) will use FastAF instead.",
+			"Run 'tuic alias' to create a tmux compatibility symlink. Any tool expecting tmux (like Claude Code) will use fastestAF instead.",
 		shortcut: null,
 	},
 	{
 		feature: "tuic open",
 		description:
-			"Open files in FastAF from the terminal: 'tuic file.rs:42' opens at line 42. 'tuic .' opens the current directory as a repo.",
+			"Open files in fastestAF from the terminal: 'tuic file.rs:42' opens at line 42. 'tuic .' opens the current directory as a repo.",
 		shortcut: null,
 	},
 	{
 		feature: "SSH Tunnel Auto-Connect",
 		description:
-			"Enable Auto-Connect on a tunnel profile to have it start automatically when FastAF launches — no manual clicks needed.",
+			"Enable Auto-Connect on a tunnel profile to have it start automatically when fastestAF launches — no manual clicks needed.",
 		shortcut: null,
 	},
 	{

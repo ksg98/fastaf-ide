@@ -1,6 +1,6 @@
 # Plugin Authoring Guide
 
-FastAF uses an Obsidian-style plugin system. Plugins extend the Activity Center (bell dropdown), watch terminal output, and interact with app state. Plugins can be **built-in** (compiled with the app) or **external** (loaded at runtime from the user's plugins directory).
+fastestAF uses an Obsidian-style plugin system. Plugins extend the Activity Center (bell dropdown), watch terminal output, and interact with app state. Plugins can be **built-in** (compiled with the app) or **external** (loaded at runtime from the user's plugins directory).
 
 ## Quick Start: External Plugin
 
@@ -113,7 +113,7 @@ File: `~/.config/com.fastaf.ide/plugins/{id}/manifest.json`
 | `id` | string | yes | Must match the directory name |
 | `name` | string | yes | Human-readable display name |
 | `version` | string | yes | Plugin semver (e.g. `"1.0.0"`) |
-| `minAppVersion` | string | yes | Minimum FastAF version required |
+| `minAppVersion` | string | yes | Minimum fastestAF version required |
 | `main` | string | yes | Entry point filename (e.g. `"main.js"`) |
 | `description` | string | no | Short description |
 | `author` | string | no | Author name |
@@ -753,7 +753,7 @@ Every plugin iframe automatically receives the TUIC SDK — a lightweight JavaSc
 
 ```javascript
 if (window.tuic) {
-  // Running inside FastAF — SDK is available
+  // Running inside fastestAF — SDK is available
   console.log("TUIC SDK version:", window.tuic.version);
 }
 ```
@@ -1144,7 +1144,7 @@ Plugins can declare which AI agents they target via the `agentTypes` manifest fi
 
 ### How agent detection works
 
-FastAF polls the foreground process of each terminal's PTY every 3 seconds (via `get_session_foreground_process`). The process name is classified into an agent type:
+fastestAF polls the foreground process of each terminal's PTY every 3 seconds (via `get_session_foreground_process`). The process name is classified into an agent type:
 
 | Process name | Agent type |
 |-------------|-----------|
@@ -1278,7 +1278,7 @@ Plugins can be distributed as ZIP archives:
 
 ## Deep Link Scheme (`tuic://`)
 
-FastAF registers the `tuic://` URL scheme for external integration:
+fastestAF registers the `tuic://` URL scheme for external integration:
 
 | URL | Action |
 |-----|--------|

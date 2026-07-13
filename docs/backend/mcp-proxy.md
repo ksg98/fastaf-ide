@@ -2,7 +2,7 @@
 
 **Module:** `src-tauri/src/mcp_proxy/`
 
-The MCP Proxy Hub turns FastAF into a universal MCP aggregator. TUIC acts simultaneously as an MCP server (serving downstream clients such as Claude Code or Cursor) and as an MCP client (connecting to upstream MCP servers). Tools from all connected upstreams are merged into the single `/mcp` endpoint that TUIC already exposes, with each upstream's tools namespaced as `{upstream_name}__{tool_name}`.
+The MCP Proxy Hub turns fastestAF into a universal MCP aggregator. TUIC acts simultaneously as an MCP server (serving downstream clients such as Claude Code or Cursor) and as an MCP client (connecting to upstream MCP servers). Tools from all connected upstreams are merged into the single `/mcp` endpoint that TUIC already exposes, with each upstream's tools namespaced as `{upstream_name}__{tool_name}`.
 
 ## Architecture
 

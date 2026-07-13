@@ -24,7 +24,7 @@ pub(crate) struct DcrResponse {
 impl DcrRequest {
     pub(crate) fn for_tuicommander(redirect_uri: &str, scope: Option<String>) -> Self {
         Self {
-            client_name: "FastAF".to_string(),
+            client_name: "fastestAF".to_string(),
             redirect_uris: vec![redirect_uri.to_string()],
             grant_types: vec!["authorization_code".to_string()],
             response_types: vec!["code".to_string()],

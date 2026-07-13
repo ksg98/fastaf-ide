@@ -1,4 +1,4 @@
-# Contributing to FastAF
+# Contributing to fastestAF
 
 Thanks for your interest in contributing! This guide covers what we expect from pull requests.
 

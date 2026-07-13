@@ -1739,7 +1739,7 @@ impl AppState {
                 subs,
                 &config,
                 &http_client,
-                "FastAF",
+                "fastestAF",
                 &body,
                 &url,
             )

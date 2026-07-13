@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Install profiling tools for FastAF performance analysis.
+# Install profiling tools for fastestAF performance analysis.
 # Run once before first profiling session.
 set -euo pipefail
 
-echo "=== FastAF Profiling Setup ==="
+echo "=== fastestAF Profiling Setup ==="
 
 # samply: CPU flamegraph profiler for Rust (macOS/Linux)
 if command -v samply &>/dev/null; then

@@ -1,4 +1,4 @@
-// Shared types for FastAF
+// Shared types for fastestAF
 
 /** PTY output event from Tauri */
 export interface PtyOutput {

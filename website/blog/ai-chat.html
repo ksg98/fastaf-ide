@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Chat: an agent that reads your terminal, not its screenshot — FastAF Blog</title>
-  <meta name="description" content="Most chat sidebars are blind to your terminal. FastAF's AI Chat reads structured OSC 133 state — commands, outputs, exit codes, links — runs local or cloud models, and can arm reactive watchers. Here's why that matters and how it's wired in." />
+  <title>AI Chat: an agent that reads your terminal, not its screenshot — fastestAF Blog</title>
+  <meta name="description" content="Most chat sidebars are blind to your terminal. fastestAF's AI Chat reads structured OSC 133 state — commands, outputs, exit codes, links — runs local or cloud models, and can arm reactive watchers. Here's why that matters and how it's wired in." />
 
-  <meta property="og:title" content="AI Chat: an agent that reads your terminal, not its screenshot — FastAF" />
+  <meta property="og:title" content="AI Chat: an agent that reads your terminal, not its screenshot — fastestAF" />
   <meta property="og:description" content="An in-app agent that reads structured OSC 133 terminal state instead of scraping pixels, runs local (Ollama) or cloud models, and arms reactive watchers. Advantages, potential, integration." />
   <meta property="og:type" content="article" />
 
@@ -28,8 +28,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -45,7 +45,7 @@
       <a href="/blog.html" class="blog-back">&larr; Blog</a>
       <time>June 2, 2026</time>
       <h1>AI Chat: an agent that reads your terminal, not its screenshot</h1>
-      <p class="blog-post-summary">Every editor now ships a chat sidebar, and almost all of them are blind to the one thing you're actually working in — the terminal. FastAF's AI Chat is built the other way around: it reads structured terminal state, runs local or cloud models, and can arm reactive watchers that wake up on their own. It's in beta today behind the Experimental toggle.</p>
+      <p class="blog-post-summary">Every editor now ships a chat sidebar, and almost all of them are blind to the one thing you're actually working in — the terminal. fastestAF's AI Chat is built the other way around: it reads structured terminal state, runs local or cloud models, and can arm reactive watchers that wake up on their own. It's in beta today behind the Experimental toggle.</p>
     </header>
 
     <div class="blog-section">
@@ -61,7 +61,7 @@
 
     <div class="blog-section">
       <h2>The advantage: structured state, not scraped pixels</h2>
-      <p>AI Chat doesn't screen-scrape ANSI bytes. It reads the same structured terminal model the rest of FastAF is built on — OSC 133 semantic blocks. Because every command, its output, and its exit code are first-class data, the agent can answer questions the raw scrollback can't support:</p>
+      <p>AI Chat doesn't screen-scrape ANSI bytes. It reads the same structured terminal model the rest of fastestAF is built on — OSC 133 semantic blocks. Because every command, its output, and its exit code are first-class data, the agent can answer questions the raw scrollback can't support:</p>
       <ul>
         <li><strong>Command history with outcomes</strong> — what ran, in what order, and which ones failed (exit code is captured per block, not guessed from text).</li>
         <li><strong>"Why did that fail?"</strong> — it reads the last failing block directly instead of you pasting it.</li>
@@ -85,7 +85,7 @@
     </div>
 
     <div class="blog-section">
-      <h2>How it's wired into the rest of FastAF</h2>
+      <h2>How it's wired into the rest of fastestAF</h2>
       <p>AI Chat isn't a separate app stapled on — it reuses the machinery TUIC already has:</p>
       <ul>
         <li><strong>Per-session context.</strong> The agent's view is scoped to the terminal it's attached to. Its file tools operate in a sandbox rooted at that session's working directory, so "list the files" means <em>this</em> project.</li>

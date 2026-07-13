@@ -5,7 +5,7 @@
   "minAppVersion": "0.3.0",
   "main": "main.js",
   "description": "Tracks Claude Code usage limits and rate limit events. Agent-scoped: only active for Claude terminals.",
-  "author": "FastAF",
+  "author": "fastestAF",
   "agentTypes": ["claude"],
   "capabilities": []
 }

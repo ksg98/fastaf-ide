@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Global Workspace: one view for all your agents — FastAF Blog</title>
+  <title>Global Workspace: one view for all your agents — fastestAF Blog</title>
   <meta name="description" content="When you run agents across multiple repos, you lose track of who's doing what. Global Workspace pulls the terminals that matter into a single split-pane view — without moving them." />
 
-  <meta property="og:title" content="Global Workspace: one view for all your agents — FastAF" />
+  <meta property="og:title" content="Global Workspace: one view for all your agents — fastestAF" />
   <meta property="og:description" content="Promote terminals from any repo into a cross-repo split-pane view. No context switching, no lost agents." />
   <meta property="og:image" content="/public/blog/global-workspace/activity-dashboard.png" />
   <meta property="og:type" content="article" />
@@ -29,8 +29,8 @@
   <nav class="nav">
     <div class="container nav-inner">
       <a href="/" class="nav-logo">
-        <img src="/logo.png" alt="FastAF" width="28" height="28" />
-        <span>FastAF</span>
+        <img src="/logo.png" alt="fastestAF" width="28" height="28" />
+        <span>fastestAF</span>
       </a>
       <div class="nav-links">
         <a href="/#features">Features</a>
@@ -51,9 +51,9 @@
 
     <div class="blog-section">
       <h2>The problem</h2>
-      <p>FastAF already had the Activity Dashboard — a bird's-eye view of every terminal session across every repo. It shows agent names, statuses and last activity timestamps. It's great for monitoring. But monitoring isn't working.</p>
+      <p>fastestAF already had the Activity Dashboard — a bird's-eye view of every terminal session across every repo. It shows agent names, statuses and last activity timestamps. It's great for monitoring. But monitoring isn't working.</p>
       <p>When an agent in repo A needs input, you click its row in the dashboard, and the whole UI switches to repo A — the sidebar, the git panel, the pane layout. You answer the question, and now you need to check on the agent in repo B. Click. Everything switches again. Three repos, five agents, and you're spending more time navigating between repos than actually interacting with the agents.</p>
-      <p>The root issue: FastAF's UI is repo-scoped. One repo at a time. That's the right default — you want your git panel, diff stats and branch list to reflect what you're working on. But when you're orchestrating agents across repos, the repo boundary becomes a wall.</p>
+      <p>The root issue: fastestAF's UI is repo-scoped. One repo at a time. That's the right default — you want your git panel, diff stats and branch list to reflect what you're working on. But when you're orchestrating agents across repos, the repo boundary becomes a wall.</p>
     </div>
 
     <figure class="blog-figure">
@@ -71,7 +71,7 @@
 
     <div class="blog-section">
       <h2>A layout that already existed</h2>
-      <p>FastAF already saves and restores pane layouts every time you switch branches. The layout tree is serialised, stashed in a Map keyed by repo+branch, and restored when you switch back. This mechanism has been running reliably for months with split panes, tab groups and nested splits.</p>
+      <p>fastestAF already saves and restores pane layouts every time you switch branches. The layout tree is serialised, stashed in a Map keyed by repo+branch, and restored when you switch back. This mechanism has been running reliably for months with split panes, tab groups and nested splits.</p>
       <p>Global Workspace reuses the exact same mechanism. When you activate the Global Workspace, the current repo layout is saved. The global layout is restored into the pane system. When you deactivate, the reverse happens. No new layout engine, no new serialisation format, no new state machine. The same code that handles branch switching handles workspace switching.</p>
       <p>This is the part we're most satisfied with. The entire workspace-switch logic — save current, restore target, swap back on deactivate — is the same code path that already handles thousands of branch switches a day. The Global Workspace just adds one more entry to the layout Map.</p>
     </div>
