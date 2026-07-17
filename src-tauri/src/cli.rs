@@ -198,14 +198,18 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         {
             let result = resolve_cli("git");
-            if std::path::Path::new("/usr/bin/git").exists()
-                || std::path::Path::new("/usr/local/bin/git").exists()
-                || std::path::Path::new("/opt/homebrew/bin/git").exists()
-            {
+            // resolve_cli only probes extra_bin_dirs(); elsewhere it falls back
+            // to the bare name (resolved via PATH at spawn time).
+            let probed_has_git = extra_bin_dirs()
+                .iter()
+                .any(|dir| std::path::Path::new(dir).join("git").exists());
+            if probed_has_git {
                 assert!(
                     result.contains('/'),
                     "resolve_cli('git') should return an absolute path, got: {result}"
                 );
+            } else {
+                assert_eq!(result, "git");
             }
         }
     }
