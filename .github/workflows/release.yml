@@ -328,12 +328,14 @@ jobs:
           TAG="v${VERSION}"
           ASSET="tuic-remote-${{ matrix.target }}${{ matrix.ext }}"
           cp "src-tauri/target/${{ matrix.target }}/release/tuic-remote${{ matrix.ext }}" "$ASSET"
-          for i in $(seq 1 20); do
+          # The draft release is created by the first build job to finish
+          # (~30 min); daemon builds are much faster, so wait up to 60 min.
+          for i in $(seq 1 60); do
             gh release upload "${TAG}" "$ASSET" --clobber && exit 0
-            echo "Release not found yet, waiting 30s... (attempt $i/20)"
-            sleep 30
+            echo "Release not found yet, waiting 60s... (attempt $i/60)"
+            sleep 60
           done
-          echo "Release still not found after 10 minutes"
+          echo "Release still not found after 60 minutes"
           exit 1
 
   finalize-release:
