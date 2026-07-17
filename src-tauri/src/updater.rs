@@ -25,8 +25,8 @@ struct ChannelConfig {
 const CHANNELS: &[(&str, ChannelConfig)] = &[(
     "nightly",
     ChannelConfig {
-        manifest_url: "https://github.com/ksg98/fastaf/releases/download/nightly/latest.json",
-        release_page: "https://github.com/ksg98/fastaf/releases/tag/nightly",
+        manifest_url: "https://github.com/ksg98/fastaf-ide/releases/download/nightly/latest.json",
+        release_page: "https://github.com/ksg98/fastaf-ide/releases/tag/nightly",
     },
 )];
 
@@ -194,7 +194,7 @@ mod tests {
 
         let result = fetch_channel_manifest(
             &format!("{}/beta/latest.json", server.url()),
-            "https://github.com/ksg98/fastaf/releases/tag/beta",
+            "https://github.com/ksg98/fastaf-ide/releases/tag/beta",
         )
         .await
         .expect("404 should return Ok, not Err");
@@ -223,7 +223,7 @@ mod tests {
 
         let result = fetch_channel_manifest(
             &format!("{}/beta/latest.json", server.url()),
-            "https://github.com/ksg98/fastaf/releases/tag/beta",
+            "https://github.com/ksg98/fastaf-ide/releases/tag/beta",
         )
         .await
         .expect("200 with valid manifest should succeed");
@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(result.notes.as_deref(), Some("Beta release notes"));
         assert_eq!(
             result.release_page.as_deref(),
-            Some("https://github.com/ksg98/fastaf/releases/tag/beta")
+            Some("https://github.com/ksg98/fastaf-ide/releases/tag/beta")
         );
         assert!(!result.not_found);
         mock.assert_async().await;
@@ -344,7 +344,7 @@ mod tests {
 
         let result = fetch_channel_manifest(
             &format!("{}/beta/latest.json", server.url()),
-            "https://github.com/ksg98/fastaf/releases/tag/beta",
+            "https://github.com/ksg98/fastaf-ide/releases/tag/beta",
         )
         .await
         .expect("302 redirect should be followed transparently");
