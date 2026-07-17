@@ -1105,16 +1105,81 @@ pub fn fs_read_file(repo_path: String, file: String) -> Result<String, String> {
     crate::read_file_impl(repo_path, file)
 }
 
-/// Write content to a file within a repository.
+/// Write content to a file within a repository. Overwrites if it exists.
+/// Used by editor saves — creates parent directories as needed so saving to a
+/// not-yet-existing nested path can't fail.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn write_file(repo_path: String, file: String, content: String) -> Result<(), String> {
-    let (_canonical_repo, canonical_target) = if PathBuf::from(&repo_path).join(&file).exists() {
-        validate_path(&repo_path, &file)?
+    let target = if PathBuf::from(&repo_path).join(&file).exists() {
+        validate_path(&repo_path, &file)?.1
     } else {
-        validate_path_for_creation(&repo_path, &file)?
+        // Path may be nested under directories that don't exist yet — validate the
+        // nearest existing ancestor stays in-repo, then create the parent chain.
+        validate_creation_within_repo(&repo_path, &file)?
     };
 
-    std::fs::write(&canonical_target, &content).map_err(|e| format!("Failed to write file: {e}"))
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directory: {e}"))?;
+    }
+
+    std::fs::write(&target, &content).map_err(|e| format!("Failed to write file: {e}"))
+}
+
+/// Verify that creating `relative` under `repo_path` stays inside the repo, even
+/// when neither the target nor its parent exists yet. Walks up to the nearest
+/// existing ancestor, canonicalizes it, and checks it's within the repo root.
+/// Returns the (uncanonicalized) target path to create.
+fn validate_creation_within_repo(repo_path: &str, relative: &str) -> Result<PathBuf, String> {
+    let repo = PathBuf::from(repo_path);
+    let target = repo.join(relative);
+
+    let canonical_repo = repo
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve repo path: {e}"))?;
+
+    let mut check = target.clone();
+    loop {
+        if check.exists() {
+            let canonical_check = check
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve path: {e}"))?;
+            if !canonical_check.starts_with(&canonical_repo) {
+                return Err("Access denied: path is outside repository".to_string());
+            }
+            break;
+        }
+        if !check.pop() {
+            return Err("Cannot resolve path".to_string());
+        }
+    }
+
+    Ok(target)
+}
+
+/// Create a new, empty file within a repository (VS Code "New File").
+/// Creates parent directories as needed, and fails if the file already exists
+/// so an existing file is never truncated.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub fn create_file(repo_path: String, file: String) -> Result<(), String> {
+    let target = validate_creation_within_repo(&repo_path, &file)?;
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directory: {e}"))?;
+    }
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(format!(
+            "A file or folder \"{file}\" already exists at this location."
+        )),
+        Err(e) => Err(format!("Failed to create file: {e}")),
+    }
 }
 
 /// Create a directory (and parents) within a repository.
@@ -1832,6 +1897,77 @@ mod tests {
 
         create_directory(repo_path.clone(), "nested/deep/dir".to_string()).unwrap();
         assert!(dir.path().join("nested/deep/dir").is_dir());
+    }
+
+    #[test]
+    fn test_create_file_empty() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        create_file(repo_path, "brand_new.txt".to_string()).unwrap();
+        assert!(dir.path().join("brand_new.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("brand_new.txt")).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_create_file_creates_parent_dirs() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        // Parent directories don't exist yet — should be created.
+        create_file(repo_path, "a/b/c/leaf.txt".to_string()).unwrap();
+        assert!(dir.path().join("a/b/c/leaf.txt").is_file());
+    }
+
+    #[test]
+    fn test_create_file_existing_is_rejected_not_truncated() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        write_file(
+            repo_path.clone(),
+            "keep.txt".to_string(),
+            "important".to_string(),
+        )
+        .unwrap();
+
+        let result = create_file(repo_path, "keep.txt".to_string());
+        assert!(result.is_err(), "creating over an existing file must fail");
+        // Existing content must be preserved (not truncated).
+        assert_eq!(
+            fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+            "important"
+        );
+    }
+
+    #[test]
+    fn test_create_file_path_traversal_rejected() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        let result = create_file(repo_path, "../escape.txt".to_string());
+        assert!(result.is_err());
+        assert!(!dir.path().join("../escape.txt").exists());
+    }
+
+    #[test]
+    fn test_write_file_creates_nested_parent_dirs() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        write_file(
+            repo_path,
+            "x/y/deep.txt".to_string(),
+            "content".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("x/y/deep.txt")).unwrap(),
+            "content"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { type Component, createSignal, For, Show } from "solid-js";
+import { type Component, createEffect, createSignal, For, type JSX, Show } from "solid-js";
 import { useFileBrowser } from "../../hooks/useFileBrowser";
 import { appLogger } from "../../stores/appLogger";
 import type { DirEntry } from "../../types/fs";
@@ -24,6 +24,10 @@ export interface TreeNodeProps {
 	/** Cache of loaded children, keyed by dir path */
 	childrenCache: Map<string, DirEntry[]>;
 	onChildrenLoaded: (path: string, children: DirEntry[]) => void;
+	/** Dir path an inline-create input is active for (VS Code-style New File/Folder). */
+	inlineCreateParent?: string | null;
+	/** Renders the inline-create input row at the given tree depth. */
+	renderInlineCreate?: (depth: number) => JSX.Element;
 }
 
 export const TreeNode: Component<TreeNodeProps> = (props) => {
@@ -33,23 +37,31 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 	const isExpanded = () => props.expandedDirs.has(props.entry.path);
 	const children = () => props.childrenCache.get(props.entry.path) ?? [];
 
+	// Load children whenever this dir is expanded but its children aren't cached.
+	// This drives both the initial lazy-load and a reload after the cache is
+	// invalidated (manual refresh or a dir-changed watcher event) — so a
+	// create/rename/delete inside an expanded folder reflects immediately.
+	// `fetching` is a plain flag (not a signal) so it guards concurrency without
+	// re-triggering this effect.
+	let fetching = false;
+	createEffect(() => {
+		if (!props.entry.is_dir || !isExpanded()) return;
+		if (props.childrenCache.has(props.entry.path) || fetching) return;
+		fetching = true;
+		setLoading(true);
+		fb.listDirectory(props.fsRoot, props.entry.path)
+			.then((entries) => props.onChildrenLoaded(props.entry.path, entries))
+			.catch((err) => appLogger.error("app", "Failed to list directory", { path: props.entry.path, error: err }))
+			.finally(() => {
+				fetching = false;
+				setLoading(false);
+			});
+	});
+
 	const handleClick = () => {
 		if (props.entry.is_dir) {
-			const wasExpanded = isExpanded();
+			// Toggle only — the effect above lazy-loads/reloads children as needed.
 			props.onToggleExpand(props.entry.path);
-			// Lazy-load children on first expand (check state BEFORE toggle)
-			if (!wasExpanded && !props.childrenCache.has(props.entry.path)) {
-				setLoading(true);
-				fb.listDirectory(props.fsRoot, props.entry.path)
-					.then((entries) => {
-						props.onChildrenLoaded(props.entry.path, entries);
-						setLoading(false);
-					})
-					.catch((err) => {
-						appLogger.error("app", "Failed to list directory", { path: props.entry.path, error: err });
-						setLoading(false);
-					});
-			}
 		} else {
 			props.onFileOpen(props.repoPath, props.entry.path);
 		}
@@ -101,6 +113,8 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 			</div>
 			{/* Recursive children */}
 			<Show when={props.entry.is_dir && isExpanded()}>
+				{/* Inline-create input for a new item inside this folder */}
+				<Show when={props.inlineCreateParent === props.entry.path}>{props.renderInlineCreate?.(props.depth + 1)}</Show>
 				<Show when={loading()}>
 					<div class={s.treeLoading} style={{ "padding-left": `${8 + (props.depth + 1) * 16}px` }}>
 						Loading...
@@ -121,6 +135,8 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 							onPointerDragStart={props.onPointerDragStart}
 							childrenCache={props.childrenCache}
 							onChildrenLoaded={props.onChildrenLoaded}
+							inlineCreateParent={props.inlineCreateParent}
+							renderInlineCreate={props.renderInlineCreate}
 						/>
 					)}
 				</For>

@@ -117,7 +117,7 @@ function createUIStore() {
 		aiChatPanelWidth: AI_CHAT_PANEL_DEFAULT_WIDTH,
 		settingsNavWidth: SETTINGS_NAV_DEFAULT_WIDTH,
 		diffViewMode: "split" as DiffViewMode,
-		fileBrowserViewMode: "flat" as "flat" | "tree",
+		fileBrowserViewMode: "tree" as "flat" | "tree",
 		fileBrowserExternalRoot: null,
 		fileBrowserContentSearchNonce: 0,
 		activeDropdown: null,

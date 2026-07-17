@@ -1752,6 +1752,7 @@ pub fn run() {
             fs::search_content_all,
             fs::fs_read_file,
             fs::write_file,
+            fs::create_file,
             fs::create_directory,
             fs::delete_path,
             fs::rename_path,

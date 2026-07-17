@@ -119,12 +119,11 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	const [deleteDialogVisible, setDeleteDialogVisible] = createSignal(false);
 	const [deleteTarget, setDeleteTarget] = createSignal<DirEntry | null>(null);
 
-	// New folder / new file dialog state
+	// VS Code-style inline create: when set, an editable name row is rendered in
+	// place in the listing (instead of a popup). `parent` is the dir the new item
+	// is created in, relative to root(); "" = root.
 	type CreateKind = "folder" | "file";
-	const [createDialogVisible, setCreateDialogVisible] = createSignal(false);
-	const [createKind, setCreateKind] = createSignal<CreateKind>("folder");
-	/** Parent dir the new item is created in, relative to root(). "" = root. */
-	const [createParent, setCreateParent] = createSignal<string>("");
+	const [inlineCreate, setInlineCreate] = createSignal<{ kind: CreateKind; parent: string } | null>(null);
 
 	// File clipboard state for copy/cut/paste. `sourceRoot` is the repo the entry
 	// was copied from — captured so paste works across different repos (entry.path
@@ -535,7 +534,14 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		return [...raw].sort((a, b) => (b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0) || b.modified_at - a.modified_at);
 	});
 
-	const refresh = () => setRefreshTrigger((n) => n + 1);
+	// Re-list the current directory AND drop the tree-view children cache so
+	// expanded folders reload — otherwise a create/rename/delete inside an
+	// expanded folder never reflects in tree view (the flat re-list doesn't touch
+	// treeCache). TreeNode re-fetches any expanded-but-uncached dir on demand.
+	const refresh = () => {
+		setTreeCache(new Map());
+		setRefreshTrigger((n) => n + 1);
+	};
 
 	const navigateInto = (entry: DirEntry) => {
 		changeSubdir(entry.path);
@@ -593,6 +599,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			refresh();
 		} catch (err) {
 			appLogger.error("app", "Failed to delete", err);
+			toastsStore.add(t("fileBrowser.deleteFailed", "Couldn't delete"), String(err), "error");
 		}
 	};
 
@@ -605,27 +612,120 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		return idx >= 0 ? entry.path.slice(0, idx) : "";
 	};
 
-	const openCreateDialog = (kind: CreateKind, parent: string) => {
-		setCreateKind(kind);
-		setCreateParent(parent);
-		setCreateDialogVisible(true);
+	const startInlineCreate = (kind: CreateKind, parent: string) => {
+		// In tree view, expand the target folder so the inline input row is visible.
+		if (viewMode() === "tree" && parent) {
+			setExpandedDirs((prev) => (prev.has(parent) ? prev : new Set(prev).add(parent)));
+		}
+		setInlineCreate({ kind, parent });
 	};
 
-	const handleCreateConfirm = async (name: string) => {
+	const handleCreateConfirm = async (kind: CreateKind, parent: string, name: string) => {
 		const fsRoot = root();
 		if (!fsRoot || !name.trim()) return;
-		const parent = createParent();
 		const relPath = parent ? `${parent}/${name.trim()}` : name.trim();
 		try {
-			if (createKind() === "folder") {
+			if (kind === "folder") {
 				await fb.createDirectory(fsRoot, relPath);
+				refresh();
 			} else {
-				await fb.writeFile(fsRoot, relPath, "");
+				await fb.createFile(fsRoot, relPath);
+				refresh();
+				// VS Code-style: open the new file in the editor so you can type right
+				// away. Setting the active editor path also drives revealActiveFile,
+				// which expands ancestors and scrolls the new row into view.
+				props.onFileOpen(fsRoot, relPath);
 			}
-			refresh();
 		} catch (err) {
-			appLogger.error("app", `Failed to create ${createKind()}`, err);
+			appLogger.error("app", `Failed to create ${kind}`, err);
+			toastsStore.add(
+				kind === "folder"
+					? t("fileBrowser.createFolderFailed", "Couldn't create folder")
+					: t("fileBrowser.createFileFailed", "Couldn't create file"),
+				String(err),
+				"error",
+			);
 		}
+	};
+
+	/** VS Code-style inline name input, rendered as a row in the listing.
+	 *  Enter/blur commits, Escape cancels; duplicate names block commit with an
+	 *  inline error. Remounts (and so resets) each time inlineCreate is set. */
+	const InlineCreateRow: Component<{ depth?: number }> = (p) => {
+		const [value, setValue] = createSignal("");
+		let done = false;
+
+		const req = () => inlineCreate();
+		const isFolder = () => req()?.kind === "folder";
+
+		// Known listing of the target dir, for duplicate-name validation. Empty
+		// when we don't have it cached — the backend still refuses collisions.
+		const siblings = (): DirEntry[] => {
+			const parent = req()?.parent ?? "";
+			const current = currentSubdir() === "." ? "" : currentSubdir();
+			if (viewMode() === "tree" && parent !== "") return treeCache().get(parent) ?? [];
+			return parent === current ? entries() : [];
+		};
+		const duplicate = () => {
+			const v = value().trim();
+			return !!v && siblings().some((e) => e.name === v);
+		};
+
+		// In flat view the row always renders in the current listing, so show
+		// where the item actually lands when that's a different (deeper) dir.
+		const prefix = () => {
+			const parent = req()?.parent ?? "";
+			const current = currentSubdir() === "." ? "" : currentSubdir();
+			if (viewMode() === "tree" || parent === current) return "";
+			return parent.startsWith(`${current}/`) ? parent.slice(current.length + 1) : parent;
+		};
+
+		const finish = (commit: boolean) => {
+			if (done) return;
+			done = true;
+			const r = req();
+			const v = value().trim();
+			setInlineCreate(null);
+			if (commit && r && v && !duplicate()) void handleCreateConfirm(r.kind, r.parent, v);
+		};
+
+		return (
+			<div class={cx(s.entry, s.inlineCreateRow)} style={{ "padding-left": `${8 + (p.depth ?? 0) * 16}px` }}>
+				<FileIcon name={isFolder() ? value() : value() || "file"} isDir={isFolder()} class={s.entryIcon} />
+				<Show when={prefix()}>
+					<span class={s.inlineCreatePrefix}>{prefix()}/</span>
+				</Show>
+				<div class={s.inlineCreateBox}>
+					<input
+						class={cx(s.inlineCreateInput, duplicate() && s.inlineCreateInputError)}
+						value={value()}
+						spellcheck={false}
+						autocomplete="off"
+						aria-label={
+							isFolder() ? t("fileBrowser.newFolderTitle", "New Folder") : t("fileBrowser.newFileTitle", "New File")
+						}
+						ref={(el) => queueMicrotask(() => el.focus())}
+						onInput={(e) => setValue(e.currentTarget.value)}
+						onKeyDown={(e) => {
+							e.stopPropagation();
+							if (e.key === "Enter") {
+								e.preventDefault();
+								if (!duplicate()) finish(true);
+							} else if (e.key === "Escape") {
+								e.preventDefault();
+								finish(false);
+							}
+						}}
+						onBlur={() => finish(!duplicate())}
+					/>
+					<Show when={duplicate()}>
+						<div class={s.inlineCreateError}>
+							{t("fileBrowser.nameExists", "A file or folder with this name already exists here")}
+						</div>
+					</Show>
+				</div>
+			</div>
+		);
 	};
 
 	const handleDuplicate = async (entry: DirEntry) => {
@@ -643,6 +743,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			refresh();
 		} catch (err) {
 			appLogger.error("app", "Failed to duplicate", err);
+			toastsStore.add(t("fileBrowser.duplicateFailed", "Couldn't duplicate"), String(err), "error");
 		}
 	};
 
@@ -724,6 +825,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			refresh();
 		} catch (err) {
 			appLogger.error("app", "Failed to rename", err);
+			toastsStore.add(t("fileBrowser.renameFailed", "Couldn't rename"), String(err), "error");
 		}
 	};
 
@@ -906,11 +1008,11 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		const parentForNew = parentDirFor(entry);
 		items.push({
 			label: t("fileBrowser.newFolder", "New Folder\u2026"),
-			action: () => openCreateDialog("folder", parentForNew),
+			action: () => startInlineCreate("folder", parentForNew),
 		});
 		items.push({
 			label: t("fileBrowser.newFile", "New File\u2026"),
-			action: () => openCreateDialog("file", parentForNew),
+			action: () => startInlineCreate("file", parentForNew),
 			separator: true,
 		});
 
@@ -997,6 +1099,38 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		e.preventDefault();
 		e.stopPropagation();
 		setContextEntry(entry);
+		contextMenu.open(e);
+	};
+
+	/** Context menu for empty space in the listing (VS Code-style): create/paste
+	 *  into the current directory. Row menus stopPropagation, so this only fires
+	 *  on the background. */
+	const getBackgroundMenuItems = (): ContextMenuItem[] => {
+		const parent = currentSubdir() === "." ? "" : currentSubdir();
+		return [
+			{
+				label: t("fileBrowser.newFolder", "New Folder…"),
+				action: () => startInlineCreate("folder", parent),
+			},
+			{
+				label: t("fileBrowser.newFile", "New File…"),
+				action: () => startInlineCreate("file", parent),
+				separator: true,
+			},
+			{
+				label: t("fileBrowser.paste", "Paste"),
+				shortcut: `${getModifierSymbol()}V`,
+				action: handlePaste,
+				disabled: !clipboard(),
+			},
+		];
+	};
+
+	const handleBackgroundContextMenu = (e: MouseEvent) => {
+		// Listing operations don't apply to search results
+		if (searchQuery().trim() || !root()) return;
+		e.preventDefault();
+		setContextEntry(null);
 		contextMenu.open(e);
 	};
 
@@ -1285,7 +1419,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				</div>
 			</Show>
 
-			<div class={p.content} ref={contentRef}>
+			<div class={p.content} ref={contentRef} onContextMenu={handleBackgroundContextMenu}>
 				<Show when={loading() || (searching() && searchMode() === "filename")}>
 					<div class={s.empty}>
 						{searching() ? t("fileBrowser.searching", "Searching\u2026") : t("fileBrowser.loading", "Loading...")}
@@ -1349,7 +1483,11 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				<Show when={searchMode() === "filename"}>
 					{/* Tree view (only when no active search query) */}
 					<Show when={viewMode() === "tree" && !searchQuery().trim()}>
-						<Show when={!loading() && !error() && filteredEntries().length === 0}>
+						{/* Inline create at the tree root; deeper parents render inside their TreeNode */}
+						<Show when={inlineCreate()?.parent === ""}>
+							<InlineCreateRow depth={0} />
+						</Show>
+						<Show when={!loading() && !error() && filteredEntries().length === 0 && !inlineCreate()}>
 							<div class={s.empty}>
 								{!root()
 									? t("fileBrowser.noRepo", "No repository selected")
@@ -1372,6 +1510,8 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 										onPointerDragStart={handlePointerDragStart}
 										childrenCache={treeCache()}
 										onChildrenLoaded={onChildrenLoaded}
+										inlineCreateParent={inlineCreate()?.parent ?? null}
+										renderInlineCreate={(depth) => <InlineCreateRow depth={depth} />}
 									/>
 								)}
 							</For>
@@ -1380,7 +1520,11 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 					{/* Flat list view (default, or when searching) */}
 					<Show when={viewMode() === "flat" || searchQuery().trim()}>
-						<Show when={!loading() && !searching() && !error() && filteredEntries().length === 0}>
+						{/* Inline create row — shown at the top of the current listing */}
+						<Show when={inlineCreate()}>
+							<InlineCreateRow />
+						</Show>
+						<Show when={!loading() && !searching() && !error() && filteredEntries().length === 0 && !inlineCreate()}>
 							<div class={s.empty}>
 								{!root()
 									? t("fileBrowser.noRepo", "No repository selected")
@@ -1457,7 +1601,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 			{/* Context menu */}
 			<ContextMenu
-				items={contextEntry() ? getContextMenuItems(contextEntry()!) : []}
+				items={contextEntry() ? getContextMenuItems(contextEntry()!) : getBackgroundMenuItems()}
 				x={contextMenu.position().x}
 				y={contextMenu.position().y}
 				visible={contextMenu.visible()}
@@ -1484,24 +1628,6 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				kind="warning"
 				onClose={() => setDeleteDialogVisible(false)}
 				onConfirm={confirmDelete}
-			/>
-
-			{/* Create new folder / file dialog */}
-			<PromptDialog
-				visible={createDialogVisible()}
-				title={
-					createKind() === "folder"
-						? t("fileBrowser.newFolderTitle", "New Folder")
-						: t("fileBrowser.newFileTitle", "New File")
-				}
-				placeholder={
-					createKind() === "folder"
-						? t("fileBrowser.newFolderPlaceholder", "Folder name")
-						: t("fileBrowser.newFilePlaceholder", "File name")
-				}
-				confirmLabel={t("fileBrowser.create", "Create")}
-				onClose={() => setCreateDialogVisible(false)}
-				onConfirm={handleCreateConfirm}
 			/>
 		</div>
 	);

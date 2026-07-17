@@ -407,3 +407,55 @@
 .searchStatusSearching {
   animation: searchPulse 1.2s ease-in-out infinite;
 }
+
+/* VS Code-style inline create (New File / New Folder in place of a popup) */
+.inlineCreateRow {
+  cursor: default;
+}
+
+.inlineCreateRow:hover {
+  background: transparent;
+}
+
+.inlineCreatePrefix {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  font-size: var(--font-md);
+}
+
+.inlineCreateBox {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.inlineCreateInput {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 1px 4px;
+  background: var(--bg-secondary);
+  color: var(--fg-primary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-md);
+  font-family: var(--font-ui);
+  outline: none;
+}
+
+.inlineCreateInputError {
+  border-color: var(--error);
+}
+
+.inlineCreateError {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  padding: 3px 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-xs);
+}

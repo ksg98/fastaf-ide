@@ -26,6 +26,12 @@ export function useFileBrowser() {
 		await invoke("write_file", { repoPath, file, content });
 	}
 
+	/** Create a new empty file (VS Code "New File"). Creates parent dirs as needed
+	 *  and fails if the file already exists (never truncates). */
+	async function createFile(repoPath: string, file: string): Promise<void> {
+		await invoke("create_file", { repoPath, file });
+	}
+
 	async function createDirectory(repoPath: string, dir: string): Promise<void> {
 		await invoke("create_directory", { repoPath, dir });
 	}
@@ -83,6 +89,7 @@ export function useFileBrowser() {
 		searchFiles,
 		readFile,
 		writeFile,
+		createFile,
 		createDirectory,
 		deletePath,
 		renamePath,
