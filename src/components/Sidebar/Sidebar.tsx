@@ -6,6 +6,7 @@ import { remoteConnectionsStore } from "../../stores/remoteConnections";
 import type { RepositoryState } from "../../stores/repositories";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
+import { getFirstVisibleRepo, getVisibleLayout, getVisibleRepoSequence } from "../../stores/sidebarLayout";
 import { tunnelPanelStore } from "../../stores/tunnelPanel";
 import { tunnelsStore } from "../../stores/tunnels";
 import { uiStore } from "../../stores/ui";
@@ -69,22 +70,10 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		return layout.ungrouped.length > 0 || layout.groups.some((g) => g.repos.length > 0);
 	});
 
-	// Repo filter lives in uiStore (session-only). When active, only repos with at
-	// least one open terminal are shown. The toggle is the toolbar filter icon next
-	// to the sidebar collapse button; here we only read + render the filtered list.
-	const repoIsActive = (repo: RepositoryState) => Object.values(repo.branches).some((b) => b.terminals.length > 0);
-
-	// Layout after applying the repo filter. In "active" mode, empty groups are
-	// dropped entirely so no orphaned group header is left behind.
-	const filteredLayout = createMemo(() => {
-		const layout = groupedLayout();
-		if (!uiStore.state.repoFilterActiveOnly) return layout;
-		const groups = layout.groups
-			.map((entry) => ({ ...entry, repos: entry.repos.filter(repoIsActive) }))
-			.filter((entry) => entry.repos.length > 0);
-		const ungrouped = layout.ungrouped.filter(repoIsActive);
-		return { groups, ungrouped };
-	});
+	// Layout after the shared visibility pipeline (workspace filter, "active
+	// only" toolbar filter, search, sort) — see stores/sidebarLayout.ts. Empty
+	// groups are dropped there so no orphaned group header is left behind.
+	const filteredLayout = createMemo(() => getVisibleLayout());
 
 	// True when the filtered layout has at least one visible repo. Distinguishes
 	// "no repos at all" from "filter hides everything" for the empty state.
@@ -231,27 +220,107 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 	};
 
 	// Compute the starting shortcut index for each repo (1-based, cumulative across all groups then ungrouped).
-	// Only counts visible repos (expanded, not collapsed, in non-collapsed groups).
+	// Walks the same shared sequence as useQuickSwitcher so numbering can't desync.
 	const repoShortcutStarts = createMemo(() => {
 		const starts: Record<string, number> = {};
 		let counter = 1;
-		const layout = filteredLayout();
-		// Groups first — skip collapsed groups and collapsed/non-expanded repos
-		for (const entry of layout.groups) {
-			if (entry.group.collapsed) continue;
-			for (const repo of entry.repos) {
-				if (!repo.expanded || repo.collapsed) continue;
-				starts[repo.path] = counter;
-				counter += Object.keys(repo.branches).length;
-			}
-		}
-		// Then ungrouped — skip collapsed/non-expanded repos
-		for (const repo of layout.ungrouped) {
-			if (!repo.expanded || repo.collapsed) continue;
+		for (const repo of getVisibleRepoSequence()) {
 			starts[repo.path] = counter;
 			counter += Object.keys(repo.branches).length;
 		}
 		return starts;
+	});
+
+	// Sidebar search box: Enter activates the first visible match (same activation
+	// path as the ParkedReposPopover unpark flow), Esc clears without bubbling to
+	// global shortcut handling. Both leave the box blurred.
+	const handleSearchKeyDown = (e: KeyboardEvent & { currentTarget: HTMLInputElement }) => {
+		if (e.key === "Enter") {
+			const repo = getFirstVisibleRepo();
+			if (repo) {
+				// onBranchSelect switches the active repo itself — pre-setting it
+				// corrupts the pane-layout save key for the repo being left.
+				const branch = repo.activeBranch || Object.keys(repo.branches)[0];
+				if (branch) props.onBranchSelect(repo.path, branch);
+				else repositoriesStore.setActive(repo.path);
+			}
+			uiStore.setRepoSearchQuery("");
+			e.currentTarget.blur();
+		} else if (e.key === "Escape") {
+			e.stopPropagation();
+			uiStore.setRepoSearchQuery("");
+			e.currentTarget.blur();
+		}
+	};
+
+	// Workspace/sort footer menu + its dialogs
+	const workspaceMenu = createContextMenu();
+	const [saveWorkspaceOpen, setSaveWorkspaceOpen] = createSignal(false);
+	const [renameWorkspaceTarget, setRenameWorkspaceTarget] = createSignal<string | null>(null);
+
+	/** Repo paths currently visible in the sidebar — what "Save current as workspace" captures */
+	const visibleRepoPaths = (): string[] => {
+		const layout = filteredLayout();
+		const paths: string[] = [];
+		for (const entry of layout.groups) {
+			for (const repo of entry.repos) paths.push(repo.path);
+		}
+		for (const repo of layout.ungrouped) paths.push(repo.path);
+		return paths;
+	};
+
+	// ContextMenuItem has no checked field — "✓ " label prefix marks the active entry
+	const checkLabel = (active: boolean, label: string) => (active ? `✓ ${label}` : label);
+
+	const workspaceMenuItems = createMemo((): ContextMenuItem[] => {
+		const activeId = repositoriesStore.state.activeWorkspaceId;
+		const sortMode = repositoriesStore.state.sortMode;
+		const items: ContextMenuItem[] = [
+			{
+				label: checkLabel(activeId === null, t("sidebar.allProjects", "All projects")),
+				action: () => repositoriesStore.setActiveWorkspace(null),
+			},
+		];
+		for (const id of repositoriesStore.state.workspaceOrder) {
+			const workspace = repositoriesStore.state.workspaces[id];
+			if (!workspace) continue;
+			items.push({
+				label: checkLabel(activeId === id, workspace.name),
+				action: () => repositoriesStore.setActiveWorkspace(id),
+			});
+		}
+		// Trailing `separator: true` renders a divider after the item
+		items[items.length - 1].separator = true;
+		items.push({
+			label: t("sidebar.saveWorkspace", "Save current as workspace…"),
+			action: () => setSaveWorkspaceOpen(true),
+		});
+		items.push({
+			label: t("sidebar.renameWorkspace", "Rename workspace…"),
+			action: () => setRenameWorkspaceTarget(activeId),
+			disabled: activeId === null,
+		});
+		items.push({
+			label: t("sidebar.deleteWorkspace", "Delete workspace"),
+			action: () => {
+				if (activeId) repositoriesStore.deleteWorkspace(activeId);
+			},
+			disabled: activeId === null,
+			separator: true,
+		});
+		items.push({
+			label: checkLabel(sortMode === "manual", t("sidebar.sortManual", "Sort: Manual")),
+			action: () => repositoriesStore.setSortMode("manual"),
+		});
+		items.push({
+			label: checkLabel(sortMode === "name", t("sidebar.sortName", "Sort: Name A–Z")),
+			action: () => repositoriesStore.setSortMode("name"),
+		});
+		items.push({
+			label: checkLabel(sortMode === "recent", t("sidebar.sortRecent", "Sort: Recently active")),
+			action: () => repositoriesStore.setSortMode("recent"),
+		});
+		return items;
 	});
 
 	// Group rename and color change via PromptDialog
@@ -317,7 +386,12 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 				onSwitchBranch={(branch) => props.onSwitchBranch?.(repo.path, branch)}
 				switchBranchList={() => props.switchBranchLists?.[repo.path] ?? []}
 				currentBranch={() => props.currentBranches?.[repo.path] ?? ""}
-				onMouseDrag={(e) => drag.handleRepoMouseDrag(e, repo.path)}
+				onMouseDrag={(e) => {
+					// Repo drops map indices against the *stored* order — meaningless
+					// while a sort mode rearranges the display, so dragging is inert
+					// unless sorting is manual. Group drag stays enabled.
+					if (repositoriesStore.state.sortMode === "manual") drag.handleRepoMouseDrag(e, repo.path);
+				}}
 			/>
 		);
 	};
@@ -326,6 +400,21 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		<aside id="sidebar" class={s.sidebar} data-testid="sidebar">
 			{/* Content */}
 			<div class={s.content}>
+				{/* Repo search box — Enter activates the first match, Esc clears */}
+				<Show when={hasVisibleRepos()}>
+					<div class={s.searchBox}>
+						<input
+							class={s.searchInput}
+							type="text"
+							placeholder={t("sidebar.searchProjects", "Search projects…")}
+							value={uiStore.state.repoSearchQuery}
+							onInput={(e) => uiStore.setRepoSearchQuery(e.currentTarget.value)}
+							onKeyDown={handleSearchKeyDown}
+							data-testid="sidebar-search"
+						/>
+					</div>
+				</Show>
+
 				{/* Repo filter status — only rendered while the "active only" filter is
 				    engaged (toggled from the toolbar icon). Keeps it unmistakable that
 				    repos are hidden, so nobody panics, while taking zero space at rest. */}
@@ -348,6 +437,30 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 						</span>
 						<span class={s.filterStatusClear}>{t("sidebar.filterShowAll", "Show all")}</span>
 					</button>
+				</Show>
+
+				{/* Workspace pill — mirrors the filter banner while a workspace is active */}
+				<Show when={repositoriesStore.getActiveWorkspace()}>
+					{(workspace) => (
+						<button
+							class={s.filterStatus}
+							onClick={() => repositoriesStore.setActiveWorkspace(null)}
+							title={t("sidebar.allProjects", "All projects")}
+						>
+							<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+								<path
+									d="M1.5 3.5h4l1.5 2h7.5v7h-13v-9Z"
+									stroke="currentColor"
+									stroke-width="1.3"
+									stroke-linejoin="round"
+								/>
+							</svg>
+							<span>
+								{t("sidebar.workspaceLabel", "Workspace")}: {workspace().name} · {shownRepoCount()}/{totalRepoCount()}
+							</span>
+							<span class={s.filterStatusClear}>{t("sidebar.allProjects", "All projects")}</span>
+						</button>
+					)}
 				</Show>
 
 				{/* Repository Section */}
@@ -382,13 +495,31 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 								<button onClick={handleAddRepoClick}>{t("sidebar.addRepository", "Add Repository")}</button>
 							</div>
 						</Show>
-						{/* Filter hides every repo — offer a way back to "all" */}
+						{/* Filters hide every repo — offer a way back for each engaged filter */}
 						<Show when={hasVisibleRepos() && !hasFilteredRepos()}>
 							<div class={s.empty}>
-								<p>{t("sidebar.noActiveRepos", "No repositories with open terminals")}</p>
-								<button onClick={() => uiStore.setRepoFilterActiveOnly(false)}>
-									{t("sidebar.filterShowAll", "Show all")}
-								</button>
+								<p>
+									{uiStore.state.repoSearchQuery
+										? t("sidebar.noSearchMatches", "No projects match your search")
+										: uiStore.state.repoFilterActiveOnly
+											? t("sidebar.noActiveRepos", "No repositories with open terminals")
+											: t("sidebar.emptyWorkspace", "This workspace is empty")}
+								</p>
+								<Show when={uiStore.state.repoSearchQuery}>
+									<button onClick={() => uiStore.setRepoSearchQuery("")}>
+										{t("sidebar.clearSearch", "Clear search")}
+									</button>
+								</Show>
+								<Show when={uiStore.state.repoFilterActiveOnly}>
+									<button onClick={() => uiStore.setRepoFilterActiveOnly(false)}>
+										{t("sidebar.filterShowAll", "Show all")}
+									</button>
+								</Show>
+								<Show when={repositoriesStore.state.activeWorkspaceId !== null}>
+									<button onClick={() => repositoriesStore.setActiveWorkspace(null)}>
+										{t("sidebar.allProjects", "All projects")}
+									</button>
+								</Show>
 							</div>
 						</Show>
 					</div>
@@ -549,6 +680,18 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 					{t("sidebar.addRepository", "Add Repository")}
 				</button>
 				<div class={s.footerIcons}>
+					<button
+						class={s.footerAction}
+						onClick={(e) => workspaceMenu.open(e)}
+						title={t("sidebar.workspacesAndSort", "Workspaces & sorting")}
+					>
+						{/* stacked panes / workspace switcher */}
+						<svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+							<rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+							<path d="M1.5 6h13" stroke="currentColor" stroke-width="1.2" />
+							<path d="M4 9h5M4 11h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+						</svg>
+					</button>
 					<Show when={parkedCount() > 0}>
 						<button
 							class={s.footerAction}
@@ -644,6 +787,36 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 				)}
 			</Show>
 
+			{/* Save-current-as-workspace dialog */}
+			<PromptDialog
+				visible={saveWorkspaceOpen()}
+				title={t("sidebar.saveWorkspaceTitle", "Save Workspace")}
+				placeholder={t("sidebar.workspaceNamePlaceholder", "Workspace name")}
+				confirmLabel={t("sidebar.saveWorkspaceConfirm", "Save")}
+				onClose={() => setSaveWorkspaceOpen(false)}
+				onConfirm={(name) => {
+					repositoriesStore.createWorkspace(name, visibleRepoPaths());
+					setSaveWorkspaceOpen(false);
+				}}
+			/>
+
+			{/* Workspace rename dialog */}
+			<PromptDialog
+				visible={renameWorkspaceTarget() !== null}
+				title={t("sidebar.renameWorkspaceTitle", "Rename Workspace")}
+				placeholder={t("sidebar.workspaceNamePlaceholder", "Workspace name")}
+				defaultValue={
+					renameWorkspaceTarget() ? (repositoriesStore.state.workspaces[renameWorkspaceTarget()!]?.name ?? "") : ""
+				}
+				confirmLabel={t("sidebar.renameWorkspaceConfirm", "Rename")}
+				onClose={() => setRenameWorkspaceTarget(null)}
+				onConfirm={(name) => {
+					const id = renameWorkspaceTarget();
+					if (id) repositoriesStore.renameWorkspace(id, name);
+					setRenameWorkspaceTarget(null);
+				}}
+			/>
+
 			{/* Group rename dialog */}
 			<PromptDialog
 				visible={renameGroupTarget() !== null}
@@ -681,6 +854,15 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 				y={addRepoMenu.position().y}
 				visible={addRepoMenu.visible()}
 				onClose={addRepoMenu.close}
+			/>
+
+			{/* Workspace/sort footer menu */}
+			<ContextMenu
+				items={workspaceMenuItems()}
+				x={workspaceMenu.position().x}
+				y={workspaceMenu.position().y}
+				visible={workspaceMenu.visible()}
+				onClose={workspaceMenu.close}
 			/>
 		</aside>
 	);

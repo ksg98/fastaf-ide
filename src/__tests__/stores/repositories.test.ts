@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { RepositoryState } from "../../stores/repositories";
 import { testInScope, testInScopeAsync } from "../helpers/store";
 
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
@@ -9,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 describe("repositoriesStore", () => {
 	let store: typeof import("../../stores/repositories").repositoriesStore;
+	let sortRepos: typeof import("../../stores/repositories").sortRepos;
 
 	beforeEach(async () => {
 		vi.resetModules();
@@ -20,7 +22,9 @@ describe("repositoriesStore", () => {
 			invoke: mockInvoke,
 		}));
 
-		store = (await import("../../stores/repositories")).repositoriesStore;
+		const mod = await import("../../stores/repositories");
+		store = mod.repositoriesStore;
+		sortRepos = mod.sortRepos;
 		store._testSetHydrated(true);
 	});
 
@@ -1248,6 +1252,274 @@ describe("repositoriesStore", () => {
 				// repoOrder is empty, but the repos still surface via the group
 				expect(store.state.repoOrder).toEqual([]);
 				expect(store.getAllReposOrdered().map((r) => r.path)).toEqual(["/repo-a", "/repo-b"]);
+			});
+		});
+	});
+
+	describe("sort mode", () => {
+		it("defaults to manual", () => {
+			testInScope(() => {
+				expect(store.state.sortMode).toBe("manual");
+			});
+		});
+
+		it("setSortMode() updates state and persists in the payload", () => {
+			testInScope(() => {
+				store.setSortMode("name");
+				expect(store.state.sortMode).toBe("name");
+				vi.advanceTimersByTime(500);
+				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				const last = calls[calls.length - 1];
+				expect(last[1].config.sortMode).toBe("name");
+			});
+		});
+
+		it("hydrate() loads a valid sortMode and ignores an invalid one", async () => {
+			mockInvoke.mockResolvedValueOnce({ repos: {}, sortMode: "recent" });
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.sortMode).toBe("recent");
+			});
+		});
+
+		it("hydrate() defaults sortMode to manual on missing/invalid values", async () => {
+			mockInvoke.mockResolvedValueOnce({ repos: {}, sortMode: "bogus" });
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.sortMode).toBe("manual");
+			});
+		});
+	});
+
+	describe("sortRepos()", () => {
+		const repo = (path: string, displayName: string, extra: Partial<RepositoryState> = {}): RepositoryState => ({
+			path,
+			displayName,
+			initials: "",
+			expanded: true,
+			collapsed: false,
+			parked: false,
+			branches: {},
+			activeBranch: null,
+			...extra,
+		});
+
+		it("manual returns the input order untouched", () => {
+			const repos = [repo("/b", "beta"), repo("/a", "alpha")];
+			expect(sortRepos(repos, "manual")).toBe(repos);
+		});
+
+		it("name sorts case-insensitively with numeric awareness", () => {
+			const repos = [repo("/10", "repo10"), repo("/b", "Beta"), repo("/2", "repo2"), repo("/a", "alpha")];
+			expect(sortRepos(repos, "name").map((r) => r.displayName)).toEqual(["alpha", "Beta", "repo2", "repo10"]);
+		});
+
+		it("name does not mutate the input array", () => {
+			const repos = [repo("/b", "beta"), repo("/a", "alpha")];
+			sortRepos(repos, "name");
+			expect(repos.map((r) => r.displayName)).toEqual(["beta", "alpha"]);
+		});
+
+		it("recent sorts by lastActivatedAt descending", () => {
+			const repos = [
+				repo("/old", "old", { lastActivatedAt: 100 }),
+				repo("/new", "new", { lastActivatedAt: 300 }),
+				repo("/mid", "mid", { lastActivatedAt: 200 }),
+			];
+			expect(sortRepos(repos, "recent").map((r) => r.path)).toEqual(["/new", "/mid", "/old"]);
+		});
+
+		it("recent falls back to the latest branch commit, name as tiebreak", () => {
+			const branch = (ts: number | null) => ({
+				name: "main",
+				isMain: true,
+				worktreePath: null,
+				terminals: [],
+				hadTerminals: false,
+				lastActiveTerminal: null,
+				additions: 0,
+				deletions: 0,
+				isMerged: false,
+				lastCommitTs: ts,
+			});
+			const repos = [
+				repo("/never-b", "b-never", { branches: { main: branch(null) } }),
+				repo("/commit", "committed", { branches: { main: branch(500) } }),
+				repo("/never-a", "a-never", { branches: { main: branch(null) } }),
+				repo("/active", "activated", { lastActivatedAt: 1000 }),
+			];
+			expect(sortRepos(repos, "recent").map((r) => r.path)).toEqual(["/active", "/commit", "/never-a", "/never-b"]);
+		});
+	});
+
+	describe("setActive() recency stamping", () => {
+		it("stamps lastActivatedAt on the activated repo", () => {
+			testInScope(() => {
+				vi.setSystemTime(123456);
+				store.add({ path: "/repo", displayName: "test" });
+				store.setActive("/repo");
+				expect(store.get("/repo")!.lastActivatedAt).toBe(123456);
+			});
+		});
+
+		it("does not stamp when clearing the active repo", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "test" });
+				store.setActive(null);
+				expect(store.get("/repo")!.lastActivatedAt).toBeUndefined();
+			});
+		});
+	});
+
+	describe("workspaces", () => {
+		it("initializes with no workspaces and All projects active", () => {
+			testInScope(() => {
+				expect(store.state.workspaces).toEqual({});
+				expect(store.state.workspaceOrder).toEqual([]);
+				expect(store.state.activeWorkspaceId).toBeNull();
+				expect(store.getActiveWorkspace()).toBeUndefined();
+			});
+		});
+
+		it("createWorkspace() captures the given repo paths and returns an ID", () => {
+			testInScope(() => {
+				const id = store.createWorkspace("Client", ["/a", "/b"])!;
+				expect(id).toBeTruthy();
+				expect(store.state.workspaces[id].name).toBe("Client");
+				expect(store.state.workspaces[id].repoPaths).toEqual(["/a", "/b"]);
+				expect(store.state.workspaceOrder).toContain(id);
+			});
+		});
+
+		it("createWorkspace() enforces unique names (case-insensitive)", () => {
+			testInScope(() => {
+				store.createWorkspace("Client", []);
+				expect(store.createWorkspace("client", [])).toBeNull();
+				expect(store.createWorkspace("CLIENT", [])).toBeNull();
+			});
+		});
+
+		it("renameWorkspace() updates name and rejects duplicates", () => {
+			testInScope(() => {
+				const id1 = store.createWorkspace("One", [])!;
+				store.createWorkspace("Two", []);
+				expect(store.renameWorkspace(id1, "two")).toBe(false);
+				expect(store.state.workspaces[id1].name).toBe("One");
+				expect(store.renameWorkspace(id1, "Three")).toBe(true);
+				expect(store.state.workspaces[id1].name).toBe("Three");
+			});
+		});
+
+		it("deleteWorkspace() removes it and falls back to All projects when active", () => {
+			testInScope(() => {
+				const id = store.createWorkspace("Client", [])!;
+				store.setActiveWorkspace(id);
+				expect(store.state.activeWorkspaceId).toBe(id);
+				store.deleteWorkspace(id);
+				expect(store.state.workspaces[id]).toBeUndefined();
+				expect(store.state.workspaceOrder).not.toContain(id);
+				expect(store.state.activeWorkspaceId).toBeNull();
+			});
+		});
+
+		it("setActiveWorkspace() ignores unknown IDs", () => {
+			testInScope(() => {
+				store.setActiveWorkspace("nope");
+				expect(store.state.activeWorkspaceId).toBeNull();
+			});
+		});
+
+		it("add() auto-joins the new repo into the active workspace", () => {
+			testInScope(() => {
+				const id = store.createWorkspace("Client", ["/a"])!;
+				store.setActiveWorkspace(id);
+				store.add({ path: "/b", displayName: "B" });
+				expect(store.state.workspaces[id].repoPaths).toEqual(["/a", "/b"]);
+			});
+		});
+
+		it("remove() strips the repo path from every workspace", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				const w1 = store.createWorkspace("One", ["/a"])!;
+				const w2 = store.createWorkspace("Two", ["/a", "/b"])!;
+				store.remove("/a");
+				expect(store.state.workspaces[w1].repoPaths).toEqual([]);
+				expect(store.state.workspaces[w2].repoPaths).toEqual(["/b"]);
+			});
+		});
+
+		it("setActive() escapes to All projects when activating a non-member", () => {
+			testInScope(() => {
+				store.add({ path: "/member", displayName: "M" });
+				store.add({ path: "/outsider", displayName: "O" });
+				const id = store.createWorkspace("Client", ["/member"])!;
+				store.setActiveWorkspace(id);
+
+				store.setActive("/member");
+				expect(store.state.activeWorkspaceId).toBe(id);
+
+				store.setActive("/outsider");
+				expect(store.state.activeWorkspaceId).toBeNull();
+			});
+		});
+
+		it("persists workspaces in the save payload", () => {
+			testInScope(() => {
+				const id = store.createWorkspace("Client", ["/a"])!;
+				store.setActiveWorkspace(id);
+				store.setSortMode("recent");
+				vi.advanceTimersByTime(500);
+				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				const last = calls[calls.length - 1];
+				expect(last[1].config.workspaces[id].repoPaths).toEqual(["/a"]);
+				expect(last[1].config.workspaceOrder).toEqual([id]);
+				expect(last[1].config.activeWorkspaceId).toBe(id);
+				expect(last[1].config.sortMode).toBe("recent");
+			});
+		});
+
+		it("hydrate() loads workspaces, validating order and active ID", async () => {
+			mockInvoke.mockResolvedValueOnce({
+				repos: {},
+				workspaces: {
+					w1: { id: "w1", name: "Client", repoPaths: ["/gone", "/a"] },
+					w2: { id: "w2", name: "OSS", repoPaths: [] },
+				},
+				// "ghost" doesn't exist; w2 missing from order gets appended
+				workspaceOrder: ["ghost", "w1"],
+				activeWorkspaceId: "w1",
+			});
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.workspaceOrder).toEqual(["w1", "w2"]);
+				expect(store.state.activeWorkspaceId).toBe("w1");
+				// Unknown repo paths are kept (filtered at render, not pruned)
+				expect(store.state.workspaces["w1"].repoPaths).toEqual(["/gone", "/a"]);
+			});
+		});
+
+		it("hydrate() resets an active ID pointing at a deleted workspace", async () => {
+			mockInvoke.mockResolvedValueOnce({
+				repos: {},
+				workspaces: {},
+				workspaceOrder: [],
+				activeWorkspaceId: "deleted",
+			});
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.activeWorkspaceId).toBeNull();
+			});
+		});
+
+		it("hydrate() defaults workspace fields on pre-feature configs", async () => {
+			mockInvoke.mockResolvedValueOnce({ repos: {}, repoOrder: [] });
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.workspaces).toEqual({});
+				expect(store.state.workspaceOrder).toEqual([]);
+				expect(store.state.activeWorkspaceId).toBeNull();
+				expect(store.state.sortMode).toBe("manual");
 			});
 		});
 	});

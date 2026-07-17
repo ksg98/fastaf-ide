@@ -57,6 +57,9 @@ export interface RepositoryState {
 	activeBranch: string | null;
 	/** Which remote connection this repo belongs to (undefined = local) */
 	connectionId?: string;
+	/** Unix ms timestamp of the last time this repo was made active — drives the
+	 *  "Recently active" sidebar sort. Missing on pre-feature configs. */
+	lastActivatedAt?: number;
 }
 
 /** A named, colored group of repositories */
@@ -66,6 +69,18 @@ export interface RepoGroup {
 	color: string; // hex color or "" for default
 	collapsed: boolean; // accordion state
 	repoOrder: string[]; // ordered repo paths in this group
+}
+
+/** Sidebar repo sort mode */
+export type RepoSortMode = "manual" | "name" | "recent";
+
+/** A named workspace — a membership-only set of repo paths shown together in
+ *  the sidebar. Groups and manual ordering stay global; a workspace merely
+ *  filters what is visible. */
+export interface Workspace {
+	id: string;
+	name: string;
+	repoPaths: string[];
 }
 
 /** Repositories store state */
@@ -79,6 +94,10 @@ interface RepositoriesStoreState {
 	groupOrder: string[]; // display order of group IDs
 	/** True while a branch switch is in progress — TabBar holds previous tabs */
 	branchSwitching: boolean;
+	sortMode: RepoSortMode;
+	workspaces: Record<string, Workspace>;
+	workspaceOrder: string[]; // display order of workspace IDs
+	activeWorkspaceId: string | null; // null = "All projects"
 }
 
 /** Grouped layout returned by getGroupedLayout() */
@@ -93,25 +112,57 @@ function isMainBranch(branchName: string): boolean {
 	return mainBranches.includes(branchName.toLowerCase());
 }
 
+/** Case-insensitive, numeric-aware name comparison for repo display names */
+function compareRepoNames(a: RepositoryState, b: RepositoryState): number {
+	return a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base", numeric: true });
+}
+
+/** Recency score for the "recent" sort: last activation, falling back to the
+ *  latest branch commit for repos never activated since the feature shipped. */
+function repoRecency(repo: RepositoryState): number {
+	if (repo.lastActivatedAt !== undefined) return repo.lastActivatedAt;
+	let latest = 0;
+	for (const branch of Object.values(repo.branches)) {
+		if (branch.lastCommitTs && branch.lastCommitTs > latest) latest = branch.lastCommitTs;
+	}
+	return latest;
+}
+
+/** Sort repos for display. Pure — returns a new array (except "manual", which
+ *  preserves the stored order untouched). Used by the sidebar layout selectors;
+ *  never mutates the persisted repoOrder. */
+export function sortRepos(repos: RepositoryState[], mode: RepoSortMode): RepositoryState[] {
+	if (mode === "name") return [...repos].sort(compareRepoNames);
+	if (mode === "recent") return [...repos].sort((a, b) => repoRecency(b) - repoRecency(a) || compareRepoNames(a, b));
+	return repos;
+}
+
 const SAVE_DEBOUNCE_MS = 500;
 
 /** Guard: prevent saves before hydrate completes to avoid nuking persisted data */
 let hydrated = false;
 
+/** Snapshot of the persisted slice of the store (terminals excluded at save) */
+interface PersistedRepoState {
+	repositories: Record<string, RepositoryState>;
+	repoOrder: string[];
+	activeRepoPath: string | null | undefined;
+	groups: Record<string, RepoGroup>;
+	groupOrder: string[];
+	sortMode: RepoSortMode;
+	workspaces: Record<string, Workspace>;
+	workspaceOrder: string[];
+	activeWorkspaceId: string | null;
+}
+
 /** Persist repos to Rust backend (fire-and-forget, terminals excluded) */
-function saveReposImmediate(
-	repositories: Record<string, RepositoryState>,
-	repoOrder: string[],
-	activeRepoPath: string | null | undefined,
-	groups: Record<string, RepoGroup>,
-	groupOrder: string[],
-): void {
+function saveReposImmediate(snapshot: PersistedRepoState): void {
 	if (!hydrated) {
 		appLogger.warn("store", "Repositories save blocked — hydrate not yet complete");
 		return;
 	}
 	const serializable: Record<string, RepositoryState> = {};
-	for (const [path, repo] of Object.entries(repositories)) {
+	for (const [path, repo] of Object.entries(snapshot.repositories)) {
 		const branches: Record<string, BranchState> = {};
 		for (const [name, branch] of Object.entries(repo.branches)) {
 			const persisted: BranchState = { ...branch, terminals: [] };
@@ -127,10 +178,14 @@ function saveReposImmediate(
 	invoke("save_repositories", {
 		config: {
 			repos: serializable,
-			repoOrder,
-			activeRepoPath: activeRepoPath ?? null,
-			groups,
-			groupOrder,
+			repoOrder: snapshot.repoOrder,
+			activeRepoPath: snapshot.activeRepoPath ?? null,
+			groups: snapshot.groups,
+			groupOrder: snapshot.groupOrder,
+			sortMode: snapshot.sortMode,
+			workspaces: snapshot.workspaces,
+			workspaceOrder: snapshot.workspaceOrder,
+			activeWorkspaceId: snapshot.activeWorkspaceId,
 		},
 	}).catch((err) => appLogger.debug("store", "Failed to save repos", err));
 }
@@ -138,23 +193,22 @@ function saveReposImmediate(
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Debounced save — coalesces rapid mutations into a single IPC call */
-function saveRepos(
-	repositories: Record<string, RepositoryState>,
-	repoOrder: string[],
-	activeRepoPath: string | null | undefined,
-	groups: Record<string, RepoGroup>,
-	groupOrder: string[],
-): void {
+function saveRepos(snapshot: PersistedRepoState): void {
 	if (saveTimer) clearTimeout(saveTimer);
 	saveTimer = setTimeout(() => {
 		saveTimer = null;
-		saveReposImmediate(repositories, repoOrder, activeRepoPath, groups, groupOrder);
+		saveReposImmediate(snapshot);
 	}, SAVE_DEBOUNCE_MS);
 }
 
 /** Generate a unique group ID */
 function generateGroupId(): string {
 	return `grp-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+/** Generate a unique workspace ID */
+function generateWorkspaceId(): string {
+	return `ws-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 }
 
 /** Create the repositories store */
@@ -167,6 +221,10 @@ function createRepositoriesStore() {
 		groups: {},
 		groupOrder: [],
 		branchSwitching: false,
+		sortMode: "manual",
+		workspaces: {},
+		workspaceOrder: [],
+		activeWorkspaceId: null,
 	});
 
 	// Inverse index: terminal ID → repo path (O(1) lookup instead of O(repos*branches*terminals)).
@@ -174,13 +232,24 @@ function createRepositoriesStore() {
 	// this map because they never change the repoPath — terminals stay in the same repo.
 	const terminalToRepo = new Map<string, string>();
 
+	/** Snapshot of the persisted slice of the current state */
+	const persistSnapshot = (): PersistedRepoState => ({
+		repositories: state.repositories,
+		repoOrder: state.repoOrder,
+		activeRepoPath: state.activeRepoPath,
+		groups: state.groups,
+		groupOrder: state.groupOrder,
+		sortMode: state.sortMode,
+		workspaces: state.workspaces,
+		workspaceOrder: state.workspaceOrder,
+		activeWorkspaceId: state.activeWorkspaceId,
+	});
+
 	/** Debounced save shorthand using current state */
-	const save = () =>
-		saveRepos(state.repositories, state.repoOrder, state.activeRepoPath, state.groups, state.groupOrder);
+	const save = () => saveRepos(persistSnapshot());
 
 	/** Immediate save shorthand using current state (for app exit) */
-	const saveNow = () =>
-		saveReposImmediate(state.repositories, state.repoOrder, state.activeRepoPath, state.groups, state.groupOrder);
+	const saveNow = () => saveReposImmediate(persistSnapshot());
 
 	const actions = {
 		/** Load repos from Rust backend; migrate from localStorage on first run */
@@ -204,6 +273,10 @@ function createRepositoriesStore() {
 					activeRepoPath?: string | null;
 					groups?: Record<string, RepoGroup>;
 					groupOrder?: string[];
+					sortMode?: string;
+					workspaces?: Record<string, Workspace>;
+					workspaceOrder?: string[];
+					activeWorkspaceId?: string | null;
 				}>("load_repositories");
 				const repos = loaded?.repos;
 				if (repos) {
@@ -247,6 +320,23 @@ function createRepositoriesStore() {
 					setState("groups", loaded.groups ?? {});
 					setState("groupOrder", loaded.groupOrder ?? []);
 
+					// Hydrate sort mode — migration: default "manual" on missing/invalid
+					if (loaded.sortMode === "manual" || loaded.sortMode === "name" || loaded.sortMode === "recent") {
+						setState("sortMode", loaded.sortMode);
+					}
+
+					// Hydrate workspaces — migration: missing field initializes empty.
+					// Membership may reference repos that were since removed on another
+					// machine; keep those paths (filtered at render) rather than pruning.
+					const workspaces = loaded.workspaces ?? {};
+					setState("workspaces", workspaces);
+					const savedWsOrder = (loaded.workspaceOrder ?? []).filter((id) => id in workspaces);
+					const missingWs = Object.keys(workspaces).filter((id) => !savedWsOrder.includes(id));
+					setState("workspaceOrder", [...savedWsOrder, ...missingWs]);
+					if (loaded.activeWorkspaceId && loaded.activeWorkspaceId in workspaces) {
+						setState("activeWorkspaceId", loaded.activeWorkspaceId);
+					}
+
 					// Restore active repo
 					if (loaded.activeRepoPath && loaded.activeRepoPath in repos) {
 						setState("activeRepoPath", loaded.activeRepoPath);
@@ -283,6 +373,12 @@ function createRepositoriesStore() {
 			if (!state.repoOrder.includes(repo.path)) {
 				setState("repoOrder", [...state.repoOrder, repo.path]);
 			}
+			// A repo added while a workspace is active joins it — otherwise the
+			// just-added repo would be invisible in the sidebar.
+			const wsId = state.activeWorkspaceId;
+			if (wsId && state.workspaces[wsId] && !state.workspaces[wsId].repoPaths.includes(repo.path)) {
+				setState("workspaces", wsId, "repoPaths", (paths) => [...paths, repo.path]);
+			}
 			save();
 			invoke("github_update_paths", { paths: this.getActivePaths() }).catch(() => {});
 		},
@@ -307,6 +403,10 @@ function createRepositoriesStore() {
 					for (const group of Object.values(s.groups)) {
 						group.repoOrder = group.repoOrder.filter((p) => p !== path);
 					}
+					// Clean up workspace membership
+					for (const workspace of Object.values(s.workspaces)) {
+						workspace.repoPaths = workspace.repoPaths.filter((p) => p !== path);
+					}
 					if (s.activeRepoPath === path) {
 						s.activeRepoPath = null;
 					}
@@ -321,7 +421,18 @@ function createRepositoriesStore() {
 			// Freeze-investigation breadcrumb: the synchronous reactive cascade off
 			// activeRepoPath/revision is the prime repo-switch-hang suspect.
 			markPerf("repo.setActive", { path });
-			setState("activeRepoPath", path);
+			batch(() => {
+				setState("activeRepoPath", path);
+				if (path && state.repositories[path]) {
+					setState("repositories", path, "lastActivatedAt", Date.now());
+					// Activating a non-member escapes to "All projects" — the active
+					// repo must never be hidden by the workspace filter.
+					const ws = state.activeWorkspaceId ? state.workspaces[state.activeWorkspaceId] : undefined;
+					if (ws && !ws.repoPaths.includes(path)) {
+						setState("activeWorkspaceId", null);
+					}
+				}
+			});
 			save();
 			if (path && !getHotRepoPaths(state.repositories).includes(path)) {
 				setState("revisions", path, (n) => (n ?? 0) + 1);
@@ -805,6 +916,68 @@ function createRepositoriesStore() {
 			if (!state.groups[id]) return;
 			setState("groups", id, "collapsed", (c) => !c);
 			save();
+		},
+
+		// ── Sort mode & workspaces ──
+
+		/** Set the sidebar repo sort mode */
+		setSortMode(mode: RepoSortMode): void {
+			setState("sortMode", mode);
+			save();
+		},
+
+		/** Create a workspace from a set of repo paths. Returns ID or null if
+		 *  name is duplicate (case-insensitive). */
+		createWorkspace(name: string, repoPaths: string[]): string | null {
+			const nameLower = name.toLowerCase();
+			const exists = Object.values(state.workspaces).some((w) => w.name.toLowerCase() === nameLower);
+			if (exists) return null;
+
+			const id = generateWorkspaceId();
+			batch(() => {
+				setState("workspaces", id, { id, name, repoPaths: [...repoPaths] });
+				setState("workspaceOrder", [...state.workspaceOrder, id]);
+			});
+			save();
+			return id;
+		},
+
+		/** Rename a workspace. Returns false if name is duplicate (case-insensitive). */
+		renameWorkspace(id: string, newName: string): boolean {
+			if (!state.workspaces[id]) return false;
+			const nameLower = newName.toLowerCase();
+			const exists = Object.values(state.workspaces).some((w) => w.id !== id && w.name.toLowerCase() === nameLower);
+			if (exists) return false;
+			setState("workspaces", id, "name", newName);
+			save();
+			return true;
+		},
+
+		/** Delete a workspace — falls back to "All projects" if it was active */
+		deleteWorkspace(id: string): void {
+			if (!state.workspaces[id]) return;
+			setState(
+				produce((s) => {
+					delete s.workspaces[id];
+					s.workspaceOrder = s.workspaceOrder.filter((wid) => wid !== id);
+					if (s.activeWorkspaceId === id) {
+						s.activeWorkspaceId = null;
+					}
+				}),
+			);
+			save();
+		},
+
+		/** Set the active workspace (null = "All projects") */
+		setActiveWorkspace(id: string | null): void {
+			if (id !== null && !state.workspaces[id]) return;
+			setState("activeWorkspaceId", id);
+			save();
+		},
+
+		/** Get the active workspace (undefined when "All projects") */
+		getActiveWorkspace(): Workspace | undefined {
+			return state.activeWorkspaceId ? state.workspaces[state.activeWorkspaceId] : undefined;
 		},
 
 		// ── Group assignment ──

@@ -48,6 +48,13 @@ const {
 
 // Mock stores before importing the component
 vi.mock("../../stores/repositories", () => ({
+	// Real (small) implementation so the sidebarLayout module works against the mock
+	sortRepos: (repos: { displayName: string }[], mode: string) =>
+		mode === "manual"
+			? repos
+			: [...repos].sort((a, b) =>
+					a.displayName.localeCompare(b.displayName, undefined, { sensitivity: "base", numeric: true }),
+				),
 	repositoriesStore: {
 		state: {
 			repositories: {} as Record<string, unknown>,
@@ -55,6 +62,10 @@ vi.mock("../../stores/repositories", () => ({
 			activeRepoPath: null as string | null,
 			groups: {} as Record<string, unknown>,
 			groupOrder: [] as string[],
+			sortMode: "manual" as string,
+			workspaces: {} as Record<string, unknown>,
+			workspaceOrder: [] as string[],
+			activeWorkspaceId: null as string | null,
 		},
 		getActive: mockGetActive,
 		getOrderedRepos: mockGetOrderedRepos,
@@ -81,6 +92,12 @@ vi.mock("../../stores/repositories", () => ({
 		setActive: vi.fn(),
 		toggleBranchTabsExpanded: mockToggleBranchTabsExpanded,
 		setBranchTabsExpanded: mockSetBranchTabsExpanded,
+		getActiveWorkspace: vi.fn(() => undefined),
+		setActiveWorkspace: vi.fn(),
+		setSortMode: vi.fn(),
+		createWorkspace: vi.fn(() => "new-workspace-id"),
+		renameWorkspace: vi.fn(() => true),
+		deleteWorkspace: vi.fn(),
 	},
 }));
 
@@ -199,6 +216,9 @@ describe("Sidebar", () => {
 		// Nested terminal tabs are opt-in and off by default — reset per test so the
 		// feature-behavior block can enable it and the gating block can rely on off.
 		settingsStore.setTabTreeEnabled(false);
+		// uiStore is the real store shared across tests — reset session-only filters
+		uiStore.setRepoSearchQuery("");
+		uiStore.setRepoFilterActiveOnly(false);
 		_resetMergedActivityAccum();
 	});
 
@@ -1309,6 +1329,102 @@ describe("Sidebar", () => {
 			expect(onBranchSelect).toHaveBeenCalledWith("/repo1", "main");
 			expect(mockToggleBranchTabsExpanded).not.toHaveBeenCalled();
 			expect(mockSetBranchTabsExpanded).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("search box", () => {
+		it("renders when repos exist and not in the empty state", () => {
+			setRepos({ "/repo1": makeRepo() });
+			const { container } = render(() => <Sidebar {...defaultProps()} />);
+			expect(container.querySelector("[data-testid='sidebar-search']")).not.toBeNull();
+		});
+
+		it("does not render without repositories", () => {
+			const { container } = render(() => <Sidebar {...defaultProps()} />);
+			expect(container.querySelector("[data-testid='sidebar-search']")).toBeNull();
+		});
+
+		it("filters repos by display name (case-insensitive)", () => {
+			setRepos({
+				"/repo1": makeRepo(),
+				"/repo2": makeRepo({ path: "/repo2", displayName: "Other Project", initials: "OP" }),
+			});
+			const { container } = render(() => <Sidebar {...defaultProps()} />);
+			const input = container.querySelector("[data-testid='sidebar-search']")!;
+			fireEvent.input(input, { target: { value: "other" } });
+
+			const names = Array.from(container.querySelectorAll(".repoName")).map((el) => el.textContent);
+			expect(names).toEqual(["Other Project"]);
+		});
+
+		it("shows the filtered-empty state with a Clear search action when nothing matches", () => {
+			setRepos({ "/repo1": makeRepo() });
+			const { container } = render(() => <Sidebar {...defaultProps()} />);
+			const input = container.querySelector("[data-testid='sidebar-search']")!;
+			fireEvent.input(input, { target: { value: "zzz" } });
+
+			const empty = container.querySelector(".empty")!;
+			expect(empty.textContent).toContain("No projects match your search");
+			const clearBtn = Array.from(empty.querySelectorAll("button")).find((b) =>
+				b.textContent?.includes("Clear search"),
+			)!;
+			fireEvent.click(clearBtn);
+			expect(container.querySelectorAll(".repoSection").length).toBe(1);
+		});
+
+		it("Enter activates the first visible match and clears the query", () => {
+			setRepos({
+				"/repo1": makeRepo(),
+				"/repo2": makeRepo({ path: "/repo2", displayName: "Other Project", initials: "OP" }),
+			});
+			const onBranchSelect = vi.fn();
+			const { container } = render(() => <Sidebar {...defaultProps({ onBranchSelect })} />);
+			const input = container.querySelector("[data-testid='sidebar-search']") as HTMLInputElement;
+			fireEvent.input(input, { target: { value: "other" } });
+			fireEvent.keyDown(input, { key: "Enter" });
+
+			expect(onBranchSelect).toHaveBeenCalledWith("/repo2", "main");
+			expect(uiStore.state.repoSearchQuery).toBe("");
+		});
+
+		it("Escape clears the query without activating anything", () => {
+			setRepos({ "/repo1": makeRepo() });
+			const onBranchSelect = vi.fn();
+			const { container } = render(() => <Sidebar {...defaultProps({ onBranchSelect })} />);
+			const input = container.querySelector("[data-testid='sidebar-search']") as HTMLInputElement;
+			fireEvent.input(input, { target: { value: "repo" } });
+			fireEvent.keyDown(input, { key: "Escape" });
+
+			expect(onBranchSelect).not.toHaveBeenCalled();
+			expect(uiStore.state.repoSearchQuery).toBe("");
+		});
+	});
+
+	describe("workspace/sort footer menu", () => {
+		it("opens with All projects checked and sort options", () => {
+			setRepos({ "/repo1": makeRepo() });
+			const { container } = render(() => <Sidebar {...defaultProps()} />);
+			const btn = container.querySelector('.footerAction[title="Workspaces & sorting"]')!;
+			fireEvent.click(btn);
+
+			const labels = Array.from(container.querySelectorAll(".menu .label")).map((el) => el.textContent);
+			expect(labels).toContain("✓ All projects");
+			expect(labels).toContain("Save current as workspace…");
+			expect(labels).toContain("✓ Sort: Manual");
+			expect(labels).toContain("Sort: Name A–Z");
+			expect(labels).toContain("Sort: Recently active");
+		});
+
+		it("selecting a sort mode calls setSortMode", () => {
+			setRepos({ "/repo1": makeRepo() });
+			const { container } = render(() => <Sidebar {...defaultProps()} />);
+			fireEvent.click(container.querySelector('.footerAction[title="Workspaces & sorting"]')!);
+
+			const item = Array.from(container.querySelectorAll(".menu .item")).find(
+				(el) => el.querySelector(".label")?.textContent === "Sort: Name A–Z",
+			)!;
+			fireEvent.click(item);
+			expect(repositoriesStore.setSortMode).toHaveBeenCalledWith("name");
 		});
 	});
 

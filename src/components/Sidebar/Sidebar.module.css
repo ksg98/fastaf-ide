@@ -44,6 +44,35 @@
   /* container for repo sections */
 }
 
+/* ── Repo search box ── */
+.searchBox {
+  display: flex;
+  align-items: center;
+  padding: 0 8px 6px;
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  font-family: var(--font-ui);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.searchInput:focus {
+  border-color: var(--accent);
+}
+
+.searchInput::placeholder {
+  color: var(--fg-muted);
+}
+
 /* ── Repo filter status banner (shown only while "active only" is engaged) ── */
 .filterStatus {
   display: flex;
@@ -147,6 +176,7 @@
 
 .empty button {
   padding: 8px 16px;
+  margin: 2px 3px;
   background: var(--accent);
   border: none;
   border-radius: var(--radius-sm);

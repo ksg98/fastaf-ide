@@ -37,6 +37,11 @@ interface UIStoreState {
 	 *  toolbar filter icon next to the sidebar collapse button. */
 	repoFilterActiveOnly: boolean;
 
+	/** Sidebar repo search: case-insensitive substring filter on repo display
+	 *  names. Session-only (not persisted) — typed into the sidebar search box,
+	 *  cleared on Esc/Enter. */
+	repoSearchQuery: string;
+
 	// Sidebar width
 	sidebarWidth: number;
 
@@ -99,6 +104,7 @@ function createUIStore() {
 		sidebarVisible: true,
 		focusMode: false,
 		repoFilterActiveOnly: false,
+		repoSearchQuery: "",
 		sidebarWidth: SIDEBAR_DEFAULT_WIDTH,
 		markdownPanelVisible: false,
 		notesPanelVisible: false,
@@ -445,6 +451,11 @@ function createUIStore() {
 
 		setRepoFilterActiveOnly(active: boolean): void {
 			setState("repoFilterActiveOnly", active);
+		},
+
+		// Repo search (session-only, not persisted)
+		setRepoSearchQuery(query: string): void {
+			setState("repoSearchQuery", query);
 		},
 
 		setSidebarVisible(visible: boolean): void {

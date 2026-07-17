@@ -2120,6 +2120,28 @@ const App: Component = () => {
 			});
 		}
 
+		// Dynamic: workspace switching (only when workspaces exist)
+		if (repositoriesStore.state.workspaceOrder.length > 0) {
+			entries.push({
+				id: "switch-workspace:all",
+				label: "All projects",
+				category: "Workspace",
+				keybinding: "",
+				execute: () => repositoriesStore.setActiveWorkspace(null),
+			});
+			for (const wsId of repositoriesStore.state.workspaceOrder) {
+				const workspace = repositoriesStore.state.workspaces[wsId];
+				if (!workspace) continue;
+				entries.push({
+					id: `switch-workspace:${workspace.id}`,
+					label: `Workspace: ${workspace.name}`,
+					category: "Workspace",
+					keybinding: "",
+					execute: () => repositoriesStore.setActiveWorkspace(workspace.id),
+				});
+			}
+		}
+
 		// Dynamic: park/unpark groups
 		for (const group of Object.values(repositoriesStore.state.groups)) {
 			if (group.repoOrder.length === 0) continue;
