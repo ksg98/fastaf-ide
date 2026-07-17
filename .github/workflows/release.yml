@@ -145,10 +145,17 @@ jobs:
         env:
           NOTARIZE_KEY_BASE64: ${{ secrets.NOTARIZE_KEY_BASE64 }}
           NOTARIZE_KEY_ID: ${{ secrets.NOTARIZE_KEY_ID }}
+          NOTARIZE_ISSUER_ID: ${{ secrets.NOTARIZE_ISSUER_ID }}
         run: |
+          if [ -z "$NOTARIZE_KEY_BASE64" ] || [ -z "$NOTARIZE_KEY_ID" ]; then
+            echo "::warning::Notarization secrets not set — skipping notarization"
+            exit 0
+          fi
           KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARIZE_KEY_ID}.p8"
           echo "$NOTARIZE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
           echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+          echo "APPLE_API_ISSUER=$NOTARIZE_ISSUER_ID" >> "$GITHUB_ENV"
+          echo "APPLE_API_KEY=$NOTARIZE_KEY_ID" >> "$GITHUB_ENV"
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -161,15 +168,11 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: "sccache"
           # mold linker on Linux
           RUSTFLAGS: ${{ matrix.label == 'Linux-x64' && '-C link-arg=-fuse-ld=mold' || '' }}
-          # macOS signing — only when the certificate import above succeeded
-          # (empty values are treated as unset by tauri-action → unsigned build)
-          APPLE_CERTIFICATE: ${{ env.MACOS_SIGNING == 'true' && secrets.DEVELOPER_ID_CERT_BASE64 || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ env.MACOS_SIGNING == 'true' && secrets.DEVELOPER_ID_CERT_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          # macOS notarization — API key written to file in previous step
-          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
-          APPLE_API_ISSUER: ${{ env.MACOS_SIGNING == 'true' && secrets.NOTARIZE_ISSUER_ID || '' }}
-          APPLE_API_KEY: ${{ env.MACOS_SIGNING == 'true' && secrets.NOTARIZE_KEY_ID || '' }}
+          # macOS signing/notarization env (APPLE_SIGNING_IDENTITY, KEYCHAIN_PATH,
+          # APPLE_API_*) is exported via GITHUB_ENV by the import/notarization
+          # steps ONLY when signing is available. The tauri bundler treats even
+          # an empty APPLE_* variable as "signing requested", so the variables
+          # must be entirely absent for an unsigned build — never set them here.
           # Updater artifact signing
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
