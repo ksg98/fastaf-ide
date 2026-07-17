@@ -210,21 +210,21 @@ export async function listenForThemeChanges(): Promise<void> {
 	});
 }
 
-/** Get a terminal theme by key, falling back to nezha-dark, then vscode-dark */
+/** Get a terminal theme by key, falling back to cursor-dark, then vscode-dark */
 export function getTerminalTheme(key: string): TerminalTheme {
 	return (
 		themes.get(key)?.terminal ??
-		themes.get("nezha-dark")?.terminal ??
+		themes.get("cursor-dark")?.terminal ??
 		themes.get("vscode-dark")?.terminal ??
 		FALLBACK_TERMINAL
 	);
 }
 
-/** Get an app theme by key, falling back to nezha-dark, then vscode-dark */
+/** Get an app theme by key, falling back to cursor-dark, then vscode-dark */
 export function getAppTheme(key: string): IAppTheme {
 	return (
 		themes.get(key)?.appChrome ??
-		themes.get("nezha-dark")?.appChrome ??
+		themes.get("cursor-dark")?.appChrome ??
 		themes.get("vscode-dark")?.appChrome ??
 		FALLBACK_APP
 	);
@@ -308,7 +308,7 @@ const ANSI_KEYS: readonly (keyof TerminalTheme)[] = [
 export function applyAppTheme(key: string): void {
 	const appTheme = themes.get(key);
 	if (!appTheme) {
-		appLogger.warn("app", `Unknown theme "${key}", falling back to nezha-dark`);
+		appLogger.warn("app", `Unknown theme "${key}", falling back to cursor-dark`);
 	}
 	const theme = getAppTheme(key);
 	const root = document.documentElement.style;

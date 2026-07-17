@@ -306,6 +306,7 @@ fn derive_app_chrome(bg: &str, fg: &str, ansi: &[String; 16]) -> AppChromeColors
 const BUILTIN_THEMES: &[(&str, &str)] = &[
     ("commander.json", include_str!("themes/commander.json")),
     ("nezha-dark.json", include_str!("themes/nezha-dark.json")),
+    ("cursor-dark.json", include_str!("themes/cursor-dark.json")),
     ("vscode-dark.json", include_str!("themes/vscode-dark.json")),
     ("tokyo-night.json", include_str!("themes/tokyo-night.json")),
     (
@@ -338,12 +339,14 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
 
 /// Seed the themes directory with built-in themes (only when the dir doesn't exist).
 pub(crate) fn seed_builtin_themes(dir: &Path) -> std::io::Result<()> {
-    if dir.exists() {
-        return Ok(());
-    }
     std::fs::create_dir_all(dir)?;
+    // Per-file, write-if-missing: built-ins added in app updates reach existing
+    // installs, while user edits to seeded theme files are never overwritten.
     for (filename, content) in BUILTIN_THEMES {
-        std::fs::write(dir.join(filename), content)?;
+        let path = dir.join(filename);
+        if !path.exists() {
+            std::fs::write(path, content)?;
+        }
     }
     Ok(())
 }
@@ -621,16 +624,25 @@ mod tests {
     }
 
     #[test]
-    fn seed_is_noop_when_dir_exists() {
+    fn seed_adds_missing_builtins_without_overwriting_existing_files() {
         let dir = TempDir::new().unwrap();
         let themes_dir = dir.path().join("themes");
         fs::create_dir_all(&themes_dir).unwrap();
+        // A user file and a user-modified copy of a built-in.
         fs::write(themes_dir.join("custom.json"), make_wt_json("Custom")).unwrap();
+        let (builtin_name, _) = BUILTIN_THEMES[0];
+        fs::write(themes_dir.join(builtin_name), make_wt_json("UserEdited")).unwrap();
 
         seed_builtin_themes(&themes_dir).unwrap();
 
-        // Only the custom file should exist — no built-ins seeded
-        assert_eq!(fs::read_dir(&themes_dir).unwrap().count(), 1);
+        // All built-ins present plus the custom file…
+        assert_eq!(
+            fs::read_dir(&themes_dir).unwrap().count(),
+            BUILTIN_THEMES.len() + 1
+        );
+        // …and the user-modified built-in was NOT overwritten.
+        let content = fs::read_to_string(themes_dir.join(builtin_name)).unwrap();
+        assert!(content.contains("UserEdited"));
     }
 
     #[test]

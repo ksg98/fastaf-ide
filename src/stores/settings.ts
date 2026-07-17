@@ -559,7 +559,7 @@ function createSettingsStore() {
 				setState("ide", validateIde(config.ide));
 				setState("defaultFontSize", config.default_font_size || DEFAULTS.fontSize);
 				setState("shell", config.shell || null);
-				setState("theme", config.theme || "nezha-dark");
+				setState("theme", config.theme || "cursor-dark");
 				setState("confirmBeforeQuit", config.confirm_before_quit ?? true);
 				setState("confirmBeforeClosingTab", config.confirm_before_closing_tab ?? true);
 				setState("maxTabNameLength", config.max_tab_name_length || 25);

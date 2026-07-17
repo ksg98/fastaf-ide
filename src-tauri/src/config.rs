@@ -719,7 +719,7 @@ impl Default for AppConfig {
             font_family: "JetBrains Mono".to_string(),
             font_size: 14,
             font_weight: default_font_weight(),
-            theme: "nezha-dark".to_string(),
+            theme: "cursor-dark".to_string(),
             mcp_server_enabled: true,
             mcp_port: default_mcp_port(),
             mcp_config_installed: false,
