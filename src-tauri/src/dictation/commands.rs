@@ -575,6 +575,21 @@ pub struct DictationConfig {
     /// Automatically send (press Enter) after injecting transcribed text.
     #[serde(default)]
     pub auto_send: bool,
+    /// Post-process the transcript through an LLM before insertion.
+    #[serde(default)]
+    pub rewrite_enabled: bool,
+    /// OpenAI-compatible base URL (e.g. "https://openrouter.ai/api/v1").
+    #[serde(default)]
+    pub rewrite_base_url: String,
+    /// Model id used for the rewrite request.
+    #[serde(default)]
+    pub rewrite_model: String,
+    /// Reasoning effort to request. None = omit the parameter (model decides).
+    #[serde(default)]
+    pub rewrite_effort: Option<String>,
+    /// System prompt for the rewrite request.
+    #[serde(default = "default_rewrite_system_prompt")]
+    pub rewrite_system_prompt: String,
 }
 
 fn default_model() -> String {
@@ -583,6 +598,14 @@ fn default_model() -> String {
 
 fn default_long_press_ms() -> u32 {
     400
+}
+
+pub(crate) fn default_rewrite_system_prompt() -> String {
+    "Rewrite the user's dictated text into a clear, well-structured prompt for an AI coding \
+     assistant. Fix transcription errors, remove filler words and false starts, and preserve \
+     the original intent and all technical details. Output only the rewritten text with no \
+     preamble or explanation."
+        .to_string()
 }
 
 impl Default for DictationConfig {
@@ -595,6 +618,11 @@ impl Default for DictationConfig {
             device: None,
             long_press_ms: default_long_press_ms(),
             auto_send: false,
+            rewrite_enabled: false,
+            rewrite_base_url: String::new(),
+            rewrite_model: String::new(),
+            rewrite_effort: None,
+            rewrite_system_prompt: default_rewrite_system_prompt(),
         }
     }
 }
@@ -622,4 +650,50 @@ pub fn check_microphone_permission() -> String {
 #[tauri::command]
 pub fn open_microphone_settings() {
     permission::open_settings();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_config_json_gets_rewrite_defaults() {
+        // dictation-config.json written before the AI-rewrite feature existed
+        let json = r#"{
+            "enabled": true,
+            "hotkey": "F5",
+            "language": "auto",
+            "model": "small",
+            "device": null,
+            "long_press_ms": 300,
+            "auto_send": true
+        }"#;
+        let config: DictationConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.long_press_ms, 300);
+        assert!(!config.rewrite_enabled);
+        assert_eq!(config.rewrite_base_url, "");
+        assert_eq!(config.rewrite_model, "");
+        assert_eq!(config.rewrite_effort, None);
+        assert_eq!(config.rewrite_system_prompt, default_rewrite_system_prompt());
+    }
+
+    #[test]
+    fn rewrite_config_roundtrips() {
+        let config = DictationConfig {
+            rewrite_enabled: true,
+            rewrite_base_url: "https://openrouter.ai/api/v1".to_string(),
+            rewrite_model: "openai/gpt-4o-mini".to_string(),
+            rewrite_effort: Some("high".to_string()),
+            rewrite_system_prompt: "Custom prompt".to_string(),
+            ..DictationConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DictationConfig = serde_json::from_str(&json).unwrap();
+        assert!(parsed.rewrite_enabled);
+        assert_eq!(parsed.rewrite_base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(parsed.rewrite_model, "openai/gpt-4o-mini");
+        assert_eq!(parsed.rewrite_effort, Some("high".to_string()));
+        assert_eq!(parsed.rewrite_system_prompt, "Custom prompt");
+    }
 }

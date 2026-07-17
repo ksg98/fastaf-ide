@@ -155,3 +155,59 @@ pub(super) async fn set_dictation_config_http(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }
+
+// --- AI rewrite ---
+
+#[derive(serde::Deserialize)]
+pub(super) struct RewriteTextRequest {
+    pub text: String,
+}
+
+pub(super) async fn dictation_rewrite_http(Json(body): Json<RewriteTextRequest>) -> Response {
+    match dictation::rewrite::dictation_rewrite(body.text).await {
+        Ok(text) => Json(serde_json::json!({"text": text})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct RewriteModelsRequest {
+    pub base_url: String,
+}
+
+pub(super) async fn dictation_fetch_rewrite_models_http(
+    Json(body): Json<RewriteModelsRequest>,
+) -> Response {
+    match dictation::rewrite::dictation_fetch_rewrite_models(body.base_url).await {
+        Ok(models) => Json(models).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct RewriteApiKeyRequest {
+    pub key: String,
+}
+
+pub(super) async fn set_dictation_rewrite_api_key_http(
+    Json(body): Json<RewriteApiKeyRequest>,
+) -> Response {
+    match dictation::rewrite::set_dictation_rewrite_api_key(body.key).await {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+pub(super) async fn dictation_rewrite_api_key_exists_http() -> Response {
+    match dictation::rewrite::dictation_rewrite_api_key_exists().await {
+        Ok(exists) => Json(exists).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+pub(super) async fn delete_dictation_rewrite_api_key_http() -> Response {
+    match dictation::rewrite::delete_dictation_rewrite_api_key().await {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}

@@ -12,6 +12,26 @@ interface DictationConfig {
 	device: string | null;
 	long_press_ms: number;
 	auto_send: boolean;
+	rewrite_enabled: boolean;
+	rewrite_base_url: string;
+	rewrite_model: string;
+	rewrite_effort: string | null;
+	rewrite_system_prompt: string;
+}
+
+/** Default rewrite system prompt — must match default_rewrite_system_prompt() in Rust */
+export const DEFAULT_REWRITE_SYSTEM_PROMPT =
+	"Rewrite the user's dictated text into a clear, well-structured prompt for an AI coding " +
+	"assistant. Fix transcription errors, remove filler words and false starts, and preserve " +
+	"the original intent and all technical details. Output only the rewritten text with no " +
+	"preamble or explanation.";
+
+/** Model advertised by the rewrite endpoint's /models route (from Rust backend) */
+export interface RewriteModelInfo {
+	id: string;
+	supports_reasoning: boolean;
+	effort_options: string[] | null;
+	default_effort: string | null;
 }
 
 /** GPU/CPU backend reported by whisper after model load. */
@@ -97,6 +117,16 @@ interface DictationStoreState {
 	capturingHotkey: boolean;
 	partialText: string;
 	backendInfo: DictationBackend | null;
+	rewriteEnabled: boolean;
+	rewriteBaseUrl: string;
+	rewriteModel: string;
+	rewriteEffort: string | null;
+	rewriteSystemPrompt: string;
+	rewriteModels: RewriteModelInfo[];
+	fetchingRewriteModels: boolean;
+	rewriteModelsError: string | null;
+	rewriteKeyExists: boolean;
+	rewriting: boolean;
 }
 
 function createDictationStore() {
@@ -122,6 +152,16 @@ function createDictationStore() {
 		capturingHotkey: false,
 		partialText: "",
 		backendInfo: null,
+		rewriteEnabled: false,
+		rewriteBaseUrl: "",
+		rewriteModel: "",
+		rewriteEffort: null,
+		rewriteSystemPrompt: DEFAULT_REWRITE_SYSTEM_PROMPT,
+		rewriteModels: [],
+		fetchingRewriteModels: false,
+		rewriteModelsError: null,
+		rewriteKeyExists: false,
+		rewriting: false,
 	});
 
 	// Listen for download progress events from Rust
@@ -153,6 +193,11 @@ function createDictationStore() {
 					selectedDevice: config.device ?? null,
 					longPressMs: config.long_press_ms ?? 400,
 					autoSend: config.auto_send ?? false,
+					rewriteEnabled: config.rewrite_enabled ?? false,
+					rewriteBaseUrl: config.rewrite_base_url ?? "",
+					rewriteModel: config.rewrite_model ?? "",
+					rewriteEffort: config.rewrite_effort ?? null,
+					rewriteSystemPrompt: config.rewrite_system_prompt ?? DEFAULT_REWRITE_SYSTEM_PROMPT,
 				});
 			} catch (err) {
 				appLogger.error("dictation", "Failed to get dictation config", err);
@@ -169,6 +214,11 @@ function createDictationStore() {
 				device: partial.device !== undefined ? partial.device : state.selectedDevice,
 				long_press_ms: partial.long_press_ms ?? state.longPressMs,
 				auto_send: partial.auto_send ?? state.autoSend,
+				rewrite_enabled: partial.rewrite_enabled ?? state.rewriteEnabled,
+				rewrite_base_url: partial.rewrite_base_url ?? state.rewriteBaseUrl,
+				rewrite_model: partial.rewrite_model ?? state.rewriteModel,
+				rewrite_effort: partial.rewrite_effort !== undefined ? partial.rewrite_effort : state.rewriteEffort,
+				rewrite_system_prompt: partial.rewrite_system_prompt ?? state.rewriteSystemPrompt,
 			};
 			try {
 				await invoke("set_dictation_config", { config });
@@ -181,6 +231,12 @@ function createDictationStore() {
 				if (partial.device !== undefined) storeUpdate.selectedDevice = partial.device;
 				if (partial.long_press_ms !== undefined) storeUpdate.longPressMs = partial.long_press_ms;
 				if (partial.auto_send !== undefined) storeUpdate.autoSend = partial.auto_send;
+				if (partial.rewrite_enabled !== undefined) storeUpdate.rewriteEnabled = partial.rewrite_enabled;
+				if (partial.rewrite_base_url !== undefined) storeUpdate.rewriteBaseUrl = partial.rewrite_base_url;
+				if (partial.rewrite_model !== undefined) storeUpdate.rewriteModel = partial.rewrite_model;
+				if (partial.rewrite_effort !== undefined) storeUpdate.rewriteEffort = partial.rewrite_effort;
+				if (partial.rewrite_system_prompt !== undefined)
+					storeUpdate.rewriteSystemPrompt = partial.rewrite_system_prompt;
 				setState(storeUpdate);
 			} catch (err) {
 				appLogger.error("dictation", "Failed to save dictation config", err);
@@ -213,6 +269,85 @@ function createDictationStore() {
 
 		setDevice(value: string | null): void {
 			actions.saveConfig({ device: value });
+		},
+
+		setRewriteEnabled(value: boolean): void {
+			actions.saveConfig({ rewrite_enabled: value });
+		},
+
+		setRewriteBaseUrl(value: string): void {
+			actions.saveConfig({ rewrite_base_url: value });
+		},
+
+		/** Set the rewrite model — resets effort in the same save (model change invalidates it) */
+		setRewriteModel(value: string): void {
+			actions.saveConfig({ rewrite_model: value, rewrite_effort: null });
+		},
+
+		setRewriteEffort(value: string | null): void {
+			actions.saveConfig({ rewrite_effort: value });
+		},
+
+		setRewriteSystemPrompt(value: string): void {
+			actions.saveConfig({ rewrite_system_prompt: value });
+		},
+
+		/** Fetch models from the configured rewrite endpoint's /models route */
+		async fetchRewriteModels(): Promise<void> {
+			const baseUrl = state.rewriteBaseUrl.trim();
+			if (!baseUrl) {
+				setState("rewriteModelsError", "Enter a base URL first");
+				return;
+			}
+			setState({ fetchingRewriteModels: true, rewriteModelsError: null });
+			try {
+				const models = await invoke<RewriteModelInfo[]>("dictation_fetch_rewrite_models", { baseUrl });
+				setState("rewriteModels", models);
+			} catch (err) {
+				setState("rewriteModelsError", String(err));
+				appLogger.error("dictation", "Failed to fetch rewrite models", err);
+			} finally {
+				setState("fetchingRewriteModels", false);
+			}
+		},
+
+		/** Refresh whether a rewrite API key is stored in the vault */
+		async refreshRewriteKeyExists(): Promise<void> {
+			try {
+				const exists = await invoke<boolean>("dictation_rewrite_api_key_exists");
+				setState("rewriteKeyExists", exists);
+			} catch (err) {
+				appLogger.error("dictation", "Failed to check rewrite API key", err);
+			}
+		},
+
+		/** Save the rewrite API key to the vault (throws on failure — caller shows feedback) */
+		async saveRewriteApiKey(key: string): Promise<void> {
+			await invoke("set_dictation_rewrite_api_key", { key });
+			setState("rewriteKeyExists", true);
+		},
+
+		/** Delete the rewrite API key from the vault (throws on failure — caller shows feedback) */
+		async deleteRewriteApiKey(): Promise<void> {
+			await invoke("delete_dictation_rewrite_api_key");
+			setState("rewriteKeyExists", false);
+		},
+
+		/**
+		 * Rewrite dictated text through the configured LLM endpoint.
+		 * Returns null on ANY failure so callers fall back to the raw transcript.
+		 * Never logs transcript content.
+		 */
+		async rewriteText(text: string): Promise<string | null> {
+			setState("rewriting", true);
+			try {
+				return await invoke<string>("dictation_rewrite", { text });
+			} catch (err) {
+				appLogger.error("dictation", "AI rewrite failed", err);
+				return null;
+			} finally {
+				setState("rewriting", false);
+			}
 		},
 
 		/** Refresh status from Rust backend */

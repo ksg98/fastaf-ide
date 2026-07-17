@@ -83,6 +83,8 @@ pub(crate) enum Credential<'a> {
     GithubToken(&'a str),
     McpUpstream(&'a str),
     Provider(&'a str),
+    /// Optional API key for the dictation AI-rewrite endpoint.
+    DictationRewriteApiKey,
 }
 
 impl Credential<'_> {
@@ -94,6 +96,7 @@ impl Credential<'_> {
             Self::GithubToken(id) => format!("github/account/{id}/token"),
             Self::McpUpstream(name) => format!("mcp/{name}"),
             Self::Provider(id) => format!("provider/{id}"),
+            Self::DictationRewriteApiKey => "dictation/rewrite-api-key".into(),
         }
     }
 
@@ -103,7 +106,7 @@ impl Credential<'_> {
             Self::LlmApiKey => Some(("tuicommander-llm-api", "api-key")),
             Self::GithubOauthToken => Some(("tuicommander-github", "oauth-token")),
             Self::McpUpstream(name) => Some(("tuicommander-mcp", name)),
-            Self::GithubToken(_) | Self::Provider(_) => None,
+            Self::GithubToken(_) | Self::Provider(_) | Self::DictationRewriteApiKey => None,
         }
     }
 }
@@ -503,6 +506,10 @@ mod tests {
         );
         assert_eq!(Credential::McpUpstream("foo").vault_key(), "mcp/foo");
         assert_eq!(Credential::Provider("my-id").vault_key(), "provider/my-id");
+        assert_eq!(
+            Credential::DictationRewriteApiKey.vault_key(),
+            "dictation/rewrite-api-key"
+        );
     }
 
     #[test]

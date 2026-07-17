@@ -4,6 +4,7 @@ pub mod corrections;
 pub mod fn_key_monitor;
 pub mod model;
 pub mod permission;
+pub mod rewrite;
 pub mod streaming;
 pub mod transcribe;
 pub mod vad;

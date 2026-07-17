@@ -116,6 +116,19 @@ export function useDictation(deps: DictationDeps) {
 			return;
 		}
 
+		// Optional AI rewrite — any failure falls back to the raw transcript.
+		// focusTarget stays snapshotted across this extra await.
+		let finalText = text;
+		if (dictationStore.state.rewriteEnabled) {
+			deps.setStatusInfo("Dictation: rewriting with AI…");
+			const rewritten = await dictationStore.rewriteText(text);
+			if (rewritten?.trim()) {
+				finalText = rewritten.trim();
+			} else {
+				deps.setStatusInfo("Dictation: AI rewrite failed — inserted raw transcript");
+			}
+		}
+
 		// Use the focus target captured at key-press time
 		const el = focusTarget;
 		focusTarget = null;
@@ -135,14 +148,14 @@ export function useDictation(deps: DictationDeps) {
 			const end = el.selectionEnd ?? start;
 			const before = el.value.slice(0, start);
 			const after = el.value.slice(end);
-			el.value = before + text + after;
-			el.selectionStart = el.selectionEnd = start + text.length;
+			el.value = before + finalText + after;
+			el.selectionStart = el.selectionEnd = start + finalText.length;
 			el.dispatchEvent(new Event("input", { bubbles: true }));
 			deps.setStatusInfo("Ready");
 			return;
 		}
 		if (el && el.getAttribute("contenteditable") === "true") {
-			document.execCommand("insertText", false, text);
+			document.execCommand("insertText", false, finalText);
 			deps.setStatusInfo("Ready");
 			return;
 		}
@@ -154,9 +167,9 @@ export function useDictation(deps: DictationDeps) {
 				const writeFn = (data: string) => deps.pty.write(targetSessionId, data);
 				if (autoSend) {
 					const shellFamily = await getShellFamily(targetSessionId);
-					await sendCommand(writeFn, text, active.agentType, shellFamily);
+					await sendCommand(writeFn, finalText, active.agentType, shellFamily);
 				} else {
-					await writeFn(text);
+					await writeFn(finalText);
 				}
 				deps.setStatusInfo("Ready");
 				requestAnimationFrame(() => active.ref?.focus());

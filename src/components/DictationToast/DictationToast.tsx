@@ -11,17 +11,17 @@ export function DictationToast() {
 	const [visible, setVisible] = createSignal(false);
 	const [exiting, setExiting] = createSignal(false);
 
-	// Show toast when partialText becomes non-empty
+	// Show toast when partialText becomes non-empty or an AI rewrite starts
 	createEffect(() => {
-		if (dictationStore.state.partialText) {
+		if (dictationStore.state.partialText || dictationStore.state.rewriting) {
 			setExiting(false);
 			setVisible(true);
 		}
 	});
 
-	// Auto-hide when recording stops
+	// Auto-hide when recording stops (but stay visible while rewriting)
 	createEffect(() => {
-		if (!dictationStore.state.recording && visible()) {
+		if (!dictationStore.state.recording && !dictationStore.state.rewriting && visible()) {
 			setExiting(true);
 			const timer = setTimeout(() => {
 				setVisible(false);
@@ -36,7 +36,7 @@ export function DictationToast() {
 			<div class={styles.toast} data-exiting={exiting()}>
 				<span class={styles.indicator} />
 				<span class={styles.text}>
-					{dictationStore.state.partialText || "Listening"}
+					{dictationStore.state.rewriting ? "Rewriting with AI" : dictationStore.state.partialText || "Listening"}
 					<span class={styles.dots} />
 				</span>
 			</div>

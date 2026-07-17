@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import "../mocks/tauri";
 import { useDictation } from "../../hooks/useDictation";
 import { dictationStore } from "../../stores/dictation";
@@ -405,6 +405,79 @@ describe("useDictation", () => {
 				input.removeEventListener("keydown", enterSpy);
 				document.body.removeChild(input);
 			}
+		});
+	});
+
+	describe("AI rewrite", () => {
+		let rewriteSpy: MockInstance | undefined;
+
+		afterEach(async () => {
+			rewriteSpy?.mockRestore();
+			rewriteSpy = undefined;
+			// rewriteEnabled lives on the real (module-singleton) store — reset it
+			await dictationStore.saveConfig({ rewrite_enabled: false });
+		});
+
+		it("does not call rewriteText when disabled and inserts the raw transcript", async () => {
+			await dictationStore.saveConfig({ rewrite_enabled: false });
+			rewriteSpy = vi.spyOn(dictationStore, "rewriteText");
+
+			const id = terminalsStore.add({
+				sessionId: "sess-rw1",
+				fontSize: 14,
+				name: "Test",
+				cwd: null,
+				awaitingInput: null,
+			});
+			terminalsStore.setActive(id);
+
+			await dictation.handleDictationStart();
+			await dictation.handleDictationStop();
+
+			expect(rewriteSpy).not.toHaveBeenCalled();
+			expect(mockPty.write).toHaveBeenCalledWith("sess-rw1", "hello world");
+		});
+
+		it("inserts the rewritten text into the PTY when rewrite succeeds", async () => {
+			await dictationStore.saveConfig({ rewrite_enabled: true });
+			rewriteSpy = vi.spyOn(dictationStore, "rewriteText").mockResolvedValue("a clean prompt");
+
+			const id = terminalsStore.add({
+				sessionId: "sess-rw2",
+				fontSize: 14,
+				name: "Test",
+				cwd: null,
+				awaitingInput: null,
+			});
+			terminalsStore.setActive(id);
+
+			await dictation.handleDictationStart();
+			await dictation.handleDictationStop();
+
+			expect(rewriteSpy).toHaveBeenCalledWith("hello world");
+			expect(mockSetStatusInfo).toHaveBeenCalledWith("Dictation: rewriting with AI…");
+			expect(mockPty.write).toHaveBeenCalledWith("sess-rw2", "a clean prompt");
+		});
+
+		it("falls back to the raw transcript with a failure status when rewrite returns null", async () => {
+			await dictationStore.saveConfig({ rewrite_enabled: true });
+			rewriteSpy = vi.spyOn(dictationStore, "rewriteText").mockResolvedValue(null);
+
+			const id = terminalsStore.add({
+				sessionId: "sess-rw3",
+				fontSize: 14,
+				name: "Test",
+				cwd: null,
+				awaitingInput: null,
+			});
+			terminalsStore.setActive(id);
+
+			await dictation.handleDictationStart();
+			await dictation.handleDictationStop();
+
+			expect(rewriteSpy).toHaveBeenCalledWith("hello world");
+			expect(mockPty.write).toHaveBeenCalledWith("sess-rw3", "hello world");
+			expect(mockSetStatusInfo).toHaveBeenCalledWith("Dictation: AI rewrite failed — inserted raw transcript");
 		});
 	});
 

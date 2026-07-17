@@ -114,6 +114,22 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	set_dictation_config: {
 		map: (args) => ({ method: "PUT", path: "/dictation/config", body: args.config }),
 	},
+	dictation_rewrite: {
+		map: (args) => ({
+			method: "POST",
+			path: "/dictation/rewrite",
+			body: { text: args.text },
+			transform: (data) => (data as { text: string }).text,
+		}),
+	},
+	dictation_fetch_rewrite_models: {
+		map: (args) => ({ method: "POST", path: "/dictation/rewrite/models", body: { base_url: args.baseUrl } }),
+	},
+	set_dictation_rewrite_api_key: {
+		map: (args) => ({ method: "PUT", path: "/dictation/rewrite/key", body: { key: args.key } }),
+	},
+	dictation_rewrite_api_key_exists: { map: () => ({ method: "GET", path: "/dictation/rewrite/key" }) },
+	delete_dictation_rewrite_api_key: { map: () => ({ method: "DELETE", path: "/dictation/rewrite/key" }) },
 	// --- OS integration ---
 	open_in_app: {
 		map: (args) => ({
