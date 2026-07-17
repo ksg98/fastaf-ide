@@ -27,6 +27,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **iPad / touch input** — Fixed on-screen-keyboard focus (only the focused terminal lifts above the keyboard, anchored to the cursor row), touch-scroll direction, emoji-glyph rendering, and long-press to start drags so sidebar scroll still works.
 - **Clipboard consistency** — All copy paths route through the shared `writeClipboard` helper.
 
+## [1.5.4] - 2026-07-17
+
+### Added
+- **Project sorting, sidebar search, and named workspaces** (#3) — Sort the project list by manual drag order, name, or recent activity from the sidebar footer menu; a type-to-filter search box at the top of the sidebar narrows projects (Enter jumps to the first match, Esc clears); save the current project set as a named workspace and switch between sets from the footer menu or command palette — projects outside the active workspace are hidden but keep running.
+- **AI rewrite of dictation** — Optionally post-process the local whisper transcript through an LLM before insertion (Settings → Dictation → AI Rewrite): one custom OpenAI-compatible endpoint (base URL + optional API key stored in the OS keychain), models fetched live from the endpoint's `/models`, a reasoning-effort selector that appears only when the endpoint advertises support, and a user-editable system prompt. If the rewrite fails, the raw transcript is inserted — dictation never blocks.
+- **Auto-updates** — Update artifacts and `latest.json` are now published with each release; the app checks GitHub releases and offers in-app updates.
+
+### Fixed
+- **File/folder creation reliability** (#2, shipped in 1.5.3) — Creation is atomic and non-destructive, changes reflect immediately in flat and tree views, and creating a file uses a VSCode-style inline input that auto-opens the file in the editor.
+- **Quick-switcher numbering** — Keyboard shortcut numbers no longer drift from the visible sidebar when filters, search, sorting, or workspaces are active.
+- **Release CI** — macOS builds fall back to an unsigned bundle instead of failing when the signing certificate secret is missing or invalid.
+
 ## [1.5.1] - 2026-06-26
 
 ### Fixed
