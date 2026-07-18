@@ -27,6 +27,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **iPad / touch input** — Fixed on-screen-keyboard focus (only the focused terminal lifts above the keyboard, anchored to the cursor row), touch-scroll direction, emoji-glyph rendering, and long-press to start drags so sidebar scroll still works.
 - **Clipboard consistency** — All copy paths route through the shared `writeClipboard` helper.
 
+## [1.5.5] - 2026-07-18
+
+### Added
+- **Cloud speech-to-text: Groq and OpenAI** — Pick a dictation provider in Settings → Dictation: local whisper.cpp (on-device, live partial preview) or Groq / OpenAI cloud transcription. Models are fetched live from the provider's `/models` endpoint (no hardcoded lists), API keys live in the OS keychain, and cloud transcripts flow through the same auto-corrections and AI-rewrite pipeline as local ones. Misconfiguration is caught when you press the dictation hotkey, and cloud errors surface in the UI.
+
+### Fixed
+- **Release CI** — remote-daemon uploads wait up to 60 minutes for the draft release, avoiding spurious upload failures while installers are still building.
+
 ## [1.5.4] - 2026-07-17
 
 ### Added
