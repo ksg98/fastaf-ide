@@ -21,7 +21,7 @@ export interface DictationDeps {
 			recording: boolean;
 			processing: boolean;
 			loading: boolean;
-			modelStatus: "not_downloaded" | "downloaded" | "ready";
+			modelStatus: "not_downloaded" | "downloaded" | "ready" | "not_configured";
 		};
 		refreshStatus: () => Promise<void>;
 		startRecording: () => Promise<void>;
@@ -63,6 +63,12 @@ export function useDictation(deps: DictationDeps) {
 
 			if (deps.dictation.state.modelStatus === "not_downloaded") {
 				deps.setStatusInfo("Dictation: model not downloaded — open Settings > Dictation");
+				deps.openSettings("dictation");
+				return false;
+			}
+
+			if (deps.dictation.state.modelStatus === "not_configured") {
+				deps.setStatusInfo("Dictation: cloud transcription not configured — open Settings > Dictation");
 				deps.openSettings("dictation");
 				return false;
 			}

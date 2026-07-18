@@ -43,6 +43,13 @@ const mockStore = vi.hoisted(() => ({
 		rewriteModelsError: null as string | null,
 		rewriteKeyExists: false,
 		rewriting: false,
+		sttProvider: "local",
+		sttModelGroq: "",
+		sttModelOpenai: "",
+		sttModels: [] as string[],
+		fetchingSttModels: false,
+		sttModelsError: null as string | null,
+		sttKeyExists: {} as Record<string, boolean>,
 	},
 	refreshConfig: vi.fn(),
 	refreshStatus: vi.fn(),
@@ -58,6 +65,12 @@ const mockStore = vi.hoisted(() => ({
 	saveRewriteApiKey: vi.fn(),
 	deleteRewriteApiKey: vi.fn(),
 	rewriteText: vi.fn(),
+	setSttProvider: vi.fn(),
+	setSttModel: vi.fn(),
+	fetchSttModels: vi.fn(),
+	refreshSttKeyExists: vi.fn(),
+	saveSttApiKey: vi.fn(),
+	deleteSttApiKey: vi.fn(),
 	setEnabled: vi.fn(),
 	setHotkey: vi.fn(),
 	setLanguage: vi.fn(),
@@ -213,6 +226,84 @@ describe("DictationSettings – Model Selector", () => {
 		const { container } = render(() => <DictationSettings />);
 		const progressBar = container.querySelector(".progressFill");
 		expect(progressBar).not.toBeNull();
+	});
+});
+
+describe("DictationSettings – STT Provider", () => {
+	/** Find the provider <select> by looking for one whose first option value is "local" */
+	function findProviderSelect(container: HTMLElement): HTMLSelectElement | null {
+		const selects = container.querySelectorAll("select");
+		for (const s of selects) {
+			if (s.querySelector("option")?.value === "local") return s;
+		}
+		return null;
+	}
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockInvoke.mockResolvedValue("not_determined");
+		mockStore.state.sttProvider = "local";
+		mockStore.state.sttModelGroq = "";
+		mockStore.state.sttModelOpenai = "";
+		mockStore.state.sttModels = [];
+		mockStore.state.sttModelsError = null;
+		mockStore.state.sttKeyExists = {};
+	});
+
+	it("renders provider select with local/groq/openai options", () => {
+		const { container } = render(() => <DictationSettings />);
+		const select = findProviderSelect(container);
+		expect(select).not.toBeNull();
+		const values = Array.from(select!.querySelectorAll("option")).map((o) => o.value);
+		expect(values).toEqual(["local", "groq", "openai"]);
+	});
+
+	it("shows the whisper model list for the local provider and no API key row", () => {
+		const { container } = render(() => <DictationSettings />);
+		expect(container.querySelectorAll(".modelRow").length).toBe(2);
+		const buttons = Array.from(container.querySelectorAll("button"));
+		expect(buttons.find((b) => b.textContent?.includes("Fetch models"))).toBeUndefined();
+	});
+
+	it("switching provider calls setSttProvider and refreshSttKeyExists", () => {
+		const { container } = render(() => <DictationSettings />);
+		const select = findProviderSelect(container)!;
+		fireEvent.change(select, { target: { value: "groq" } });
+		expect(mockStore.setSttProvider).toHaveBeenCalledWith("groq");
+		expect(mockStore.refreshSttKeyExists).toHaveBeenCalledWith("groq");
+	});
+
+	it("cloud provider hides the whisper model list and shows key input + fetch button", () => {
+		mockStore.state.sttProvider = "groq";
+		const { container } = render(() => <DictationSettings />);
+		expect(container.querySelectorAll(".modelRow").length).toBe(0);
+		const buttons = Array.from(container.querySelectorAll("button"));
+		const fetchBtn = buttons.find((b) => b.textContent?.includes("Fetch models"));
+		expect(fetchBtn).not.toBeUndefined();
+		fireEvent.click(fetchBtn!);
+		expect(mockStore.fetchSttModels).toHaveBeenCalledWith("groq");
+	});
+
+	it("appends the saved model when absent from fetched list", () => {
+		mockStore.state.sttProvider = "openai";
+		mockStore.state.sttModelOpenai = "whisper-1";
+		mockStore.state.sttModels = ["gpt-4o-transcribe"];
+		const { container } = render(() => <DictationSettings />);
+		const selects = Array.from(container.querySelectorAll("select"));
+		const modelSelect = selects.find((s) =>
+			Array.from(s.querySelectorAll("option")).some((o) => o.value === "gpt-4o-transcribe"),
+		);
+		expect(modelSelect).not.toBeUndefined();
+		const values = Array.from(modelSelect!.querySelectorAll("option")).map((o) => o.value);
+		expect(values).toContain("whisper-1");
+		fireEvent.change(modelSelect!, { target: { value: "gpt-4o-transcribe" } });
+		expect(mockStore.setSttModel).toHaveBeenCalledWith("openai", "gpt-4o-transcribe");
+	});
+
+	it("refreshes key existence for both providers on mount", () => {
+		render(() => <DictationSettings />);
+		expect(mockStore.refreshSttKeyExists).toHaveBeenCalledWith("groq");
+		expect(mockStore.refreshSttKeyExists).toHaveBeenCalledWith("openai");
 	});
 });
 

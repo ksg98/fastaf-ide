@@ -84,6 +84,29 @@ fn configured_model() -> model::WhisperModel {
 pub fn get_dictation_status(
     dictation: State<'_, DictationState>,
 ) -> Result<DictationStatus, String> {
+    let config = get_dictation_config();
+    if let Some((provider, model)) = cloud_stt_model(&config) {
+        let key_exists = crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
+            &provider,
+        ))
+        .ok()
+        .flatten()
+        .filter(|k| !k.is_empty())
+        .is_some();
+        let model_status = if key_exists && !model.is_empty() {
+            "ready"
+        } else {
+            "not_configured"
+        };
+        return Ok(DictationStatus {
+            model_status: model_status.to_string(),
+            model_name: model,
+            model_size_mb: 0,
+            recording: dictation.recording.load(Ordering::Acquire),
+            processing: dictation.processing.load(Ordering::Acquire),
+        });
+    }
+
     let whisper_model = configured_model();
     let model_downloaded = model::model_exists(whisper_model);
     let has_transcriber = dictation.transcriber_arc.lock().is_some();
@@ -197,6 +220,54 @@ pub fn start_dictation(app: AppHandle, dictation: State<'_, DictationState>) -> 
             }
         }
         permission::MicPermission::Authorized => {}
+    }
+
+    // Cloud STT: validate configuration up front (so failures surface at start,
+    // not after recording), then capture audio without loading whisper or
+    // starting a streaming session — there are no live partials for cloud.
+    let config = get_dictation_config();
+    if let Some((provider, model)) = cloud_stt_model(&config) {
+        if model.is_empty() {
+            return Err(format!("No {provider} transcription model selected"));
+        }
+        let key_exists = crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
+            &provider,
+        ))?
+        .filter(|k| !k.is_empty())
+        .is_some();
+        if !key_exists {
+            return Err(format!("API key not set for {provider}"));
+        }
+
+        let device_name = config.device.as_deref().filter(|s| !s.is_empty());
+        let capture = audio::AudioCapture::start_with_device(device_name).map_err(|e| {
+            app_logger::log_via_handle(
+                &app,
+                "error",
+                "dictation",
+                &format!("Audio capture failed: {e}"),
+            );
+            if device_name.is_some() {
+                app_logger::log_via_handle(
+                    &app,
+                    "warn",
+                    "dictation",
+                    "Configured device not available — check Settings > Dictation > Microphone",
+                );
+            }
+            e
+        })?;
+        *dictation.audio.lock() = Some(capture);
+        dictation.accumulated_partials.lock().clear();
+
+        app_logger::log_via_handle(
+            &app,
+            "info",
+            "dictation",
+            &format!("Cloud recording started ({provider})"),
+        );
+        recording_guard.disarm();
+        return Ok(());
     }
 
     let whisper_model = configured_model();
@@ -355,11 +426,12 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
             Some(config.language.clone())
         };
 
-        // Clone Arc-ed resources for the blocking task
+        // Clone Arc-ed resources for the blocking tasks
         let transcriber = dictation.transcriber_arc.lock().clone();
         let accumulated_partials = dictation.accumulated_partials.clone();
         let corrections = dictation.corrections.clone();
         let processing = dictation.processing.clone();
+        let cloud_stt = cloud_stt_model(&config);
 
         Some((
             session,
@@ -369,6 +441,7 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
             accumulated_partials,
             corrections,
             processing,
+            cloud_stt,
         ))
     };
 
@@ -380,27 +453,36 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
         accumulated_partials,
         corrections,
         processing,
+        cloud_stt,
     ) = prepare.unwrap(); // always Some — the None path returns Err above
 
-    let app_clone = app.clone();
+    // Resets processing=false when this function returns (any path, incl. errors)
+    let _processing_guard = ProcessingGuard(processing);
 
-    // Run session join + whisper inference off the IPC thread
-    let result = tokio::task::spawn_blocking(move || {
-        let _guard = ProcessingGuard(processing);
+    let result: Result<TranscribeResponse, String> = async {
+        // Join the streaming thread + drain the capture buffer off the IPC
+        // thread (the join may block while the last partial window finishes).
+        let all_audio = tokio::task::spawn_blocking(move || {
+            let mut all_audio = session.map(|s| s.stop()).unwrap_or_default();
 
-        // Join the streaming thread (may block while last partial window finishes)
-        let mut all_audio = session.map(|s| s.stop()).unwrap_or_default();
-
-        // Drain anything left in the audio capture buffer (arrived after last poll).
-        // Safe: streaming thread is joined above, no more concurrent readers.
-        if let Some(buf) = audio_buffer {
-            let remaining: Vec<f32> = buf.lock().drain(..).collect();
-            all_audio.extend(remaining);
-        }
+            // Drain anything left in the audio capture buffer (arrived after last poll).
+            // Safe: streaming thread is joined above, no more concurrent readers.
+            if let Some(buf) = audio_buffer {
+                let remaining: Vec<f32> = buf.lock().drain(..).collect();
+                all_audio.extend(remaining);
+            }
+            all_audio
+        })
+        .await
+        .map_err(|e| {
+            let msg = format!("Audio collection task panicked: {e}");
+            app_logger::log_via_handle(&app, "error", "dictation", &msg);
+            msg
+        })?;
 
         let total_duration_s = all_audio.len() as f64 / 16000.0;
         app_logger::log_via_handle(
-            &app_clone,
+            &app,
             "info",
             "dictation",
             &format!(
@@ -411,62 +493,111 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
 
         // Short audio: no transcription needed
         if all_audio.len() < 8000 {
-            app_logger::log_via_handle(&app_clone, "info", "dictation", "No speech detected");
-            return TranscribeResponse {
+            app_logger::log_via_handle(&app, "info", "dictation", "No speech detected");
+            return Ok(TranscribeResponse {
                 text: String::new(),
                 skip_reason: Some("no speech detected".to_string()),
                 duration_s: total_duration_s,
-            };
+            });
         }
 
-        let mut final_text = String::new();
-
-        if let Some(ref transcriber) = transcriber {
-            let lang_ref = lang_owned.as_deref();
-            match transcriber.transcribe(&all_audio, lang_ref) {
-                Ok(result) if result.skip_reason.is_none() => {
-                    final_text = result.text;
-                }
-                Ok(result) => {
-                    if let Some(reason) = &result.skip_reason {
-                        app_logger::log_via_handle(
-                            &app_clone,
-                            "info",
-                            "dictation",
-                            &format!("Final transcription skipped: {reason}"),
-                        );
-                    }
-                }
-                Err(e) => {
+        // Raw transcript: None means the local transcriber was never loaded.
+        // Skipped/failed local inference yields Some("") — "no speech detected"
+        // below — while cloud failures propagate as Err (the user must see them).
+        let raw_text: Option<String> = if let Some((provider, model)) = cloud_stt {
+            let api_key = {
+                let provider_owned = provider.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
+                        &provider_owned,
+                    ))
+                })
+                .await
+                .map_err(|e| format!("Keyring task failed: {e}"))??
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| format!("API key not set for {provider}"))?
+            };
+            let text = super::stt_cloud::transcribe_cloud(
+                &provider,
+                &model,
+                &api_key,
+                lang_owned.as_deref(),
+                &all_audio,
+            )
+            .await
+            .map_err(|e| {
+                app_logger::log_via_handle(
+                    &app,
+                    "warn",
+                    "dictation",
+                    &format!("Cloud transcription failed: {e}"),
+                );
+                e
+            })?;
+            Some(text)
+        } else {
+            // Run whisper inference off the IPC thread
+            let app_clone = app.clone();
+            tokio::task::spawn_blocking(move || {
+                let Some(transcriber) = transcriber else {
                     app_logger::log_via_handle(
                         &app_clone,
                         "warn",
                         "dictation",
-                        &format!("Final transcription failed: {e}"),
+                        "Transcriber not available — model not loaded",
                     );
+                    return None;
+                };
+
+                let mut final_text = String::new();
+                match transcriber.transcribe(&all_audio, lang_owned.as_deref()) {
+                    Ok(result) if result.skip_reason.is_none() => {
+                        final_text = result.text;
+                    }
+                    Ok(result) => {
+                        if let Some(reason) = &result.skip_reason {
+                            app_logger::log_via_handle(
+                                &app_clone,
+                                "info",
+                                "dictation",
+                                &format!("Final transcription skipped: {reason}"),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        app_logger::log_via_handle(
+                            &app_clone,
+                            "warn",
+                            "dictation",
+                            &format!("Final transcription failed: {e}"),
+                        );
+                    }
                 }
-            }
-        } else {
-            app_logger::log_via_handle(
-                &app_clone,
-                "warn",
-                "dictation",
-                "Transcriber not available — model not loaded",
-            );
-            return TranscribeResponse {
+                Some(final_text)
+            })
+            .await
+            .map_err(|e| {
+                let msg = format!("Transcription task panicked: {e}");
+                app_logger::log_via_handle(&app, "error", "dictation", &msg);
+                msg
+            })?
+        };
+
+        let Some(final_text) = raw_text else {
+            return Ok(TranscribeResponse {
                 text: String::new(),
                 skip_reason: Some("model not loaded".to_string()),
                 duration_s: total_duration_s,
-            };
-        }
+            });
+        };
 
         if final_text.is_empty() {
-            app_logger::log_via_handle(&app_clone, "info", "dictation", "No speech detected");
-            return TranscribeResponse {
+            app_logger::log_via_handle(&app, "info", "dictation", "No speech detected");
+            return Ok(TranscribeResponse {
                 text: String::new(),
                 skip_reason: Some("no speech detected".to_string()),
                 duration_s: total_duration_s,
-            };
+            });
         }
 
         // Log accuracy comparison (lengths only — no verbatim text to avoid PII in logs)
@@ -483,7 +614,7 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
             0
         };
         app_logger::log_via_handle(
-            &app_clone,
+            &app,
             "info",
             "dictation",
             &format!(
@@ -499,24 +630,18 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
         let corrected = corrections.lock().correct(&final_text);
         let final_text = corrected.replace('\n', " ");
 
-        // _guard drops here → processing = false
-        TranscribeResponse {
+        Ok(TranscribeResponse {
             text: final_text,
             skip_reason: None,
             duration_s: total_duration_s,
-        }
-    })
-    .await
-    .map_err(|e| {
-        let msg = format!("Transcription task panicked: {e}");
-        app_logger::log_via_handle(&app, "error", "dictation", &msg);
-        msg
-    })?;
+        })
+    }
+    .await;
 
-    // Clean up audio capture
+    // Clean up audio capture (all paths — _processing_guard drops on return)
     *app.state::<DictationState>().audio.lock() = None;
 
-    Ok(result)
+    result
 }
 
 #[tauri::command]
@@ -590,10 +715,36 @@ pub struct DictationConfig {
     /// System prompt for the rewrite request.
     #[serde(default = "default_rewrite_system_prompt")]
     pub rewrite_system_prompt: String,
+    /// Speech-to-text provider: "local" (whisper.cpp on-device), "groq", or "openai".
+    #[serde(default = "default_stt_provider")]
+    pub stt_provider: String,
+    /// Groq transcription model id (user must fetch and pick one — none hardcoded).
+    #[serde(default)]
+    pub stt_model_groq: String,
+    /// OpenAI transcription model id.
+    #[serde(default)]
+    pub stt_model_openai: String,
 }
 
 fn default_model() -> String {
     "large-v3-turbo".to_string()
+}
+
+fn default_stt_provider() -> String {
+    "local".to_string()
+}
+
+/// Cloud provider + configured model for the active STT provider.
+/// None when the provider is "local" (or unknown) — the whisper path applies.
+fn cloud_stt_model(config: &DictationConfig) -> Option<(String, String)> {
+    match config.stt_provider.as_str() {
+        "groq" => Some(("groq".to_string(), config.stt_model_groq.trim().to_string())),
+        "openai" => Some((
+            "openai".to_string(),
+            config.stt_model_openai.trim().to_string(),
+        )),
+        _ => None,
+    }
 }
 
 fn default_long_press_ms() -> u32 {
@@ -623,6 +774,9 @@ impl Default for DictationConfig {
             rewrite_model: String::new(),
             rewrite_effort: None,
             rewrite_system_prompt: default_rewrite_system_prompt(),
+            stt_provider: default_stt_provider(),
+            stt_model_groq: String::new(),
+            stt_model_openai: String::new(),
         }
     }
 }
@@ -676,6 +830,9 @@ mod tests {
         assert_eq!(config.rewrite_model, "");
         assert_eq!(config.rewrite_effort, None);
         assert_eq!(config.rewrite_system_prompt, default_rewrite_system_prompt());
+        assert_eq!(config.stt_provider, "local");
+        assert_eq!(config.stt_model_groq, "");
+        assert_eq!(config.stt_model_openai, "");
     }
 
     #[test]
@@ -695,5 +852,50 @@ mod tests {
         assert_eq!(parsed.rewrite_model, "openai/gpt-4o-mini");
         assert_eq!(parsed.rewrite_effort, Some("high".to_string()));
         assert_eq!(parsed.rewrite_system_prompt, "Custom prompt");
+    }
+
+    #[test]
+    fn stt_config_roundtrips() {
+        let config = DictationConfig {
+            stt_provider: "groq".to_string(),
+            stt_model_groq: "whisper-large-v3-turbo".to_string(),
+            stt_model_openai: "gpt-4o-transcribe".to_string(),
+            ..DictationConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: DictationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.stt_provider, "groq");
+        assert_eq!(parsed.stt_model_groq, "whisper-large-v3-turbo");
+        assert_eq!(parsed.stt_model_openai, "gpt-4o-transcribe");
+    }
+
+    #[test]
+    fn cloud_stt_model_resolves_provider() {
+        let config = DictationConfig {
+            stt_provider: "groq".to_string(),
+            stt_model_groq: " whisper-large-v3 ".to_string(),
+            ..DictationConfig::default()
+        };
+        assert_eq!(
+            cloud_stt_model(&config),
+            Some(("groq".to_string(), "whisper-large-v3".to_string()))
+        );
+
+        let config = DictationConfig {
+            stt_provider: "openai".to_string(),
+            stt_model_openai: "whisper-1".to_string(),
+            ..DictationConfig::default()
+        };
+        assert_eq!(
+            cloud_stt_model(&config),
+            Some(("openai".to_string(), "whisper-1".to_string()))
+        );
+
+        assert_eq!(cloud_stt_model(&DictationConfig::default()), None);
+        let config = DictationConfig {
+            stt_provider: "bogus".to_string(),
+            ..DictationConfig::default()
+        };
+        assert_eq!(cloud_stt_model(&config), None);
     }
 }

@@ -80,6 +80,9 @@ export const DictationSettings: Component = () => {
 	const [rewriteKeyInput, setRewriteKeyInput] = createSignal("");
 	const [rewriteKeyMsg, setRewriteKeyMsg] = createSignal("");
 	const [savingRewriteKey, setSavingRewriteKey] = createSignal(false);
+	const [sttKeyInput, setSttKeyInput] = createSignal("");
+	const [sttKeyMsg, setSttKeyMsg] = createSignal("");
+	const [savingSttKey, setSavingSttKey] = createSignal(false);
 
 	// Load data on mount. Auto-detect devices only if mic is already authorized
 	// (avoids triggering the macOS TCC permission dialog unexpectedly).
@@ -89,6 +92,8 @@ export const DictationSettings: Component = () => {
 		dictationStore.refreshCorrections();
 		dictationStore.refreshModels();
 		dictationStore.refreshRewriteKeyExists();
+		dictationStore.refreshSttKeyExists("groq");
+		dictationStore.refreshSttKeyExists("openai");
 		try {
 			const perm = await invoke<string>("check_microphone_permission");
 			if (perm === "authorized") {
@@ -130,6 +135,60 @@ export const DictationSettings: Component = () => {
 		a.download = "dictation-corrections.json";
 		a.click();
 		URL.revokeObjectURL(url);
+	};
+
+	const sttProvider = () => dictationStore.state.sttProvider;
+
+	/** Saved transcription model for the active cloud provider */
+	const sttModel = () =>
+		sttProvider() === "groq" ? dictationStore.state.sttModelGroq : dictationStore.state.sttModelOpenai;
+
+	/** Model dropdown options — the saved model is appended if absent from the fetch */
+	const sttModelOptions = () => {
+		const models = dictationStore.state.sttModels;
+		const saved = sttModel();
+		if (saved && !models.includes(saved)) {
+			return [...models, saved];
+		}
+		return models;
+	};
+
+	const sttKeyExists = () => dictationStore.state.sttKeyExists[sttProvider()] ?? false;
+
+	const handleSttProviderChange = (provider: string) => {
+		dictationStore.setSttProvider(provider);
+		setSttKeyInput("");
+		setSttKeyMsg("");
+		if (provider !== "local") {
+			dictationStore.refreshSttKeyExists(provider);
+		}
+	};
+
+	const handleSaveSttKey = async () => {
+		if (!sttKeyInput().trim()) return;
+		setSavingSttKey(true);
+		setSttKeyMsg("");
+		try {
+			await dictationStore.saveSttApiKey(sttProvider(), sttKeyInput().trim());
+			setSttKeyInput("");
+			setSttKeyMsg(t("dictation.sttKeySaved", "Key saved"));
+		} catch (e) {
+			setSttKeyMsg(`Error: ${String(e)}`);
+		} finally {
+			setSavingSttKey(false);
+		}
+	};
+
+	const handleDeleteSttKey = async () => {
+		setSavingSttKey(true);
+		try {
+			await dictationStore.deleteSttApiKey(sttProvider());
+			setSttKeyMsg(t("dictation.sttKeyRemoved", "Key removed"));
+		} catch (e) {
+			setSttKeyMsg(`Error: ${String(e)}`);
+		} finally {
+			setSavingSttKey(false);
+		}
 	};
 
 	/** Model dropdown options — the saved model is appended if absent from the fetch */
@@ -212,16 +271,98 @@ export const DictationSettings: Component = () => {
 				</div>
 			</div>
 
-			{/* Model selector */}
+			{/* Speech-to-text provider */}
 			<div class={s.group}>
-				<label>{t("dictation.modelLabel", "Whisper Model")}</label>
-				<p class={s.hint} style={{ "margin-bottom": "8px" }}>
-					{t("dictation.modelHint", "Choose a model. Larger models are more accurate but slower.")}
-				</p>
-				<div class={d.modelList}>
-					<For each={dictationStore.state.models}>{(model: ModelInfo) => <ModelRow model={model} />}</For>
-				</div>
+				<label>{t("dictation.sttProviderLabel", "Speech-to-Text Provider")}</label>
+				<select value={sttProvider()} onChange={(e) => handleSttProviderChange(e.currentTarget.value)}>
+					<option value="local">{t("dictation.sttProviderLocal", "Local — whisper.cpp (on-device)")}</option>
+					<option value="groq">{t("dictation.sttProviderGroq", "Groq Cloud")}</option>
+					<option value="openai">{t("dictation.sttProviderOpenai", "OpenAI")}</option>
+				</select>
+				<Show when={sttProvider() !== "local"}>
+					{/* API key (required) */}
+					<div style={{ "margin-top": "8px" }}>
+						<div class={s.passwordRow}>
+							<input
+								class={s.input}
+								type="password"
+								placeholder={
+									sttKeyExists()
+										? t("dictation.sttKeyReplace", "Replace existing key…")
+										: t("dictation.sttKeyEnter", "Enter API key…")
+								}
+								value={sttKeyInput()}
+								onInput={(e) => setSttKeyInput(e.currentTarget.value)}
+							/>
+							<button class={s.saveBtn} onClick={handleSaveSttKey} disabled={savingSttKey() || !sttKeyInput().trim()}>
+								{t("dictation.sttKeySave", "Save")}
+							</button>
+							<Show when={sttKeyExists()}>
+								<button
+									class={s.testBtn}
+									onClick={handleDeleteSttKey}
+									disabled={savingSttKey()}
+									style={{ color: "var(--error)" }}
+								>
+									{t("dictation.sttKeyRemove", "Remove")}
+								</button>
+							</Show>
+						</div>
+						<p class={s.hint}>{t("dictation.sttKeyHint", "API key required")}</p>
+						<Show when={sttKeyMsg()}>
+							<div class={s.hint}>{sttKeyMsg()}</div>
+						</Show>
+					</div>
+
+					{/* Transcription model */}
+					<div style={{ "margin-top": "8px" }}>
+						<button
+							class={s.inlineBtn}
+							onClick={() => dictationStore.fetchSttModels(sttProvider())}
+							disabled={dictationStore.state.fetchingSttModels}
+						>
+							{dictationStore.state.fetchingSttModels
+								? t("dictation.sttFetchingModels", "Fetching…")
+								: t("dictation.sttFetchModels", "Fetch models")}
+						</button>
+						<Show when={dictationStore.state.sttModelsError}>
+							<p class={s.hint} style={{ color: "var(--error)" }}>
+								{dictationStore.state.sttModelsError}
+							</p>
+						</Show>
+						<Show when={sttModelOptions().length > 0}>
+							<select
+								value={sttModel()}
+								onChange={(e) => dictationStore.setSttModel(sttProvider(), e.currentTarget.value)}
+								style={{ "margin-top": "6px" }}
+							>
+								<option value="">{t("dictation.sttModelNone", "Select a model…")}</option>
+								<For each={sttModelOptions()}>{(id) => <option value={id}>{id}</option>}</For>
+							</select>
+						</Show>
+					</div>
+
+					<p class={s.hint} style={{ "margin-top": "8px" }}>
+						{t(
+							"dictation.sttCloudHint",
+							"Live partial preview is unavailable with cloud providers — text appears when you stop recording.",
+						)}
+					</p>
+				</Show>
 			</div>
+
+			{/* Model selector (local whisper only) */}
+			<Show when={sttProvider() === "local"}>
+				<div class={s.group}>
+					<label>{t("dictation.modelLabel", "Whisper Model")}</label>
+					<p class={s.hint} style={{ "margin-bottom": "8px" }}>
+						{t("dictation.modelHint", "Choose a model. Larger models are more accurate but slower.")}
+					</p>
+					<div class={d.modelList}>
+						<For each={dictationStore.state.models}>{(model: ModelInfo) => <ModelRow model={model} />}</For>
+					</div>
+				</div>
+			</Show>
 
 			{/* Hotkey */}
 			<div class={s.group}>

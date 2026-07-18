@@ -130,6 +130,18 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	},
 	dictation_rewrite_api_key_exists: { map: () => ({ method: "GET", path: "/dictation/rewrite/key" }) },
 	delete_dictation_rewrite_api_key: { map: () => ({ method: "DELETE", path: "/dictation/rewrite/key" }) },
+	dictation_fetch_stt_models: {
+		map: (args) => ({ method: "POST", path: "/dictation/stt/models", body: { provider: args.provider } }),
+	},
+	set_dictation_stt_api_key: {
+		map: (args) => ({ method: "PUT", path: "/dictation/stt/key", body: { provider: args.provider, key: args.key } }),
+	},
+	dictation_stt_api_key_exists: {
+		map: (_args, p) => ({ method: "GET", path: `/dictation/stt/key/${p("provider")}` }),
+	},
+	delete_dictation_stt_api_key: {
+		map: (_args, p) => ({ method: "DELETE", path: `/dictation/stt/key/${p("provider")}` }),
+	},
 	// --- OS integration ---
 	open_in_app: {
 		map: (args) => ({

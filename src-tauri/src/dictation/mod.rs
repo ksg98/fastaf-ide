@@ -6,6 +6,7 @@ pub mod model;
 pub mod permission;
 pub mod rewrite;
 pub mod streaming;
+pub mod stt_cloud;
 pub mod transcribe;
 pub mod vad;
 

@@ -17,6 +17,9 @@ interface DictationConfig {
 	rewrite_model: string;
 	rewrite_effort: string | null;
 	rewrite_system_prompt: string;
+	stt_provider: string;
+	stt_model_groq: string;
+	stt_model_openai: string;
 }
 
 /** Default rewrite system prompt — must match default_rewrite_system_prompt() in Rust */
@@ -47,7 +50,7 @@ export interface ModelInfo {
 }
 
 /** Model status values from Rust backend */
-type ModelStatus = "not_downloaded" | "downloaded" | "ready";
+type ModelStatus = "not_downloaded" | "downloaded" | "ready" | "not_configured";
 
 /** Model status from Rust backend */
 interface DictationStatus {
@@ -127,6 +130,13 @@ interface DictationStoreState {
 	rewriteModelsError: string | null;
 	rewriteKeyExists: boolean;
 	rewriting: boolean;
+	sttProvider: string;
+	sttModelGroq: string;
+	sttModelOpenai: string;
+	sttModels: string[];
+	fetchingSttModels: boolean;
+	sttModelsError: string | null;
+	sttKeyExists: Record<string, boolean>;
 }
 
 function createDictationStore() {
@@ -162,6 +172,13 @@ function createDictationStore() {
 		rewriteModelsError: null,
 		rewriteKeyExists: false,
 		rewriting: false,
+		sttProvider: "local",
+		sttModelGroq: "",
+		sttModelOpenai: "",
+		sttModels: [],
+		fetchingSttModels: false,
+		sttModelsError: null,
+		sttKeyExists: {},
 	});
 
 	// Listen for download progress events from Rust
@@ -198,6 +215,9 @@ function createDictationStore() {
 					rewriteModel: config.rewrite_model ?? "",
 					rewriteEffort: config.rewrite_effort ?? null,
 					rewriteSystemPrompt: config.rewrite_system_prompt ?? DEFAULT_REWRITE_SYSTEM_PROMPT,
+					sttProvider: config.stt_provider ?? "local",
+					sttModelGroq: config.stt_model_groq ?? "",
+					sttModelOpenai: config.stt_model_openai ?? "",
 				});
 			} catch (err) {
 				appLogger.error("dictation", "Failed to get dictation config", err);
@@ -219,6 +239,9 @@ function createDictationStore() {
 				rewrite_model: partial.rewrite_model ?? state.rewriteModel,
 				rewrite_effort: partial.rewrite_effort !== undefined ? partial.rewrite_effort : state.rewriteEffort,
 				rewrite_system_prompt: partial.rewrite_system_prompt ?? state.rewriteSystemPrompt,
+				stt_provider: partial.stt_provider ?? state.sttProvider,
+				stt_model_groq: partial.stt_model_groq ?? state.sttModelGroq,
+				stt_model_openai: partial.stt_model_openai ?? state.sttModelOpenai,
 			};
 			try {
 				await invoke("set_dictation_config", { config });
@@ -237,6 +260,9 @@ function createDictationStore() {
 				if (partial.rewrite_effort !== undefined) storeUpdate.rewriteEffort = partial.rewrite_effort;
 				if (partial.rewrite_system_prompt !== undefined)
 					storeUpdate.rewriteSystemPrompt = partial.rewrite_system_prompt;
+				if (partial.stt_provider !== undefined) storeUpdate.sttProvider = partial.stt_provider;
+				if (partial.stt_model_groq !== undefined) storeUpdate.sttModelGroq = partial.stt_model_groq;
+				if (partial.stt_model_openai !== undefined) storeUpdate.sttModelOpenai = partial.stt_model_openai;
 				setState(storeUpdate);
 			} catch (err) {
 				appLogger.error("dictation", "Failed to save dictation config", err);
@@ -331,6 +357,57 @@ function createDictationStore() {
 		async deleteRewriteApiKey(): Promise<void> {
 			await invoke("delete_dictation_rewrite_api_key");
 			setState("rewriteKeyExists", false);
+		},
+
+		/** Set the STT provider ("local" | "groq" | "openai") — clears fetched models */
+		setSttProvider(provider: string): void {
+			actions.saveConfig({ stt_provider: provider });
+			setState({ sttModels: [], sttModelsError: null });
+		},
+
+		/** Set the transcription model for a cloud provider */
+		setSttModel(provider: string, model: string): void {
+			if (provider === "groq") {
+				actions.saveConfig({ stt_model_groq: model });
+			} else if (provider === "openai") {
+				actions.saveConfig({ stt_model_openai: model });
+			}
+		},
+
+		/** Fetch transcription-capable model ids from the provider's /models route */
+		async fetchSttModels(provider: string): Promise<void> {
+			setState({ fetchingSttModels: true, sttModelsError: null });
+			try {
+				const models = await invoke<string[]>("dictation_fetch_stt_models", { provider });
+				setState("sttModels", models);
+			} catch (err) {
+				setState("sttModelsError", String(err));
+				appLogger.error("dictation", "Failed to fetch STT models", err);
+			} finally {
+				setState("fetchingSttModels", false);
+			}
+		},
+
+		/** Refresh whether an STT API key is stored in the vault for a provider */
+		async refreshSttKeyExists(provider: string): Promise<void> {
+			try {
+				const exists = await invoke<boolean>("dictation_stt_api_key_exists", { provider });
+				setState("sttKeyExists", provider, exists);
+			} catch (err) {
+				appLogger.error("dictation", "Failed to check STT API key", err);
+			}
+		},
+
+		/** Save an STT API key to the vault (throws on failure — caller shows feedback) */
+		async saveSttApiKey(provider: string, key: string): Promise<void> {
+			await invoke("set_dictation_stt_api_key", { provider, key });
+			setState("sttKeyExists", provider, true);
+		},
+
+		/** Delete an STT API key from the vault (throws on failure — caller shows feedback) */
+		async deleteSttApiKey(provider: string): Promise<void> {
+			await invoke("delete_dictation_stt_api_key", { provider });
+			setState("sttKeyExists", provider, false);
 		},
 
 		/**

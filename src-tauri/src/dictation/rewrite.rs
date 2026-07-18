@@ -131,7 +131,7 @@ async fn load_api_key() -> Result<Option<String>, String> {
 }
 
 /// Truncate a server error body for error messages (~300 chars).
-fn truncate_body(body: &str) -> String {
+pub(crate) fn truncate_body(body: &str) -> String {
     if body.chars().count() <= 300 {
         body.to_string()
     } else {
