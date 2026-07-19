@@ -38,6 +38,7 @@ pub(crate) mod github_account;
 pub(crate) mod github_auth;
 #[cfg(test)]
 mod github_compat_tests;
+pub(crate) mod github_clone;
 pub(crate) mod github_debug;
 pub(crate) mod github_poller;
 #[cfg(feature = "desktop")]
@@ -1602,6 +1603,8 @@ pub fn run() {
             github_account::github_resolve_repos,
             github_account::github_list_accounts,
             github_account::github_list_bindings,
+            github_clone::github_list_user_repos,
+            github_clone::github_clone_repo,
             worktree::generate_worktree_name_cmd,
             worktree::generate_clone_branch_name_cmd,
             worktree::merge_and_archive_worktree,

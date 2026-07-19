@@ -1,0 +1,164 @@
+/* Clone-from-GitHub dialog — widens the shared popover and adds repo-list UI */
+.wide {
+  width: 480px;
+  max-width: calc(100vw - 48px);
+}
+
+.destRow {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.destRow input {
+  flex: 1;
+  min-width: 0;
+}
+
+.browseBtn {
+  padding: 6px 12px;
+  background: var(--bg-highlight);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.browseBtn:hover:not(:disabled) {
+  background: var(--border);
+  color: var(--fg-primary);
+}
+
+.browseBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sectionLabel {
+  margin: 14px 0 6px;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+}
+
+.hint {
+  margin: 6px 0 0;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.repoList {
+  margin-top: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+}
+
+.repoRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.repoRow:last-child {
+  border-bottom: none;
+}
+
+.repoRow:hover {
+  background: var(--bg-highlight);
+}
+
+.repoRowActive {
+  background: var(--bg-highlight);
+}
+
+.repoName {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.privateBadge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--fg-muted);
+}
+
+.repoDesc {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.listStatus {
+  padding: 10px;
+  font-size: var(--font-md);
+  color: var(--fg-muted);
+}
+
+.progressWrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.progressBar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-highlight);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transform-origin: left;
+  transition: transform 0.2s ease;
+}
+
+.progressFill.indeterminate {
+  width: 40%;
+  animation: cloneIndeterminate 1.2s ease-in-out infinite;
+}
+
+@keyframes cloneIndeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+.progressLabel {
+  flex-shrink: 0;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}

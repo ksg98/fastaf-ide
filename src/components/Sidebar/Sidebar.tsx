@@ -36,6 +36,8 @@ export interface SidebarProps {
 	onCreateWorktreeFromBranch?: (repoPath: string, branchName: string) => void;
 	onMergeAndArchive?: (repoPath: string, branchName: string) => void;
 	onAddRepo: () => void;
+	/** Opens the clone-from-GitHub dialog */
+	onCloneFromGitHub?: () => void;
 	onAddRemoteRepo?: (connectionId: string) => void;
 	/** Opens the import-from-other-tools dialog (Claude Code / Codex / Cursor / superset.sh) */
 	onImportProjects?: () => void;
@@ -110,6 +112,12 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		const items: ContextMenuItem[] = [
 			{ label: t("sidebar.localRepository", "Local Repository"), action: () => props.onAddRepo() },
 		];
+		if (props.onCloneFromGitHub) {
+			items.push({
+				label: t("sidebar.cloneFromGithub", "Clone from GitHub…"),
+				action: () => props.onCloneFromGitHub?.(),
+			});
+		}
 		if (props.onAddRemoteRepo) {
 			for (const conn of connectedRemotes()) {
 				const id = conn.connection.id;

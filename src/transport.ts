@@ -733,6 +733,16 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	get_github_viewer_login: {
 		map: () => ({ method: "GET", path: "/github/viewer-login" }),
 	},
+	github_list_user_repos: {
+		map: () => ({ method: "GET", path: "/github/user-repos" }),
+	},
+	github_clone_repo: {
+		map: (args) => ({
+			method: "POST",
+			path: "/github/clone",
+			body: { url: args.url, destDir: args.destDir },
+		}),
+	},
 	fetch_ci_failure_logs: {
 		map: (_args, p) => ({
 			method: "GET",

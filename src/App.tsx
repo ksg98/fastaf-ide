@@ -27,6 +27,7 @@ import { writeClipboard } from "./utils/clipboard";
 const SettingsPanel = lazy(() => import("./components/SettingsPanel").then((m) => ({ default: m.SettingsPanel })));
 
 import releaseNotes from "./assets/release-notes.json";
+import { CloneRepoDialog } from "./components/CloneRepoDialog";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "./components/ContextMenu";
 import { CreateBranchDialog } from "./components/CreateBranchDialog";
@@ -278,6 +279,9 @@ const App: Component = () => {
 
 	// Import-from-other-tools dialog state
 	const [importDialogVisible, setImportDialogVisible] = createSignal(false);
+
+	// Clone-from-GitHub dialog state
+	const [cloneDialogVisible, setCloneDialogVisible] = createSignal(false);
 
 	// Background git operations tracking (for button loading states)
 	const [runningGitOps, setRunningGitOps] = createSignal<Set<string>>(new Set());
@@ -2164,6 +2168,13 @@ const App: Component = () => {
 			execute: () => gitOps.handleAddRepo(),
 		});
 		entries.push({
+			id: "clone-from-github",
+			label: "Clone from GitHub",
+			category: "Repository",
+			keybinding: "",
+			execute: () => setCloneDialogVisible(true),
+		});
+		entries.push({
 			id: "check-for-updates",
 			label: "Check for Updates",
 			category: "Application",
@@ -2688,6 +2699,7 @@ const App: Component = () => {
 					creatingWorktreeRepos={gitOps.creatingWorktreeRepos()}
 					removingBranches={gitOps.removingBranches()}
 					onAddRepo={gitOps.handleAddRepo}
+					onCloneFromGitHub={() => setCloneDialogVisible(true)}
 					onAddRemoteRepo={gitOps.handleAddRemoteRepo}
 					onImportProjects={() => setImportDialogVisible(true)}
 					onRepoSettings={(repoPath) =>
@@ -2893,6 +2905,13 @@ const App: Component = () => {
 					gitOps.setBranchToRename(null);
 				}}
 				onRename={gitOps.handleRenameBranch}
+			/>
+
+			{/* Clone-from-GitHub dialog */}
+			<CloneRepoDialog
+				visible={cloneDialogVisible()}
+				onClose={() => setCloneDialogVisible(false)}
+				onCloned={(path) => void gitOps.addRepoFromPath(path)}
 			/>
 
 			{/* Create branch dialog */}

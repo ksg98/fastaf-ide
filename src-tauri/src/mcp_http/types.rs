@@ -473,6 +473,13 @@ pub(super) struct GithubRepoPathBody {
 }
 
 #[derive(Deserialize)]
+pub(super) struct GithubCloneRequest {
+    pub url: String,
+    #[serde(rename = "destDir")]
+    pub dest_dir: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct GithubResolveRepoQuery {
     #[serde(rename = "repoPath")]
     pub repo_path: String,

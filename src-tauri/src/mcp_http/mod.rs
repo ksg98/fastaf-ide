@@ -932,6 +932,8 @@ pub fn build_router(state: Arc<AppState>, remote_auth: bool, mcp_enabled: bool) 
             "/github/viewer-login",
             get(github_routes::github_viewer_login),
         )
+        .route("/github/user-repos", get(github_routes::github_user_repos))
+        .route("/github/clone", post(github_routes::github_clone))
         .route("/repo/ci-failure-logs", get(github_routes::ci_failure_logs))
         .route(
             "/github/pr-hide-drafts",

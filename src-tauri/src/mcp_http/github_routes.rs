@@ -350,3 +350,19 @@ pub(super) async fn github_resolve_repos(
     ))
     .into_response()
 }
+
+pub(super) async fn github_user_repos(State(state): State<Arc<AppState>>) -> Response {
+    json_result(crate::github_clone::github_list_user_repos_impl(&state).await)
+}
+
+pub(super) async fn github_clone(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<super::types::GithubCloneRequest>,
+) -> Response {
+    // Progress events are Tauri-emit only; browser mode treats the resolved
+    // request as completion (indeterminate progress in the dialog).
+    json_result(
+        crate::github_clone::github_clone_repo_impl(&state, body.url, body.dest_dir, |_, _| {})
+            .await,
+    )
+}
