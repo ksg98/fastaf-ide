@@ -1,7 +1,7 @@
 {
   "name": "fastaf",
   "private": true,
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "Multi-agent terminal orchestrator with native terminal and Tauri",
   "type": "module",
   "packageManager": "pnpm@11.5.1",
