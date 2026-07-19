@@ -1,5 +1,7 @@
 allowBuilds:
   esbuild: true
+  # onnxruntime-web transitive; its postinstall is optional codegen we don't need
+  protobufjs: false
 
 # pnpm 11 no longer reads the "pnpm.overrides" field from package.json — overrides
 # live here. These pin transitive deps for security and to dedupe versions.

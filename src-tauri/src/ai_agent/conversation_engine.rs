@@ -49,6 +49,9 @@ pub(crate) struct ConversationConfig {
     pub reasoning: ReasoningLevel,
     /// Prompt-token budget that triggers history compaction. None disables it.
     pub compact_after_tokens: Option<usize>,
+    /// Extra section appended to the base system prompt (e.g. the voice-mode
+    /// persona when the reply will be spoken aloud).
+    pub extra_system_prompt: Option<String>,
 }
 
 /// User-facing reasoning effort. `Auto` enables a sensible default on capable
@@ -109,6 +112,7 @@ impl Default for ConversationConfig {
             bypassed_tools: HashSet::new(),
             reasoning: ReasoningLevel::Auto,
             compact_after_tokens: Some(engine::DEFAULT_COMPACT_THRESHOLD_TOKENS),
+            extra_system_prompt: None,
         }
     }
 }
@@ -382,6 +386,7 @@ pub(crate) async fn build_config(
         bypassed_tools: bypassed_tools.unwrap_or_default().into_iter().collect(),
         reasoning: ReasoningLevel::from_opt(reasoning_effort.as_deref()),
         compact_after_tokens: Some(engine::DEFAULT_COMPACT_THRESHOLD_TOKENS),
+        extra_system_prompt: None,
     }
 }
 
@@ -702,7 +707,14 @@ async fn run_conversation(
     // per-phase model, which is only known inside the loop.
 
     // Build system prompt — merged from agent + chat rules
-    let base_system_prompt = build_base_system_prompt(&session_id);
+    let base_system_prompt = {
+        let mut prompt = build_base_system_prompt(&session_id);
+        if let Some(extra) = &config.extra_system_prompt {
+            prompt.push_str("\n\n");
+            prompt.push_str(extra);
+        }
+        prompt
+    };
     let cross_session = super::context::build_cross_session_section(&state, &session_id);
     let mut last_context = assemble_context(&state, &session_id);
     let mut last_knowledge = super::context::build_knowledge_section(&state, &session_id);

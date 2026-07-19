@@ -24,6 +24,8 @@ pub(crate) mod cpu_watchdog;
 pub(crate) mod credentials;
 #[cfg(feature = "desktop")]
 mod dictation;
+#[cfg(feature = "desktop")]
+mod voice_agent;
 pub(crate) mod diff_triage;
 pub(crate) mod dir_watcher;
 pub(crate) mod error_classification;
@@ -1651,6 +1653,15 @@ pub fn run() {
             dictation::stt_cloud::set_dictation_stt_api_key,
             dictation::stt_cloud::dictation_stt_api_key_exists,
             dictation::stt_cloud::delete_dictation_stt_api_key,
+            voice_agent::commands::get_voice_agent_config,
+            voice_agent::commands::set_voice_agent_config,
+            voice_agent::commands::voice_agent_interrupt,
+            voice_agent::commands::voice_tts_status,
+            voice_agent::commands::voice_kokoro_preload,
+            voice_agent::commands::voice_kokoro_unload,
+            voice_agent::commands::voice_fetch_tts_models,
+            voice_agent::commands::voice_speak,
+            voice_agent::commands::voice_transcribe_wav,
             global_hotkey::set_global_hotkey,
             global_hotkey::get_global_hotkey,
             config::load_app_config,
@@ -1877,6 +1888,8 @@ pub fn run() {
                 // streaming thread (which holds an Arc<WhisperContext>), then drops
                 // the transcriber while the process is still alive.
                 tauri::RunEvent::Exit => {
+                    // Stop TTS playback + kill the kokoro sidecar before exit.
+                    voice_agent::shutdown();
                     if let Some(dictation) = app_handle.try_state::<dictation::DictationState>() {
                         dictation.shutdown();
                     }

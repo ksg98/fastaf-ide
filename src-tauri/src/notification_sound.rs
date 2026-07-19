@@ -274,7 +274,8 @@ pub(crate) fn list_output_devices() -> Vec<AudioOutputDevice> {
 // ---------------------------------------------------------------------------
 
 /// Resolve an output device by name, falling back to default.
-fn resolve_output_stream(
+/// Shared with `voice_agent::speaker` for TTS playback.
+pub(crate) fn resolve_output_stream(
     device_name: Option<&str>,
 ) -> Option<(OutputStream, rodio::OutputStreamHandle)> {
     if let Some(name) = device_name {

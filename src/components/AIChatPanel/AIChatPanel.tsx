@@ -3,6 +3,8 @@ import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import { type ConversationMeta, conversationStore, type ToolCallEntry } from "../../stores/conversationStore";
 import { terminalsStore } from "../../stores/terminals";
+import { VOICE_STATE_COLORS, voiceAgentStore } from "../../stores/voiceAgent";
+import { isTauri } from "../../transport";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
@@ -91,6 +93,31 @@ const IconHistory = () => (
 const IconRobot = () => (
 	<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
 		<path d="M7 1a.75.75 0 01.75.75V3h1.5A2.25 2.25 0 0111.5 5.25v4.5A2.25 2.25 0 019.25 12h-4.5A2.25 2.25 0 012.5 9.75v-4.5A2.25 2.25 0 014.75 3h1.5V1.75A.75.75 0 017 1zM5 6.5a.75.75 0 100 1.5.75.75 0 000-1.5zm4 0a.75.75 0 100 1.5.75.75 0 000-1.5zM5.5 9a.5.5 0 000 1h3a.5.5 0 000-1h-3z" />
+	</svg>
+);
+
+const IconMic = () => (
+	<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+		<path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+		<path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+	</svg>
+);
+
+const IconMicOff = () => (
+	<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+		<path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z" />
+	</svg>
+);
+
+const IconSpeaker = () => (
+	<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+		<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
+	</svg>
+);
+
+const IconSpeakerOff = () => (
+	<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+		<path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm-3.5-8.71L9.91 6.09 12 8.18V3.29zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73 4.27 3z" />
 	</svg>
 );
 
@@ -293,13 +320,14 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		if (!text || isFrozen()) return;
 		const sid = activeSessionId();
 
+		const voiceMode = voiceAgentStore.state.active;
 		if (autonomy() === "autonomous") {
 			const st = conversationStore.agentState();
 			if (st === "running" || st === "paused") return;
-			if (sid) conversationStore.startAgent(sid, text, conversationStore.unrestricted());
+			if (sid) conversationStore.startAgent(sid, text, conversationStore.unrestricted(), { voiceMode });
 		} else {
 			if (conversationStore.isStreaming()) return;
-			conversationStore.sendMessage(text, sid);
+			conversationStore.sendMessage(text, sid, { voiceMode });
 		}
 
 		setInputText("");
@@ -452,6 +480,44 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					<Show when={activeTerminalName()}>{(name) => <span class={s.terminalName}>{name()}</span>}</Show>
 				</div>
 				<div class={s.headerActions}>
+					{/* Voice agent (desktop only) */}
+					<Show when={isTauri()}>
+						<Show when={voiceAgentStore.state.active}>
+							<span
+								class={s.voicePill}
+								title={`Voice agent: ${voiceAgentStore.uiState()}`}
+								style={{ color: VOICE_STATE_COLORS[voiceAgentStore.uiState()] }}
+							>
+								<span class={s.voiceDot} style={{ background: VOICE_STATE_COLORS[voiceAgentStore.uiState()] }} />
+								{voiceAgentStore.uiState()}
+							</span>
+							<button
+								class={cx(s.headerBtn, voiceAgentStore.state.micMuted && s.headerBtnDanger)}
+								onClick={() => voiceAgentStore.toggleMicMute()}
+								title={voiceAgentStore.state.micMuted ? "Resume listening" : "Pause listening (mic mute)"}
+							>
+								<IconMicOff />
+							</button>
+							<button
+								class={cx(s.headerBtn, voiceAgentStore.state.muteTts && s.headerBtnActive)}
+								onClick={() => void voiceAgentStore.toggleTtsMute()}
+								title={voiceAgentStore.state.muteTts ? "Unmute voice replies" : "Mute voice replies (text only)"}
+							>
+								{voiceAgentStore.state.muteTts ? <IconSpeakerOff /> : <IconSpeaker />}
+							</button>
+						</Show>
+						<button
+							class={cx(s.headerBtn, voiceAgentStore.state.active && s.headerBtnActive)}
+							onClick={() => void voiceAgentStore.toggle()}
+							title={
+								voiceAgentStore.state.active
+									? "Stop voice agent"
+									: "Start voice agent — talk to the AI, it controls your sessions"
+							}
+						>
+							<IconMic />
+						</button>
+					</Show>
 					{/* Model picker */}
 					<Show when={availableModels().length > 0}>
 						<select

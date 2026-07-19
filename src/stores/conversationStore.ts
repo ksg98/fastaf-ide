@@ -685,7 +685,7 @@ function accumulateUsageForState(
 // Conversation control
 // ---------------------------------------------------------------------------
 
-async function sendMessage(text: string, sessionId: string | null): Promise<void> {
+async function sendMessage(text: string, sessionId: string | null, opts?: { voiceMode?: boolean }): Promise<void> {
 	const s = activeConversation();
 	if (s.isStreaming()) return;
 	if (!sessionId) {
@@ -709,7 +709,13 @@ async function sendMessage(text: string, sessionId: string | null): Promise<void
 			const { invoke: coreInvoke, Channel } = await import("@tauri-apps/api/core");
 			const onEvent = new Channel<ConversationEvent>();
 			onEvent.onmessage = (event) => applyConversationEvent(s, event, capturedKey);
-			await coreInvoke("start_conversation", { sessionId, message: text, autonomy: "assisted", onEvent });
+			await coreInvoke("start_conversation", {
+				sessionId,
+				message: text,
+				autonomy: "assisted",
+				voiceMode: opts?.voiceMode ?? false,
+				onEvent,
+			});
 		} else {
 			// Browser/PWA: dedicated WS carries the token stream (event-bridge plan Step 5).
 			closeConversationStream(s); // drop any orphaned prior stream first
@@ -743,7 +749,12 @@ async function cancelStream(): Promise<void> {
 	}
 }
 
-async function startAgent(sessionId: string, goal: string, isUnrestricted?: boolean): Promise<void> {
+async function startAgent(
+	sessionId: string,
+	goal: string,
+	isUnrestricted?: boolean,
+	opts?: { voiceMode?: boolean },
+): Promise<void> {
 	const s = activeConversation();
 	const capturedKey = activeKey();
 	if (s.agentState() === "running" || s.agentState() === "paused") return;
@@ -774,6 +785,7 @@ async function startAgent(sessionId: string, goal: string, isUnrestricted?: bool
 				message: goal,
 				autonomy: "autonomous",
 				bypassedTools: bypassed,
+				voiceMode: opts?.voiceMode ?? false,
 				onEvent,
 			});
 		} else {

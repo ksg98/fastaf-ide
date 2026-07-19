@@ -28,6 +28,7 @@
     "@lezer/common": "^1.5.2",
     "@lezer/highlight": "^1.2.3",
     "@replit/codemirror-css-color-picker": "^6.3.0",
+    "@ricky0123/vad-web": "^0.0.30",
     "@tanstack/solid-virtual": "^3.13.28",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-deep-link": "^2.4.9",
@@ -55,12 +56,14 @@
     "@vitest/coverage-v8": "^4.1.8",
     "happy-dom": "20.8.9",
     "lightningcss": "^1.32.0",
+    "onnxruntime-web": "1.27.0",
     "react": "^19.2.7",
     "rollup-plugin-visualizer": "^7.0.1",
     "typescript": "~6.0.3",
     "vite": "^8.0.16",
     "vite-plugin-checker": "^0.12.0",
     "vite-plugin-purgecss": "^0.2.13",
+    "vite-plugin-static-copy": "^4.1.1",
     "vitest": "^4.1.8"
   }
 }

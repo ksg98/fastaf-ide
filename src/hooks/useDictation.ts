@@ -1,6 +1,7 @@
 import { appLogger } from "../stores/appLogger";
 import { dictationStore } from "../stores/dictation";
 import { terminalsStore } from "../stores/terminals";
+import { voiceAgentStore } from "../stores/voiceAgent";
 import { getShellFamily, sendCommand } from "../utils/sendCommand";
 
 /** Transcription result from the Rust backend */
@@ -119,6 +120,16 @@ export function useDictation(deps: DictationDeps) {
 		if (!text) {
 			focusTarget = null;
 			deps.setStatusInfo("Dictation: no text recognized");
+			return;
+		}
+
+		// Voice-agent session active: push-to-talk talks to the agent instead of
+		// injecting into the focused element. Raw transcript — the agent doesn't
+		// need the prompt rewrite.
+		if (voiceAgentStore.state.active) {
+			focusTarget = null;
+			voiceAgentStore.sendTranscript(text);
+			deps.setStatusInfo("Ready");
 			return;
 		}
 

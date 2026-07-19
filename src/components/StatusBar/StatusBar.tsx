@@ -13,6 +13,7 @@ import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { statusBarTicker } from "../../stores/statusBarTicker";
 import { terminalsStore } from "../../stores/terminals";
+import { VOICE_STATE_COLORS, voiceAgentStore } from "../../stores/voiceAgent";
 import { cx } from "../../utils";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
@@ -414,6 +415,20 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 					>
 						<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
 							<path d="M3 2a2 2 0 00-2 2v6a2 2 0 002 2h1v2.5L7.5 12H13a2 2 0 002-2V4a2 2 0 00-2-2H3z" />
+						</svg>
+					</button>
+				</Show>
+
+				{/* Voice agent indicator — visible while a voice session runs */}
+				<Show when={voiceAgentStore.state.active}>
+					<button
+						class={s.toggleBtn}
+						onClick={() => void voiceAgentStore.stop()}
+						title={`${t("statusBar.voiceAgent", "Voice agent")}: ${voiceAgentStore.uiState()} — click to stop`}
+						style={{ color: VOICE_STATE_COLORS[voiceAgentStore.uiState()] }}
+					>
+						<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+							<path d="M3 9v6h2V9H3zm4-4v14h2V5H7zm4 7v3h2v-3h-2zm0-7v5h2V5h-2zm4 2v10h2V7h-2zm4 2v6h2V9h-2z" />
 						</svg>
 					</button>
 				</Show>

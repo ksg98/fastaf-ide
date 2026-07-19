@@ -504,84 +504,8 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
         // Raw transcript: None means the local transcriber was never loaded.
         // Skipped/failed local inference yields Some("") — "no speech detected"
         // below — while cloud failures propagate as Err (the user must see them).
-        let raw_text: Option<String> = if let Some((provider, model)) = cloud_stt {
-            let api_key = {
-                let provider_owned = provider.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
-                        &provider_owned,
-                    ))
-                })
-                .await
-                .map_err(|e| format!("Keyring task failed: {e}"))??
-                .filter(|k| !k.is_empty())
-                .ok_or_else(|| format!("API key not set for {provider}"))?
-            };
-            let text = super::stt_cloud::transcribe_cloud(
-                &provider,
-                &model,
-                &api_key,
-                lang_owned.as_deref(),
-                &all_audio,
-            )
-            .await
-            .map_err(|e| {
-                app_logger::log_via_handle(
-                    &app,
-                    "warn",
-                    "dictation",
-                    &format!("Cloud transcription failed: {e}"),
-                );
-                e
-            })?;
-            Some(text)
-        } else {
-            // Run whisper inference off the IPC thread
-            let app_clone = app.clone();
-            tokio::task::spawn_blocking(move || {
-                let Some(transcriber) = transcriber else {
-                    app_logger::log_via_handle(
-                        &app_clone,
-                        "warn",
-                        "dictation",
-                        "Transcriber not available — model not loaded",
-                    );
-                    return None;
-                };
-
-                let mut final_text = String::new();
-                match transcriber.transcribe(&all_audio, lang_owned.as_deref()) {
-                    Ok(result) if result.skip_reason.is_none() => {
-                        final_text = result.text;
-                    }
-                    Ok(result) => {
-                        if let Some(reason) = &result.skip_reason {
-                            app_logger::log_via_handle(
-                                &app_clone,
-                                "info",
-                                "dictation",
-                                &format!("Final transcription skipped: {reason}"),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        app_logger::log_via_handle(
-                            &app_clone,
-                            "warn",
-                            "dictation",
-                            &format!("Final transcription failed: {e}"),
-                        );
-                    }
-                }
-                Some(final_text)
-            })
-            .await
-            .map_err(|e| {
-                let msg = format!("Transcription task panicked: {e}");
-                app_logger::log_via_handle(&app, "error", "dictation", &msg);
-                msg
-            })?
-        };
+        let raw_text: Option<String> =
+            transcribe_core(&app, all_audio, lang_owned, cloud_stt, transcriber).await?;
 
         let Some(final_text) = raw_text else {
             return Ok(TranscribeResponse {
@@ -642,6 +566,186 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
     *app.state::<DictationState>().audio.lock() = None;
 
     result
+}
+
+/// Provider dispatch for a finished utterance: cloud `/audio/transcriptions`
+/// or local whisper. `None` means the local transcriber was never loaded;
+/// `Some("")` means no speech; cloud failures propagate as `Err`. Shared by
+/// `stop_dictation_and_transcribe` and the voice agent's `transcribe_samples`.
+async fn transcribe_core(
+    app: &AppHandle,
+    all_audio: Vec<f32>,
+    lang: Option<String>,
+    cloud_stt: Option<(String, String)>,
+    transcriber: Option<Arc<dyn transcribe::Transcriber>>,
+) -> Result<Option<String>, String> {
+    if let Some((provider, model)) = cloud_stt {
+        let api_key = {
+            let provider_owned = provider.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
+                    &provider_owned,
+                ))
+            })
+            .await
+            .map_err(|e| format!("Keyring task failed: {e}"))??
+            .filter(|k| !k.is_empty())
+            .ok_or_else(|| format!("API key not set for {provider}"))?
+        };
+        let text = super::stt_cloud::transcribe_cloud(
+            &provider,
+            &model,
+            &api_key,
+            lang.as_deref(),
+            &all_audio,
+        )
+        .await
+        .map_err(|e| {
+            app_logger::log_via_handle(
+                app,
+                "warn",
+                "dictation",
+                &format!("Cloud transcription failed: {e}"),
+            );
+            e
+        })?;
+        Ok(Some(text))
+    } else {
+        // Run whisper inference off the IPC thread
+        let app_clone = app.clone();
+        tokio::task::spawn_blocking(move || {
+            let Some(transcriber) = transcriber else {
+                app_logger::log_via_handle(
+                    &app_clone,
+                    "warn",
+                    "dictation",
+                    "Transcriber not available — model not loaded",
+                );
+                return None;
+            };
+
+            let mut final_text = String::new();
+            match transcriber.transcribe(&all_audio, lang.as_deref()) {
+                Ok(result) if result.skip_reason.is_none() => {
+                    final_text = result.text;
+                }
+                Ok(result) => {
+                    if let Some(reason) = &result.skip_reason {
+                        app_logger::log_via_handle(
+                            &app_clone,
+                            "info",
+                            "dictation",
+                            &format!("Final transcription skipped: {reason}"),
+                        );
+                    }
+                }
+                Err(e) => {
+                    app_logger::log_via_handle(
+                        &app_clone,
+                        "warn",
+                        "dictation",
+                        &format!("Final transcription failed: {e}"),
+                    );
+                }
+            }
+            Some(final_text)
+        })
+        .await
+        .map_err(|e| {
+            let msg = format!("Transcription task panicked: {e}");
+            app_logger::log_via_handle(app, "error", "dictation", &msg);
+            msg
+        })
+    }
+}
+
+/// Load (or reload) the whisper transcriber for the configured model. Same
+/// semantics as the load block in `start_dictation`, minus its event emits.
+fn ensure_transcriber(dictation: &DictationState) -> Result<Arc<dyn transcribe::Transcriber>, String> {
+    let whisper_model = configured_model();
+    let mut transcriber_arc_lock = dictation.transcriber_arc.lock();
+    let mut active_model_lock = dictation.active_model.lock();
+    let model_changed = active_model_lock
+        .as_deref()
+        .map(|name| name != whisper_model.name())
+        .unwrap_or(true);
+
+    if model_changed || transcriber_arc_lock.is_none() {
+        if !model::model_exists(whisper_model) {
+            return Err("Model not downloaded".to_string());
+        }
+        let t = transcribe::WhisperTranscriber::load(&model::model_path(whisper_model))?;
+        *transcriber_arc_lock = Some(Arc::new(t));
+        *active_model_lock = Some(whisper_model.name().to_string());
+    }
+    transcriber_arc_lock
+        .clone()
+        .ok_or_else(|| "Transcriber not available".to_string())
+}
+
+/// Transcribe pre-captured 16 kHz mono samples through the configured STT
+/// provider + user corrections — the same pipeline push-to-talk dictation
+/// uses. Voice-agent entry point for hands-free (webview VAD) utterances.
+pub(crate) async fn transcribe_samples(
+    app: &AppHandle,
+    all_audio: Vec<f32>,
+) -> Result<TranscribeResponse, String> {
+    let total_duration_s = all_audio.len() as f64 / 16000.0;
+    if all_audio.len() < 8000 {
+        return Ok(TranscribeResponse {
+            text: String::new(),
+            skip_reason: Some("no speech detected".to_string()),
+            duration_s: total_duration_s,
+        });
+    }
+
+    let config = get_dictation_config();
+    let lang = if config.language == "auto" {
+        None
+    } else {
+        Some(config.language.clone())
+    };
+    let cloud_stt = cloud_stt_model(&config);
+
+    let corrections = app.state::<DictationState>().corrections.clone();
+    let transcriber = if cloud_stt.is_none() {
+        // Model load can take seconds — keep it off the IPC thread.
+        let app_clone = app.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                ensure_transcriber(&app_clone.state::<DictationState>())
+            })
+            .await
+            .map_err(|e| format!("Model load task panicked: {e}"))??,
+        )
+    } else {
+        None
+    };
+
+    let raw_text = transcribe_core(app, all_audio, lang, cloud_stt, transcriber).await?;
+
+    let Some(final_text) = raw_text else {
+        return Ok(TranscribeResponse {
+            text: String::new(),
+            skip_reason: Some("model not loaded".to_string()),
+            duration_s: total_duration_s,
+        });
+    };
+    if final_text.is_empty() {
+        return Ok(TranscribeResponse {
+            text: String::new(),
+            skip_reason: Some("no speech detected".to_string()),
+            duration_s: total_duration_s,
+        });
+    }
+
+    let corrected = corrections.lock().correct(&final_text);
+    let final_text = corrected.replace('\n', " ");
+    Ok(TranscribeResponse {
+        text: final_text,
+        skip_reason: None,
+        duration_s: total_duration_s,
+    })
 }
 
 #[tauri::command]

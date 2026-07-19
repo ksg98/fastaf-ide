@@ -47,6 +47,39 @@
   color: var(--error);
 }
 
+/* Voice agent state pill (dot + state color set inline per state) */
+.voicePill {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--font-sm);
+  text-transform: capitalize;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-highlight);
+  user-select: none;
+}
+
+.voiceDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: voicePulse 1.6s ease-in-out infinite;
+}
+
+@keyframes voicePulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.8);
+  }
+}
+
 .attachIndicator {
   display: flex;
   align-items: center;

@@ -149,6 +149,7 @@ impl Scheduler {
             bypassed_tools: HashSet::new(),
             reasoning: super::conversation_engine::ReasoningLevel::default(),
             compact_after_tokens: Some(super::engine::DEFAULT_COMPACT_THRESHOLD_TOKENS),
+            extra_system_prompt: None,
         };
 
         let timeout = std::time::Duration::from_secs(job.max_duration_secs);

@@ -55,6 +55,7 @@ export type AppLogSource =
 	| "ViewportLock"
 	| "ai-chat"
 	| "ai-agent"
+	| "voice-agent"
 	| "conversation"
 	| "panel"
 	| "panel-sync"

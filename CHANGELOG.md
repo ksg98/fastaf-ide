@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Voice Agent — talk to FastAF while it controls your sessions** — A hands-free conversational agent built on the existing AI conversation engine. Click the microphone in the AI Chat panel: Silero VAD (echo-cancelled, with barge-in — interrupt it mid-sentence and it stops within a beat) detects your utterances, transcribes them through your configured Dictation provider (local whisper / Groq / OpenAI), and auto-sends them to the agent, which answers **out loud** and can act on the whole IDE: `list_sessions` → route prompts into any terminal or Claude Code session by alias/repo ("tell tc-1 to run the tests", "ask claude in the fastaf repo to fix the build"), read screens, wait for output. Replies stream sentence-by-sentence into TTS: **local Kokoro** (mlx-audio sidecar via uv, Apple Silicon, kept warm between sessions) or **Groq playai-tts / OpenAI** cloud voices (keys shared with cloud STT — configure once). Voice mode adds a spoken-reply persona (terse answers, approval requests said aloud, no code read out). Push-to-talk works too: with a voice session active, the dictation hotkey talks to the agent instead of typing. New Settings → Voice Agent tab: TTS engine/voice/model pickers with live model fetch, hands-free toggle, output device, Kokoro load/unload with RAM state, and a test button. Status bar shows a live state indicator (listening / thinking / speaking) while a session runs.
+
 ## [1.5.6] - 2026-07-18
 
 ### Added

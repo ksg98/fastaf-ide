@@ -338,6 +338,8 @@ const App: Component = () => {
 		import("./hooks/useFileDrop").then(({ setFolderDropConfirmHandler }) => {
 			setFolderDropConfirmHandler((req) => setPendingFolderDrop(req));
 		});
+		// Voice agent: load config + TTS status, register speaking/status listeners.
+		import("./stores/voiceAgent").then(({ voiceAgentStore }) => void voiceAgentStore.init());
 	});
 
 	// Redirect keyboard input from sidebar to terminal

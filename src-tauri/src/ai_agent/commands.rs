@@ -15,6 +15,7 @@ use crate::state::AppState;
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_conversation(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
     session_id: String,
     message: String,
@@ -24,13 +25,14 @@ pub(crate) async fn start_conversation(
     model_override: Option<String>,
     bypassed_tools: Option<Vec<String>>,
     reasoning_effort: Option<String>,
+    voice_mode: Option<bool>,
     on_event: tauri::ipc::Channel<super::conversation_engine::ConversationEvent>,
 ) -> Result<(), String> {
     use super::conversation_engine::{
         batched_conversation_stream, build_config, start_conversation as engine_start,
     };
 
-    let config = build_config(
+    let mut config = build_config(
         autonomy,
         max_steps,
         temperature,
@@ -40,7 +42,18 @@ pub(crate) async fn start_conversation(
     )
     .await;
 
-    let rx = engine_start(state.inner().clone(), session_id, message, config).await?;
+    // Voice mode: replies are spoken aloud — append the voice persona and tap
+    // this run's event stream for sentence-chunked TTS (see voice_agent).
+    let voice = voice_mode.unwrap_or(false);
+    if voice {
+        config.extra_system_prompt = Some(crate::voice_agent::voice_system_suffix().to_string());
+    }
+
+    let rx = engine_start(state.inner().clone(), session_id.clone(), message, config).await?;
+
+    if voice {
+        crate::voice_agent::attach_conversation_tap(app, session_id);
+    }
 
     // Bridge broadcast→Channel via the shared 50ms batcher (same logic the
     // browser WebSocket bridge uses — see conversation_engine::batched_conversation_stream).

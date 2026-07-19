@@ -3,6 +3,7 @@ import { execSync } from "node:child_process";
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
 import checker from "vite-plugin-checker";
+import { viteStaticCopy } from "vite-plugin-static-copy";
 import { visualizer } from "rollup-plugin-visualizer";
 import purgecss from "vite-plugin-purgecss";
 import { Features } from "lightningcss";
@@ -27,6 +28,18 @@ export default defineConfig(async ({ command }) => ({
   },
   plugins: [
     solid(),
+    // Silero VAD + onnxruntime assets are fetched at runtime by
+    // @ricky0123/vad-web (voice agent hands-free mode); serve them under /vad/
+    // in dev and dist instead of committing the binaries.
+    viteStaticCopy({
+      targets: [
+        { src: "node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js", dest: "vad" },
+        { src: "node_modules/@ricky0123/vad-web/dist/silero_vad_v5.onnx", dest: "vad" },
+        { src: "node_modules/@ricky0123/vad-web/dist/silero_vad_legacy.onnx", dest: "vad" },
+        { src: "node_modules/onnxruntime-web/dist/*.wasm", dest: "vad" },
+        { src: "node_modules/onnxruntime-web/dist/*.mjs", dest: "vad" },
+      ],
+    }),
     // The type-check overlay is only useful in the dev server (`vite` / `tauri
     // dev`). One-shot builds run `tsc` up front (`pnpm build` = `tsc && vite
     // build`, and `make check` runs it too), so keeping the checker in build
