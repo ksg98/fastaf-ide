@@ -49,6 +49,7 @@ CLAUDE.md
 scripts/*
 !scripts/dev-install.sh
 !scripts/generate-release-notes.sh
+!scripts/sync-vad-assets.mjs
 !scripts/perf/
 scripts/perf/results/
 competitor-analysis
@@ -83,3 +84,6 @@ test-width.txt
 
 # Scratch planning / triage docs (local only)
 PR.md
+
+# Voice agent VAD/onnx runtime assets (synced from node_modules by scripts/sync-vad-assets.mjs)
+public/vad
