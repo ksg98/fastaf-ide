@@ -83,6 +83,30 @@ export const DictationSettings: Component = () => {
 	const [sttKeyInput, setSttKeyInput] = createSignal("");
 	const [sttKeyMsg, setSttKeyMsg] = createSignal("");
 	const [savingSttKey, setSavingSttKey] = createSignal(false);
+	const [rewriteTestInput, setRewriteTestInput] = createSignal(
+		"umm so basically can you uh fix the the login bug and and also add some tests for it",
+	);
+	const [rewriteTestResult, setRewriteTestResult] = createSignal<string | null>(null);
+	const [rewriteTestError, setRewriteTestError] = createSignal<string | null>(null);
+	const [rewriteTestBusy, setRewriteTestBusy] = createSignal(false);
+
+	/** Run a sample text through the configured rewrite endpoint (errors surface). */
+	const handleRewriteTest = async () => {
+		const text = rewriteTestInput().trim();
+		if (!text || rewriteTestBusy()) return;
+		setRewriteTestBusy(true);
+		setRewriteTestResult(null);
+		setRewriteTestError(null);
+		const started = Date.now();
+		try {
+			const result = await invoke<string>("dictation_rewrite", { text });
+			setRewriteTestResult(`${result}  (${((Date.now() - started) / 1000).toFixed(1)}s)`);
+		} catch (e) {
+			setRewriteTestError(String(e));
+		} finally {
+			setRewriteTestBusy(false);
+		}
+	};
 
 	// Load data on mount. Auto-detect devices only if mic is already authorized
 	// (avoids triggering the macOS TCC permission dialog unexpectedly).
@@ -570,6 +594,36 @@ export const DictationSettings: Component = () => {
 								"Instructions for the rewrite model. Saved when the field loses focus.",
 							)}
 						</p>
+					</div>
+
+					{/* Test the endpoint end-to-end (base URL + key + model + prompt) */}
+					<div style={{ "margin-top": "8px" }}>
+						<label>{t("dictation.rewriteTestLabel", "Test rewrite")}</label>
+						<div class={s.passwordRow}>
+							<input
+								class={s.input}
+								type="text"
+								value={rewriteTestInput()}
+								onInput={(e) => setRewriteTestInput(e.currentTarget.value)}
+							/>
+							<button
+								class={s.testBtn}
+								onClick={() => void handleRewriteTest()}
+								disabled={rewriteTestBusy() || !rewriteTestInput().trim()}
+							>
+								{rewriteTestBusy() ? t("dictation.rewriteTesting", "Testing…") : t("dictation.rewriteTest", "Test")}
+							</button>
+						</div>
+						<Show when={rewriteTestResult()}>
+							<p class={s.hint} style={{ "white-space": "pre-wrap" }}>
+								→ {rewriteTestResult()}
+							</p>
+						</Show>
+						<Show when={rewriteTestError()}>
+							<p class={s.hint} style={{ color: "var(--error)" }}>
+								{rewriteTestError()}
+							</p>
+						</Show>
 					</div>
 				</Show>
 			</div>
