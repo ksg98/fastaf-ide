@@ -88,17 +88,26 @@ fn supports_extended_thinking(model: &str) -> bool {
 }
 
 /// Resolve the user's reasoning level + the active model into a genai effort.
-/// Returns `None` when the model can't think or the user turned it off.
+///
+/// An explicit Low/Medium/High is honored for ANY model — GPT-style reasoning
+/// models (gpt-oss, o-series, GPT-5, local OpenAI-compatible servers) accept
+/// `reasoning_effort` too, and servers that don't simply ignore it. `Auto`
+/// only opts in on models known to support extended thinking (Claude Opus
+/// 4.7+); `Off` always disables.
 fn resolve_reasoning(level: ReasoningLevel, model: &str) -> Option<genai::chat::ReasoningEffort> {
     use genai::chat::ReasoningEffort;
-    if !supports_extended_thinking(model) {
-        return None;
-    }
     match level {
         ReasoningLevel::Off => None,
-        ReasoningLevel::Auto | ReasoningLevel::Medium => Some(ReasoningEffort::Medium),
         ReasoningLevel::Low => Some(ReasoningEffort::Low),
+        ReasoningLevel::Medium => Some(ReasoningEffort::Medium),
         ReasoningLevel::High => Some(ReasoningEffort::High),
+        ReasoningLevel::Auto => {
+            if supports_extended_thinking(model) {
+                Some(ReasoningEffort::Medium)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -1143,9 +1152,18 @@ mod tests {
         use genai::chat::ReasoningEffort;
         // Off always disables, even on a capable model.
         assert!(resolve_reasoning(ReasoningLevel::Off, "claude-opus-4-8").is_none());
-        // Any level is a no-op on a model without extended thinking.
-        assert!(resolve_reasoning(ReasoningLevel::High, "gpt-5").is_none());
-        // Auto maps to Medium on a capable model (ReasoningEffort has no PartialEq → matches!).
+        // Explicit levels are honored on ANY model (gpt-oss/o-series/local
+        // OpenAI-compatible accept reasoning_effort; others ignore it).
+        assert!(matches!(
+            resolve_reasoning(ReasoningLevel::High, "gpt-5"),
+            Some(ReasoningEffort::High)
+        ));
+        assert!(matches!(
+            resolve_reasoning(ReasoningLevel::Medium, "gpt-oss-120b"),
+            Some(ReasoningEffort::Medium)
+        ));
+        // Auto only opts in on extended-thinking models.
+        assert!(resolve_reasoning(ReasoningLevel::Auto, "gpt-5").is_none());
         assert!(matches!(
             resolve_reasoning(ReasoningLevel::Auto, "claude-opus-4-8"),
             Some(ReasoningEffort::Medium)

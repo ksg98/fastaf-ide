@@ -250,7 +250,7 @@ export const AiChatTab: Component = () => {
 			</div>
 
 			<div class={s.group}>
-				<label>Extended thinking</label>
+				<label>Reasoning effort</label>
 				<select
 					value={reasoningEffort()}
 					onChange={(e) => {
@@ -258,15 +258,16 @@ export const AiChatTab: Component = () => {
 						saveConfig();
 					}}
 				>
-					<option value="auto">Auto (on for Opus 4.7+)</option>
+					<option value="auto">Auto (on for Opus 4.7+ only)</option>
 					<option value="off">Off</option>
 					<option value="low">Low</option>
 					<option value="medium">Medium</option>
 					<option value="high">High</option>
 				</select>
 				<p class={s.hint}>
-					Streams the model's reasoning into a collapsible "Thinking" block. Only models that support extended thinking
-					(Claude Opus 4.7+) are affected; higher effort costs more tokens and latency.
+					Low/Medium/High is sent as reasoning_effort to whatever model the Main slot runs — GPT-style reasoning models
+					(gpt-oss, o-series, GPT-5, local OpenAI-compatible servers) honor it, others ignore it. On Claude Opus 4.7+
+					it streams extended thinking into a collapsible "Thinking" block. Higher effort costs more tokens and latency.
 				</p>
 			</div>
 
