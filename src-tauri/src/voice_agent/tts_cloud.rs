@@ -15,6 +15,21 @@ fn provider_base_url(provider: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Base URL for a provider, honoring the user-supplied base for "custom"
+/// (any OpenAI-compatible `/audio/speech` server — kokoro-fastapi and
+/// friends; keyless local servers work).
+pub fn resolve_base_url(provider: &str, custom_base: Option<&str>) -> Result<String, String> {
+    if provider == "custom" {
+        let base = custom_base
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("Custom TTS base URL not set — add it under Settings → Voice Agent")?;
+        Ok(base.trim_end_matches('/').to_string())
+    } else {
+        provider_base_url(provider).map(String::from)
+    }
+}
+
 fn truncate_body(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.chars().count() > 300 {
@@ -30,18 +45,21 @@ pub async fn synthesize(
     provider: &str,
     model: &str,
     voice: &str,
-    api_key: &str,
+    custom_base: Option<&str>,
+    api_key: Option<&str>,
     text: &str,
 ) -> Result<Vec<u8>, String> {
-    let base = provider_base_url(provider)?;
+    let base = resolve_base_url(provider, custom_base)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let resp = client
-        .post(format!("{base}/audio/speech"))
-        .bearer_auth(api_key)
+    let mut request = client.post(format!("{base}/audio/speech"));
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    let resp = request
         .json(&serde_json::json!({
             "model": model,
             "voice": voice,
@@ -99,17 +117,24 @@ pub fn parse_tts_models(json: &Value) -> Vec<String> {
     models
 }
 
-/// Fetch the provider's model list and return TTS-capable ids.
-pub async fn fetch_tts_models(provider: &str, api_key: &str) -> Result<Vec<String>, String> {
-    let base = provider_base_url(provider)?;
+/// Fetch the provider's model list and return TTS-capable ids. The key is
+/// optional for "custom" (keyless local servers).
+pub async fn fetch_tts_models(
+    provider: &str,
+    custom_base: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let base = resolve_base_url(provider, custom_base)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
 
-    let resp = client
-        .get(format!("{base}/models"))
-        .bearer_auth(api_key)
+    let mut request = client.get(format!("{base}/models"));
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| format!("Model list request failed: {e}"))?;
@@ -128,13 +153,40 @@ pub async fn fetch_tts_models(provider: &str, api_key: &str) -> Result<Vec<Strin
         .json()
         .await
         .map_err(|e| format!("Model list parse failed: {e}"))?;
-    Ok(parse_tts_models(&json))
+    let models = parse_tts_models(&json);
+    // Custom endpoints may not use tts-ish names — show everything then.
+    if models.is_empty() && provider == "custom" {
+        let mut all: Vec<String> = json
+            .get("data")
+            .and_then(Value::as_array)
+            .or_else(|| json.get("models").and_then(Value::as_array))
+            .or_else(|| json.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|m| {
+                        m.get("id")
+                            .and_then(Value::as_str)
+                            .or_else(|| m.get("name").and_then(Value::as_str))
+                            .or_else(|| m.as_str())
+                    })
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        all.sort();
+        all.dedup();
+        return Ok(all);
+    }
+    Ok(models)
 }
 
 /// Default model + voice per provider (used until the user picks their own).
+/// "custom" uses the de-facto OpenAI-compatible aliases most local servers
+/// (kokoro-fastapi, openedai-speech) accept.
 pub fn provider_defaults(provider: &str) -> (&'static str, &'static str) {
     match provider {
         "groq" => ("playai-tts", "Fritz-PlayAI"),
+        "custom" => ("tts-1", "alloy"),
         _ => ("gpt-4o-mini-tts", "alloy"),
     }
 }

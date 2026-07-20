@@ -28,6 +28,14 @@ pub struct VoiceAgentConfig {
     pub tts_model_openai: String,
     #[serde(default)]
     pub tts_voice_openai: String,
+    /// Base URL for the "custom" TTS provider (any OpenAI-compatible
+    /// /audio/speech server — same idea as the dictation rewrite base URL).
+    #[serde(default)]
+    pub tts_base_url: String,
+    #[serde(default)]
+    pub tts_model_custom: String,
+    #[serde(default)]
+    pub tts_voice_custom: String,
     /// Hands-free VAD turn-taking (vs push-to-talk only).
     #[serde(default = "default_true")]
     pub hands_free: bool,
@@ -63,6 +71,9 @@ impl Default for VoiceAgentConfig {
             tts_voice_groq: String::new(),
             tts_model_openai: String::new(),
             tts_voice_openai: String::new(),
+            tts_base_url: String::new(),
+            tts_model_custom: String::new(),
+            tts_voice_custom: String::new(),
             hands_free: true,
             mute_tts: false,
             output_device: None,
@@ -156,7 +167,8 @@ pub fn voice_kokoro_unload() {
     kokoro_sidecar::sidecar().shutdown();
 }
 
-/// List TTS-capable models for a cloud provider (key shared with cloud STT).
+/// List TTS-capable models for a cloud provider (key shared with cloud STT;
+/// optional for "custom" — local servers are typically keyless).
 #[tauri::command]
 pub async fn voice_fetch_tts_models(provider: String) -> Result<Vec<String>, String> {
     let provider_owned = provider.clone();
@@ -165,9 +177,18 @@ pub async fn voice_fetch_tts_models(provider: String) -> Result<Vec<String>, Str
     })
     .await
     .map_err(|e| format!("Keyring task failed: {e}"))??
-    .filter(|k| !k.is_empty())
-    .ok_or_else(|| format!("API key not set for {provider} — add it under Settings → Dictation"))?;
-    tts_cloud::fetch_tts_models(&provider, &api_key).await
+    .filter(|k| !k.is_empty());
+    if api_key.is_none() && provider != "custom" {
+        return Err(format!(
+            "API key not set for {provider} — add it under Settings → Dictation"
+        ));
+    }
+    let custom_base = if provider == "custom" {
+        Some(cached_config().tts_base_url)
+    } else {
+        None
+    };
+    tts_cloud::fetch_tts_models(&provider, custom_base.as_deref(), api_key.as_deref()).await
 }
 
 /// Speak arbitrary text through the active TTS engine (Settings test button).

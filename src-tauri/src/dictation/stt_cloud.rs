@@ -22,6 +22,28 @@ fn provider_base_url(provider: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Base URL for a provider, honoring the user-supplied base for "custom"
+/// (any OpenAI-compatible endpoint — local whisper servers etc., same idea
+/// as the rewrite feature's base URL). Trailing slashes are trimmed.
+pub(crate) fn resolve_base_url(provider: &str, custom_base: Option<&str>) -> Result<String, String> {
+    if provider == "custom" {
+        let base = custom_base
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or("Custom STT base URL not set — add it under Settings → Dictation")?;
+        Ok(base.trim_end_matches('/').to_string())
+    } else {
+        provider_base_url(provider).map(String::from)
+    }
+}
+
+fn validate_provider(provider: &str) -> Result<(), String> {
+    match provider {
+        "groq" | "openai" | "custom" => Ok(()),
+        other => Err(format!("Unknown STT provider: {other}")),
+    }
+}
+
 /// Encode 16kHz mono f32 samples as a 16-bit PCM WAV file (44-byte RIFF header).
 fn encode_wav_16k_mono(samples: &[f32]) -> Vec<u8> {
     const SAMPLE_RATE: u32 = 16_000;
@@ -97,23 +119,55 @@ async fn load_api_key(provider: String) -> Result<Option<String>, String> {
     .map_err(|e| format!("Keyring task failed: {e}"))?
 }
 
+/// Extract every model id (no transcription filter) — fallback for custom
+/// endpoints whose local model names don't contain whisper/transcribe.
+fn parse_all_model_ids(json: &serde_json::Value) -> Vec<String> {
+    let entries = json
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| json.get("models").and_then(|v| v.as_array()))
+        .or_else(|| json.as_array());
+    let Some(entries) = entries else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry.as_str().map(String::from).or_else(|| {
+                entry
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| entry.get("name").and_then(|v| v.as_str()))
+                    .map(String::from)
+            })
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
 /// Fetch transcription-capable model ids from `GET {base}/models`.
+/// The API key is required for cloud providers, optional for "custom"
+/// (local OpenAI-compatible servers are typically keyless).
 #[tauri::command]
 pub async fn dictation_fetch_stt_models(provider: String) -> Result<Vec<String>, String> {
-    let base = provider_base_url(&provider)?;
-    let api_key = load_api_key(provider.clone())
-        .await?
-        .filter(|k| !k.is_empty())
-        .ok_or_else(|| format!("API key not set for {provider}"))?;
+    let config = super::commands::get_dictation_config();
+    let base = resolve_base_url(&provider, Some(&config.stt_base_url))?;
+    let api_key = load_api_key(provider.clone()).await?.filter(|k| !k.is_empty());
+    if api_key.is_none() && provider != "custom" {
+        return Err(format!("API key not set for {provider}"));
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-    let response = client
-        .get(format!("{base}/models"))
-        .bearer_auth(api_key)
+    let mut request = client.get(format!("{base}/models"));
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("Models request failed: {e}"))?;
@@ -133,7 +187,12 @@ pub async fn dictation_fetch_stt_models(provider: String) -> Result<Vec<String>,
 
     let json: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("Invalid models response JSON: {e}"))?;
-    Ok(parse_stt_models(&json))
+    let models = parse_stt_models(&json);
+    // Custom endpoints may not use whisper-ish names — show everything then.
+    if models.is_empty() && provider == "custom" {
+        return Ok(parse_all_model_ids(&json));
+    }
+    Ok(models)
 }
 
 /// Transcribe captured audio through the provider's `/audio/transcriptions`
@@ -142,11 +201,12 @@ pub async fn dictation_fetch_stt_models(provider: String) -> Result<Vec<String>,
 pub async fn transcribe_cloud(
     provider: &str,
     model: &str,
-    api_key: &str,
+    custom_base: Option<&str>,
+    api_key: Option<&str>,
     language: Option<&str>,
     samples: &[f32],
 ) -> Result<String, String> {
-    let base = provider_base_url(provider)?;
+    let base = resolve_base_url(provider, custom_base)?;
     let wav = encode_wav_16k_mono(samples);
 
     let file_part = reqwest::multipart::Part::bytes(wav)
@@ -167,9 +227,11 @@ pub async fn transcribe_cloud(
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-    let response = client
-        .post(format!("{base}/audio/transcriptions"))
-        .bearer_auth(api_key)
+    let mut request = client.post(format!("{base}/audio/transcriptions"));
+    if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    let response = request
         .multipart(form)
         .send()
         .await
@@ -206,7 +268,7 @@ pub async fn transcribe_cloud(
 
 #[tauri::command]
 pub async fn set_dictation_stt_api_key(provider: String, key: String) -> Result<(), String> {
-    provider_base_url(&provider)?;
+    validate_provider(&provider)?;
     if key.trim().is_empty() {
         return Err("API key must not be empty".to_string());
     }

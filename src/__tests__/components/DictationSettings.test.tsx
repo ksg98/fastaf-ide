@@ -255,7 +255,7 @@ describe("DictationSettings – STT Provider", () => {
 		const select = findProviderSelect(container);
 		expect(select).not.toBeNull();
 		const values = Array.from(select!.querySelectorAll("option")).map((o) => o.value);
-		expect(values).toEqual(["local", "groq", "openai"]);
+		expect(values).toEqual(["local", "groq", "openai", "custom"]);
 	});
 
 	it("shows the whisper model list for the local provider and no API key row", () => {

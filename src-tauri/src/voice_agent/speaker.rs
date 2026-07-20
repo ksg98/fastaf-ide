@@ -157,7 +157,7 @@ async fn synth_loop(app: AppHandle, mut rx: mpsc::Receiver<SpeakJob>) {
                     fallback
                 }
             },
-            provider @ ("groq" | "openai") => synth_cloud(&app, &job, provider, &config).await,
+            provider @ ("groq" | "openai" | "custom") => synth_cloud(&app, &job, provider, &config).await,
             other => Err(format!("Unknown TTS provider: {other}")),
         };
         if let Err(e) = result {
@@ -197,13 +197,31 @@ async fn synth_cloud(
     let (default_model, default_voice) = tts_cloud::provider_defaults(provider);
     let (model, voice) = match provider {
         "groq" => (config.tts_model_groq.clone(), config.tts_voice_groq.clone()),
+        "custom" => (config.tts_model_custom.clone(), config.tts_voice_custom.clone()),
         _ => (config.tts_model_openai.clone(), config.tts_voice_openai.clone()),
     };
     let model = if model.trim().is_empty() { default_model.to_string() } else { model };
     let voice = if voice.trim().is_empty() { default_voice.to_string() } else { voice };
 
+    // Key optional for custom (keyless local servers); required for cloud.
     let api_key = load_tts_api_key(provider).await?;
-    let wav_bytes = tts_cloud::synthesize(provider, &model, &voice, &api_key, &job.text).await?;
+    if api_key.is_none() && provider != "custom" {
+        return Err(format!("API key not set for {provider} — add it under Settings → Dictation"));
+    }
+    let custom_base = if provider == "custom" {
+        Some(config.tts_base_url.clone())
+    } else {
+        None
+    };
+    let wav_bytes = tts_cloud::synthesize(
+        provider,
+        &model,
+        &voice,
+        custom_base.as_deref(),
+        api_key.as_deref(),
+        &job.text,
+    )
+    .await?;
 
     let mgr = manager();
     if job.generation < mgr.current_generation() {
@@ -215,15 +233,15 @@ async fn synth_cloud(
 }
 
 /// Cloud TTS shares the cloud-STT keys (`dictation/stt-api-key/{provider}`).
-async fn load_tts_api_key(provider: &str) -> Result<String, String> {
+/// Returns None when no key is stored — callers decide whether that's fatal.
+async fn load_tts_api_key(provider: &str) -> Result<Option<String>, String> {
     let provider_owned = provider.to_string();
-    tokio::task::spawn_blocking(move || {
+    Ok(tokio::task::spawn_blocking(move || {
         crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(&provider_owned))
     })
     .await
     .map_err(|e| format!("Keyring task failed: {e}"))??
-    .filter(|k| !k.is_empty())
-    .ok_or_else(|| format!("API key not set for {provider} — add it under Settings → Dictation"))
+    .filter(|k| !k.is_empty()))
 }
 
 /// Dedicated playback thread. Owns the rodio OutputStream/Sink (neither is

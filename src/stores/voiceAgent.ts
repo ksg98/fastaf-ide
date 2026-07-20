@@ -25,6 +25,9 @@ interface VoiceAgentConfig {
 	tts_voice_groq: string;
 	tts_model_openai: string;
 	tts_voice_openai: string;
+	tts_base_url: string;
+	tts_model_custom: string;
+	tts_voice_custom: string;
 	hands_free: boolean;
 	mute_tts: boolean;
 	output_device: string | null;
@@ -83,6 +86,9 @@ interface VoiceAgentStoreState {
 	ttsVoiceGroq: string;
 	ttsModelOpenai: string;
 	ttsVoiceOpenai: string;
+	ttsBaseUrl: string;
+	ttsModelCustom: string;
+	ttsVoiceCustom: string;
 	handsFree: boolean;
 	muteTts: boolean;
 	outputDevice: string | null;
@@ -129,6 +135,9 @@ function createVoiceAgentStore() {
 		ttsVoiceGroq: "",
 		ttsModelOpenai: "",
 		ttsVoiceOpenai: "",
+		ttsBaseUrl: "",
+		ttsModelCustom: "",
+		ttsVoiceCustom: "",
 		handsFree: true,
 		muteTts: false,
 		outputDevice: null,
@@ -389,6 +398,9 @@ function createVoiceAgentStore() {
 					ttsVoiceGroq: config.tts_voice_groq ?? "",
 					ttsModelOpenai: config.tts_model_openai ?? "",
 					ttsVoiceOpenai: config.tts_voice_openai ?? "",
+					ttsBaseUrl: config.tts_base_url ?? "",
+					ttsModelCustom: config.tts_model_custom ?? "",
+					ttsVoiceCustom: config.tts_voice_custom ?? "",
 					handsFree: config.hands_free ?? true,
 					muteTts: config.mute_tts ?? false,
 					outputDevice: config.output_device ?? null,
@@ -409,6 +421,9 @@ function createVoiceAgentStore() {
 				tts_voice_groq: partial.tts_voice_groq ?? state.ttsVoiceGroq,
 				tts_model_openai: partial.tts_model_openai ?? state.ttsModelOpenai,
 				tts_voice_openai: partial.tts_voice_openai ?? state.ttsVoiceOpenai,
+				tts_base_url: partial.tts_base_url ?? state.ttsBaseUrl,
+				tts_model_custom: partial.tts_model_custom ?? state.ttsModelCustom,
+				tts_voice_custom: partial.tts_voice_custom ?? state.ttsVoiceCustom,
 				hands_free: partial.hands_free ?? state.handsFree,
 				mute_tts: partial.mute_tts ?? state.muteTts,
 				output_device: partial.output_device !== undefined ? partial.output_device : state.outputDevice,
@@ -423,6 +438,9 @@ function createVoiceAgentStore() {
 				if (partial.tts_voice_groq !== undefined) update.ttsVoiceGroq = partial.tts_voice_groq;
 				if (partial.tts_model_openai !== undefined) update.ttsModelOpenai = partial.tts_model_openai;
 				if (partial.tts_voice_openai !== undefined) update.ttsVoiceOpenai = partial.tts_voice_openai;
+				if (partial.tts_base_url !== undefined) update.ttsBaseUrl = partial.tts_base_url;
+				if (partial.tts_model_custom !== undefined) update.ttsModelCustom = partial.tts_model_custom;
+				if (partial.tts_voice_custom !== undefined) update.ttsVoiceCustom = partial.tts_voice_custom;
 				if (partial.hands_free !== undefined) update.handsFree = partial.hands_free;
 				if (partial.mute_tts !== undefined) update.muteTts = partial.mute_tts;
 				if (partial.output_device !== undefined) update.outputDevice = partial.output_device;

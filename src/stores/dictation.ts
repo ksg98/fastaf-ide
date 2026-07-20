@@ -20,6 +20,8 @@ interface DictationConfig {
 	stt_provider: string;
 	stt_model_groq: string;
 	stt_model_openai: string;
+	stt_base_url: string;
+	stt_model_custom: string;
 }
 
 /** Default rewrite system prompt — must match default_rewrite_system_prompt() in Rust */
@@ -133,6 +135,8 @@ interface DictationStoreState {
 	sttProvider: string;
 	sttModelGroq: string;
 	sttModelOpenai: string;
+	sttBaseUrl: string;
+	sttModelCustom: string;
 	sttModels: string[];
 	fetchingSttModels: boolean;
 	sttModelsError: string | null;
@@ -175,6 +179,8 @@ function createDictationStore() {
 		sttProvider: "local",
 		sttModelGroq: "",
 		sttModelOpenai: "",
+		sttBaseUrl: "",
+		sttModelCustom: "",
 		sttModels: [],
 		fetchingSttModels: false,
 		sttModelsError: null,
@@ -218,6 +224,8 @@ function createDictationStore() {
 					sttProvider: config.stt_provider ?? "local",
 					sttModelGroq: config.stt_model_groq ?? "",
 					sttModelOpenai: config.stt_model_openai ?? "",
+					sttBaseUrl: config.stt_base_url ?? "",
+					sttModelCustom: config.stt_model_custom ?? "",
 				});
 			} catch (err) {
 				appLogger.error("dictation", "Failed to get dictation config", err);
@@ -242,6 +250,8 @@ function createDictationStore() {
 				stt_provider: partial.stt_provider ?? state.sttProvider,
 				stt_model_groq: partial.stt_model_groq ?? state.sttModelGroq,
 				stt_model_openai: partial.stt_model_openai ?? state.sttModelOpenai,
+				stt_base_url: partial.stt_base_url ?? state.sttBaseUrl,
+				stt_model_custom: partial.stt_model_custom ?? state.sttModelCustom,
 			};
 			try {
 				await invoke("set_dictation_config", { config });
@@ -263,6 +273,8 @@ function createDictationStore() {
 				if (partial.stt_provider !== undefined) storeUpdate.sttProvider = partial.stt_provider;
 				if (partial.stt_model_groq !== undefined) storeUpdate.sttModelGroq = partial.stt_model_groq;
 				if (partial.stt_model_openai !== undefined) storeUpdate.sttModelOpenai = partial.stt_model_openai;
+				if (partial.stt_base_url !== undefined) storeUpdate.sttBaseUrl = partial.stt_base_url;
+				if (partial.stt_model_custom !== undefined) storeUpdate.sttModelCustom = partial.stt_model_custom;
 				setState(storeUpdate);
 			} catch (err) {
 				appLogger.error("dictation", "Failed to save dictation config", err);
@@ -371,6 +383,8 @@ function createDictationStore() {
 				actions.saveConfig({ stt_model_groq: model });
 			} else if (provider === "openai") {
 				actions.saveConfig({ stt_model_openai: model });
+			} else if (provider === "custom") {
+				actions.saveConfig({ stt_model_custom: model });
 			}
 		},
 

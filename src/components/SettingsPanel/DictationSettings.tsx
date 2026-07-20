@@ -140,8 +140,16 @@ export const DictationSettings: Component = () => {
 	const sttProvider = () => dictationStore.state.sttProvider;
 
 	/** Saved transcription model for the active cloud provider */
-	const sttModel = () =>
-		sttProvider() === "groq" ? dictationStore.state.sttModelGroq : dictationStore.state.sttModelOpenai;
+	const sttModel = () => {
+		switch (sttProvider()) {
+			case "groq":
+				return dictationStore.state.sttModelGroq;
+			case "custom":
+				return dictationStore.state.sttModelCustom;
+			default:
+				return dictationStore.state.sttModelOpenai;
+		}
+	};
 
 	/** Model dropdown options — the saved model is appended if absent from the fetch */
 	const sttModelOptions = () => {
@@ -278,9 +286,28 @@ export const DictationSettings: Component = () => {
 					<option value="local">{t("dictation.sttProviderLocal", "Local — whisper.cpp (on-device)")}</option>
 					<option value="groq">{t("dictation.sttProviderGroq", "Groq Cloud")}</option>
 					<option value="openai">{t("dictation.sttProviderOpenai", "OpenAI")}</option>
+					<option value="custom">{t("dictation.sttProviderCustom", "Custom — OpenAI-compatible URL")}</option>
 				</select>
+				<Show when={sttProvider() === "custom"}>
+					<div style={{ "margin-top": "8px" }}>
+						<label>{t("dictation.sttBaseUrlLabel", "Base URL")}</label>
+						<input
+							class={s.input}
+							type="text"
+							placeholder="http://127.0.0.1:8000/v1"
+							value={dictationStore.state.sttBaseUrl}
+							onChange={(e) => dictationStore.saveConfig({ stt_base_url: e.currentTarget.value.trim() })}
+						/>
+						<p class={s.hint}>
+							{t(
+								"dictation.sttBaseUrlHint",
+								"Any OpenAI-compatible /audio/transcriptions server (same idea as the rewrite base URL). API key below is optional for local servers.",
+							)}
+						</p>
+					</div>
+				</Show>
 				<Show when={sttProvider() !== "local"}>
-					{/* API key (required) */}
+					{/* API key (required for cloud providers, optional for custom) */}
 					<div style={{ "margin-top": "8px" }}>
 						<div class={s.passwordRow}>
 							<input

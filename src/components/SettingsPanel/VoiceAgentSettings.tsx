@@ -27,20 +27,64 @@ export const VoiceAgentSettings: Component = () => {
 
 	const provider = () => voiceAgentStore.state.ttsProvider;
 
-	const cloudModel = () =>
-		provider() === "groq" ? voiceAgentStore.state.ttsModelGroq : voiceAgentStore.state.ttsModelOpenai;
-	const cloudVoice = () =>
-		provider() === "groq" ? voiceAgentStore.state.ttsVoiceGroq : voiceAgentStore.state.ttsVoiceOpenai;
-	const cloudModelPlaceholder = () => (provider() === "groq" ? "playai-tts" : "gpt-4o-mini-tts");
+	const cloudModel = () => {
+		switch (provider()) {
+			case "groq":
+				return voiceAgentStore.state.ttsModelGroq;
+			case "custom":
+				return voiceAgentStore.state.ttsModelCustom;
+			default:
+				return voiceAgentStore.state.ttsModelOpenai;
+		}
+	};
+	const cloudVoice = () => {
+		switch (provider()) {
+			case "groq":
+				return voiceAgentStore.state.ttsVoiceGroq;
+			case "custom":
+				return voiceAgentStore.state.ttsVoiceCustom;
+			default:
+				return voiceAgentStore.state.ttsVoiceOpenai;
+		}
+	};
+	const cloudModelPlaceholder = () => {
+		switch (provider()) {
+			case "groq":
+				return "playai-tts";
+			case "custom":
+				return "tts-1";
+			default:
+				return "gpt-4o-mini-tts";
+		}
+	};
 	const cloudVoicePlaceholder = () => (provider() === "groq" ? "Fritz-PlayAI" : "alloy");
+	/** Key hint only applies to the cloud providers — custom is keyless-friendly. */
 	const cloudKeyExists = () =>
 		provider() === "groq" ? voiceAgentStore.state.groqKeyExists : voiceAgentStore.state.openaiKeyExists;
 
 	const setCloudModel = (value: string) => {
-		void voiceAgentStore.saveConfig(provider() === "groq" ? { tts_model_groq: value } : { tts_model_openai: value });
+		switch (provider()) {
+			case "groq":
+				void voiceAgentStore.saveConfig({ tts_model_groq: value });
+				break;
+			case "custom":
+				void voiceAgentStore.saveConfig({ tts_model_custom: value });
+				break;
+			default:
+				void voiceAgentStore.saveConfig({ tts_model_openai: value });
+		}
 	};
 	const setCloudVoice = (value: string) => {
-		void voiceAgentStore.saveConfig(provider() === "groq" ? { tts_voice_groq: value } : { tts_voice_openai: value });
+		switch (provider()) {
+			case "groq":
+				void voiceAgentStore.saveConfig({ tts_voice_groq: value });
+				break;
+			case "custom":
+				void voiceAgentStore.saveConfig({ tts_voice_custom: value });
+				break;
+			default:
+				void voiceAgentStore.saveConfig({ tts_voice_openai: value });
+		}
 	};
 
 	const cloudModelOptions = () => {
@@ -99,6 +143,7 @@ export const VoiceAgentSettings: Component = () => {
 					<option value="kokoro">{t("voiceAgent.ttsKokoro", "Local — Kokoro (mlx-audio, Apple Silicon)")}</option>
 					<option value="groq">{t("voiceAgent.ttsGroq", "Groq Cloud (playai-tts)")}</option>
 					<option value="openai">{t("voiceAgent.ttsOpenai", "OpenAI")}</option>
+					<option value="custom">{t("voiceAgent.ttsCustom", "Custom — OpenAI-compatible URL")}</option>
 				</select>
 
 				<Show when={provider() === "kokoro"}>
@@ -158,7 +203,25 @@ export const VoiceAgentSettings: Component = () => {
 				</Show>
 
 				<Show when={provider() !== "kokoro"}>
-					<Show when={!cloudKeyExists()}>
+					<Show when={provider() === "custom"}>
+						<div style={{ "margin-top": "8px" }}>
+							<label>{t("voiceAgent.ttsBaseUrlLabel", "Base URL")}</label>
+							<input
+								class={s.input}
+								type="text"
+								placeholder="http://127.0.0.1:8880/v1"
+								value={voiceAgentStore.state.ttsBaseUrl}
+								onChange={(e) => void voiceAgentStore.saveConfig({ tts_base_url: e.currentTarget.value.trim() })}
+							/>
+							<p class={s.hint}>
+								{t(
+									"voiceAgent.ttsBaseUrlHint",
+									"Any OpenAI-compatible /audio/speech server (kokoro-fastapi, openedai-speech, …). Keyless local servers work.",
+								)}
+							</p>
+						</div>
+					</Show>
+					<Show when={provider() !== "custom" && !cloudKeyExists()}>
 						<p class={s.hint} style={{ color: "var(--error)", "margin-top": "8px" }}>
 							{t(
 								"voiceAgent.cloudKeyMissing",

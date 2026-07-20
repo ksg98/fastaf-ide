@@ -230,13 +230,20 @@ pub fn start_dictation(app: AppHandle, dictation: State<'_, DictationState>) -> 
         if model.is_empty() {
             return Err(format!("No {provider} transcription model selected"));
         }
-        let key_exists = crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
-            &provider,
-        ))?
-        .filter(|k| !k.is_empty())
-        .is_some();
-        if !key_exists {
-            return Err(format!("API key not set for {provider}"));
+        if provider == "custom" {
+            if config.stt_base_url.trim().is_empty() {
+                return Err("Custom STT base URL not set — add it under Settings → Dictation".to_string());
+            }
+            // Key optional — local OpenAI-compatible servers are keyless.
+        } else {
+            let key_exists = crate::credentials::get(
+                crate::credentials::Credential::DictationSttApiKey(&provider),
+            )?
+            .filter(|k| !k.is_empty())
+            .is_some();
+            if !key_exists {
+                return Err(format!("API key not set for {provider}"));
+            }
         }
 
         let device_name = config.device.as_deref().filter(|s| !s.is_empty());
@@ -590,12 +597,21 @@ async fn transcribe_core(
             .await
             .map_err(|e| format!("Keyring task failed: {e}"))??
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| format!("API key not set for {provider}"))?
+        };
+        // Keyless is fine for custom (local) endpoints; cloud providers need one.
+        if api_key.is_none() && provider != "custom" {
+            return Err(format!("API key not set for {provider}"));
+        }
+        let custom_base = if provider == "custom" {
+            Some(get_dictation_config().stt_base_url)
+        } else {
+            None
         };
         let text = super::stt_cloud::transcribe_cloud(
             &provider,
             &model,
-            &api_key,
+            custom_base.as_deref(),
+            api_key.as_deref(),
             lang.as_deref(),
             &all_audio,
         )
@@ -819,7 +835,8 @@ pub struct DictationConfig {
     /// System prompt for the rewrite request.
     #[serde(default = "default_rewrite_system_prompt")]
     pub rewrite_system_prompt: String,
-    /// Speech-to-text provider: "local" (whisper.cpp on-device), "groq", or "openai".
+    /// Speech-to-text provider: "local" (whisper.cpp on-device), "groq",
+    /// "openai", or "custom" (any OpenAI-compatible endpoint).
     #[serde(default = "default_stt_provider")]
     pub stt_provider: String,
     /// Groq transcription model id (user must fetch and pick one — none hardcoded).
@@ -828,6 +845,13 @@ pub struct DictationConfig {
     /// OpenAI transcription model id.
     #[serde(default)]
     pub stt_model_openai: String,
+    /// Base URL for the "custom" provider (e.g. "http://127.0.0.1:8000/v1" —
+    /// same idea as rewrite_base_url; keyless local servers work).
+    #[serde(default)]
+    pub stt_base_url: String,
+    /// Transcription model id for the "custom" provider.
+    #[serde(default)]
+    pub stt_model_custom: String,
 }
 
 fn default_model() -> String {
@@ -846,6 +870,10 @@ fn cloud_stt_model(config: &DictationConfig) -> Option<(String, String)> {
         "openai" => Some((
             "openai".to_string(),
             config.stt_model_openai.trim().to_string(),
+        )),
+        "custom" => Some((
+            "custom".to_string(),
+            config.stt_model_custom.trim().to_string(),
         )),
         _ => None,
     }
@@ -881,6 +909,8 @@ impl Default for DictationConfig {
             stt_provider: default_stt_provider(),
             stt_model_groq: String::new(),
             stt_model_openai: String::new(),
+            stt_base_url: String::new(),
+            stt_model_custom: String::new(),
         }
     }
 }
