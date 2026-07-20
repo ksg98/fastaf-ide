@@ -261,10 +261,14 @@ function createVoiceAgentStore() {
 			}
 
 			const { MicVAD } = await import("@ricky0123/vad-web");
+			// Absolute origin-prefixed base (same as the groq_local_stt reference):
+			// ort resolves these inside worker/blob contexts where root-relative
+			// paths fail with "Importing a module script failed".
+			const vadBase = `${window.location.origin}/vad/`;
 			const instance = await MicVAD.new({
 				model: "v5",
-				baseAssetPath: "/vad/",
-				onnxWASMBasePath: "/vad/",
+				baseAssetPath: vadBase,
+				onnxWASMBasePath: vadBase,
 				getStream: () =>
 					navigator.mediaDevices.getUserMedia({
 						audio: {
