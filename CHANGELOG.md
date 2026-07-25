@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **AI rewrite now uses your configured AI providers** — Settings → Dictation → AI Rewrite no longer carries its own endpoint, API key, and model list. Pick any model from the provider registry (Settings → Providers), or leave it on the default to follow the same Main-slot model AI Chat uses. Every provider type works, not just OpenAI-compatible ones, and there is one place to configure AI. A **Test rewrite** button runs the real path and shows the model's output — or the raw error, which normal dictation hides by falling back to the untouched transcript.
+- **Synced with upstream tuicommander** — 86 upstream commits merged, including the Solid frontend decomposition, MCP OAuth in-app confirmation, evidence-based agent activity detection, atomic file writes, OSC 52 clipboard support, and the dictation microphone level meter.
+
 ## [1.5.6] - 2026-07-18
 ### Fixed
 
@@ -63,7 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **CI auto-heal on partially completed workflows** — A failed job now reaches the branch agent immediately even when sibling jobs keep the overall GitHub Actions workflow running. Failed log lookup or PTY delivery no longer consumes one of the three heal attempts.
 - **MCP upstream authentication editor** — Switching an HTTP upstream from Bearer to OAuth now clears the incompatible stored token, persists DCR mode when the client ID is blank, and reconnects with the selected method instead of silently remaining on Bearer.
 - **Concurrent settings saves** — Frontend configuration writers now share one serialized load-modify-save queue, preventing overlapping General, Services, and plugin writes from losing each other's fields.
-- **MCP bridge returning zero tools after a settings save** — Restarting the remote HTTP server no longer drops the runtime that owns the local Unix-socket MCP listener. Claude and other stdio clients remain connected to TUICommander instead of reporting `connected · no tools` while the web UI still appears healthy.
+- **MCP bridge returning zero tools after a settings save** — Restarting the remote HTTP server no longer drops the runtime that owns the local Unix-socket MCP listener. Claude and other stdio clients remain connected to FastAF instead of reporting `connected · no tools` while the web UI still appears healthy.
 - **Settings no longer clobber the web-server toggle or global hotkey** — Changing any General setting used to overwrite `config.json` wholesale from a stale in-memory snapshot, silently resetting fields owned by other panels — most visibly turning the Remote Access web server **off** and wiping the **global hotkey** on the next restart. The settings store now uses a load-modify-save (fresh `load_config` → apply only its own fields → `save_config`), matching the Services tab, so `services.*`, `mcp_server_enabled`, and `global_hotkey` are always preserved from disk.
 
 ## [1.6.0] - 2026-07-11

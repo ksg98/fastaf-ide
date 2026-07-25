@@ -29,19 +29,9 @@ const mockStore = vi.hoisted(() => ({
 		corrections: {},
 		devices: [] as { name: string; is_default: boolean }[],
 		rewriteEnabled: false,
-		rewriteBaseUrl: "",
-		rewriteModel: "",
+		rewriteModelId: "",
 		rewriteEffort: null as string | null,
 		rewriteSystemPrompt: "",
-		rewriteModels: [] as {
-			id: string;
-			supports_reasoning: boolean;
-			effort_options: string[] | null;
-			default_effort: string | null;
-		}[],
-		fetchingRewriteModels: false,
-		rewriteModelsError: null as string | null,
-		rewriteKeyExists: false,
 		rewriting: false,
 		sttProvider: "local",
 		sttModelGroq: "",
@@ -55,15 +45,10 @@ const mockStore = vi.hoisted(() => ({
 	refreshStatus: vi.fn(),
 	refreshCorrections: vi.fn(),
 	refreshModels: vi.fn(),
-	refreshRewriteKeyExists: vi.fn(),
 	setRewriteEnabled: vi.fn(),
-	setRewriteBaseUrl: vi.fn(),
-	setRewriteModel: vi.fn(),
+	setRewriteModelId: vi.fn(),
 	setRewriteEffort: vi.fn(),
 	setRewriteSystemPrompt: vi.fn(),
-	fetchRewriteModels: vi.fn(),
-	saveRewriteApiKey: vi.fn(),
-	deleteRewriteApiKey: vi.fn(),
 	rewriteText: vi.fn(),
 	setSttProvider: vi.fn(),
 	setSttModel: vi.fn(),
@@ -91,6 +76,21 @@ vi.mock("../../stores/dictation", () => ({
 	dictationStore: mockStore,
 	WHISPER_LANGUAGES: { auto: "Auto-detect", en: "English" },
 }));
+
+const mockRegistry = vi.hoisted(() => ({
+	state: {
+		registry: {
+			schema_version: 3,
+			providers: [] as { id: string; type: string; label: string }[],
+			models: [] as { id: string; provider_id: string; model_name: string; tier: string }[],
+			slots: {} as Record<string, string>,
+			features: {},
+		},
+	},
+	hydrate: vi.fn(),
+}));
+
+vi.mock("../../stores/providerRegistry", () => ({ providerRegistryStore: mockRegistry }));
 
 import { DictationSettings } from "../../components/SettingsPanel/DictationSettings";
 
@@ -406,5 +406,49 @@ describe("DictationSettings – Microphone Selector", () => {
 		expect(micWarning).toBeDefined();
 		expect(mockStore.refreshDevices).not.toHaveBeenCalled();
 		consoleSpy.mockRestore();
+	});
+});
+
+describe("DictationSettings – AI Rewrite", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockInvoke.mockResolvedValue("not_determined");
+		mockStore.state.rewriteEnabled = true;
+		mockStore.state.rewriteModelId = "";
+		mockRegistry.state.registry.providers = [{ id: "openrouter-1", type: "open_router", label: "OpenRouter" }];
+		mockRegistry.state.registry.models = [
+			{ id: "or-mini", provider_id: "openrouter-1", model_name: "gpt-4o-mini", tier: "standard" },
+		];
+		mockRegistry.state.registry.slots = { main: "or-mini" };
+	});
+
+	it("hydrates the provider registry on mount", () => {
+		render(() => <DictationSettings />);
+		expect(mockRegistry.hydrate).toHaveBeenCalled();
+	});
+
+	it("lists registry models and names the model the default resolves to", () => {
+		const { container } = render(() => <DictationSettings />);
+		const options = Array.from(container.querySelectorAll("option")).map((o) => o.textContent);
+		expect(options).toContain("gpt-4o-mini — OpenRouter");
+		expect(options).toContain("Same as AI Chat (gpt-4o-mini)");
+	});
+
+	it("picking a model saves it as the rewrite model id", () => {
+		const { container } = render(() => <DictationSettings />);
+		const select = Array.from(container.querySelectorAll("select")).find((s) =>
+			Array.from(s.options).some((o) => o.value === "or-mini"),
+		);
+		expect(select).toBeTruthy();
+		fireEvent.change(select as HTMLSelectElement, { target: { value: "or-mini" } });
+		expect(mockStore.setRewriteModelId).toHaveBeenCalledWith("or-mini");
+	});
+
+	it("tells the user to configure a provider when the registry is empty", () => {
+		mockRegistry.state.registry.providers = [];
+		mockRegistry.state.registry.models = [];
+		mockRegistry.state.registry.slots = {};
+		const { getByText } = render(() => <DictationSettings />);
+		expect(getByText(/No AI providers configured yet/)).toBeTruthy();
 	});
 });

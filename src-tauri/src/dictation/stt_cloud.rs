@@ -10,8 +10,17 @@
 
 use std::time::Duration;
 
-use super::rewrite::truncate_body;
 use crate::credentials;
+
+/// Truncate a server error body for error messages (~300 chars).
+fn truncate_body(body: &str) -> String {
+    if body.chars().count() <= 300 {
+        body.to_string()
+    } else {
+        let truncated: String = body.chars().take(300).collect();
+        format!("{truncated}…")
+    }
+}
 
 /// Resolve the OpenAI-compatible base URL for a supported provider.
 fn provider_base_url(provider: &str) -> Result<&'static str, String> {
@@ -236,6 +245,14 @@ pub async fn delete_dictation_stt_api_key(provider: String) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_body_caps_length() {
+        let short = "short error";
+        assert_eq!(truncate_body(short), short);
+        let long = "x".repeat(1000);
+        assert_eq!(truncate_body(&long).chars().count(), 301); // 300 + ellipsis
+    }
 
     #[test]
     fn provider_base_urls() {

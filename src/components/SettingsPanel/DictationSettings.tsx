@@ -1,9 +1,10 @@
-import { type Component, createSignal, For, onMount, Show } from "solid-js";
+import { type Component, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import type { ModelInfo } from "../../stores/dictation";
 import { dictationStore, WHISPER_LANGUAGES } from "../../stores/dictation";
+import { providerRegistryStore } from "../../stores/providerRegistry";
 import { cx } from "../../utils";
 import { KeyComboCapture } from "../shared/KeyComboCapture";
 import d from "./DictationSettings.module.css";
@@ -77,9 +78,12 @@ const ModelRow: Component<{ model: ModelInfo }> = (props) => {
 export const DictationSettings: Component = () => {
 	const [newFrom, setNewFrom] = createSignal("");
 	const [newTo, setNewTo] = createSignal("");
-	const [rewriteKeyInput, setRewriteKeyInput] = createSignal("");
-	const [rewriteKeyMsg, setRewriteKeyMsg] = createSignal("");
-	const [savingRewriteKey, setSavingRewriteKey] = createSignal(false);
+	const [rewriteTestInput, setRewriteTestInput] = createSignal(
+		"umm so basically can you uh fix the the login bug and and also add some tests for it",
+	);
+	const [rewriteTestResult, setRewriteTestResult] = createSignal("");
+	const [rewriteTestError, setRewriteTestError] = createSignal("");
+	const [rewriteTestBusy, setRewriteTestBusy] = createSignal(false);
 	const [sttKeyInput, setSttKeyInput] = createSignal("");
 	const [sttKeyMsg, setSttKeyMsg] = createSignal("");
 	const [savingSttKey, setSavingSttKey] = createSignal(false);
@@ -91,7 +95,7 @@ export const DictationSettings: Component = () => {
 		dictationStore.refreshStatus();
 		dictationStore.refreshCorrections();
 		dictationStore.refreshModels();
-		dictationStore.refreshRewriteKeyExists();
+		void providerRegistryStore.hydrate();
 		dictationStore.refreshSttKeyExists("groq");
 		dictationStore.refreshSttKeyExists("openai");
 		try {
@@ -191,46 +195,37 @@ export const DictationSettings: Component = () => {
 		}
 	};
 
-	/** Model dropdown options — the saved model is appended if absent from the fetch */
-	const rewriteModelOptions = () => {
-		const models = dictationStore.state.rewriteModels;
-		const saved = dictationStore.state.rewriteModel;
-		if (saved && !models.some((m) => m.id === saved)) {
-			return [...models, { id: saved, supports_reasoning: false, effort_options: null, default_effort: null }];
-		}
-		return models;
+	/** Registry models, labelled "<model> — <provider>" for the picker. */
+	const rewriteModelOptions = createMemo(() => {
+		const reg = providerRegistryStore.state.registry;
+		return reg.models.map((model) => ({
+			id: model.id,
+			label: `${model.model_name} — ${reg.providers.find((p) => p.id === model.provider_id)?.label ?? model.provider_id}`,
+		}));
+	});
+
+	/** The Main slot's model name, so the default option says what it resolves to. */
+	const mainSlotLabel = () => {
+		const reg = providerRegistryStore.state.registry;
+		const mainId = reg.slots.main;
+		const model = mainId ? reg.models.find((m) => m.id === mainId) : undefined;
+		return model ? `${t("dictation.rewriteUseMain", "Same as AI Chat")} (${model.model_name})` : null;
 	};
 
-	const selectedRewriteModel = () =>
-		dictationStore.state.rewriteModels.find((m) => m.id === dictationStore.state.rewriteModel);
-
-	/** OpenAI-spec vocabulary as fallback when reasoning is advertised without an enumeration */
-	const effortOptions = () => selectedRewriteModel()?.effort_options ?? ["minimal", "low", "medium", "high"];
-
-	const handleSaveRewriteKey = async () => {
-		if (!rewriteKeyInput().trim()) return;
-		setSavingRewriteKey(true);
-		setRewriteKeyMsg("");
+	const handleRewriteTest = async () => {
+		const text = rewriteTestInput().trim();
+		if (!text) return;
+		setRewriteTestBusy(true);
+		setRewriteTestResult("");
+		setRewriteTestError("");
+		const started = performance.now();
 		try {
-			await dictationStore.saveRewriteApiKey(rewriteKeyInput().trim());
-			setRewriteKeyInput("");
-			setRewriteKeyMsg(t("dictation.rewriteKeySaved", "Key saved"));
+			const rewritten = await invoke<string>("dictation_rewrite", { text });
+			setRewriteTestResult(`${rewritten}  (${((performance.now() - started) / 1000).toFixed(1)}s)`);
 		} catch (e) {
-			setRewriteKeyMsg(`Error: ${String(e)}`);
+			setRewriteTestError(String(e));
 		} finally {
-			setSavingRewriteKey(false);
-		}
-	};
-
-	const handleDeleteRewriteKey = async () => {
-		setSavingRewriteKey(true);
-		try {
-			await dictationStore.deleteRewriteApiKey();
-			setRewriteKeyMsg(t("dictation.rewriteKeyRemoved", "Key removed"));
-		} catch (e) {
-			setRewriteKeyMsg(`Error: ${String(e)}`);
-		} finally {
-			setSavingRewriteKey(false);
+			setRewriteTestBusy(false);
 		}
 	};
 
@@ -423,111 +418,47 @@ export const DictationSettings: Component = () => {
 					<span>{t("dictation.rewriteHint", "Rewrite transcripts with an AI model before inserting them")}</span>
 				</div>
 				<Show when={dictationStore.state.rewriteEnabled}>
-					{/* Base URL */}
+					{/* Model — comes from the provider registry, so AI is configured once */}
 					<div style={{ "margin-top": "8px" }}>
-						<input
-							type="text"
-							placeholder="https://openrouter.ai/api/v1"
-							value={dictationStore.state.rewriteBaseUrl}
-							onChange={(e) => dictationStore.setRewriteBaseUrl(e.currentTarget.value.trim())}
-						/>
+						<label>{t("dictation.rewriteModelLabel", "Model")}</label>
+						<select
+							value={dictationStore.state.rewriteModelId}
+							onChange={(e) => dictationStore.setRewriteModelId(e.currentTarget.value)}
+						>
+							<option value="">{mainSlotLabel() ?? t("dictation.rewriteUseMain", "Same as AI Chat")}</option>
+							<For each={rewriteModelOptions()}>{(model) => <option value={model.id}>{model.label}</option>}</For>
+						</select>
 						<p class={s.hint}>
 							{t(
-								"dictation.rewriteBaseUrlHint",
-								"Any OpenAI-compatible endpoint — e.g. Ollama at http://localhost:11434/v1",
+								"dictation.rewriteModelHint",
+								"Uses the providers configured under Settings → Providers — the same models and keys as AI Chat. Leave on the default to follow the Main slot.",
 							)}
 						</p>
-					</div>
-
-					{/* API key (optional) */}
-					<div style={{ "margin-top": "8px" }}>
-						<div class={s.passwordRow}>
-							<input
-								class={s.input}
-								type="password"
-								placeholder={
-									dictationStore.state.rewriteKeyExists
-										? t("dictation.rewriteKeyReplace", "Replace existing key…")
-										: t("dictation.rewriteKeyEnter", "Enter API key…")
-								}
-								value={rewriteKeyInput()}
-								onInput={(e) => setRewriteKeyInput(e.currentTarget.value)}
-							/>
-							<button
-								class={s.saveBtn}
-								onClick={handleSaveRewriteKey}
-								disabled={savingRewriteKey() || !rewriteKeyInput().trim()}
-							>
-								{t("dictation.rewriteKeySave", "Save")}
-							</button>
-							<Show when={dictationStore.state.rewriteKeyExists}>
-								<button
-									class={s.testBtn}
-									onClick={handleDeleteRewriteKey}
-									disabled={savingRewriteKey()}
-									style={{ color: "var(--error)" }}
-								>
-									{t("dictation.rewriteKeyRemove", "Remove")}
-								</button>
-							</Show>
-						</div>
-						<p class={s.hint}>
-							{t("dictation.rewriteKeyHint", "API key is optional for local endpoints (Ollama, LM Studio).")}
-						</p>
-						<Show when={rewriteKeyMsg()}>
-							<div class={s.hint}>{rewriteKeyMsg()}</div>
-						</Show>
-					</div>
-
-					{/* Model */}
-					<div style={{ "margin-top": "8px" }}>
-						<button
-							class={s.inlineBtn}
-							onClick={() => dictationStore.fetchRewriteModels()}
-							disabled={dictationStore.state.fetchingRewriteModels || !dictationStore.state.rewriteBaseUrl.trim()}
-						>
-							{dictationStore.state.fetchingRewriteModels
-								? t("dictation.rewriteFetchingModels", "Fetching…")
-								: t("dictation.rewriteFetchModels", "Fetch models")}
-						</button>
-						<Show when={dictationStore.state.rewriteModelsError}>
+						<Show when={rewriteModelOptions().length === 0}>
 							<p class={s.hint} style={{ color: "var(--error)" }}>
-								{dictationStore.state.rewriteModelsError}
+								{t(
+									"dictation.rewriteNoProviders",
+									"No AI providers configured yet — add one under Settings → Providers.",
+								)}
 							</p>
 						</Show>
-						<Show when={rewriteModelOptions().length > 0}>
-							<select
-								value={dictationStore.state.rewriteModel}
-								onChange={(e) => dictationStore.setRewriteModel(e.currentTarget.value)}
-								style={{ "margin-top": "6px" }}
-							>
-								<option value="">{t("dictation.rewriteModelNone", "Select a model…")}</option>
-								<For each={rewriteModelOptions()}>{(model) => <option value={model.id}>{model.id}</option>}</For>
-							</select>
-						</Show>
 					</div>
 
-					{/* Reasoning effort — only when the selected model advertises reasoning */}
-					<Show when={selectedRewriteModel()?.supports_reasoning}>
-						<div style={{ "margin-top": "8px" }}>
-							<label>{t("dictation.rewriteEffortLabel", "Reasoning effort")}</label>
-							<select
-								value={dictationStore.state.rewriteEffort ?? ""}
-								onChange={(e) =>
-									dictationStore.setRewriteEffort(e.currentTarget.value === "" ? null : e.currentTarget.value)
-								}
-							>
-								<option value="">{t("dictation.rewriteEffortDefault", "Default (model decides)")}</option>
-								<For each={effortOptions()}>
-									{(effort) => (
-										<option value={effort}>
-											{effort === selectedRewriteModel()?.default_effort ? `${effort} (default)` : effort}
-										</option>
-									)}
-								</For>
-							</select>
-						</div>
-					</Show>
+					{/* Reasoning effort — sent only when set; models that ignore it are unaffected */}
+					<div style={{ "margin-top": "8px" }}>
+						<label>{t("dictation.rewriteEffortLabel", "Reasoning effort")}</label>
+						<select
+							value={dictationStore.state.rewriteEffort ?? ""}
+							onChange={(e) =>
+								dictationStore.setRewriteEffort(e.currentTarget.value === "" ? null : e.currentTarget.value)
+							}
+						>
+							<option value="">{t("dictation.rewriteEffortDefault", "Default (model decides)")}</option>
+							<For each={["minimal", "low", "medium", "high"]}>
+								{(effort) => <option value={effort}>{effort}</option>}
+							</For>
+						</select>
+					</div>
 
 					{/* System prompt */}
 					<div style={{ "margin-top": "8px" }}>
@@ -543,6 +474,30 @@ export const DictationSettings: Component = () => {
 								"Instructions for the rewrite model. Saved when the field loses focus.",
 							)}
 						</p>
+					</div>
+
+					{/* Test — runs the real rewrite path and surfaces the raw error on failure */}
+					<div style={{ "margin-top": "8px" }}>
+						<label>{t("dictation.rewriteTestLabel", "Test rewrite")}</label>
+						<div class={s.passwordRow}>
+							<input
+								class={s.input}
+								type="text"
+								value={rewriteTestInput()}
+								onInput={(e) => setRewriteTestInput(e.currentTarget.value)}
+							/>
+							<button class={s.testBtn} onClick={handleRewriteTest} disabled={rewriteTestBusy()}>
+								{rewriteTestBusy() ? t("dictation.rewriteTesting", "Testing…") : t("dictation.rewriteTest", "Test")}
+							</button>
+						</div>
+						<Show when={rewriteTestResult()}>
+							<p class={s.hint}>{rewriteTestResult()}</p>
+						</Show>
+						<Show when={rewriteTestError()}>
+							<p class={s.hint} style={{ color: "var(--error)" }}>
+								{rewriteTestError()}
+							</p>
+						</Show>
 					</div>
 				</Show>
 			</div>

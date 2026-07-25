@@ -436,11 +436,19 @@ pub(crate) fn resolve_slot(
         .slots
         .get(&slot)
         .ok_or_else(|| format!("No model configured for slot {slot:?}"))?;
+    resolve_model(registry, model_id)
+}
 
+/// Resolve a registry model id to its provider endpoint + key. Surfaces that
+/// pick a model directly (rather than through a slot) go through this.
+pub(crate) fn resolve_model(
+    registry: &ProviderRegistry,
+    model_id: &str,
+) -> Result<ResolvedSlot, String> {
     let model = registry
         .models
         .iter()
-        .find(|m| &m.id == model_id)
+        .find(|m| m.id == model_id)
         .ok_or_else(|| format!("Model '{model_id}' not found in registry"))?;
 
     let provider = registry

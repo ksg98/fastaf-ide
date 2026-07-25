@@ -716,12 +716,10 @@ pub struct DictationConfig {
     /// Post-process the transcript through an LLM before insertion.
     #[serde(default)]
     pub rewrite_enabled: bool,
-    /// OpenAI-compatible base URL (e.g. "https://openrouter.ai/api/v1").
+    /// Provider-registry model id used for the rewrite request.
+    /// Empty = use the Main slot, so a single provider setup covers chat + rewrite.
     #[serde(default)]
-    pub rewrite_base_url: String,
-    /// Model id used for the rewrite request.
-    #[serde(default)]
-    pub rewrite_model: String,
+    pub rewrite_model_id: String,
     /// Reasoning effort to request. None = omit the parameter (model decides).
     #[serde(default)]
     pub rewrite_effort: Option<String>,
@@ -783,8 +781,7 @@ impl Default for DictationConfig {
             long_press_ms: default_long_press_ms(),
             auto_send: false,
             rewrite_enabled: false,
-            rewrite_base_url: String::new(),
-            rewrite_model: String::new(),
+            rewrite_model_id: String::new(),
             rewrite_effort: None,
             rewrite_system_prompt: default_rewrite_system_prompt(),
             stt_provider: default_stt_provider(),
@@ -839,8 +836,7 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.long_press_ms, 300);
         assert!(!config.rewrite_enabled);
-        assert_eq!(config.rewrite_base_url, "");
-        assert_eq!(config.rewrite_model, "");
+        assert_eq!(config.rewrite_model_id, "");
         assert_eq!(config.rewrite_effort, None);
         assert_eq!(config.rewrite_system_prompt, default_rewrite_system_prompt());
         assert_eq!(config.stt_provider, "local");
@@ -852,8 +848,7 @@ mod tests {
     fn rewrite_config_roundtrips() {
         let config = DictationConfig {
             rewrite_enabled: true,
-            rewrite_base_url: "https://openrouter.ai/api/v1".to_string(),
-            rewrite_model: "openai/gpt-4o-mini".to_string(),
+            rewrite_model_id: "openrouter-gpt-4o-mini".to_string(),
             rewrite_effort: Some("high".to_string()),
             rewrite_system_prompt: "Custom prompt".to_string(),
             ..DictationConfig::default()
@@ -861,8 +856,7 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DictationConfig = serde_json::from_str(&json).unwrap();
         assert!(parsed.rewrite_enabled);
-        assert_eq!(parsed.rewrite_base_url, "https://openrouter.ai/api/v1");
-        assert_eq!(parsed.rewrite_model, "openai/gpt-4o-mini");
+        assert_eq!(parsed.rewrite_model_id, "openrouter-gpt-4o-mini");
         assert_eq!(parsed.rewrite_effort, Some("high".to_string()));
         assert_eq!(parsed.rewrite_system_prompt, "Custom prompt");
     }
