@@ -235,11 +235,7 @@ pub fn build_menu(app: &App) -> Result<tauri::menu::Menu<Wry>, tauri::Error> {
     if is_macos {
         // macOS: App menu with standard items
         let app_menu = SubmenuBuilder::new(app, "FastAF")
-            .item(&PredefinedMenuItem::about(
-                app,
-                Some("About FastAF"),
-                None,
-            )?)
+            .item(&PredefinedMenuItem::about(app, Some("About FastAF"), None)?)
             .separator()
             .item(&item!("check-for-updates", "Check for Updates…"))
             .separator()

@@ -88,9 +88,9 @@ pub fn get_dictation_status(
 ) -> Result<DictationStatus, String> {
     let config = get_dictation_config();
     if let Some((provider, model)) = cloud_stt_model(&config) {
-        let key_exists = crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
-            &provider,
-        ))
+        let key_exists = crate::credentials::get(
+            crate::credentials::Credential::DictationSttApiKey(&provider),
+        )
         .ok()
         .flatten()
         .filter(|k| !k.is_empty())
@@ -242,9 +242,9 @@ pub fn start_dictation(app: AppHandle, dictation: State<'_, DictationState>) -> 
         if model.is_empty() {
             return Err(format!("No {provider} transcription model selected"));
         }
-        let key_exists = crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
-            &provider,
-        ))?
+        let key_exists = crate::credentials::get(
+            crate::credentials::Credential::DictationSttApiKey(&provider),
+        )?
         .filter(|k| !k.is_empty())
         .is_some();
         if !key_exists {
@@ -838,7 +838,10 @@ mod tests {
         assert!(!config.rewrite_enabled);
         assert_eq!(config.rewrite_model_id, "");
         assert_eq!(config.rewrite_effort, None);
-        assert_eq!(config.rewrite_system_prompt, default_rewrite_system_prompt());
+        assert_eq!(
+            config.rewrite_system_prompt,
+            default_rewrite_system_prompt()
+        );
         assert_eq!(config.stt_provider, "local");
         assert_eq!(config.stt_model_groq, "");
         assert_eq!(config.stt_model_openai, "");

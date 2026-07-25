@@ -38,9 +38,9 @@ pub(crate) mod git_reads;
 pub(crate) mod github;
 pub(crate) mod github_account;
 pub(crate) mod github_auth;
+pub(crate) mod github_clone;
 #[cfg(test)]
 mod github_compat_tests;
-pub(crate) mod github_clone;
 pub(crate) mod github_debug;
 pub(crate) mod github_poller;
 #[cfg(feature = "desktop")]

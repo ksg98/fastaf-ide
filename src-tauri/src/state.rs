@@ -2256,15 +2256,9 @@ impl AppState {
         let push_state = Arc::clone(state);
         let body = body.to_owned();
         tokio::spawn(async move {
-            let stale = crate::push::send_push_batch(
-                subs,
-                &config,
-                &http_client,
-                "FastAF",
-                &body,
-                &url,
-            )
-            .await;
+            let stale =
+                crate::push::send_push_batch(subs, &config, &http_client, "FastAF", &body, &url)
+                    .await;
             for endpoint in &stale {
                 push_state.push_store.remove(endpoint);
             }
