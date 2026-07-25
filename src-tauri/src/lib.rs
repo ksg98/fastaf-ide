@@ -1691,6 +1691,8 @@ pub fn run() {
             dictation::commands::check_microphone_permission,
             dictation::commands::open_microphone_settings,
             dictation::rewrite::dictation_rewrite,
+            dictation::rewrite::dictation_fetch_rewrite_models,
+            dictation::rewrite::dictation_rewrite_request_preview,
             dictation::stt_cloud::dictation_fetch_stt_models,
             dictation::stt_cloud::set_dictation_stt_api_key,
             dictation::stt_cloud::dictation_stt_api_key_exists,

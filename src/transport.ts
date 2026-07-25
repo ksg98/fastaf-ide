@@ -126,6 +126,20 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 			transform: (data) => (data as { text: string }).text,
 		}),
 	},
+	dictation_fetch_rewrite_models: {
+		map: (args) => ({
+			method: "POST",
+			path: "/dictation/rewrite/models",
+			body: { provider_id: args.providerId },
+		}),
+	},
+	dictation_rewrite_request_preview: {
+		map: (args) => ({
+			method: "POST",
+			path: "/dictation/rewrite/preview",
+			body: { text: args.text },
+		}),
+	},
 	dictation_fetch_stt_models: {
 		map: (args) => ({ method: "POST", path: "/dictation/stt/models", body: { provider: args.provider } }),
 	},

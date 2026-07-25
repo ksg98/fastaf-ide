@@ -13,12 +13,22 @@ interface DictationConfig {
 	long_press_ms: number;
 	auto_send: boolean;
 	rewrite_enabled: boolean;
-	rewrite_model_id: string;
+	rewrite_provider_id: string;
+	rewrite_model: string;
+	rewrite_extra_body: string;
 	rewrite_effort: string | null;
 	rewrite_system_prompt: string;
 	stt_provider: string;
 	stt_model_groq: string;
 	stt_model_openai: string;
+}
+
+/** A model as advertised by the rewrite provider's /models endpoint (from Rust) */
+export interface RewriteModelInfo {
+	id: string;
+	supports_reasoning: boolean;
+	effort_options: string[] | null;
+	default_effort: string | null;
 }
 
 /** Default rewrite system prompt — must match default_rewrite_system_prompt() in Rust */
@@ -119,9 +129,14 @@ interface DictationStoreState {
 	audioLevel: number;
 	backendInfo: DictationBackend | null;
 	rewriteEnabled: boolean;
-	rewriteModelId: string;
+	rewriteProviderId: string;
+	rewriteModel: string;
+	rewriteExtraBody: string;
 	rewriteEffort: string | null;
 	rewriteSystemPrompt: string;
+	rewriteModels: RewriteModelInfo[];
+	fetchingRewriteModels: boolean;
+	rewriteModelsError: string | null;
 	rewriting: boolean;
 	sttProvider: string;
 	sttModelGroq: string;
@@ -157,7 +172,12 @@ function createDictationStore() {
 		audioLevel: 0,
 		backendInfo: null,
 		rewriteEnabled: false,
-		rewriteModelId: "",
+		rewriteProviderId: "",
+		rewriteModel: "",
+		rewriteExtraBody: "",
+		rewriteModels: [],
+		fetchingRewriteModels: false,
+		rewriteModelsError: null,
 		rewriteEffort: null,
 		rewriteSystemPrompt: DEFAULT_REWRITE_SYSTEM_PROMPT,
 		rewriting: false,
@@ -214,7 +234,9 @@ function createDictationStore() {
 					longPressMs: config.long_press_ms ?? 400,
 					autoSend: config.auto_send ?? false,
 					rewriteEnabled: config.rewrite_enabled ?? false,
-					rewriteModelId: config.rewrite_model_id ?? "",
+					rewriteProviderId: config.rewrite_provider_id ?? "",
+					rewriteModel: config.rewrite_model ?? "",
+					rewriteExtraBody: config.rewrite_extra_body ?? "",
 					rewriteEffort: config.rewrite_effort ?? null,
 					rewriteSystemPrompt: config.rewrite_system_prompt ?? DEFAULT_REWRITE_SYSTEM_PROMPT,
 					sttProvider: config.stt_provider ?? "local",
@@ -237,7 +259,9 @@ function createDictationStore() {
 				long_press_ms: partial.long_press_ms ?? state.longPressMs,
 				auto_send: partial.auto_send ?? state.autoSend,
 				rewrite_enabled: partial.rewrite_enabled ?? state.rewriteEnabled,
-				rewrite_model_id: partial.rewrite_model_id ?? state.rewriteModelId,
+				rewrite_provider_id: partial.rewrite_provider_id ?? state.rewriteProviderId,
+				rewrite_model: partial.rewrite_model ?? state.rewriteModel,
+				rewrite_extra_body: partial.rewrite_extra_body ?? state.rewriteExtraBody,
 				rewrite_effort: partial.rewrite_effort !== undefined ? partial.rewrite_effort : state.rewriteEffort,
 				rewrite_system_prompt: partial.rewrite_system_prompt ?? state.rewriteSystemPrompt,
 				stt_provider: partial.stt_provider ?? state.sttProvider,
@@ -256,7 +280,9 @@ function createDictationStore() {
 				if (partial.long_press_ms !== undefined) storeUpdate.longPressMs = partial.long_press_ms;
 				if (partial.auto_send !== undefined) storeUpdate.autoSend = partial.auto_send;
 				if (partial.rewrite_enabled !== undefined) storeUpdate.rewriteEnabled = partial.rewrite_enabled;
-				if (partial.rewrite_model_id !== undefined) storeUpdate.rewriteModelId = partial.rewrite_model_id;
+				if (partial.rewrite_provider_id !== undefined) storeUpdate.rewriteProviderId = partial.rewrite_provider_id;
+				if (partial.rewrite_model !== undefined) storeUpdate.rewriteModel = partial.rewrite_model;
+				if (partial.rewrite_extra_body !== undefined) storeUpdate.rewriteExtraBody = partial.rewrite_extra_body;
 				if (partial.rewrite_effort !== undefined) storeUpdate.rewriteEffort = partial.rewrite_effort;
 				if (partial.rewrite_system_prompt !== undefined)
 					storeUpdate.rewriteSystemPrompt = partial.rewrite_system_prompt;
@@ -303,8 +329,39 @@ function createDictationStore() {
 
 		/** Pick the provider-registry model — resets effort in the same save
 		 *  (a different model may not accept the previous effort). */
-		setRewriteModelId(value: string): void {
-			actions.saveConfig({ rewrite_model_id: value, rewrite_effort: null });
+		/** Switch provider — the model and effort belonged to the old endpoint,
+		 *  and the fetched list no longer applies. */
+		setRewriteProviderId(value: string): void {
+			setState({ rewriteModels: [], rewriteModelsError: null });
+			actions.saveConfig({ rewrite_provider_id: value, rewrite_model: "", rewrite_effort: null });
+		},
+
+		/** Pick a model — clears effort, whose options are per-model. */
+		setRewriteModel(value: string): void {
+			actions.saveConfig({ rewrite_model: value, rewrite_effort: null });
+		},
+
+		setRewriteExtraBody(value: string): void {
+			actions.saveConfig({ rewrite_extra_body: value });
+		},
+
+		/** Ask the configured provider which models it actually serves. */
+		async fetchRewriteModels(): Promise<void> {
+			setState({ fetchingRewriteModels: true, rewriteModelsError: null });
+			try {
+				const models = await invoke<RewriteModelInfo[]>("dictation_fetch_rewrite_models", {
+					providerId: state.rewriteProviderId,
+				});
+				setState("rewriteModels", models);
+				if (models.length === 0) {
+					setState("rewriteModelsError", "The endpoint returned no models");
+				}
+			} catch (err) {
+				setState("rewriteModelsError", String(err));
+				appLogger.error("dictation", "Failed to fetch rewrite models", err);
+			} finally {
+				setState("fetchingRewriteModels", false);
+			}
 		},
 
 		setRewriteEffort(value: string | null): void {
