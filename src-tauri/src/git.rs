@@ -3205,7 +3205,24 @@ pub(crate) async fn get_file_blame(path: String, file: String) -> Result<Vec<Bla
         let repo_path = PathBuf::from(&path);
         validate_paths_within_repo(&repo_path, std::slice::from_ref(&file))?;
         // Routed through the GitReads port (Step 13 may flip to gix).
-        git_reads().blame(&repo_path, &file)
+        // gix-blame asserts its way out of some histories — a merge of two
+        // unrelated roots (this repo, after the upstream sync) leaves hunks
+        // unblamed when the walk ends, and it panics. A panic must not cost the
+        // user the whole blame gutter, so fall back to the CLI, which handles
+        // any history git itself can walk. Errors (untracked file, bad path)
+        // still surface as-is — only a panic triggers the fallback.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            git_reads().blame(&repo_path, &file)
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    file = %file,
+                    "gix blame panicked; falling back to git blame --porcelain"
+                );
+                blame_cli(&repo_path, &file)
+            }
+        }
     })
     .await
     .map_err(|e| format!("spawn_blocking join error: {e}"))?
