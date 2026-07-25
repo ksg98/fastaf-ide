@@ -439,6 +439,32 @@ pub(crate) fn resolve_slot(
     resolve_model(registry, model_id)
 }
 
+/// Resolve a provider id to its endpoint + key, independent of any model.
+/// Surfaces that list a provider's models live (rather than using the models
+/// registered here) need the endpoint before a model exists.
+pub(crate) fn resolve_provider(
+    registry: &ProviderRegistry,
+    provider_id: &str,
+) -> Result<(Option<String>, String), String> {
+    let provider = registry
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| format!("Provider '{provider_id}' not found in registry"))?;
+
+    let base_url = provider
+        .base_url
+        .clone()
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| provider.provider_type.default_base_url().map(String::from))
+        .map(|u| if u.ends_with('/') { u } else { format!("{u}/") });
+
+    let api_key = crate::credentials::get(crate::credentials::Credential::Provider(&provider.id))?
+        .unwrap_or_default();
+
+    Ok((base_url, api_key))
+}
+
 /// Resolve a registry model id to its provider endpoint + key. Surfaces that
 /// pick a model directly (rather than through a slot) go through this.
 pub(crate) fn resolve_model(

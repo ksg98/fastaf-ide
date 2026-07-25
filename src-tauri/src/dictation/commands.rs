@@ -716,10 +716,18 @@ pub struct DictationConfig {
     /// Post-process the transcript through an LLM before insertion.
     #[serde(default)]
     pub rewrite_enabled: bool,
-    /// Provider-registry model id used for the rewrite request.
-    /// Empty = use the Main slot, so a single provider setup covers chat + rewrite.
+    /// Provider-registry provider id used for the rewrite request.
+    /// Empty = follow the Main slot, so one provider setup covers chat + rewrite.
     #[serde(default)]
-    pub rewrite_model_id: String,
+    pub rewrite_provider_id: String,
+    /// Model name as advertised by that provider's /models endpoint.
+    /// Empty = the Main slot's model (only valid when no provider is picked).
+    #[serde(default)]
+    pub rewrite_model: String,
+    /// Extra JSON object merged into the chat-completions body, so endpoints
+    /// with their own parameters work without a code change. Empty = none.
+    #[serde(default)]
+    pub rewrite_extra_body: String,
     /// Reasoning effort to request. None = omit the parameter (model decides).
     #[serde(default)]
     pub rewrite_effort: Option<String>,
@@ -781,7 +789,9 @@ impl Default for DictationConfig {
             long_press_ms: default_long_press_ms(),
             auto_send: false,
             rewrite_enabled: false,
-            rewrite_model_id: String::new(),
+            rewrite_provider_id: String::new(),
+            rewrite_model: String::new(),
+            rewrite_extra_body: String::new(),
             rewrite_effort: None,
             rewrite_system_prompt: default_rewrite_system_prompt(),
             stt_provider: default_stt_provider(),
@@ -836,7 +846,9 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.long_press_ms, 300);
         assert!(!config.rewrite_enabled);
-        assert_eq!(config.rewrite_model_id, "");
+        assert_eq!(config.rewrite_provider_id, "");
+        assert_eq!(config.rewrite_model, "");
+        assert_eq!(config.rewrite_extra_body, "");
         assert_eq!(config.rewrite_effort, None);
         assert_eq!(
             config.rewrite_system_prompt,
@@ -851,7 +863,9 @@ mod tests {
     fn rewrite_config_roundtrips() {
         let config = DictationConfig {
             rewrite_enabled: true,
-            rewrite_model_id: "openrouter-gpt-4o-mini".to_string(),
+            rewrite_provider_id: "local-openai".to_string(),
+            rewrite_model: "gpt-5.6-terra".to_string(),
+            rewrite_extra_body: r#"{"top_p": 0.9}"#.to_string(),
             rewrite_effort: Some("high".to_string()),
             rewrite_system_prompt: "Custom prompt".to_string(),
             ..DictationConfig::default()
@@ -859,7 +873,9 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: DictationConfig = serde_json::from_str(&json).unwrap();
         assert!(parsed.rewrite_enabled);
-        assert_eq!(parsed.rewrite_model_id, "openrouter-gpt-4o-mini");
+        assert_eq!(parsed.rewrite_provider_id, "local-openai");
+        assert_eq!(parsed.rewrite_model, "gpt-5.6-terra");
+        assert_eq!(parsed.rewrite_extra_body, r#"{"top_p": 0.9}"#);
         assert_eq!(parsed.rewrite_effort, Some("high".to_string()));
         assert_eq!(parsed.rewrite_system_prompt, "Custom prompt");
     }

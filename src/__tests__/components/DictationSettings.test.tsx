@@ -29,9 +29,19 @@ const mockStore = vi.hoisted(() => ({
 		corrections: {},
 		devices: [] as { name: string; is_default: boolean }[],
 		rewriteEnabled: false,
-		rewriteModelId: "",
+		rewriteProviderId: "",
+		rewriteModel: "",
+		rewriteExtraBody: "",
 		rewriteEffort: null as string | null,
 		rewriteSystemPrompt: "",
+		rewriteModels: [] as {
+			id: string;
+			supports_reasoning: boolean;
+			effort_options: string[] | null;
+			default_effort: string | null;
+		}[],
+		fetchingRewriteModels: false,
+		rewriteModelsError: null as string | null,
 		rewriting: false,
 		sttProvider: "local",
 		sttModelGroq: "",
@@ -46,9 +56,12 @@ const mockStore = vi.hoisted(() => ({
 	refreshCorrections: vi.fn(),
 	refreshModels: vi.fn(),
 	setRewriteEnabled: vi.fn(),
-	setRewriteModelId: vi.fn(),
+	setRewriteProviderId: vi.fn(),
+	setRewriteModel: vi.fn(),
+	setRewriteExtraBody: vi.fn(),
 	setRewriteEffort: vi.fn(),
 	setRewriteSystemPrompt: vi.fn(),
+	fetchRewriteModels: vi.fn(),
 	rewriteText: vi.fn(),
 	setSttProvider: vi.fn(),
 	setSttModel: vi.fn(),
@@ -414,12 +427,17 @@ describe("DictationSettings – AI Rewrite", () => {
 		vi.clearAllMocks();
 		mockInvoke.mockResolvedValue("not_determined");
 		mockStore.state.rewriteEnabled = true;
-		mockStore.state.rewriteModelId = "";
-		mockRegistry.state.registry.providers = [{ id: "openrouter-1", type: "open_router", label: "OpenRouter" }];
-		mockRegistry.state.registry.models = [
-			{ id: "or-mini", provider_id: "openrouter-1", model_name: "gpt-4o-mini", tier: "standard" },
+		mockStore.state.rewriteProviderId = "local-openai";
+		mockStore.state.rewriteModel = "";
+		mockStore.state.rewriteExtraBody = "";
+		mockStore.state.rewriteEffort = null;
+		mockStore.state.rewriteModels = [];
+		mockStore.state.rewriteModelsError = null;
+		mockRegistry.state.registry.providers = [
+			{ id: "local-openai", type: "custom", label: "Local (OpenAI-compatible)" },
 		];
-		mockRegistry.state.registry.slots = { main: "or-mini" };
+		mockRegistry.state.registry.models = [];
+		mockRegistry.state.registry.slots = {};
 	});
 
 	it("hydrates the provider registry on mount", () => {
@@ -427,27 +445,90 @@ describe("DictationSettings – AI Rewrite", () => {
 		expect(mockRegistry.hydrate).toHaveBeenCalled();
 	});
 
-	it("lists registry models and names the model the default resolves to", () => {
+	it("lists the registry's providers to pick from", () => {
 		const { container } = render(() => <DictationSettings />);
 		const options = Array.from(container.querySelectorAll("option")).map((o) => o.textContent);
-		expect(options).toContain("gpt-4o-mini — OpenRouter");
-		expect(options).toContain("Same as AI Chat (gpt-4o-mini)");
+		expect(options).toContain("Local (OpenAI-compatible)");
 	});
 
-	it("picking a model saves it as the rewrite model id", () => {
+	it("fetches models from the endpoint on demand", () => {
+		const { getByText } = render(() => <DictationSettings />);
+		fireEvent.click(getByText("Fetch models"));
+		expect(mockStore.fetchRewriteModels).toHaveBeenCalled();
+	});
+
+	it("offers the fetched models and saves the pick", () => {
+		mockStore.state.rewriteModels = [
+			{ id: "gpt-5.6-terra", supports_reasoning: true, effort_options: null, default_effort: null },
+			{ id: "qwen2.5-coder", supports_reasoning: false, effort_options: null, default_effort: null },
+		];
 		const { container } = render(() => <DictationSettings />);
 		const select = Array.from(container.querySelectorAll("select")).find((s) =>
-			Array.from(s.options).some((o) => o.value === "or-mini"),
+			Array.from(s.options).some((o) => o.value === "gpt-5.6-terra"),
 		);
 		expect(select).toBeTruthy();
-		fireEvent.change(select as HTMLSelectElement, { target: { value: "or-mini" } });
-		expect(mockStore.setRewriteModelId).toHaveBeenCalledWith("or-mini");
+		expect(Array.from((select as HTMLSelectElement).options).map((o) => o.value)).toContain("qwen2.5-coder");
+		fireEvent.change(select as HTMLSelectElement, { target: { value: "gpt-5.6-terra" } });
+		expect(mockStore.setRewriteModel).toHaveBeenCalledWith("gpt-5.6-terra");
+	});
+
+	it("keeps a saved model that the endpoint did not return", () => {
+		mockStore.state.rewriteModel = "retired-model";
+		mockStore.state.rewriteModels = [
+			{ id: "gpt-5.6-terra", supports_reasoning: false, effort_options: null, default_effort: null },
+		];
+		const { container } = render(() => <DictationSettings />);
+		const values = Array.from(container.querySelectorAll("option")).map((o) => o.value);
+		expect(values).toContain("retired-model");
+	});
+
+	it("uses the effort levels the endpoint advertised for the model", () => {
+		mockStore.state.rewriteModel = "reasoner";
+		mockStore.state.rewriteModels = [
+			{
+				id: "reasoner",
+				supports_reasoning: true,
+				effort_options: ["low", "high"],
+				default_effort: "high",
+			},
+		];
+		const { container } = render(() => <DictationSettings />);
+		const options = Array.from(container.querySelectorAll("option")).map((o) => o.textContent);
+		expect(options).toContain("low");
+		expect(options).toContain("high (default)");
+	});
+
+	it("falls back to a free-text effort when the model advertises none", () => {
+		mockStore.state.rewriteModel = "plain";
+		mockStore.state.rewriteModels = [
+			{ id: "plain", supports_reasoning: false, effort_options: null, default_effort: null },
+		];
+		const { container } = render(() => <DictationSettings />);
+		const input = container.querySelector('input[placeholder="unset — model decides"]');
+		expect(input).toBeTruthy();
+		fireEvent.change(input as HTMLInputElement, { target: { value: "ultra" } });
+		expect(mockStore.setRewriteEffort).toHaveBeenCalledWith("ultra");
+	});
+
+	it("shows the composed request body on demand", async () => {
+		mockInvoke.mockImplementation((cmd: string) =>
+			cmd === "dictation_rewrite_request_preview"
+				? Promise.resolve('{\n  "model": "gpt-5.6-terra"\n}')
+				: Promise.resolve("not_determined"),
+		);
+		const { getByText, findByText } = render(() => <DictationSettings />);
+		fireEvent.click(getByText("Show request body"));
+		expect(await findByText(/"model": "gpt-5.6-terra"/)).toBeTruthy();
+	});
+
+	it("surfaces a fetch failure instead of silently offering nothing", () => {
+		mockStore.state.rewriteModelsError = "Models request failed (404)";
+		const { getByText } = render(() => <DictationSettings />);
+		expect(getByText("Models request failed (404)")).toBeTruthy();
 	});
 
 	it("tells the user to configure a provider when the registry is empty", () => {
 		mockRegistry.state.registry.providers = [];
-		mockRegistry.state.registry.models = [];
-		mockRegistry.state.registry.slots = {};
 		const { getByText } = render(() => <DictationSettings />);
 		expect(getByText(/No AI providers configured yet/)).toBeTruthy();
 	});
