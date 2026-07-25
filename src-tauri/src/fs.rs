@@ -1997,12 +1997,7 @@ mod tests {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
 
-        write_file(
-            repo_path,
-            "x/y/deep.txt".to_string(),
-            "content".to_string(),
-        )
-        .unwrap();
+        write_file(repo_path, "x/y/deep.txt".to_string(), "content".to_string()).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("x/y/deep.txt")).unwrap(),
             "content"

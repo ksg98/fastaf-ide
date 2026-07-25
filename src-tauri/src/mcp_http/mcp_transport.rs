@@ -538,7 +538,9 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
 
     // ── Identity ──────────────────────────────────────────────────────
     out.push_str(&format!("# FastAF v{ver}\n\n"));
-    out.push_str("You are connected to FastAF, a terminal session orchestrator for AI coding agents.\n\n");
+    out.push_str(
+        "You are connected to FastAF, a terminal session orchestrator for AI coding agents.\n\n",
+    );
 
     // ── TUIC protocol (mandatory line markers) ─────────────────────────
     // Wire-level tokens parsed by the host TUI. Concision rules do NOT apply —

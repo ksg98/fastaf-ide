@@ -42,12 +42,7 @@ fn connect() -> io::Result<std::fs::File> {
         .read(true)
         .write(true)
         .open(path)
-        .map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("Cannot connect to FastAF at {path}: {e}"),
-            )
-        })
+        .map_err(|e| io::Error::new(e.kind(), format!("Cannot connect to FastAF at {path}: {e}")))
 }
 
 /// HTTP response parsed from the IPC stream.
@@ -208,9 +203,7 @@ pub fn ensure_running() -> io::Result<()> {
         if result.is_err() {
             std::process::Command::new("tuicommander")
                 .spawn()
-                .map_err(|e| {
-                    io::Error::new(e.kind(), format!("Failed to launch FastAF: {e}"))
-                })?;
+                .map_err(|e| io::Error::new(e.kind(), format!("Failed to launch FastAF: {e}")))?;
         }
     }
 

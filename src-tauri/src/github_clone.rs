@@ -249,7 +249,13 @@ pub(crate) fn parse_clone_progress(line: &str) -> Option<(&'static str, u32)> {
     } else {
         return None;
     };
-    let pct = rest.trim_start().split('%').next()?.trim().parse::<u32>().ok()?;
+    let pct = rest
+        .trim_start()
+        .split('%')
+        .next()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
     Some((phase, pct.min(100)))
 }
 
@@ -276,10 +282,7 @@ fn run_git_clone(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start git: {e}"))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or("Failed to capture git output")?;
+    let mut stderr = child.stderr.take().ok_or("Failed to capture git output")?;
 
     // git rewrites progress lines with \r — read raw bytes and treat \r and \n
     // both as line terminators.
@@ -495,10 +498,7 @@ mod tests {
         assert!(repos[0].private);
         assert_eq!(repos[0].description.as_deref(), Some("demo"));
         // Missing clone_url falls back to the canonical form
-        assert_eq!(
-            repos[1].clone_url,
-            "https://github.com/octocat/world.git"
-        );
+        assert_eq!(repos[1].clone_url, "https://github.com/octocat/world.git");
         assert!(!repos[1].private);
         assert_eq!(repos[1].description, None);
     }

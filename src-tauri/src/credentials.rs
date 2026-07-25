@@ -540,7 +540,11 @@ mod tests {
             Credential::DictationSttApiKey("openai").vault_key(),
             "dictation/stt-api-key/openai"
         );
-        assert!(Credential::DictationSttApiKey("groq").legacy_entry().is_none());
+        assert!(
+            Credential::DictationSttApiKey("groq")
+                .legacy_entry()
+                .is_none()
+        );
     }
 
     #[test]
