@@ -46,7 +46,7 @@ Local voice-to-text using Whisper with Metal acceleration on macOS. Push-to-talk
 
 | Command | Description |
 |---------|-------------|
-| `get_dictation_status()` | Model status, recording state, processing state |
+| `get_dictation_status()` | Model status, recording/processing state, and normalized `audio_level` (0–1). The preview polls this shared IPC/HTTP response while recording. |
 | `get_dictation_config()` | Load dictation configuration |
 | `set_dictation_config(config)` | Save dictation configuration |
 | `get_correction_map()` | Load text correction dictionary |

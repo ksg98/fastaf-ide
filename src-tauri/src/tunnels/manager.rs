@@ -33,6 +33,15 @@ impl TunnelManager {
     /// Returns the profile id on success.
     pub async fn start(&self, profile: TunnelProfile) -> Result<String, String> {
         let id = profile.id.clone();
+
+        // Reject a start for an already-running id before spawning anything. Without
+        // this, DashMap::insert would overwrite the live handle and orphan its
+        // supervisor loop + ssh child forever (no Drop). Mirrors
+        // UpstreamRegistry::connect_upstream's contains_key guard.
+        if self.tunnels.contains_key(&id) {
+            return Err(format!("tunnel '{id}' already running"));
+        }
+
         let audit = Arc::clone(&self.audit);
         let audit_cb = Arc::clone(&self.audit);
         let cb_id = id.clone();
@@ -297,6 +306,49 @@ mod tests {
             manager.list().is_empty(),
             "all tunnels should be removed after shutdown_all"
         );
+    }
+
+    #[tokio::test]
+    async fn start_rejects_duplicate_id_without_orphaning() {
+        let (audit, _dir) = temp_audit();
+        let manager = TunnelManager::new(audit);
+        let script = fake_ssh_script("sleep 3600");
+
+        // Seed a live handle for id `dup` via the fake-ssh helper.
+        let profile = test_profile("dup");
+        let id = profile.id.clone();
+        start_with_fake_ssh(&manager, profile.clone(), script.path().to_path_buf())
+            .await
+            .unwrap();
+
+        // Identity of the original handle — must survive a duplicate start.
+        let original_ptr = {
+            let entry = manager.tunnels.get(&id).unwrap();
+            Arc::as_ptr(entry.value())
+        };
+
+        // Second start with the same id must be rejected by the collision guard
+        // BEFORE it spawns a supervisor/ssh child, so nothing is orphaned and the
+        // original handle stays in place (no DashMap::insert overwrite).
+        let err = manager.start(profile).await.unwrap_err();
+        assert!(err.contains("already running"), "unexpected error: {err}");
+
+        assert_eq!(
+            manager.list().len(),
+            1,
+            "duplicate start must not add a second entry"
+        );
+
+        let still_ptr = {
+            let entry = manager.tunnels.get(&id).unwrap();
+            Arc::as_ptr(entry.value())
+        };
+        assert_eq!(
+            original_ptr, still_ptr,
+            "original handle must be untouched (not overwritten/orphaned)"
+        );
+
+        manager.stop(&id).unwrap();
     }
 
     #[tokio::test]

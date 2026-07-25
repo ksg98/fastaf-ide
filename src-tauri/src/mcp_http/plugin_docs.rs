@@ -9,7 +9,7 @@ Create directory `{id}/` containing `manifest.json` + `main.js` under the platfo
 - Linux: `~/.config/tuicommander/plugins/`
 - Windows: `%APPDATA%/com.fastaf.ide/plugins/`
 
-Hot reload: editing any file in the plugin directory triggers automatic unload + re-import.
+Hot reload: editing any file in the plugin directory triggers automatic unload + re-import. Adding a new plugin directory or symlink after the app has started is also discovered live — no restart needed.
 
 ## manifest.json
 
@@ -33,7 +33,7 @@ Constraints:
 - `id` must match directory name exactly, non-empty
 - `main` must be a filename only (no path separators or `..`)
 - `minAppVersion` must be <= current app version (current: 0.3.x)
-- `capabilities`: subset of `pty:write`, `pty:read`, `ui:markdown`, `ui:sound`, `ui:panel`, `ui:ticker`, `ui:context-menu`, `ui:sidebar`, `ui:file-icons`, `net:http`, `credentials:read`, `invoke:read_file`, `invoke:list_markdown_files`, `fs:read`, `fs:list`, `fs:watch`, `fs:write`, `fs:rename`, `fs:scan`, `fs:delete`, `exec:cli`, `git:read`
+- `capabilities`: subset of `pty:write`, `pty:read`, `ui:markdown`, `ui:sound`, `ui:panel`, `ui:ticker`, `ui:context-menu`, `ui:sidebar`, `ui:file-icons`, `ui:file-preview`, `net:http`, `credentials:read`, `invoke:read_file`, `invoke:list_markdown_files`, `fs:read`, `fs:list`, `fs:watch`, `fs:write`, `fs:rename`, `fs:scan`, `fs:delete`, `exec:cli`, `git:read`
 - `allowedUrls`: URL patterns for `net:http` (supports `*` wildcard for path prefix matching)
 - `agentTypes`: optional array of agent type strings. When set, output watchers and structured event handlers only fire for terminals running a matching agent. Omit or use `[]` for universal plugins. Valid values: `claude`, `gemini`, `opencode`, `aider`, `codex`, `amp`, `cursor`, `goose`, `droid`, `git`.
 - `binaries`: optional array of CLI binary names this plugin may execute via `exec:cli` (e.g. `["rtk", "mdkb"]`). The on-disk manifest is the source of truth — binaries not declared here are rejected.
@@ -177,6 +177,12 @@ host.registerStructuredEventHandler(type: string, handler: (payload: unknown, se
 // Provide content when user clicks an item with contentUri
 host.registerMarkdownProvider(scheme: string, { provideContent(uri: URL): Promise<string | null> })
 
+// Custom file-tree icons (requires "ui:file-icons"). Last provider wins.
+host.registerFileIconProvider({ resolveFileIcon(name: string, isDir: boolean): string | null })
+
+// Custom file preview/open for given extensions (requires "ui:file-preview")
+host.registerFilePreview({ extensions: string[], onOpen(ctx: { filePath: string, repoPath: string, fsRoot: string }): void })
+
 // Manage activity items
 host.addItem({
   id: string,             // Unique identifier
@@ -201,6 +207,8 @@ host.getActiveRepo()       // { path, displayName, activeBranch, worktreePath } 
 host.getRepos()            // [{ path, displayName }]
 host.getActiveTerminalSessionId()  // string | null
 host.getRepoPathForSession(sessionId: string)  // string | null (repo owning this terminal session)
+host.getSessionCwd(sessionId: string)          // string | null (working directory of this terminal session)
+host.getActiveRepoPath()                        // string | null (active repo path, shortcut for getActiveRepo()?.path)
 host.getClaudeProjectDir(repoPath: string)     // Promise<string | null> — requires "fs:read"
 host.getPrNotifications()  // [{ id, repoPath, branch, prNumber, title, type }]
 host.getSettings(repoPath: string) // { path, displayName, baseBranch, color } | null
@@ -225,6 +233,7 @@ host.getGitDiff(repoPath, scope?)       // unified diff string (scope: "staged" 
 | `await host.readSessionOutput(sessionId: string, maxLines?: number): Promise<string>` | `pty:read` |
 | `host.openMarkdownPanel(title: string, contentUri: string): void` | `ui:markdown` |
 | `host.openMarkdownFile(absolutePath: string): void` | `ui:markdown` |
+| `host.openEditorTab(filePath: string, repoPath: string, opts?: { fsRoot?: string, line?: number }): void` | *(none)* |
 | `await host.playNotificationSound(sound?: "question" \| "error" \| "completion" \| "warning" \| "info"): Promise<void>` | `ui:sound` |
 | `host.openPanel({ id, title, html, onMessage? }): PanelHandle` | `ui:panel` |
 | `host.setTicker({ id, text, label?, icon?, priority?, ttlMs?, onClick? }): void` | `ui:ticker` |
@@ -232,7 +241,7 @@ host.getGitDiff(repoPath, scope?)       // unified diff string (scope: "staged" 
 | `await host.readCredential(serviceName: string): Promise<string \| null>` | `credentials:read` |
 | `await host.writeFile(absolutePath: string, content: string): Promise<void>` | `fs:write` |
 | `await host.renamePath(from: string, to: string): Promise<void>` | `fs:rename` |
-| `await host.scanBuildArtifacts(repoPaths: string[]): Promise<ArtifactEntry[]>` | `fs:scan` |
+| `await host.scanBuildArtifacts(repoPaths: string[], options?: { forceRefresh?: boolean }): Promise<ArtifactEntry[]>` | `fs:scan` |
 | `await host.deleteBuildArtifact(path: string, repoPaths: string[]): Promise<void>` | `fs:delete` |
 | `await host.httpFetch(url: string, options?): Promise<HttpResponse>` | `net:http` |
 | `host.registerTerminalAction({ id, label, action(ctx), disabled?(ctx) }): Disposable` | `ui:context-menu` |
@@ -269,6 +278,9 @@ const projectDir = await host.getClaudeProjectDir("/Users/me/my-project");  // r
 
 // Read a file (max 10 MB, UTF-8)
 const content = await host.readFile(`${projectDir}/conversation.jsonl`);  // requires "fs:read"
+
+// Read a binary file as base64 (max 10 MB)
+const encoded = await host.readFileBase64("/Users/me/Documents/spec.docx");  // requires "fs:read"
 
 // Read last N bytes of a file (skip partial first line)
 const tail = await host.readFileTail("/Users/me/.claude/hud-tracking.jsonl", 512 * 1024);  // requires "fs:read"
@@ -524,7 +536,7 @@ esbuild src/main.ts --bundle --format=esm --outfile=main.js --external:nothing
 4. Module check: default export must have id, onload, onunload
 5. Register: pluginRegistry.register() calls plugin.onload(host)
 6. Active: plugin receives PTY lines, structured events, uses PluginHost API
-7. Hot reload: file changes trigger unregister + re-import (cache-busted)
+7. Hot reload: file changes trigger unregister + re-import (cache-busted); a newly added plugin directory/symlink is discovered and loaded live
 8. Unload: plugin.onunload() called, all registrations auto-disposed
 
 Crash safety: all boundaries are try/catch wrapped. A broken plugin produces a console error and is skipped. The app always continues.

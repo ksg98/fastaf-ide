@@ -14,16 +14,27 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGINS_SRC="$REPO_ROOT/plugins"
 
-# Determine plugins install directory per platform
+# Determine plugin install directories per platform. Debug and release builds use
+# different bundle ids; install into both so `make dev` sees symlinks too.
+PLUGINS_DIRS=()
 case "$(uname)" in
   Darwin)
-    PLUGINS_DIR="$HOME/Library/Application Support/tuicommander/plugins"
+    PLUGINS_DIRS=(
+      "$HOME/Library/Application Support/tuicommander/plugins"
+      "$HOME/Library/Application Support/com.tuic.commander/plugins"
+    )
     ;;
   Linux)
-    PLUGINS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/tuicommander/plugins"
+    PLUGINS_DIRS=(
+      "${XDG_CONFIG_HOME:-$HOME/.config}/tuicommander/plugins"
+      "${XDG_CONFIG_HOME:-$HOME/.config}/com.tuic.commander/plugins"
+    )
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    PLUGINS_DIR="$APPDATA/com.fastaf.ide/plugins"
+    PLUGINS_DIRS=(
+      "$APPDATA/com.fastaf.ide/plugins"
+      "$APPDATA/com.tuic.commander/plugins"
+    )
     ;;
   *)
     echo "Unsupported platform: $(uname)" >&2
@@ -31,20 +42,26 @@ case "$(uname)" in
     ;;
 esac
 
-mkdir -p "$PLUGINS_DIR"
+for plugins_dir in "${PLUGINS_DIRS[@]}"; do
+  mkdir -p "$plugins_dir"
+done
 
 # --clean: remove symlinks we created
 if [[ "${1:-}" == "--clean" ]]; then
-  for link in "$PLUGINS_DIR"/*/; do
-    link="${link%/}"
-    if [[ -L "$link" ]]; then
-      target="$(readlink "$link")"
-      if [[ "$target" == "$PLUGINS_SRC"/* ]]; then
-        echo "Removing symlink: $(basename "$link")"
-        rm "$link"
+  shopt -s nullglob
+  for plugins_dir in "${PLUGINS_DIRS[@]}"; do
+    for link in "$plugins_dir"/*/; do
+      link="${link%/}"
+      if [[ -L "$link" ]]; then
+        target="$(readlink "$link")"
+        if [[ "$target" == "$PLUGINS_SRC"/* ]]; then
+          echo "Removing symlink: $(basename "$link") from $plugins_dir"
+          rm "$link"
+        fi
       fi
-    fi
+    done
   done
+  shopt -u nullglob
   echo "Done."
   exit 0
 fi
@@ -70,7 +87,6 @@ fi
 
 for name in "${PLUGIN_NAMES[@]}"; do
   src="$PLUGINS_SRC/$name"
-  dest="$PLUGINS_DIR/$name"
 
   if [[ ! -d "$src" ]]; then
     echo "SKIP: $name — directory not found at $src" >&2
@@ -82,16 +98,20 @@ for name in "${PLUGIN_NAMES[@]}"; do
     continue
   fi
 
-  if [[ -L "$dest" ]]; then
-    echo "UPDATE: $name (replacing existing symlink)"
-    rm "$dest"
-  elif [[ -d "$dest" ]]; then
-    echo "SKIP: $name — real directory already exists at $dest (remove it first)" >&2
-    continue
-  fi
+  for plugins_dir in "${PLUGINS_DIRS[@]}"; do
+    dest="$plugins_dir/$name"
 
-  ln -s "$src" "$dest"
-  echo "LINKED: $name → $dest"
+    if [[ -L "$dest" ]]; then
+      echo "UPDATE: $name (replacing existing symlink in $plugins_dir)"
+      rm "$dest"
+    elif [[ -d "$dest" ]]; then
+      echo "SKIP: $name — real directory already exists at $dest (remove it first)" >&2
+      continue
+    fi
+
+    ln -s "$src" "$dest"
+    echo "LINKED: $name → $dest"
+  done
 done
 
 echo ""

@@ -11,6 +11,15 @@ export interface Toast {
 
 let nextId = 1;
 
+/** Auto-dismiss delay per level (ms). `info` is transient; `warn` lingers so
+ *  actionable messages can be read; `error` is sticky (0 = never auto-dismiss)
+ *  and stays until the user clicks it away. Callers can override per toast. */
+const DEFAULT_DURATION_MS: Record<Toast["level"], number> = {
+	info: 4000,
+	warn: 15000,
+	error: 0,
+};
+
 /** Lazy-initialized AudioContext (created on first sound to satisfy autoplay policy) */
 let audioCtx: AudioContext | null = null;
 
@@ -87,15 +96,21 @@ function createToastsStore() {
 			level: "info" | "warn" | "error" = "info",
 			sound = false,
 			action?: { label: string; onClick: () => void },
+			durationMs?: number,
 		) {
 			const id = nextId++;
 			const toast: Toast = { id, title, message, level, createdAt: Date.now(), action };
 			setState("toasts", (prev) => [...prev, toast]);
 			if (sound) playSound(level);
-			dismissTimers.set(
-				id,
-				setTimeout(() => this.remove(id), 4000),
-			);
+			// A non-positive duration means "sticky" — no auto-dismiss timer, so the
+			// toast stays until the user clicks it away.
+			const timeout = durationMs ?? DEFAULT_DURATION_MS[level];
+			if (timeout > 0) {
+				dismissTimers.set(
+					id,
+					setTimeout(() => this.remove(id), timeout),
+				);
+			}
 			return id;
 		},
 

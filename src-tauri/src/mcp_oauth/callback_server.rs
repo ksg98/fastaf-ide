@@ -125,11 +125,14 @@ async fn handle_callback(
 ) -> Result<()> {
     if let Some(err) = params.error {
         let desc = params.error_description.unwrap_or_default();
-        // Try to extract the upstream name from state to rollback
-        if let Some(state) = &params.state
-            && let Some(name) = manager.upstream_name_for_state(state)
-        {
-            registry.rollback_authenticating(&name);
+        // Try to extract the upstream name from state to rollback, then
+        // cancel the pending flow — the auth semaphore has a single permit,
+        // so a flow left pending here would block every later start_flow.
+        if let Some(state) = &params.state {
+            if let Some(name) = manager.upstream_name_for_state(state) {
+                registry.rollback_authenticating(&name);
+            }
+            manager.cancel_flow(state);
         }
         return Err(anyhow!(
             "Authorization server returned error: {err}{}",
@@ -162,7 +165,10 @@ async fn handle_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_proxy::registry::UpstreamStatus;
+    use crate::mcp_upstream_config::UpstreamAuth;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::Semaphore;
 
     #[test]
@@ -177,5 +183,100 @@ mod tests {
         let reg = Arc::new(UpstreamRegistry::new());
         let server = spawn(mgr, reg).await.unwrap();
         assert!(server.port > 0);
+    }
+
+    // -- error-callback handling (#stuck-authenticating) --
+
+    fn oauth2_config() -> UpstreamAuth {
+        UpstreamAuth::OAuth2 {
+            client_id: "test-client".into(),
+            client_secret: None,
+            scopes: vec!["read".into()],
+            authorization_endpoint: Some("https://auth.example.com/authorize".into()),
+            token_endpoint: Some("https://auth.example.com/token".into()),
+        }
+    }
+
+    fn error_params(state: Option<String>) -> CallbackParams {
+        CallbackParams {
+            code: None,
+            state,
+            error: Some("server_error".into()),
+            error_description: Some("Internal server error".into()),
+        }
+    }
+
+    async fn start_test_flow(mgr: &OAuthFlowManager, name: &str) -> String {
+        mgr.start_flow(
+            name,
+            "https://api.example.com",
+            &oauth2_config(),
+            "http://127.0.0.1:9999/oauth/callback",
+        )
+        .await
+        .unwrap()
+        .state
+    }
+
+    #[tokio::test]
+    async fn error_callback_releases_pending_flow_and_permit() {
+        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(1))));
+        let reg = Arc::new(UpstreamRegistry::new());
+        let state = start_test_flow(&mgr, "spinach").await;
+
+        let err = handle_callback(mgr.clone(), reg, error_params(Some(state.clone())))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("server_error"), "got: {err}");
+
+        // Pending flow is gone…
+        assert!(mgr.upstream_name_for_state(&state).is_none());
+        // …and the single permit is released — a retry must not deadlock.
+        tokio::time::timeout(Duration::from_secs(2), start_test_flow(&mgr, "spinach"))
+            .await
+            .expect("start_flow deadlocked — permit was not released on error callback");
+    }
+
+    #[tokio::test]
+    async fn error_callback_rolls_back_authenticating_status() {
+        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(1))));
+        let reg = Arc::new(UpstreamRegistry::new());
+        reg.inject_ready_upstream("spinach", &[]);
+        reg.set_authenticating("spinach");
+        let state = start_test_flow(&mgr, "spinach").await;
+
+        handle_callback(mgr, reg.clone(), error_params(Some(state)))
+            .await
+            .unwrap_err();
+        assert_eq!(reg.status("spinach"), Some(UpstreamStatus::NeedsAuth));
+    }
+
+    #[tokio::test]
+    async fn error_callback_with_unknown_state_leaves_other_flows_pending() {
+        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(2))));
+        let reg = Arc::new(UpstreamRegistry::new());
+        let state = start_test_flow(&mgr, "spinach").await;
+
+        handle_callback(mgr.clone(), reg, error_params(Some("bogus-state".into())))
+            .await
+            .unwrap_err();
+        // The unrelated pending flow must be untouched.
+        assert_eq!(
+            mgr.upstream_name_for_state(&state).as_deref(),
+            Some("spinach")
+        );
+    }
+
+    #[tokio::test]
+    async fn error_callback_without_state_still_errors() {
+        let mgr = Arc::new(OAuthFlowManager::new(Arc::new(Semaphore::new(1))));
+        let reg = Arc::new(UpstreamRegistry::new());
+        let err = handle_callback(mgr, reg, error_params(None))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Internal server error"),
+            "got: {err}"
+        );
     }
 }

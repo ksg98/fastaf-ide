@@ -1,11 +1,20 @@
 //! Relay client: connects to the cloud relay server via WSS, bridging
-//! E2E-encrypted messages between FastAF's event bus and the mobile PWA.
+//! encrypted messages between FastAF's event bus and the mobile PWA.
+//!
+//! TRUST MODEL — this is NOT end-to-end encryption. The AES-256-GCM key is
+//! derived (HKDF) from the relay token, and that SAME token is sent to the
+//! relay for authentication (see `connect_and_run`, the `Bearer {token}`
+//! handshake). The relay operator therefore holds the token and CAN re-derive
+//! the key and decrypt all forwarded messages. The guarantee is transport
+//! encryption with a trusted relay operator — treat the operator as able to
+//! read message contents. True E2E would require a key the relay never sees
+//! (e.g. X25519 ECDH per `docs/research/e2e-relay-server.md`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, KeyInit};
+use aes_gcm::aead::{Aead, Generate};
+use aes_gcm::{Aes256Gcm, KeyInit};
 use futures_util::{SinkExt, StreamExt};
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -46,10 +55,16 @@ enum PeerStatus {
 }
 
 // ---------------------------------------------------------------------------
-// E2E Encryption (AES-256-GCM with HKDF key derivation)
+// Message Encryption (AES-256-GCM with HKDF key derivation)
+// NOTE: not end-to-end — the key is derived from the relay token, which the
+// relay itself receives for auth, so the relay operator CAN decrypt. See the
+// TRUST MODEL note in the module docs above.
 // ---------------------------------------------------------------------------
 
 /// Derive a 256-bit AES key from the relay token using HKDF-SHA-256.
+///
+/// NOT E2E: the relay receives this same token for authentication and can
+/// therefore re-derive this key (see module-level TRUST MODEL note).
 ///
 /// BREAKING CHANGE: mobile clients must update their key derivation to use the
 /// same HKDF parameters (salt + info) or they will fail to decrypt messages.
@@ -58,12 +73,12 @@ fn derive_cipher(relay_token: &str) -> Aes256Gcm {
     let mut okm = [0u8; 32];
     hk.expand(b"aes-256-gcm-key", &mut okm)
         .expect("HKDF-SHA256 expand for 32 bytes always succeeds");
-    Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&okm))
+    Aes256Gcm::new(&okm.into())
 }
 
 /// Encrypt plaintext with AES-256-GCM. Returns nonce (12 bytes) || ciphertext.
 fn encrypt(cipher: &Aes256Gcm, plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = aes_gcm::Nonce::generate();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?;
@@ -79,9 +94,10 @@ fn decrypt(cipher: &Aes256Gcm, data: &[u8]) -> anyhow::Result<Vec<u8>> {
         anyhow::bail!("ciphertext too short (missing nonce)");
     }
     let (nonce_bytes, ciphertext) = data.split_at(12);
-    let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
+    let nonce = aes_gcm::Nonce::try_from(nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| anyhow::anyhow!("decryption failed: {e}"))?;
     Ok(plaintext)
 }
@@ -213,7 +229,10 @@ async fn connect_and_run(
     let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await?;
     let (mut ws_sink, mut ws_source) = ws_stream.split();
 
-    // Authenticate: send bearer token as first text message
+    // Authenticate: send bearer token as first text message.
+    // NOTE: this is the exact reason the scheme is not E2E — the relay now
+    // holds `relay_token`, the same secret `derive_cipher` uses for the AES
+    // key, so it can decrypt everything below. Trusted-relay, not zero-knowledge.
     ws_sink
         .send(Message::Text(format!("Bearer {relay_token}").into()))
         .await?;
@@ -525,7 +544,7 @@ mod tests {
         let mut expected = [0u8; 32];
         hk.expand(b"aes-256-gcm-key", &mut expected).unwrap();
 
-        let reference_cipher = Aes256Gcm::new(aes_gcm::Key::<Aes256Gcm>::from_slice(&expected));
+        let reference_cipher = Aes256Gcm::new(&expected.into());
         let cipher = derive_cipher("test_token");
 
         // If derive_cipher uses the same HKDF params, cross-decryption works

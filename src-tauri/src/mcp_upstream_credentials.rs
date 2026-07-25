@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires interactive Keychain access on macOS
+    #[ignore = "requires interactive Keychain access on macOS"]
     fn save_read_delete_round_trip() {
         let token = "test-token-abc123";
 
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires interactive Keychain access on macOS
+    #[ignore = "requires interactive Keychain access on macOS"]
     fn overwrite_credential() {
         let token_v1 = "token-v1";
         let token_v2 = "token-v2";

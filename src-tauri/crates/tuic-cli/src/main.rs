@@ -511,17 +511,37 @@ fn cmd_agent(action: AgentAction) -> Result<(), String> {
         }
         AgentAction::Send { target, message } => {
             let id = resolve_session_id(&target)?;
-            let body = serde_json::json!({ "data": format!("{message}\r") });
+            let (payload, enter) = agent_send_parts(&message);
+            let body = serde_json::json!({ "data": payload });
             let resp = ipc::post(&format!("/sessions/{id}/write"), &body.to_string())
                 .map_err(|e| e.to_string())?;
 
             if !resp.is_success() {
                 return Err(format!("Failed to send: {}", resp.body));
             }
+
+            // Raw-mode agent TUIs require Enter in a later PTY read. A combined
+            // `message\r` is commonly treated as a prefill and left unsent.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let body = serde_json::json!({ "data": enter });
+            let resp = ipc::post(&format!("/sessions/{id}/write"), &body.to_string())
+                .map_err(|e| e.to_string())?;
+            if !resp.is_success() {
+                return Err(format!("Failed to submit agent message: {}", resp.body));
+            }
         }
     }
 
     Ok(())
+}
+
+fn agent_send_parts(message: &str) -> (String, &'static str) {
+    let payload = if message.contains('\n') {
+        format!("\x15\x1b[200~{message}\x1b[201~")
+    } else {
+        format!("\x15{message}")
+    };
+    (payload, "\r")
 }
 
 fn cmd_status() -> Result<(), String> {
@@ -1043,4 +1063,24 @@ fn remove_with_elevation(path: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_send_parts;
+
+    #[test]
+    fn agent_send_separates_framed_payload_from_enter() {
+        let (payload, enter) = agent_send_parts("report complete");
+        assert_eq!(payload, "\x15report complete");
+        assert!(!payload.contains('\r'));
+        assert_eq!(enter, "\r");
+    }
+
+    #[test]
+    fn agent_send_bracket_pastes_multiline_before_separate_enter() {
+        let (payload, enter) = agent_send_parts("line one\nline two");
+        assert_eq!(payload, "\x15\x1b[200~line one\nline two\x1b[201~");
+        assert_eq!(enter, "\r");
+    }
 }

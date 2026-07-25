@@ -162,8 +162,3 @@ export function destroyClaudeUsage(): void {
 
 	statusBarTicker.removeMessage(TICKER_ID, FEATURE_ID);
 }
-
-/** Check if the feature is currently active. */
-export function isClaudeUsageActive(): boolean {
-	return initialized;
-}

@@ -170,6 +170,32 @@ describe("ContextMenu", () => {
 		Object.defineProperty(window, "innerHeight", { value: 768, writable: true, configurable: true });
 	});
 
+	it("constrains an oversized menu to the visible viewport", async () => {
+		Object.defineProperty(window, "innerWidth", { value: 120, writable: true, configurable: true });
+		Object.defineProperty(window, "innerHeight", { value: 80, writable: true, configurable: true });
+
+		try {
+			const items: ContextMenuItem[] = Array.from({ length: 20 }, (_, i) => ({
+				label: `Item ${i}`,
+				action: vi.fn(),
+			}));
+			const { container } = render(() => (
+				<ContextMenu items={items} x={110} y={70} visible={true} onClose={() => {}} />
+			));
+
+			await new Promise((r) => requestAnimationFrame(r));
+			const menu = container.querySelector(".menu") as HTMLElement;
+
+			expect(menu.style.left).toBe("8px");
+			expect(menu.style.top).toBe("8px");
+			expect(menu.style.maxWidth).toBe("104px");
+			expect(menu.style.maxHeight).toBe("64px");
+		} finally {
+			Object.defineProperty(window, "innerWidth", { value: 1024, writable: true, configurable: true });
+			Object.defineProperty(window, "innerHeight", { value: 768, writable: true, configurable: true });
+		}
+	});
+
 	it("positions menu at x,y coordinates", () => {
 		const { container } = render(() => (
 			<ContextMenu items={[{ label: "Test", action: vi.fn() }]} x={150} y={250} visible={true} onClose={() => {}} />
@@ -263,6 +289,65 @@ describe("ContextMenu submenus", () => {
 		const parentItem = container.querySelector(".item")!;
 		fireEvent.click(parentItem);
 		expect(parentAction).not.toHaveBeenCalled();
+	});
+
+	it("constrains oversized submenus to the visible viewport", async () => {
+		Object.defineProperty(window, "innerWidth", { value: 180, writable: true, configurable: true });
+		Object.defineProperty(window, "innerHeight", { value: 100, writable: true, configurable: true });
+		const originalRect = HTMLElement.prototype.getBoundingClientRect;
+		try {
+			HTMLElement.prototype.getBoundingClientRect = function () {
+				const el = this as HTMLElement;
+				if (el.className.includes("itemWrap")) {
+					return {
+						left: 140,
+						right: 170,
+						top: 80,
+						bottom: 104,
+						width: 30,
+						height: 24,
+						x: 140,
+						y: 80,
+						toJSON: () => ({}),
+					} as DOMRect;
+				}
+				if (el.className.includes("submenu")) {
+					return {
+						left: 0,
+						right: 220,
+						top: 0,
+						bottom: 220,
+						width: 220,
+						height: 220,
+						x: 0,
+						y: 0,
+						toJSON: () => ({}),
+					} as DOMRect;
+				}
+				return originalRect.call(this);
+			};
+
+			const items: ContextMenuItem[] = [
+				{
+					label: "Move to Group",
+					action: vi.fn(),
+					children: Array.from({ length: 20 }, (_, i) => ({ label: `Group ${i}`, action: vi.fn() })),
+				},
+			];
+			const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+			fireEvent.mouseEnter(container.querySelector(".itemWrap")!);
+			await new Promise((r) => requestAnimationFrame(r));
+
+			const submenu = container.querySelector(".submenu") as HTMLElement;
+			expect(submenu.style.left).toBe("8px");
+			expect(submenu.style.top).toBe("8px");
+			expect(submenu.style.maxWidth).toBe("164px");
+			expect(submenu.style.maxHeight).toBe("84px");
+		} finally {
+			HTMLElement.prototype.getBoundingClientRect = originalRect;
+			Object.defineProperty(window, "innerWidth", { value: 1024, writable: true, configurable: true });
+			Object.defineProperty(window, "innerHeight", { value: 768, writable: true, configurable: true });
+		}
 	});
 });
 

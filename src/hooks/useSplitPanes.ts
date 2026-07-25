@@ -64,13 +64,21 @@ export function useSplitPanes() {
 		setSavedLayout(null);
 	};
 
-	/** Close the active pane group. Terminals in the group are destroyed. */
+	/** Close the active pane group. Terminals in the group are destroyed.
+	 *  If a split still has an empty pane (freshly split, no terminal placed
+	 *  yet), closing that empty pane is preferred — it cancels the split
+	 *  without destroying a terminal. We can't rely on activeGroupId to target
+	 *  it: an empty pane can't hold DOM focus, so the active-group pointer
+	 *  drifts back to the terminal's group on the next focus event. */
 	const closeActivePane = () => {
-		const activeGroupId = paneLayoutStore.state.activeGroupId;
-		if (!activeGroupId) return;
+		const emptyGroupId = paneLayoutStore
+			.getAllGroupIds()
+			.find((id) => paneLayoutStore.state.groups[id]?.tabs.length === 0);
+		const targetGroupId = emptyGroupId ?? paneLayoutStore.state.activeGroupId;
+		if (!targetGroupId) return;
 
 		// Close terminal sessions in this group
-		const group = paneLayoutStore.state.groups[activeGroupId];
+		const group = paneLayoutStore.state.groups[targetGroupId];
 		if (group) {
 			for (const tab of group.tabs) {
 				if (tab.type === "terminal") {
@@ -79,7 +87,7 @@ export function useSplitPanes() {
 			}
 		}
 
-		paneLayoutStore.closePane(activeGroupId);
+		paneLayoutStore.closePane(targetGroupId);
 
 		// Focus the terminal in the new active group (if any)
 		const newActiveGroup = paneLayoutStore.getActiveGroup();

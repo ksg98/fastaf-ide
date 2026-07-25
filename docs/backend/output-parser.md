@@ -153,9 +153,9 @@ ParsedEvent::Suggest {
 }
 ```
 
-Detected as a single-line plain-prefix token at column 0: `suggest: [ A | B | C ]`.
+Detected as a plain-prefix token at column 0: `suggest: [ A | B | C ]`.
 
-The whole token must sit on one row and the bracketed content may not contain a nested `[`/`]`. These two constraints make a false capture impossible: a wrapped line lacks the closing `]` on the same row, and a mermaid/markdown line carries a nested `[`, so neither matches. Items are pipe-delimited (2–4 per the protocol). Parsing is agent-gated; the raw token is stripped from the log delivered to PWA/REST consumers by `strip_structural_tokens`, and concealed on the desktop canvas by the frontend overlay.
+One bounded logical line may soft-wrap across terminal rows and may begin with any parser-supported agent bullet (`●`, `⏺`, `•`, or `◦`), but the bracketed content may not contain a nested `[`/`]`. The closing bracket must be at or before the cursor; cells to the right of the cursor are ignored so stale content left by a carriage-return overwrite cannot complete a partial token. Reconstruction follows at most four soft-wrap transitions and 512 bytes. If those bounds or cursor metadata prevent reconstruction, the cursor-row structural candidate is rejected rather than parsed from rendered cells. Items are pipe-delimited (2–4 per the protocol). Parsing is agent-gated; the raw token is stripped from the log delivered to PWA/REST consumers by `strip_structural_tokens`, and concealed on the desktop canvas by the frontend overlay.
 
 ### UsageLimit
 
@@ -243,7 +243,7 @@ ParsedEvent::ChoicePrompt {
 
 **Destructive flag:** labels matching `"no"`, `"cancel"`, `"reject"`, `"abort"`, `"deny"`, or the prefixes `"don't"` / `"do not"` are flagged so the PWA overlay and plugins can style them as destructive.
 
-**Flow:** the payload is stored on `SessionState.choice_prompt` and dispatched via `pluginRegistry.dispatchStructuredEvent("choice-prompt", …)`. Cleared on user input, scroll, or PTY exit. Single-key replies should go through `sendPtyKey()` in `src/utils/sendCommand.ts`, never raw `text + \r`.
+**Flow:** the payload is stored on `SessionState.choice_prompt` and dispatched via `pluginRegistry.dispatchStructuredEvent("choice-prompt", …)`. Animated status-line updates preserve the prompt and its `awaiting_input` lifecycle; user input, scroll, or PTY exit clears it. Single-key replies should go through `sendPtyKey()` in `src/utils/sendCommand.ts`, never raw `text + \r`.
 
 ### SlashMenu
 
@@ -308,4 +308,13 @@ The `strip_ansi()` function pre-processes CUF (Cursor Forward, `\x1b[nC`) escape
 
 ### Hook-Instrumented Session Suppression
 
-When an agent session has native hook instrumentation enabled (OSC 7770-driven state transitions via the agent's own hook system), heuristic `Question` events are suppressed for that session. Hook-instrumented agents report awaiting state directly via `OSC 7770;state=awaiting`, so the silence/regex question heuristics would only double-fire. Only `Question` detection is suppressed — idle/busy transitions and all other events pass through unchanged. The silence-idle backstop remains active so a crashed or stalled agent still recovers from "busy". See `suppress_heuristic_question()` in `src-tauri/src/pty.rs`.
+When native hook instrumentation is configured, heuristic `Question` events are
+suppressed only after the session actually emits an OSC 7770 `state=` marker.
+The runtime handshake avoids trusting a stale flag when hook installation or an
+agent upgrade has broken delivery. Hook `busy` is authoritative over silence;
+hook `idle`, a confirmed interrupted screen, or process exit ends it. For known
+agents, explicit IDLE waits for a process snapshot newer than the marker before
+publishing parent idle/completed lifecycle mail, so background descendants remain
+working even while the shell is ready. Other parsed events continue unchanged.
+See `suppress_heuristic_question()` and the
+explicit-state fields in `SilenceState` (`src-tauri/src/pty.rs`).

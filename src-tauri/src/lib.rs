@@ -15,10 +15,12 @@ pub(crate) mod ai_agent;
 pub(crate) mod ai_chat;
 pub(crate) mod ai_chat_registry;
 pub(crate) mod app_logger;
+pub(crate) mod changelog;
 pub(crate) mod chrome;
 pub(crate) mod claude_usage;
 pub(crate) mod cli;
 pub(crate) mod config;
+pub(crate) mod conflict_assist;
 pub(crate) mod content_index;
 pub(crate) mod cpu_watchdog;
 pub(crate) mod credentials;
@@ -44,6 +46,7 @@ pub(crate) mod github_poller;
 #[cfg(feature = "desktop")]
 mod global_hotkey;
 pub(crate) mod import;
+pub(crate) mod improvement_scan;
 mod input_line_buffer;
 pub(crate) mod llm_api;
 pub(crate) mod mcp_http;
@@ -244,6 +247,8 @@ fn load_config(state: State<'_, Arc<AppState>>) -> config::AppConfig {
 #[tauri::command]
 fn save_config(state: State<'_, Arc<AppState>>, config: config::AppConfig) -> Result<(), String> {
     let old = state.config.read().clone();
+    let mut config = config;
+    config::preserve_redacted_app_config_secrets(&mut config, &old);
     let server_changed = old.services.server.enabled != config.services.server.enabled
         || old.services.server.port != config.services.server.port
         || old.services.auth.username != config.services.auth.username
@@ -261,7 +266,7 @@ fn save_config(state: State<'_, Arc<AppState>>, config: config::AppConfig) -> Re
     }
 
     if server_changed {
-        restart_server(state.inner());
+        restart_server(state.inner(), "remote-access configuration changed");
     }
 
     Ok(())
@@ -715,7 +720,7 @@ fn write_external_file(path: String, content: String) -> Result<(), String> {
     let home =
         dirs::home_dir().ok_or_else(|| "Could not resolve user home directory".to_string())?;
     fs::validate_external_write_path(p, &home)?;
-    std::fs::write(p, content).map_err(|e| format!("Failed to write file: {e}"))
+    fs::atomic_write(p, content.as_bytes()).map_err(|e| format!("Failed to write file: {e}"))
 }
 
 /// Get MCP server status (running, port, active sessions).
@@ -835,6 +840,7 @@ fn regenerate_session_token(state: State<'_, Arc<AppState>>) {
     // Persist so the new token survives restarts
     let mut cfg = state.config.read().clone();
     cfg.services.auth.session_token = new_token;
+    cfg.services.auth.session_token_exists = true;
     if let Err(e) = config::save_app_config(cfg) {
         tracing::error!(
             source = "auth",
@@ -843,8 +849,9 @@ fn regenerate_session_token(state: State<'_, Arc<AppState>>) {
     }
 }
 
-/// Build a QR-code connect URL server-side so the raw session token
-/// never reaches JS (where a malicious plugin could steal it).
+/// Build a QR-code connect URL server-side, selecting scheme/host from the
+/// current Tailscale + TLS state. The returned URL embeds the raw session
+/// token as a `?token=` query param, so the token IS exposed to the JS caller.
 /// Uses HTTPS + Tailscale FQDN when TLS is active on a Tailscale IP.
 #[cfg(feature = "desktop")]
 #[tauri::command]
@@ -904,10 +911,22 @@ async fn provision_tls_config(
 
 #[cfg(feature = "desktop")]
 /// Restart the HTTP/MCP server with fresh TLS config (reuses the shutdown/spawn pattern from save_config).
-fn restart_server(state: &Arc<AppState>) {
+fn restart_server(state: &Arc<AppState>, reason: &'static str) {
+    tracing::info!(
+        source = "mcp_http",
+        reason,
+        remote_enabled = state.config.read().services.server.enabled,
+        "HTTP server reconfiguration requested; local MCP IPC remains active"
+    );
     // Shutdown existing server
-    if let Some(tx) = state.server_shutdown.lock().take() {
-        let _ = tx.send(());
+    if let Some(tx) = state.server_shutdown.lock().take()
+        && tx.send(()).is_err()
+    {
+        tracing::warn!(
+            source = "mcp_http",
+            reason,
+            "Previous TCP server lifecycle had already stopped"
+        );
     }
     let remote_enabled = state.config.read().services.server.enabled;
     let state_arc = state.clone();
@@ -919,6 +938,17 @@ fn restart_server(state: &Arc<AppState>) {
             mcp_http::start_server(state_arc, true, remote_enabled, tls_config).await;
         });
     });
+}
+
+/// Run the initial server future without letting its owning Tokio runtime die
+/// after a TCP restart. Always-on IPC/background tasks are children of that
+/// runtime and must live for the process lifetime.
+async fn keep_server_owner_runtime_alive<F>(server: F)
+where
+    F: std::future::Future,
+{
+    let _ = server.await;
+    std::future::pending::<()>().await;
 }
 
 /// Re-detect Tailscale daemon status and restart server if HTTPS availability changed.
@@ -957,7 +987,7 @@ async fn recheck_tailscale_status(
             new_https,
             "HTTPS state changed, restarting server"
         );
-        restart_server(&state);
+        restart_server(&state, "Tailscale HTTPS availability changed");
     }
 
     Ok(new_state)
@@ -1062,6 +1092,7 @@ pub fn run() {
             Ok((private, public)) => {
                 tracing::info!(source = "push", "Generated VAPID key pair");
                 config.services.push.vapid_private_key = private;
+                config.services.push.vapid_private_key_exists = true;
                 config.services.push.vapid_public_key = public;
                 config_dirty = true;
             }
@@ -1072,6 +1103,7 @@ pub fn run() {
     }
     if config.services.auth.session_token.is_empty() {
         config.services.auth.session_token = uuid::Uuid::new_v4().to_string();
+        config.services.auth.session_token_exists = true;
         tracing::info!(source = "auth", "Generated persistent session token");
         config_dirty = true;
     }
@@ -1155,7 +1187,13 @@ pub fn run() {
                 });
 
                 let srv_state = server_state.clone();
-                mcp_http::start_server(srv_state, true, remote_enabled, tls_config).await;
+                keep_server_owner_runtime_alive(mcp_http::start_server(
+                    srv_state,
+                    true,
+                    remote_enabled,
+                    tls_config,
+                ))
+                .await;
             });
         });
     }
@@ -1472,6 +1510,7 @@ pub fn run() {
             git::get_file_diff,
             git::get_gutter_changes,
             diff_triage::run_diff_triage,
+            diff_triage::run_pr_review,
             git::get_recent_commits,
             list_markdown_files,
             read_file,
@@ -1577,8 +1616,17 @@ pub fn run() {
             github::merge_pr_via_github,
             github::get_pr_diff,
             github::approve_pr,
+            github::create_pr,
+            github::create_issue,
+            github::post_pr_review,
+            github::get_merged_prs,
+            changelog::generate_changelog,
+            conflict_assist::start_conflict_assist,
+            improvement_scan::run_improvement_scan,
+            improvement_scan::create_issue_from_proposal,
             github::fetch_ci_failure_logs,
             github::get_all_issues,
+            github::get_issue_detail,
             github::close_issue,
             github::reopen_issue,
             github_poller::github_start_polling,
@@ -1785,6 +1833,7 @@ pub fn run() {
             plugins::register_loaded_plugin,
             plugins::unregister_loaded_plugin,
             plugin_fs::plugin_read_file,
+            plugin_fs::plugin_read_file_base64,
             plugin_fs::plugin_list_directory,
             plugin_fs::plugin_read_file_tail,
             plugin_fs::plugin_write_file,
@@ -1905,6 +1954,7 @@ fn build_connect_url(scheme: &str, host: &str, port: u16, token: &str) -> String
 /// Spawn background tasks shared by both desktop and headless modes.
 fn spawn_background_tasks(state: &Arc<AppState>) {
     AppState::spawn_session_state_accumulator(state.clone());
+    drop(state.oauth_flow_manager.spawn_cleanup_task());
     mcp_http::mcp_transport::spawn_tool_search_index_updater(state.clone());
     pty::spawn_tombstone_sweeper(state.clone());
     content_index::spawn_content_index_updater(state.clone());
@@ -2004,6 +2054,7 @@ pub async fn run_headless(port: u16) -> anyhow::Result<()> {
     }
     if app_config.services.auth.session_token.is_empty() {
         app_config.services.auth.session_token = uuid::Uuid::new_v4().to_string();
+        app_config.services.auth.session_token_exists = true;
     }
 
     let data_dir = config::config_dir();
@@ -2133,6 +2184,7 @@ pub async fn run_remote(port: u16) -> anyhow::Result<()> {
     }
     if app_config.services.auth.session_token.is_empty() {
         app_config.services.auth.session_token = uuid::Uuid::new_v4().to_string();
+        app_config.services.auth.session_token_exists = true;
     }
 
     let data_dir = config::config_dir();
@@ -2211,6 +2263,22 @@ pub async fn run_remote(port: u16) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn initial_server_runtime_stays_alive_after_tcp_shutdown() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(keep_server_owner_runtime_alive(async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        shutdown_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !owner.is_finished(),
+            "the runtime owner must remain parked after start_server returns"
+        );
+        owner.abort();
+    }
 
     #[test]
     fn build_connect_url_ipv4() {

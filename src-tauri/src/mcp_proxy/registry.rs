@@ -249,24 +249,25 @@ impl UpstreamRegistry {
     /// Insert a fake Ready upstream with the given tools. Test-only.
     #[cfg(test)]
     pub(crate) fn inject_ready_upstream(&self, name: &str, tool_names: &[&str]) {
+        self.inject_ready_http_upstream(name, &format!("http://127.0.0.1:1/{name}"), tool_names);
+    }
+
+    /// Insert a Ready HTTP upstream backed by a caller-supplied test server.
+    #[cfg(test)]
+    pub(crate) fn inject_ready_http_upstream(&self, name: &str, url: &str, tool_names: &[&str]) {
         use crate::mcp_proxy::http_client::{HttpMcpClient, UpstreamToolDef};
         let config = UpstreamMcpServer {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             transport: UpstreamTransport::Http {
-                url: format!("http://127.0.0.1:1/{name}"),
+                url: url.to_string(),
             },
             enabled: true,
             timeout_secs: 10,
             tool_filter: None,
             auth: None,
         };
-        let client = HttpMcpClient::new(
-            name.to_string(),
-            format!("http://127.0.0.1:1/{name}"),
-            10,
-            false,
-        );
+        let client = HttpMcpClient::new(name.to_string(), url.to_string(), 10, false);
         let entry = Arc::new(UpstreamEntry::new(
             config,
             UpstreamClient::Http(Box::new(tokio::sync::RwLock::new(client))),
@@ -489,13 +490,6 @@ impl UpstreamRegistry {
                 let mut def = tool.definition.clone();
                 if let Some(obj) = def.as_object_mut() {
                     obj.insert("name".to_string(), Value::String(prefixed_name));
-                    // Annotate description with upstream origin
-                    let desc = obj
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let annotated = format!("[via {}] {}", entry.config.name, desc);
-                    obj.insert("description".to_string(), Value::String(annotated));
                 }
                 result.push(def);
             }
@@ -776,11 +770,19 @@ impl UpstreamRegistry {
             .remove(name)
             .ok_or_else(|| format!("Upstream '{name}' not found"))?;
 
-        // Fire-and-forget shutdown for stdio (sync)
-        if let UpstreamClient::Stdio(ref mutex) = entry.client
-            && let Ok(mut client) = mutex.lock()
-        {
-            client.shutdown();
+        // Fire-and-forget shutdown for stdio. `shutdown()` blocks up to 2s
+        // (graceful child wait + SIGKILL fallback), so run it on a detached
+        // thread — this keeps the async callers (reconnect/apply_config_diff)
+        // off that stall. `std::thread` (not `spawn_blocking`) because this fn
+        // is sync and also runs from non-runtime contexts (tests, config
+        // reconcile), where `spawn_blocking` would panic for lack of a runtime.
+        if let UpstreamClient::Stdio(ref mutex) = entry.client {
+            let mutex = std::sync::Arc::clone(mutex);
+            std::thread::spawn(move || {
+                if let Ok(mut client) = mutex.lock() {
+                    client.shutdown();
+                }
+            });
         }
         // HTTP clients don't hold persistent connections — nothing to clean up.
 
@@ -1283,12 +1285,14 @@ async fn run_health_checks(registry: &UpstreamRegistry) {
                     let _ = flow; // flow is only started after user click, never here
                     mark_entry_needs_auth(&entry, &name, bus.as_ref());
                 }
-                Err(_) => {
+                Err(e) => {
+                    let e_str = e.to_string();
+                    *entry.last_error.write() = Some(e_str.clone());
                     let exhausted = entry.cb.record_failure();
                     let new_status = if exhausted {
                         // Only log on first transition to Failed, not on repeated probe failures
                         if status != UpstreamStatus::Failed {
-                            tracing::error!(source = "mcp_registry", %name, "Health check failed permanently");
+                            tracing::error!(source = "mcp_registry", %name, "Health check failed permanently: {e_str}");
                         }
                         UpstreamStatus::Failed
                     } else {
@@ -1296,7 +1300,7 @@ async fn run_health_checks(registry: &UpstreamRegistry) {
                         // while already open are coalesced by the ring buffer but we want
                         // to avoid generating the warn at all once the circuit is open.
                         if status != UpstreamStatus::CircuitOpen {
-                            tracing::warn!(source = "mcp_registry", audience = "diagnostic", %name, "Health check failed — circuit opening");
+                            tracing::warn!(source = "mcp_registry", audience = "diagnostic", %name, "Health check failed — circuit opening: {e_str}");
                         }
                         UpstreamStatus::CircuitOpen
                     };
@@ -1499,16 +1503,21 @@ mod tests {
     }
 
     #[test]
-    fn aggregated_tools_annotates_description() {
+    fn aggregated_tools_preserve_upstream_description_without_tuic_preamble() {
         let registry = UpstreamRegistry::new();
-        let (name, entry) = ready_entry("myserver", vec![make_tool_def("do_thing")]);
+        let mut tool = make_tool_def("do_thing");
+        tool.definition["description"] =
+            Value::String("Search the upstream index once.".to_string());
+        let (name, entry) = ready_entry("myserver", vec![tool]);
         registry.entries.insert(name, entry);
 
         let tools = registry.aggregated_tools();
         assert_eq!(tools.len(), 1);
         let desc = tools[0]["description"].as_str().unwrap();
-        assert!(desc.starts_with("[via myserver]"), "got: {desc}");
-        assert!(desc.contains("test tool"), "got: {desc}");
+        assert_eq!(desc, "Search the upstream index once.");
+        assert!(!desc.contains("FastAF"));
+        assert!(!desc.contains("TUIC Protocol"));
+        assert!(!desc.contains("Required Output Markers"));
     }
 
     #[test]
@@ -1760,6 +1769,56 @@ mod tests {
         assert!(
             rx.try_recv().is_ok(),
             "disconnect_upstream must emit mcp_tools_changed so connected MCP clients refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_check_failure_records_last_error() {
+        // Regression: the Err arm of the health check must bind the error, log it,
+        // and write entry.last_error so the failure reason surfaces in the status
+        // snapshot the UI reads. Previously the error was discarded (Err(_)), leaving
+        // stale/empty diagnostics after an upstream went down.
+        let registry = UpstreamRegistry::new();
+        let name = "unreachable".to_string();
+        // Loopback port 1 refuses connections fast → deterministic health-check failure.
+        let url = "http://127.0.0.1:1/mcp";
+        let config = http_server_config(&name, url);
+        let client = HttpMcpClient::new(name.clone(), url.to_string(), 2, false);
+        let entry = Arc::new(UpstreamEntry::new(
+            config,
+            UpstreamClient::Http(Box::new(tokio::sync::RwLock::new(client))),
+        ));
+        *entry.status.write() = UpstreamStatus::Ready;
+        assert!(
+            entry.last_error.read().is_none(),
+            "precondition: no error recorded yet"
+        );
+        registry.entries.insert(name.clone(), Arc::clone(&entry));
+
+        // run_health_checks spawns a detached probe task; poll until it records.
+        run_health_checks(&registry).await;
+        let mut recorded = None;
+        for _ in 0..100 {
+            if let Some(e) = entry.last_error.read().clone() {
+                recorded = Some(e);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let recorded = recorded.expect("health-check failure must record last_error");
+        assert!(
+            !recorded.is_empty(),
+            "recorded error must be non-empty: {recorded}"
+        );
+
+        // The failure reason must be visible in the status snapshot the UI reads.
+        let snap = registry.status_snapshot();
+        let upstream = &snap["upstreams"][0];
+        assert_eq!(upstream["name"], name);
+        assert_eq!(
+            upstream["last_error"].as_str(),
+            Some(recorded.as_str()),
+            "snapshot must surface the recorded failure reason"
         );
     }
 

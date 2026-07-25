@@ -1,5 +1,71 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildHttpUrl, INTENTIONALLY_UNMAPPED, isTauri, mapCommandToHttp } from "../transport";
+import { setTransportLogger } from "../transportRuntime";
+
+function readRepoFile(relativePath: string): string {
+	return readFileSync(join(process.cwd(), relativePath), "utf8");
+}
+
+function extractBalancedObject(source: string, marker: string): string {
+	const markerIndex = source.indexOf(marker);
+	if (markerIndex < 0) {
+		throw new Error(`Marker not found: ${marker}`);
+	}
+	const start = source.indexOf("{", markerIndex);
+	if (start < 0) {
+		throw new Error(`Object start not found after marker: ${marker}`);
+	}
+
+	let depth = 0;
+	for (let index = start; index < source.length; index += 1) {
+		const char = source[index];
+		if (char === "{") depth += 1;
+		if (char === "}") {
+			depth -= 1;
+			if (depth === 0) return source.slice(start, index + 1);
+		}
+	}
+
+	throw new Error(`Object end not found after marker: ${marker}`);
+}
+
+function extractCommandTableCommands(): Set<string> {
+	const transportSource = readRepoFile("src/transport.ts");
+	const tableBody = extractBalancedObject(transportSource, "const COMMAND_TABLE");
+	return new Set(
+		Array.from(tableBody.matchAll(/^\s*([a-zA-Z_][\w]*):\s*\{/gm), (match) => match[1]).filter(
+			(command) => command !== undefined,
+		),
+	);
+}
+
+function extractRegisteredTauriCommands(): Set<string> {
+	const libSource = readRepoFile("src-tauri/src/lib.rs");
+	const handlerStart = libSource.indexOf("tauri::generate_handler![");
+	if (handlerStart < 0) {
+		throw new Error("tauri::generate_handler![ block not found");
+	}
+	const listStart = libSource.indexOf("[", handlerStart);
+	const listEnd = libSource.indexOf("\n        ])", listStart);
+	if (listStart < 0 || listEnd < 0) {
+		throw new Error("tauri::generate_handler![ command list bounds not found");
+	}
+
+	const commandList = libSource
+		.slice(listStart + 1, listEnd)
+		.replace(/\/\/.*$/gm, "")
+		.split(",")
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0)
+		.map((entry) => {
+			const parts = entry.split("::");
+			return parts[parts.length - 1];
+		});
+
+	return new Set(commandList);
+}
 
 describe("transport", () => {
 	describe("isTauri()", () => {
@@ -644,6 +710,86 @@ describe("transport", () => {
 			expect(result.body).toEqual({ repoPath: "/r", issueNumber: 42 });
 		});
 
+		it("maps get_issue_detail to GET", () => {
+			const result = mapCommandToHttp("get_issue_detail", { repoPath: "/r", issueNumber: 42 });
+			expect(result.method).toBe("GET");
+			expect(result.path).toBe("/repo/issue-detail?repoPath=%2Fr&issueNumber=42");
+		});
+
+		it("maps GitHub write primitives to HTTP", () => {
+			const pr = mapCommandToHttp("create_pr", {
+				repoPath: "/r",
+				title: "Fix bug",
+				body: "Details",
+				base: "main",
+				head: "fix/bug",
+				draft: true,
+			});
+			expect(pr.method).toBe("POST");
+			expect(pr.path).toBe("/repo/create-pr");
+			expect(pr.body).toEqual({
+				repoPath: "/r",
+				title: "Fix bug",
+				body: "Details",
+				base: "main",
+				head: "fix/bug",
+				draft: true,
+			});
+
+			const issue = mapCommandToHttp("create_issue", { repoPath: "/r", title: "Bug", body: "Broken" });
+			expect(issue.method).toBe("POST");
+			expect(issue.path).toBe("/repo/create-issue");
+			expect(issue.body).toEqual({ repoPath: "/r", title: "Bug", body: "Broken" });
+
+			const proposal = { issue_title: "Improve tests", issue_body: "Acceptance:\n- covered" };
+			const proposalIssue = mapCommandToHttp("create_issue_from_proposal", { repoPath: "/r", proposal });
+			expect(proposalIssue.method).toBe("POST");
+			expect(proposalIssue.path).toBe("/repo/create-issue-from-proposal");
+			expect(proposalIssue.body).toEqual({ repoPath: "/r", proposal });
+
+			const review = mapCommandToHttp("post_pr_review", {
+				repoPath: "/r",
+				prNumber: 42,
+				body: "Review",
+				event: "COMMENT",
+				comments: [{ path: "src/main.rs", line: 10, side: "RIGHT", body: "Check this" }],
+			});
+			expect(review.method).toBe("POST");
+			expect(review.path).toBe("/repo/post-pr-review");
+			expect(review.body).toEqual({
+				repoPath: "/r",
+				prNumber: 42,
+				body: "Review",
+				event: "COMMENT",
+				comments: [{ path: "src/main.rs", line: 10, side: "RIGHT", body: "Check this" }],
+			});
+		});
+
+		it("maps get_merged_prs to GET with optional sinceTag", () => {
+			const noTag = mapCommandToHttp("get_merged_prs", { repoPath: "/r" });
+			expect(noTag.method).toBe("GET");
+			expect(noTag.path).toBe("/repo/merged-prs?path=%2Fr");
+
+			const withTag = mapCommandToHttp("get_merged_prs", { repoPath: "/r", sinceTag: "v1.2.0" });
+			expect(withTag.path).toBe("/repo/merged-prs?path=%2Fr&sinceTag=v1.2.0");
+		});
+
+		it("maps generate_changelog to GET with optional sinceTag", () => {
+			const noTag = mapCommandToHttp("generate_changelog", { repoPath: "/r" });
+			expect(noTag.method).toBe("GET");
+			expect(noTag.path).toBe("/repo/changelog?path=%2Fr");
+
+			const withTag = mapCommandToHttp("generate_changelog", { repoPath: "/r", sinceTag: "v1.2.0" });
+			expect(withTag.path).toBe("/repo/changelog?path=%2Fr&sinceTag=v1.2.0");
+		});
+
+		it("maps start_conflict_assist to POST", () => {
+			const result = mapCommandToHttp("start_conflict_assist", { repoPath: "/r", prNumber: 7 });
+			expect(result.method).toBe("POST");
+			expect(result.path).toBe("/repo/conflict-assist");
+			expect(result.body).toEqual({ repoPath: "/r", prNumber: 7 });
+		});
+
 		it("maps get_github_viewer_login to GET", () => {
 			const result = mapCommandToHttp("get_github_viewer_login", {});
 			expect(result.method).toBe("GET");
@@ -670,6 +816,10 @@ describe("transport", () => {
 			expect(poll.method).toBe("POST");
 			expect(poll.path).toBe("/github/auth/poll");
 			expect(poll.body).toEqual({ deviceCode: "abc" });
+			const addPoll = mapCommandToHttp("github_poll_add_account", { deviceCode: "def" });
+			expect(addPoll.method).toBe("POST");
+			expect(addPoll.path).toBe("/github/auth/poll");
+			expect(addPoll.body).toEqual({ deviceCode: "def" });
 			expect(mapCommandToHttp("github_logout", {}).path).toBe("/github/auth/logout");
 			expect(mapCommandToHttp("github_disconnect", {}).path).toBe("/github/auth/disconnect");
 			expect(mapCommandToHttp("github_auth_status", {}).path).toBe("/github/auth/status");
@@ -893,11 +1043,30 @@ describe("transport", () => {
 			expect(r.body).toEqual({ repoPath: "/r", refresh: true });
 		});
 
+		it("maps run_pr_review trigger", () => {
+			const r = mapCommandToHttp("run_pr_review", { repoPath: "/r", prNumber: 42 });
+			expect(r.method).toBe("POST");
+			expect(r.path).toBe("/ai/review/pr");
+			expect(r.body).toEqual({ repoPath: "/r", prNumber: 42 });
+		});
+
+		it("maps run_improvement_scan trigger", () => {
+			const r = mapCommandToHttp("run_improvement_scan", { repoPath: "/r", focus: "testing" });
+			expect(r.method).toBe("POST");
+			expect(r.path).toBe("/ai/improvements/scan");
+			expect(r.body).toEqual({ repoPath: "/r", focus: "testing" });
+		});
+
 		it("maps plugin RPC commands (story 071)", () => {
 			// plugin_read_file
 			const rf = mapCommandToHttp("plugin_read_file", { pluginId: "my-plugin", path: "/home/user/f.txt" });
 			expect(rf.method).toBe("GET");
 			expect(rf.path).toBe("/api/plugins/my-plugin/fs/read?path=%2Fhome%2Fuser%2Ff.txt");
+
+			// plugin_read_file_base64
+			const rfb = mapCommandToHttp("plugin_read_file_base64", { pluginId: "my-plugin", path: "/home/user/f.docx" });
+			expect(rfb.method).toBe("GET");
+			expect(rfb.path).toBe("/api/plugins/my-plugin/fs/read-base64?path=%2Fhome%2Fuser%2Ff.docx");
 
 			// plugin_read_file_tail
 			const tail = mapCommandToHttp("plugin_read_file_tail", {
@@ -949,6 +1118,12 @@ describe("transport", () => {
 			expect(scan.method).toBe("POST");
 			expect(scan.path).toBe("/api/plugins/build-cleaner/build-artifacts/scan");
 			expect(scan.body).toEqual({ repoPaths: ["/home/user/repoA", "/home/user/repoB"] });
+			const forcedScan = mapCommandToHttp("scan_build_artifacts", {
+				pluginId: "build-cleaner",
+				repoPaths: ["/home/user/repoA"],
+				forceRefresh: true,
+			});
+			expect(forcedScan.body).toEqual({ repoPaths: ["/home/user/repoA"], forceRefresh: true });
 
 			// delete_build_artifact
 			const del = mapCommandToHttp("delete_build_artifact", {
@@ -978,7 +1153,6 @@ describe("transport", () => {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: "{}",
-				allowedUrls: ["https://api.example.com/*"],
 			});
 			expect(hf.method).toBe("POST");
 			expect(hf.path).toBe("/api/plugins/my-plugin/http");
@@ -987,7 +1161,6 @@ describe("transport", () => {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: "{}",
-				allowedUrls: ["https://api.example.com/*"],
 			});
 
 			// plugin_read_session_output — with and without maxLines
@@ -1051,9 +1224,42 @@ describe("transport", () => {
 			expect(ollama.path).toBe("/config/ollama-models");
 			expect(ollama.body).toEqual({ providerId: "ollama-local" });
 		});
+
+		it("maps agent detection and spawn aliases to HTTP", () => {
+			const detectClaude = mapCommandToHttp("detect_claude_binary", {});
+			expect(detectClaude.method).toBe("GET");
+			expect(detectClaude.path).toBe("/agents/detect?binary=claude");
+			expect(detectClaude.transform?.({ path: "/usr/local/bin/claude" })).toBe("/usr/local/bin/claude");
+
+			const spawn = mapCommandToHttp("spawn_agent", {
+				pty_config: { rows: 30, cols: 100, cwd: "/repo" },
+				agent_config: { prompt: "fix it", agent_type: "codex", model: "gpt-5" },
+			});
+			expect(spawn.method).toBe("POST");
+			expect(spawn.path).toBe("/sessions/agent");
+			expect(spawn.body).toEqual({
+				rows: 30,
+				cols: 100,
+				cwd: "/repo",
+				prompt: "fix it",
+				agent_type: "codex",
+				model: "gpt-5",
+			});
+			expect(spawn.transform?.({ session_id: "s1" })).toBe("s1");
+		});
 	});
 
 	describe("INTENTIONALLY_UNMAPPED (native/host-only commands)", () => {
+		it("classifies every registered Tauri command as HTTP-mapped or intentionally host-only", () => {
+			const mappedCommands = extractCommandTableCommands();
+			const registeredCommands = extractRegisteredTauriCommands();
+			const uncoveredCommands = Array.from(registeredCommands)
+				.filter((command) => !mappedCommands.has(command) && !INTENTIONALLY_UNMAPPED.has(command))
+				.sort();
+
+			expect(uncoveredCommands).toEqual([]);
+		});
+
 		it("raises a precise native-only error, not a generic missing-mapping error", () => {
 			for (const command of INTENTIONALLY_UNMAPPED) {
 				expect(() => mapCommandToHttp(command, {})).toThrow(/native\/host-only/);
@@ -1350,7 +1556,8 @@ describe("transport", () => {
 			const origWs = globalThis.WebSocket;
 			globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 
-			const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+			const debugSpy = vi.fn();
+			setTransportLogger({ debug: debugSpy, warn: vi.fn() });
 			const onExit = vi.fn();
 
 			const subscribePromise = subscribePty("sess-1", vi.fn(), onExit);
@@ -1359,12 +1566,12 @@ describe("transport", () => {
 
 			// Abnormal close triggers reconnect, not onExit
 			wsInstance!.onclose!({ wasClean: false, code: 1006, reason: "" });
-			expect(debugSpy).toHaveBeenCalledWith("[network]", expect.stringContaining("abnormally"), expect.anything());
+			expect(debugSpy).toHaveBeenCalledWith("network", expect.stringContaining("abnormally"));
 			// onExit is NOT called on abnormal close — the transport schedules a reconnect instead
 			expect(onExit).not.toHaveBeenCalled();
 
 			unsub();
-			debugSpy.mockRestore();
+			setTransportLogger({ debug: vi.fn(), warn: vi.fn() });
 			globalThis.WebSocket = origWs;
 		});
 

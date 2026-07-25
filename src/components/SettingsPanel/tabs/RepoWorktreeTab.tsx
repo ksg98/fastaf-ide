@@ -12,6 +12,7 @@ import type {
 import type { RepoSettings } from "../../../stores/repoSettings";
 import { settingsStore } from "../../../stores/settings";
 import { ColorSwatchPicker } from "../../shared/ColorSwatchPicker";
+import { DEFAULT_COLOR_PRESETS } from "../../shared/colorPresets";
 import { type TriState, TriStateToggle } from "../../shared/TriStateToggle";
 import s from "../Settings.module.css";
 
@@ -72,7 +73,11 @@ export const RepoWorktreeTab: Component<RepoTabProps> = (props) => {
 
 			<div class={s.group}>
 				<label>{t("repoWorktree.label.sidebarColor", "Sidebar Color")}</label>
-				<ColorSwatchPicker color={props.settings.color ?? ""} onChange={(c) => props.onUpdate("color", c)} />
+				<ColorSwatchPicker
+					color={props.settings.color ?? ""}
+					presets={DEFAULT_COLOR_PRESETS}
+					onChange={(c) => props.onUpdate("color", c)}
+				/>
 				<p class={s.hint}>{t("repoWorktree.hint.sidebarColor", "Color-code this repo in the sidebar")}</p>
 			</div>
 

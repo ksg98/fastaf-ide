@@ -5,8 +5,9 @@
 //! and an integrated ADSR amplitude envelope for smooth, click-free playback.
 
 use rodio::cpal::traits::HostTrait;
-use rodio::{DeviceTrait, OutputStream, Sink, Source};
+use rodio::{DeviceSinkBuilder, DeviceTrait, MixerDeviceSink, Player, Source};
 use serde::Serialize;
+use std::num::NonZero;
 use std::time::Duration;
 
 const SAMPLE_RATE: u32 = 48_000;
@@ -222,16 +223,16 @@ impl Iterator for EnvelopedTone {
 }
 
 impl Source for EnvelopedTone {
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
 
-    fn channels(&self) -> u16 {
-        1
+    fn channels(&self) -> NonZero<u16> {
+        NonZero::new(1).expect("one channel is non-zero")
     }
 
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    fn sample_rate(&self) -> NonZero<u32> {
+        NonZero::new(self.sample_rate).expect("sample rate is non-zero")
     }
 
     fn total_duration(&self) -> Option<Duration> {
@@ -252,13 +253,15 @@ pub(crate) struct AudioOutputDevice {
 
 pub(crate) fn list_output_devices() -> Vec<AudioOutputDevice> {
     let host = rodio::cpal::default_host();
-    let default_name: Option<String> = host.default_output_device().and_then(|d| d.name().ok());
+    let default_name: Option<String> = host
+        .default_output_device()
+        .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()));
 
     host.output_devices()
         .map(|devices| {
             devices
                 .filter_map(|d| {
-                    let name = d.name().ok()?;
+                    let name = d.description().ok()?.name().to_string();
                     Some(AudioOutputDevice {
                         is_default: default_name.as_deref() == Some(name.as_str()),
                         name,
@@ -274,18 +277,17 @@ pub(crate) fn list_output_devices() -> Vec<AudioOutputDevice> {
 // ---------------------------------------------------------------------------
 
 /// Resolve an output device by name, falling back to default.
-fn resolve_output_stream(
-    device_name: Option<&str>,
-) -> Option<(OutputStream, rodio::OutputStreamHandle)> {
+fn resolve_output_stream(device_name: Option<&str>) -> Option<MixerDeviceSink> {
     if let Some(name) = device_name {
         let host = rodio::cpal::default_host();
-        let device = host
-            .output_devices()
-            .ok()?
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false));
+        let device = host.output_devices().ok()?.find(|d| {
+            d.description()
+                .map(|description| description.name() == name)
+                .unwrap_or(false)
+        });
         if let Some(dev) = device {
-            match OutputStream::try_from_device(&dev) {
-                Ok(pair) => return Some(pair),
+            match DeviceSinkBuilder::from_device(dev).and_then(|builder| builder.open_stream()) {
+                Ok(stream) => return Some(stream),
                 Err(e) => {
                     tracing::warn!(
                         source = "notification_sound",
@@ -302,7 +304,7 @@ fn resolve_output_stream(
             );
         }
     }
-    OutputStream::try_default().ok()
+    DeviceSinkBuilder::open_default_sink().ok()
 }
 
 /// Play a notification sound on a background thread.
@@ -313,18 +315,15 @@ fn resolve_output_stream(
 pub(crate) fn play(sound: NotificationSound, volume: f32, device_name: Option<String>) {
     let volume = volume.clamp(0.0, 1.0);
     std::thread::spawn(move || {
-        let Some((_stream, stream_handle)) = resolve_output_stream(device_name.as_deref()) else {
+        let Some(stream) = resolve_output_stream(device_name.as_deref()) else {
             tracing::warn!(source = "notification_sound", "Failed to open audio output");
             return;
         };
-        let Ok(sink) = Sink::try_new(&stream_handle) else {
-            tracing::warn!(source = "notification_sound", "Failed to create audio sink");
-            return;
-        };
+        let player = Player::connect_new(stream.mixer());
 
         let seq = sound_sequence(sound);
         for (i, note) in seq.notes.iter().enumerate() {
-            sink.append(EnvelopedTone::new(
+            player.append(EnvelopedTone::new(
                 note.frequency,
                 note.duration,
                 volume,
@@ -332,11 +331,17 @@ pub(crate) fn play(sound: NotificationSound, volume: f32, device_name: Option<St
             ));
             // Insert silence gap between notes (not after the last one)
             if i < seq.notes.len() - 1 && !seq.gap.is_zero() {
-                sink.append(rodio::source::Zero::<f32>::new(1, SAMPLE_RATE).take_duration(seq.gap));
+                player.append(
+                    rodio::source::Zero::new(
+                        NonZero::new(1).expect("one channel is non-zero"),
+                        NonZero::new(SAMPLE_RATE).expect("sample rate is non-zero"),
+                    )
+                    .take_duration(seq.gap),
+                );
             }
         }
 
-        sink.sleep_until_end();
+        player.sleep_until_end();
     });
 }
 

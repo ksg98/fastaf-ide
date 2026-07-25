@@ -6,8 +6,10 @@
 
 use crate::AppState;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, State};
 
@@ -96,6 +98,19 @@ pub async fn plugin_read_file(
     plugin_read_file_impl(&state, path, plugin_id).await
 }
 
+/// Read a file's raw bytes as base64.
+/// Validates the path is within $HOME, enforces the same 10 MB size limit as
+/// plugin_read_file.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub async fn plugin_read_file_base64(
+    path: String,
+    plugin_id: String,
+    state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
+) -> Result<String, String> {
+    plugin_read_file_base64_impl(&state, path, plugin_id).await
+}
+
 /// Run a blocking filesystem closure on Tokio's blocking pool, flattening the
 /// JoinError into the closure's own `Result<T, String>`. Keeps the synchronous
 /// `std::fs` calls off the async worker threads.
@@ -135,6 +150,38 @@ pub(crate) async fn plugin_read_file_impl(
         }
 
         std::fs::read_to_string(&canonical).map_err(|e| format!("Failed to read file: {e}"))
+    })
+    .await
+}
+
+pub(crate) async fn plugin_read_file_base64_impl(
+    state: &std::sync::Arc<crate::AppState>,
+    path: String,
+    plugin_id: String,
+) -> Result<String, String> {
+    crate::plugins::check_plugin_capability(state, &plugin_id, "fs:read")?;
+    spawn_blocking_fs(move || {
+        use base64::Engine;
+
+        let canonical = validate_within_home(&path)?;
+
+        let metadata =
+            std::fs::metadata(&canonical).map_err(|e| format!("Failed to stat file: {e}"))?;
+
+        if !metadata.is_file() {
+            return Err("Path is not a file".into());
+        }
+
+        if metadata.len() > MAX_FILE_SIZE {
+            return Err(format!(
+                "File exceeds maximum size ({} bytes > {} bytes)",
+                metadata.len(),
+                MAX_FILE_SIZE
+            ));
+        }
+
+        let bytes = std::fs::read(&canonical).map_err(|e| format!("Failed to read file: {e}"))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     })
     .await
 }
@@ -290,6 +337,32 @@ async fn plugin_read_file_tail_inner(path: String, max_bytes: u64) -> Result<Str
     .await
 }
 
+/// Maximum concurrent `fs:watch` registrations per plugin. Each live watch costs
+/// one OS thread (`debounce_loop`) plus a notify watcher, so an unbounded plugin
+/// re-registering without disposing leaks both per call. The cap is generous —
+/// legitimate multi-directory workflows stay well under it — while bounding the
+/// leak. Enforced in `plugin_watch_path` before a watcher is created; watches are
+/// released on unload/uninstall by `dispose_plugin_runtime_state` (plugins.rs).
+#[cfg(feature = "desktop")]
+const MAX_WATCHERS_PER_PLUGIN: usize = 20;
+
+/// Reject a new watch once a plugin already holds `MAX_WATCHERS_PER_PLUGIN` live
+/// watchers. Counts the plugin's current entries in `plugin_watchers`.
+#[cfg(feature = "desktop")]
+fn check_watcher_cap(state: &AppState, plugin_id: &str) -> Result<(), String> {
+    let count = state
+        .plugin_watchers
+        .iter()
+        .filter(|e| e.value().0 == plugin_id)
+        .count();
+    if count >= MAX_WATCHERS_PER_PLUGIN {
+        return Err(format!(
+            "Watch limit reached: plugin '{plugin_id}' already has {MAX_WATCHERS_PER_PLUGIN} active watchers"
+        ));
+    }
+    Ok(())
+}
+
 /// Start watching a path for filesystem changes.
 /// Returns a watch_id (UUID) that can be used with plugin_unwatch.
 /// Emits `plugin-fs-change-{plugin_id}` Tauri events on changes.
@@ -305,6 +378,7 @@ pub async fn plugin_watch_path(
     app: AppHandle,
 ) -> Result<String, String> {
     crate::plugins::check_plugin_capability(&state, &plugin_id, "fs:watch")?;
+    check_watcher_cap(&state, &plugin_id)?;
     let canonical = validate_within_home(&path)?;
 
     let watch_id = uuid::Uuid::new_v4().to_string();
@@ -577,20 +651,157 @@ async fn plugin_rename_path_inner(from: String, to: String) -> Result<(), String
 // / `deleteBuildArtifact`.
 // ---------------------------------------------------------------------------
 
-/// Known build-artifact directory names mapped to a language/tool kind.
-/// Shared by the scanner (which dirs to measure) and the delete guard (which
-/// names are removable). Generic names like `bin`/`obj` are .NET conventions;
-/// the delete guard's other conditions (inside a registered repo, not the repo
-/// root, `$HOME`-scoped) keep them from being a footgun.
-pub(crate) const ARTIFACT_DIRS: &[(&str, &str)] = &[
-    ("target", "rust"),
-    ("node_modules", "node"),
-    (".venv", "python"),
-    ("__pycache__", "python"),
-    ("obj", "dotnet"),
-    ("bin", "dotnet"),
-    (".gradle", "gradle"),
+/// How a name-matched artifact dir proves it is claimed by its toolchain.
+/// Generic names (`target`, `bin`, `build`, `vendor`, …) are ambiguous — they
+/// only count as artifacts when a marker file sits beside them, otherwise a Go
+/// sysroot `bin`, an Xcode `PIFCache/target`, or Rust `src/bin` SOURCES would
+/// be reported (and deletable) as artifacts.
+enum ArtifactMarker {
+    /// The dir name alone is unambiguous (e.g. `node_modules`, `__pycache__`).
+    Always,
+    /// Any of these exact filenames must exist beside the dir.
+    AnyFile(&'static [&'static str]),
+    /// A .NET project/solution file (`DOTNET_PROJECT_EXTS`) must exist beside it.
+    DotnetProject,
+}
+
+/// One scanner/delete-guard rule: a dir name (exact, or prefix for IDE-suffixed
+/// dirs like `cmake-build-debug`), the kind it maps to, and the marker required
+/// beside it. First matching rule wins (`classify_artifact`), so e.g. `target`
+/// resolves to `rust` or `maven` depending on which project file is present.
+struct ArtifactRule {
+    name: &'static str,
+    prefix: bool,
+    kind: &'static str,
+    marker: ArtifactMarker,
+}
+
+const fn rule(name: &'static str, kind: &'static str, marker: ArtifactMarker) -> ArtifactRule {
+    ArtifactRule {
+        name,
+        prefix: false,
+        kind,
+        marker,
+    }
+}
+
+/// File extensions marking a directory as a .NET project/solution root — a
+/// sibling `bin`/`obj` is then a build-artifact dir.
+const DOTNET_PROJECT_EXTS: &[&str] = &["csproj", "fsproj", "vbproj", "sln", "slnx"];
+
+const GRADLE_MARKERS: &[&str] = &[
+    "build.gradle",
+    "settings.gradle",
+    "build.gradle.kts",
+    "settings.gradle.kts",
 ];
+
+/// All scanner/delete-guard rules. Kinds MUST stay in sync with the
+/// build-cleaner plugin's `ALL_KINDS`/`KIND_LABELS` (`plugins/build-cleaner/main.js`).
+const ARTIFACT_RULES: &[ArtifactRule] = &[
+    rule("target", "rust", ArtifactMarker::AnyFile(&["Cargo.toml"])),
+    rule("target", "maven", ArtifactMarker::AnyFile(&["pom.xml"])),
+    rule("node_modules", "node", ArtifactMarker::Always),
+    rule(".next", "jscache", ArtifactMarker::Always),
+    rule(".nuxt", "jscache", ArtifactMarker::Always),
+    rule(".turbo", "jscache", ArtifactMarker::Always),
+    rule(".parcel-cache", "jscache", ArtifactMarker::Always),
+    rule(".svelte-kit", "jscache", ArtifactMarker::Always),
+    rule(".astro", "jscache", ArtifactMarker::Always),
+    rule(".venv", "python", ArtifactMarker::Always),
+    rule("__pycache__", "python", ArtifactMarker::Always),
+    rule(".pytest_cache", "python", ArtifactMarker::Always),
+    rule(".mypy_cache", "python", ArtifactMarker::Always),
+    rule(".ruff_cache", "python", ArtifactMarker::Always),
+    rule(".tox", "python", ArtifactMarker::Always),
+    rule("obj", "dotnet", ArtifactMarker::DotnetProject),
+    rule("bin", "dotnet", ArtifactMarker::DotnetProject),
+    rule(".gradle", "gradle", ArtifactMarker::Always),
+    rule("build", "gradle", ArtifactMarker::AnyFile(GRADLE_MARKERS)),
+    rule(
+        "build",
+        "cmake",
+        ArtifactMarker::AnyFile(&["CMakeLists.txt"]),
+    ),
+    rule(
+        "build",
+        "flutter",
+        ArtifactMarker::AnyFile(&["pubspec.yaml"]),
+    ),
+    ArtifactRule {
+        name: "cmake-build-",
+        prefix: true,
+        kind: "cmake",
+        marker: ArtifactMarker::AnyFile(&["CMakeLists.txt"]),
+    },
+    rule(
+        ".build",
+        "swift",
+        ArtifactMarker::AnyFile(&["Package.swift"]),
+    ),
+    rule("Pods", "swift", ArtifactMarker::AnyFile(&["Podfile"])),
+    rule(".dart_tool", "flutter", ArtifactMarker::Always),
+    rule(".terraform", "terraform", ArtifactMarker::Always),
+    rule("_build", "elixir", ArtifactMarker::Always),
+    rule("zig-out", "zig", ArtifactMarker::Always),
+    rule(".zig-cache", "zig", ArtifactMarker::Always),
+    rule(".stack-work", "haskell", ArtifactMarker::Always),
+    rule("dist-newstyle", "haskell", ArtifactMarker::Always),
+    rule("vendor", "php", ArtifactMarker::AnyFile(&["composer.json"])),
+];
+
+impl ArtifactRule {
+    fn matches_name(&self, name: &str) -> bool {
+        if self.prefix {
+            name.starts_with(self.name)
+        } else {
+            name == self.name
+        }
+    }
+}
+
+impl ArtifactMarker {
+    /// `files` are the names of the non-directory entries beside the candidate dir.
+    fn satisfied(&self, files: &[String]) -> bool {
+        match self {
+            ArtifactMarker::Always => true,
+            ArtifactMarker::AnyFile(names) => files.iter().any(|f| names.contains(&f.as_str())),
+            ArtifactMarker::DotnetProject => files.iter().any(|f| {
+                std::path::Path::new(f)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| DOTNET_PROJECT_EXTS.contains(&e))
+            }),
+        }
+    }
+}
+
+/// Names of the non-directory entries (files and symlinks — a symlinked
+/// `Cargo.toml` still marks a workspace) directly inside `dir`.
+fn file_names(dir: &std::path::Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter(|e| e.file_type().map(|t| !t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect()
+}
+
+/// Whether any rule matches this dir name (cheap pre-check before reading the
+/// parent's file list).
+fn name_matches_any_rule(name: &str) -> bool {
+    ARTIFACT_RULES.iter().any(|r| r.matches_name(name))
+}
+
+/// Resolve a name-matched dir to its kind, given the file names beside it.
+/// `None` means no rule's marker is satisfied — the dir is not an artifact.
+fn classify_artifact(name: &str, files: &[String]) -> Option<&'static str> {
+    ARTIFACT_RULES
+        .iter()
+        .find(|r| r.matches_name(name) && r.marker.satisfied(files))
+        .map(|r| r.kind)
+}
 
 /// Cap on scan-walk recursion into a repo (runaway backstop; real source trees
 /// are far shallower). Symlinked dirs are never followed, so cycles are impossible.
@@ -603,13 +814,199 @@ const MAX_SIZE_DEPTH: u8 = 64;
 /// One matched build-artifact directory: its absolute path, tool kind, total
 /// on-disk size, last-build age (max mtime of direct children, as Unix secs),
 /// and the repo root it was found under.
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct ArtifactEntry {
     pub path: String,
     pub kind: String,
     pub size_bytes: u64,
     pub last_modified_secs: u64,
     pub repo: String,
+}
+
+/// Reuse the expensive all-repo artifact walk across frontend reloads. A short
+/// TTL keeps filesystem changes fresh while covering HMR's repeated plugin
+/// `onload` calls. Explicit dashboard refreshes bypass ready entries.
+const BUILD_ARTIFACT_SCAN_TTL: Duration = Duration::from_secs(30);
+const BUILD_ARTIFACT_SCAN_MAX_READY: usize = 8;
+
+enum ArtifactScanCacheEntry {
+    Running {
+        invalidated: bool,
+    },
+    Ready {
+        completed_at: Instant,
+        last_accessed: Instant,
+        result: Vec<ArtifactEntry>,
+    },
+}
+
+struct ArtifactScanCache {
+    entries: parking_lot::Mutex<HashMap<Vec<PathBuf>, ArtifactScanCacheEntry>>,
+    changed: parking_lot::Condvar,
+    #[cfg(test)]
+    waiter_count: std::sync::atomic::AtomicUsize,
+}
+
+impl ArtifactScanCache {
+    fn new() -> Self {
+        Self {
+            entries: parking_lot::Mutex::new(HashMap::new()),
+            changed: parking_lot::Condvar::new(),
+            #[cfg(test)]
+            waiter_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn get_or_scan<F>(
+        &self,
+        key: Vec<PathBuf>,
+        ttl: Duration,
+        force_refresh: bool,
+        scan: F,
+    ) -> Vec<ArtifactEntry>
+    where
+        F: Fn() -> Vec<ArtifactEntry>,
+    {
+        let mut waited_for_running = false;
+
+        loop {
+            let mut entries = self.entries.lock();
+            if !waited_for_running {
+                Self::prune_expired(&mut entries, ttl);
+            }
+            match entries.get_mut(&key) {
+                Some(ArtifactScanCacheEntry::Running { .. }) => {
+                    waited_for_running = true;
+                    #[cfg(test)]
+                    self.waiter_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    self.changed.wait(&mut entries);
+                    #[cfg(test)]
+                    self.waiter_count
+                        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    continue;
+                }
+                Some(ArtifactScanCacheEntry::Ready {
+                    completed_at,
+                    last_accessed,
+                    result,
+                }) if waited_for_running || (!force_refresh && completed_at.elapsed() < ttl) => {
+                    *last_accessed = Instant::now();
+                    return result.clone();
+                }
+                _ => {
+                    entries.insert(
+                        key.clone(),
+                        ArtifactScanCacheEntry::Running { invalidated: false },
+                    );
+                    break;
+                }
+            }
+        }
+
+        loop {
+            // A panic must not leave the key permanently stuck in Running.
+            // Preserve it so spawn_blocking still reports its normal JoinError.
+            let scanned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&scan));
+            let mut entries = self.entries.lock();
+            match scanned {
+                Ok(result) => {
+                    if matches!(
+                        entries.get(&key),
+                        Some(ArtifactScanCacheEntry::Running { invalidated: true })
+                    ) {
+                        entries.insert(
+                            key.clone(),
+                            ArtifactScanCacheEntry::Running { invalidated: false },
+                        );
+                        drop(entries);
+                        continue;
+                    }
+
+                    let now = Instant::now();
+                    entries.insert(
+                        key.clone(),
+                        ArtifactScanCacheEntry::Ready {
+                            completed_at: now,
+                            last_accessed: now,
+                            result: result.clone(),
+                        },
+                    );
+                    Self::enforce_ready_bound(&mut entries);
+                    self.changed.notify_all();
+                    return result;
+                }
+                Err(payload) => {
+                    entries.remove(&key);
+                    self.changed.notify_all();
+                    drop(entries);
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }
+    }
+
+    fn prune_expired(entries: &mut HashMap<Vec<PathBuf>, ArtifactScanCacheEntry>, ttl: Duration) {
+        entries.retain(|_, entry| match entry {
+            ArtifactScanCacheEntry::Running { .. } => true,
+            ArtifactScanCacheEntry::Ready { completed_at, .. } => completed_at.elapsed() < ttl,
+        });
+    }
+
+    fn enforce_ready_bound(entries: &mut HashMap<Vec<PathBuf>, ArtifactScanCacheEntry>) {
+        while entries
+            .values()
+            .filter(|entry| matches!(entry, ArtifactScanCacheEntry::Ready { .. }))
+            .count()
+            > BUILD_ARTIFACT_SCAN_MAX_READY
+        {
+            let oldest = entries
+                .iter()
+                .filter_map(|(key, entry)| match entry {
+                    ArtifactScanCacheEntry::Ready { last_accessed, .. } => {
+                        Some((key.clone(), *last_accessed))
+                    }
+                    ArtifactScanCacheEntry::Running { .. } => None,
+                })
+                .min_by_key(|(_, last_accessed)| *last_accessed)
+                .map(|(key, _)| key);
+            if let Some(key) = oldest {
+                entries.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn invalidate_path(&self, path: &std::path::Path) {
+        let mut entries = self.entries.lock();
+        entries.retain(|roots, entry| {
+            if !roots.iter().any(|root| path.starts_with(root)) {
+                return true;
+            }
+            match entry {
+                ArtifactScanCacheEntry::Running { invalidated } => {
+                    *invalidated = true;
+                    true
+                }
+                ArtifactScanCacheEntry::Ready { .. } => false,
+            }
+        });
+    }
+
+    #[cfg(test)]
+    fn wait_until_waiter_is_blocked(&self) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while self.waiter_count.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "expected a blocked cache waiter");
+            std::thread::yield_now();
+        }
+    }
+}
+
+fn artifact_scan_cache() -> &'static ArtifactScanCache {
+    static CACHE: OnceLock<ArtifactScanCache> = OnceLock::new();
+    CACHE.get_or_init(ArtifactScanCache::new)
 }
 
 /// Recursively sum sizes of regular files under `dir`. Does not follow symlinks
@@ -673,7 +1070,9 @@ fn measure(dir: &std::path::Path, kind: &str, repo: &str) -> ArtifactEntry {
 /// Recursively find build-artifact directories under `dir`. On a match, the dir
 /// is summed whole and NOT descended into (stop-at-match), so a `node_modules`
 /// nested inside another is folded into the outer entry — never double counted.
-/// Skips `.git` and symlinked dirs; per-dir read errors are non-fatal.
+/// Ambiguously-named matches (`target`, `bin`, `build`, …) require a marker
+/// file beside them (`classify_artifact`); unclaimed ones are walked like any
+/// other dir. Skips `.git` and symlinked dirs; per-dir read errors are non-fatal.
 fn walk_artifacts(dir: &std::path::Path, repo: &str, depth: u8, out: &mut Vec<ArtifactEntry>) {
     if depth == 0 {
         return;
@@ -681,6 +1080,8 @@ fn walk_artifacts(dir: &std::path::Path, repo: &str, depth: u8, out: &mut Vec<Ar
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
+    // Sibling file names, computed lazily once per dir — only when a rule name matches.
+    let mut files: Option<Vec<String>> = None;
     for e in rd.flatten() {
         let Ok(ft) = e.file_type() else { continue };
         if !ft.is_dir() || ft.is_symlink() {
@@ -691,47 +1092,116 @@ fn walk_artifacts(dir: &std::path::Path, repo: &str, depth: u8, out: &mut Vec<Ar
             continue;
         }
         let p = e.path();
-        if let Some((_, kind)) = ARTIFACT_DIRS.iter().find(|(n, _)| *n == name) {
-            out.push(measure(&p, kind, repo));
-        } else {
-            walk_artifacts(&p, repo, depth - 1, out);
+        if name_matches_any_rule(&name) {
+            let files = files.get_or_insert_with(|| file_names(dir));
+            if let Some(kind) = classify_artifact(&name, files) {
+                out.push(measure(&p, kind, repo));
+                continue;
+            }
         }
+        walk_artifacts(&p, repo, depth - 1, out);
     }
 }
 
+/// Load the backend's actual registered repository roots — the `repos` map
+/// key in `repositories.json` (schema owned by the frontend; see
+/// `src/stores/repositories.ts`), canonicalized. Entries that fail to
+/// canonicalize (moved, unmounted, never existed) are dropped, not fatal —
+/// matches the silent-drop behavior for invalid caller-supplied roots
+/// elsewhere in this module.
+fn registered_repo_roots() -> Vec<PathBuf> {
+    crate::config::load_repositories()
+        .get("repos")
+        .and_then(|r| r.as_object())
+        .map(|obj| {
+            obj.keys()
+                .filter_map(|p| PathBuf::from(p).canonicalize().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Canonicalize, authorize, sort, and deduplicate the requested roots. The
+/// resulting exact path set is the scan-cache key, so argument order and
+/// duplicates share work while a changed registered path set does not.
+fn normalized_scan_roots(repo_paths: &[String]) -> Vec<PathBuf> {
+    let registered = registered_repo_roots();
+    normalize_root_set(
+        repo_paths
+            .iter()
+            .filter_map(|raw| validate_within_home(raw).ok())
+            .filter(|root| is_within_registered_repo(root, &registered))
+            .collect(),
+    )
+}
+
+fn normalize_root_set(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+/// Whether `path` is itself a genuinely registered repo root, or nested
+/// inside one. Guards `fs:scan`/`fs:delete` against a plugin widening its
+/// containment by passing an arbitrary `repo_paths` entry (e.g. `$HOME`)
+/// that was never actually registered with the app — `repo_paths` is
+/// caller-supplied and must not be trusted as a containment root on its own.
+fn is_within_registered_repo(path: &std::path::Path, registered: &[PathBuf]) -> bool {
+    registered.iter().any(|r| path.starts_with(r))
+}
+
 /// Scan registered repo roots for build-artifact directories. Read-only; gated
-/// by `fs:scan`. Each repo path is `validate_within_home`'d; a repo that fails
-/// validation (moved, unmounted, outside `$HOME`) is skipped, not fatal.
+/// by `fs:scan`. Each repo path is `validate_within_home`'d, then intersected
+/// with the backend's actual registered repositories (`registered_repo_roots`)
+/// — a caller-supplied root that isn't backed by a real registered repo is
+/// skipped, not fatal, same as one that fails `$HOME` validation.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub async fn scan_build_artifacts(
     repo_paths: Vec<String>,
     plugin_id: String,
+    force_refresh: Option<bool>,
     state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
 ) -> Result<Vec<ArtifactEntry>, String> {
-    scan_build_artifacts_impl(&state, repo_paths, plugin_id).await
+    scan_build_artifacts_impl(
+        &state,
+        repo_paths,
+        plugin_id,
+        force_refresh.unwrap_or(false),
+    )
+    .await
 }
 
 pub(crate) async fn scan_build_artifacts_impl(
     state: &std::sync::Arc<crate::AppState>,
     repo_paths: Vec<String>,
     plugin_id: String,
+    force_refresh: bool,
 ) -> Result<Vec<ArtifactEntry>, String> {
     crate::plugins::check_plugin_capability(state, &plugin_id, "fs:scan")?;
-    scan_build_artifacts_inner(repo_paths).await
+    scan_build_artifacts_inner(repo_paths, force_refresh).await
 }
 
-async fn scan_build_artifacts_inner(repo_paths: Vec<String>) -> Result<Vec<ArtifactEntry>, String> {
+async fn scan_build_artifacts_inner(
+    repo_paths: Vec<String>,
+    force_refresh: bool,
+) -> Result<Vec<ArtifactEntry>, String> {
     spawn_blocking_fs(move || {
-        let mut out = Vec::new();
-        for raw in &repo_paths {
-            let Ok(root) = validate_within_home(raw) else {
-                continue;
-            };
-            let repo = root.to_string_lossy().to_string();
-            walk_artifacts(&root, &repo, MAX_SCAN_DEPTH, &mut out);
-        }
-        Ok(out)
+        let roots = normalized_scan_roots(&repo_paths);
+        let key = roots.clone();
+        Ok(artifact_scan_cache().get_or_scan(
+            key,
+            BUILD_ARTIFACT_SCAN_TTL,
+            force_refresh,
+            move || {
+                let mut out = Vec::new();
+                for root in &roots {
+                    let repo = root.to_string_lossy().to_string();
+                    walk_artifacts(root, &repo, MAX_SCAN_DEPTH, &mut out);
+                }
+                out
+            },
+        ))
     })
     .await
 }
@@ -747,19 +1217,26 @@ async fn scan_build_artifacts_inner(repo_paths: Vec<String>) -> Result<Vec<Artif
 /// Guard for a destructive `remove_dir_all`. ALL conditions must hold, or the
 /// path is refused. Canonicalizes first so a symlink pointing outside a repo
 /// resolves to its real location and fails containment:
-///   1. basename is a known artifact dir name (`ARTIFACT_DIRS`);
-///   2. strictly inside one of the caller-supplied registered repo roots
-///      (`starts_with` a root AND not equal to it — never delete a repo root).
+///   1. basename matches a known artifact rule name (`ARTIFACT_RULES`);
+///   2. strictly inside one of `repo_roots` (`starts_with` a root AND not
+///      equal to it — never delete a repo root);
+///   3. for ambiguous names (`target`, `bin`, `build`, …), a marker file sits
+///      beside the dir (`classify_artifact`) — refuses e.g. Rust `src/bin` sources.
 ///
-/// `$HOME` scoping is enforced separately by `validate_within_home` on both the
-/// target and each repo root before this runs (defense in depth).
+/// `repo_roots` is caller-supplied (`repo_paths`) but is NOT trusted as-is:
+/// the caller (`delete_build_artifact_inner`) intersects it with the backend's
+/// actual registered repositories (`registered_repo_roots`) before it reaches
+/// here, so a plugin cannot widen containment by passing an arbitrary root
+/// (e.g. `$HOME`) that was never really registered. `$HOME` scoping is
+/// enforced separately by `validate_within_home` on both the target and each
+/// repo root before this runs (defense in depth).
 fn assert_deletable(path: &std::path::Path, repo_roots: &[PathBuf]) -> Result<(), String> {
     let c = path
         .canonicalize()
         .map_err(|e| format!("Failed to resolve path: {e}"))?;
 
     let name = c.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if !ARTIFACT_DIRS.iter().any(|(n, _)| *n == name) {
+    if !name_matches_any_rule(name) {
         return Err(format!(
             "Refusing to delete: '{name}' is not a build-artifact dir"
         ));
@@ -770,11 +1247,19 @@ fn assert_deletable(path: &std::path::Path, repo_roots: &[PathBuf]) -> Result<()
         return Err("Refusing to delete: path is outside all registered repos".into());
     }
 
+    let files = c.parent().map(file_names).unwrap_or_default();
+    if classify_artifact(name, &files).is_none() {
+        return Err(format!(
+            "Refusing to delete: '{name}' has no matching project file beside it"
+        ));
+    }
+
     Ok(())
 }
 
 /// Delete a build-artifact directory. Destructive; gated by `fs:delete`. The
-/// target and every repo root are `validate_within_home`'d, then `assert_deletable`
+/// target and every repo root are `validate_within_home`'d and intersected
+/// with the backend's actual registered repositories, then `assert_deletable`
 /// enforces the artifact-name + strict-containment guard before `remove_dir_all`.
 #[cfg(feature = "desktop")]
 #[tauri::command]
@@ -802,19 +1287,27 @@ async fn delete_build_artifact_inner(path: String, repo_paths: Vec<String>) -> R
         // $HOME scope + canonicalization of the target.
         let canonical = validate_within_home(&path)?;
 
-        // Canonicalize each registered repo root (resolves symlinks so
-        // containment is compared apples-to-apples). Roots that fail validation
-        // are dropped, not fatal — a stale repo entry can't widen the guard.
+        // Canonicalize each caller-supplied repo root (resolves symlinks so
+        // containment is compared apples-to-apples), then keep only those that
+        // are actually backed by a registered repository (`registered_repo_roots`)
+        // — a plugin cannot widen containment by passing an arbitrary root
+        // (e.g. `$HOME`) that was never really registered with the app. Roots
+        // that fail validation or aren't registered are dropped, not fatal.
+        let registered = registered_repo_roots();
         let mut roots = Vec::new();
         for r in &repo_paths {
-            if let Ok(rc) = validate_within_home(r) {
+            if let Ok(rc) = validate_within_home(r)
+                && is_within_registered_repo(&rc, &registered)
+            {
                 roots.push(rc);
             }
         }
 
         assert_deletable(&canonical, &roots)?;
 
-        std::fs::remove_dir_all(&canonical).map_err(|e| format!("Failed to remove: {e}"))
+        std::fs::remove_dir_all(&canonical).map_err(|e| format!("Failed to remove: {e}"))?;
+        artifact_scan_cache().invalidate_path(&canonical);
+        Ok(())
     })
     .await
 }
@@ -1122,6 +1615,7 @@ mod tests {
     fn scan_build_artifacts_finds_known_dirs_only() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        std::fs::write(root.join("Cargo.toml"), b"[package]").unwrap();
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("target/a.o"), vec![0u8; 100]).unwrap();
         std::fs::create_dir_all(root.join("node_modules")).unwrap();
@@ -1177,6 +1671,7 @@ mod tests {
     fn scan_build_artifacts_sums_sizes_recursively() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        std::fs::write(root.join("Cargo.toml"), b"[package]").unwrap();
         let t = root.join("target");
         std::fs::create_dir_all(t.join("debug/deps")).unwrap();
         std::fs::write(t.join("f1"), vec![0u8; 10]).unwrap();
@@ -1187,6 +1682,168 @@ mod tests {
         walk_artifacts(root, "repo", MAX_SCAN_DEPTH, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].size_bytes, 60);
+    }
+
+    #[test]
+    fn scan_claims_bin_obj_only_with_dotnet_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // .NET project root: bin + obj beside a .csproj → both claimed.
+        std::fs::write(root.join("app.csproj"), b"<Project/>").unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/app.dll"), vec![0u8; 10]).unwrap();
+        std::fs::create_dir_all(root.join("obj")).unwrap();
+        std::fs::write(root.join("obj/app.o"), vec![0u8; 10]).unwrap();
+        // Go-style sysroot bin with NO marker → not claimed, but still walked:
+        // a real artifact nested inside must surface.
+        std::fs::create_dir_all(root.join("sysroot/bin/__pycache__")).unwrap();
+        std::fs::write(root.join("sysroot/bin/python3"), vec![0u8; 10]).unwrap();
+        std::fs::write(root.join("sysroot/bin/__pycache__/m.pyc"), vec![0u8; 5]).unwrap();
+
+        let mut out = Vec::new();
+        walk_artifacts(root, "repo", MAX_SCAN_DEPTH, &mut out);
+
+        let paths: Vec<_> = out.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            out.iter().any(|e| e.path.ends_with("/bin")
+                && e.kind == "dotnet"
+                && !e.path.contains("sysroot")),
+            "got {paths:?}"
+        );
+        assert!(
+            out.iter()
+                .any(|e| e.path.ends_with("/obj") && e.kind == "dotnet"),
+            "got {paths:?}"
+        );
+        assert!(
+            !out.iter().any(|e| e.path.ends_with("sysroot/bin")),
+            "unmarked bin must not be claimed: {paths:?}"
+        );
+        assert!(
+            out.iter().any(|e| e.path.ends_with("__pycache__")),
+            "nested artifact inside unmarked bin must be found: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn scan_ignores_target_without_cargo_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Xcode-style dir named `target` with no Cargo.toml beside it.
+        std::fs::create_dir_all(root.join("PIFCache/target")).unwrap();
+        std::fs::write(root.join("PIFCache/target/x"), vec![0u8; 10]).unwrap();
+
+        let mut out = Vec::new();
+        walk_artifacts(root, "repo", MAX_SCAN_DEPTH, &mut out);
+        assert!(
+            out.is_empty(),
+            "got {:?}",
+            out.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn scan_classifies_target_by_project_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Maven repo: target + pom.xml → kind "maven", not "rust".
+        std::fs::write(root.join("pom.xml"), b"<project/>").unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/app.jar"), vec![0u8; 10]).unwrap();
+
+        let mut out = Vec::new();
+        walk_artifacts(root, "repo", MAX_SCAN_DEPTH, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, "maven");
+    }
+
+    #[test]
+    fn scan_claims_build_dir_by_marker_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Gradle module: build/ beside build.gradle → claimed as gradle.
+        let gradle = root.join("app");
+        std::fs::create_dir_all(gradle.join("build")).unwrap();
+        std::fs::write(gradle.join("build.gradle"), b"").unwrap();
+        std::fs::write(gradle.join("build/out.class"), vec![0u8; 10]).unwrap();
+        // CMake project: build/ beside CMakeLists.txt → claimed as cmake.
+        let cmake = root.join("native");
+        std::fs::create_dir_all(cmake.join("build")).unwrap();
+        std::fs::write(cmake.join("CMakeLists.txt"), b"").unwrap();
+        // CLion variant: cmake-build-debug (prefix rule).
+        std::fs::create_dir_all(cmake.join("cmake-build-debug")).unwrap();
+        // Unmarked build/ (e.g. a JS project's committed output) → NOT claimed,
+        // but a nested artifact inside must still surface.
+        let plain = root.join("web");
+        std::fs::create_dir_all(plain.join("build/__pycache__")).unwrap();
+
+        let mut out = Vec::new();
+        walk_artifacts(root, "repo", MAX_SCAN_DEPTH, &mut out);
+
+        let kind_of = |suffix: &str| {
+            out.iter()
+                .find(|e| e.path.ends_with(suffix))
+                .map(|e| e.kind.clone())
+        };
+        assert_eq!(kind_of("app/build").as_deref(), Some("gradle"));
+        assert_eq!(kind_of("native/build").as_deref(), Some("cmake"));
+        assert_eq!(kind_of("cmake-build-debug").as_deref(), Some("cmake"));
+        assert_eq!(
+            kind_of("web/build"),
+            None,
+            "unmarked build must not be claimed"
+        );
+        assert_eq!(kind_of("__pycache__").as_deref(), Some("python"));
+    }
+
+    #[test]
+    fn scan_claims_vendor_only_with_composer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let php = root.join("php-app");
+        std::fs::create_dir_all(php.join("vendor")).unwrap();
+        std::fs::write(php.join("composer.json"), b"{}").unwrap();
+        // Go-style committed vendor without composer.json → not claimed.
+        let go = root.join("go-app");
+        std::fs::create_dir_all(go.join("vendor")).unwrap();
+        std::fs::write(go.join("go.mod"), b"module x").unwrap();
+
+        let mut out = Vec::new();
+        walk_artifacts(root, "repo", MAX_SCAN_DEPTH, &mut out);
+        assert_eq!(
+            out.len(),
+            1,
+            "got {:?}",
+            out.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+        assert!(out[0].path.ends_with("php-app/vendor"));
+        assert_eq!(out[0].kind, "php");
+    }
+
+    #[test]
+    fn scan_finds_unconditional_cache_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for d in [
+            ".pytest_cache",
+            ".next",
+            ".terraform",
+            "_build",
+            "zig-out",
+            ".stack-work",
+        ] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("x"), vec![0u8; 1]).unwrap();
+        }
+
+        let mut out = Vec::new();
+        walk_artifacts(root, "repo", MAX_SCAN_DEPTH, &mut out);
+        let mut kinds: Vec<_> = out.iter().map(|e| e.kind.as_str()).collect();
+        kinds.sort_unstable();
+        assert_eq!(
+            kinds,
+            vec!["elixir", "haskell", "jscache", "python", "terraform", "zig"]
+        );
     }
 
     #[test]
@@ -1207,18 +1864,374 @@ mod tests {
         let _guard = set_home_dir_override(tmp.path().to_path_buf());
         let repo = tmp.path().join("myrepo");
         std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), b"[package]").unwrap();
         std::fs::write(repo.join("target/x"), vec![0u8; 42]).unwrap();
+
+        // Register `repo` so it passes the registered-repo intersection.
+        let _config_guard = crate::config::set_config_dir_override(tmp.path().join("cfg"));
+        crate::config::save_repositories(serde_json::json!({
+            "repos": { repo.to_string_lossy().to_string(): {} }
+        }))
+        .unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let out = rt
-            .block_on(scan_build_artifacts_inner(vec![
-                repo.to_string_lossy().to_string(),
-                "/outside/home/repo".to_string(), // invalid → skipped, not fatal
-            ]))
+            .block_on(scan_build_artifacts_inner(
+                vec![
+                    repo.to_string_lossy().to_string(),
+                    "/outside/home/repo".to_string(), // invalid → skipped, not fatal
+                ],
+                false,
+            ))
             .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].size_bytes, 42);
         assert_eq!(out[0].kind, "rust");
+    }
+
+    #[test]
+    fn scan_build_artifacts_inner_rejects_unregistered_repo_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = set_home_dir_override(tmp.path().to_path_buf());
+        let repo = tmp.path().join("myrepo");
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), b"[package]").unwrap();
+        std::fs::write(repo.join("target/x"), vec![0u8; 42]).unwrap();
+
+        // No repos registered — even though `repo` is a valid $HOME-scoped
+        // path, it must be skipped because it was never actually registered.
+        let _config_guard = crate::config::set_config_dir_override(tmp.path().join("cfg"));
+        crate::config::save_repositories(serde_json::json!({ "repos": {} })).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let out = rt
+            .block_on(scan_build_artifacts_inner(
+                vec![repo.to_string_lossy().to_string()],
+                false,
+            ))
+            .unwrap();
+        assert!(out.is_empty(), "unregistered repo path must be skipped");
+    }
+
+    fn cached_artifact(label: &str) -> Vec<ArtifactEntry> {
+        vec![ArtifactEntry {
+            path: format!("/{label}"),
+            kind: "test".into(),
+            size_bytes: 1,
+            last_modified_secs: 1,
+            repo: "/repo".into(),
+        }]
+    }
+
+    #[test]
+    fn artifact_scan_cache_deduplicates_concurrent_scan() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(ArtifactScanCache::new());
+        let scans = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let key = vec![PathBuf::from("/repo")];
+
+        let first = {
+            let cache = Arc::clone(&cache);
+            let scans = Arc::clone(&scans);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let key = key.clone();
+            std::thread::spawn(move || {
+                cache.get_or_scan(key, Duration::from_secs(60), false, || {
+                    scans.fetch_add(1, Ordering::SeqCst);
+                    entered.wait();
+                    release.wait();
+                    cached_artifact("shared")
+                })
+            })
+        };
+
+        entered.wait();
+        let second = {
+            let cache = Arc::clone(&cache);
+            let scans = Arc::clone(&scans);
+            let key = key.clone();
+            std::thread::spawn(move || {
+                cache.get_or_scan(key, Duration::from_secs(60), false, || {
+                    scans.fetch_add(1, Ordering::SeqCst);
+                    cached_artifact("duplicate")
+                })
+            })
+        };
+        cache.wait_until_waiter_is_blocked();
+        release.wait();
+
+        assert_eq!(first.join().unwrap()[0].path, "/shared");
+        assert_eq!(second.join().unwrap()[0].path, "/shared");
+        assert_eq!(scans.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn artifact_scan_cache_reuses_fresh_ttl_result() {
+        let cache = ArtifactScanCache::new();
+        let key = vec![PathBuf::from("/repo")];
+        let scans = std::sync::atomic::AtomicUsize::new(0);
+
+        let first = cache.get_or_scan(key.clone(), Duration::from_secs(60), false, || {
+            scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            cached_artifact("first")
+        });
+        let second = cache.get_or_scan(key, Duration::from_secs(60), false, || {
+            scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            cached_artifact("second")
+        });
+
+        assert_eq!(first[0].path, "/first");
+        assert_eq!(second[0].path, "/first");
+        assert_eq!(scans.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn artifact_scan_cache_key_change_runs_new_scan() {
+        let cache = ArtifactScanCache::new();
+        let scans = std::sync::atomic::AtomicUsize::new(0);
+
+        cache.get_or_scan(
+            vec![PathBuf::from("/repo-a")],
+            Duration::from_secs(60),
+            false,
+            || {
+                scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                cached_artifact("a")
+            },
+        );
+        let changed = cache.get_or_scan(
+            vec![PathBuf::from("/repo-b")],
+            Duration::from_secs(60),
+            false,
+            || {
+                scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                cached_artifact("b")
+            },
+        );
+
+        assert_eq!(changed[0].path, "/b");
+        assert_eq!(scans.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn artifact_scan_cache_force_refresh_bypasses_ready_result() {
+        let cache = ArtifactScanCache::new();
+        let key = vec![PathBuf::from("/repo")];
+
+        cache.get_or_scan(key.clone(), Duration::from_secs(60), false, || {
+            cached_artifact("cached")
+        });
+        let refreshed = cache.get_or_scan(key, Duration::from_secs(60), true, || {
+            cached_artifact("refreshed")
+        });
+
+        assert_eq!(refreshed[0].path, "/refreshed");
+    }
+
+    #[test]
+    fn artifact_scan_cache_expired_result_is_pruned() {
+        let cache = ArtifactScanCache::new();
+        let key = vec![PathBuf::from("/repo")];
+
+        cache.get_or_scan(key.clone(), Duration::from_secs(60), false, || {
+            cached_artifact("expired")
+        });
+        let fresh = cache.get_or_scan(key, Duration::ZERO, false, || cached_artifact("fresh"));
+
+        assert_eq!(fresh[0].path, "/fresh");
+        assert_eq!(cache.entries.lock().len(), 1);
+    }
+
+    #[test]
+    fn artifact_scan_cache_bounds_ready_entries() {
+        let cache = ArtifactScanCache::new();
+        let running_key = vec![PathBuf::from("/running")];
+        cache.entries.lock().insert(
+            running_key.clone(),
+            ArtifactScanCacheEntry::Running { invalidated: false },
+        );
+        for index in 0..(BUILD_ARTIFACT_SCAN_MAX_READY + 3) {
+            cache.get_or_scan(
+                vec![PathBuf::from(format!("/repo-{index}"))],
+                Duration::from_secs(60),
+                false,
+                || cached_artifact(&index.to_string()),
+            );
+        }
+
+        let entries = cache.entries.lock();
+        assert_eq!(
+            entries
+                .values()
+                .filter(|entry| matches!(entry, ArtifactScanCacheEntry::Ready { .. }))
+                .count(),
+            BUILD_ARTIFACT_SCAN_MAX_READY
+        );
+        assert!(matches!(
+            entries.get(&running_key),
+            Some(ArtifactScanCacheEntry::Running { .. })
+        ));
+    }
+
+    #[test]
+    fn artifact_scan_cache_panic_wakes_waiter_and_allows_recovery() {
+        let cache = Arc::new(ArtifactScanCache::new());
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let key = vec![PathBuf::from("/repo")];
+
+        let first = {
+            let cache = Arc::clone(&cache);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let key = key.clone();
+            std::thread::spawn(move || {
+                cache.get_or_scan(key, Duration::from_secs(60), false, || {
+                    entered.wait();
+                    release.wait();
+                    panic!("scan failed");
+                })
+            })
+        };
+
+        entered.wait();
+        let waiter = {
+            let cache = Arc::clone(&cache);
+            let key = key.clone();
+            std::thread::spawn(move || {
+                cache.get_or_scan(key, Duration::from_secs(60), false, || {
+                    cached_artifact("recovered")
+                })
+            })
+        };
+        cache.wait_until_waiter_is_blocked();
+        release.wait();
+
+        assert!(first.join().is_err());
+        assert_eq!(waiter.join().unwrap()[0].path, "/recovered");
+        assert!(matches!(
+            cache.entries.lock().get(&key),
+            Some(ArtifactScanCacheEntry::Ready { .. })
+        ));
+    }
+
+    #[test]
+    fn normalized_scan_key_ignores_order_and_duplicates() {
+        let a = PathBuf::from("/repo-a");
+        let b = PathBuf::from("/repo-b");
+        assert_eq!(
+            normalize_root_set(vec![b.clone(), a.clone(), a.clone()]),
+            normalize_root_set(vec![a, b])
+        );
+    }
+
+    #[test]
+    fn artifact_scan_cache_concurrent_forced_waiter_shares_refresh() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(ArtifactScanCache::new());
+        let key = vec![PathBuf::from("/repo")];
+        cache.get_or_scan(key.clone(), Duration::from_secs(60), false, || {
+            cached_artifact("old")
+        });
+
+        let scans = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let first = {
+            let cache = Arc::clone(&cache);
+            let scans = Arc::clone(&scans);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let key = key.clone();
+            std::thread::spawn(move || {
+                cache.get_or_scan(key, Duration::from_secs(60), true, || {
+                    scans.fetch_add(1, Ordering::SeqCst);
+                    entered.wait();
+                    release.wait();
+                    cached_artifact("forced")
+                })
+            })
+        };
+
+        entered.wait();
+        let waiter = {
+            let cache = Arc::clone(&cache);
+            let scans = Arc::clone(&scans);
+            let key = key.clone();
+            std::thread::spawn(move || {
+                cache.get_or_scan(key, Duration::from_secs(60), true, || {
+                    scans.fetch_add(1, Ordering::SeqCst);
+                    cached_artifact("duplicate-force")
+                })
+            })
+        };
+        cache.wait_until_waiter_is_blocked();
+        release.wait();
+
+        assert_eq!(first.join().unwrap()[0].path, "/forced");
+        assert_eq!(waiter.join().unwrap()[0].path, "/forced");
+        assert_eq!(scans.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn artifact_scan_cache_invalidation_discards_running_result() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = Arc::new(ArtifactScanCache::new());
+        let scans = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker = {
+            let cache = Arc::clone(&cache);
+            let scans = Arc::clone(&scans);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                cache.get_or_scan(
+                    vec![PathBuf::from("/repo")],
+                    Duration::from_secs(60),
+                    false,
+                    || {
+                        let attempt = scans.fetch_add(1, Ordering::SeqCst);
+                        if attempt == 0 {
+                            entered.wait();
+                            release.wait();
+                            cached_artifact("stale")
+                        } else {
+                            cached_artifact("fresh")
+                        }
+                    },
+                )
+            })
+        };
+
+        entered.wait();
+        cache.invalidate_path(Path::new("/repo/target"));
+        release.wait();
+
+        assert_eq!(worker.join().unwrap()[0].path, "/fresh");
+        assert_eq!(scans.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn artifact_scan_cache_invalidation_removes_ready_result() {
+        let cache = ArtifactScanCache::new();
+        let key = vec![PathBuf::from("/repo")];
+        cache.get_or_scan(key.clone(), Duration::from_secs(60), false, || {
+            cached_artifact("deleted")
+        });
+
+        cache.invalidate_path(Path::new("/repo/target"));
+        let result = cache.get_or_scan(key, Duration::from_secs(60), false, || {
+            cached_artifact("after-delete")
+        });
+
+        assert_eq!(result[0].path, "/after-delete");
     }
 
     // -- delete_build_artifact tests --
@@ -1229,6 +2242,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         let target = repo.join("target");
         std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), b"[package]").unwrap();
         let roots = vec![repo.canonicalize().unwrap()];
 
         assert!(assert_deletable(&target, &roots).is_ok());
@@ -1261,6 +2275,49 @@ mod tests {
     }
 
     #[test]
+    fn delete_build_artifact_rejects_bin_without_dotnet_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        // Rust convention: `src/bin` holds SOURCE files — must never be deletable.
+        let bin = repo.join("src/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("main.rs"), b"fn main() {}").unwrap();
+        let roots = vec![repo.canonicalize().unwrap()];
+
+        let err = assert_deletable(&bin, &roots).unwrap_err();
+        assert!(err.contains("project file"), "got: {err}");
+    }
+
+    #[test]
+    fn delete_build_artifact_accepts_bin_with_csproj_beside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let bin = repo.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(repo.join("app.csproj"), b"<Project/>").unwrap();
+        let roots = vec![repo.canonicalize().unwrap()];
+
+        assert!(assert_deletable(&bin, &roots).is_ok());
+    }
+
+    #[test]
+    fn delete_build_artifact_respects_new_kind_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        // Gradle build/ with marker → deletable; bare build/ → refused.
+        let marked = repo.join("app");
+        std::fs::create_dir_all(marked.join("build")).unwrap();
+        std::fs::write(marked.join("settings.gradle"), b"").unwrap();
+        let bare = repo.join("web");
+        std::fs::create_dir_all(bare.join("build")).unwrap();
+        let roots = vec![repo.canonicalize().unwrap()];
+
+        assert!(assert_deletable(&marked.join("build"), &roots).is_ok());
+        let err = assert_deletable(&bare.join("build"), &roots).unwrap_err();
+        assert!(err.contains("project file"), "got: {err}");
+    }
+
+    #[test]
     fn delete_build_artifact_rejects_repo_root_itself() {
         let tmp = tempfile::tempdir().unwrap();
         // Repo root whose own name happens to be a known artifact name — the
@@ -1269,7 +2326,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let root = repo.canonicalize().unwrap();
 
-        let err = assert_deletable(&root, &[root.clone()]).unwrap_err();
+        let err = assert_deletable(&root, std::slice::from_ref(&root)).unwrap_err();
         assert!(err.contains("outside"), "got: {err}");
     }
 
@@ -1299,7 +2356,29 @@ mod tests {
         let repo = tmp.path().join("repo");
         let target = repo.join("target");
         std::fs::create_dir_all(target.join("debug")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), b"[package]").unwrap();
         std::fs::write(target.join("debug/artifact.o"), vec![0u8; 10]).unwrap();
+
+        // Register `repo` so it passes the registered-repo intersection.
+        let _config_guard = crate::config::set_config_dir_override(tmp.path().join("cfg"));
+        crate::config::save_repositories(serde_json::json!({
+            "repos": { repo.to_string_lossy().to_string(): {} }
+        }))
+        .unwrap();
+
+        let cache_key = vec![repo.canonicalize().unwrap()];
+        artifact_scan_cache().get_or_scan(
+            cache_key.clone(),
+            Duration::from_secs(60),
+            false,
+            || cached_artifact("before-delete"),
+        );
+        assert!(
+            artifact_scan_cache()
+                .entries
+                .lock()
+                .contains_key(&cache_key)
+        );
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(delete_build_artifact_inner(
@@ -1309,6 +2388,13 @@ mod tests {
         assert!(result.is_ok(), "delete failed: {:?}", result);
         assert!(!target.exists(), "target should be removed");
         assert!(repo.exists(), "repo root must survive");
+        assert!(
+            !artifact_scan_cache()
+                .entries
+                .lock()
+                .contains_key(&cache_key),
+            "successful deletion must invalidate the affected cached scan"
+        );
     }
 
     #[test]
@@ -1323,5 +2409,94 @@ mod tests {
             ));
             assert!(result.is_err());
         }
+    }
+
+    /// SEC-1: a plugin must not be able to widen `fs:delete` containment by
+    /// passing an unregistered `$HOME` subdir (or `$HOME` itself) as a
+    /// `repo_path`. Only genuinely registered repos (`repositories.json`)
+    /// may act as containment roots — a caller-supplied root that was never
+    /// registered is dropped, so the delete is refused even though the
+    /// target is a real, correctly-named build-artifact dir under `$HOME`.
+    #[test]
+    fn delete_build_artifact_inner_rejects_unregistered_repo_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = set_home_dir_override(tmp.path().to_path_buf());
+
+        // A legitimately registered repo that does NOT contain the target.
+        let registered_repo = tmp.path().join("registered-repo");
+        std::fs::create_dir_all(&registered_repo).unwrap();
+        let _config_guard = crate::config::set_config_dir_override(tmp.path().join("cfg"));
+        crate::config::save_repositories(serde_json::json!({
+            "repos": { registered_repo.to_string_lossy().to_string(): {} }
+        }))
+        .unwrap();
+
+        // A real `node_modules` dir sitting under an UNregistered $HOME subdir.
+        let unregistered_project = tmp.path().join("unregistered-project");
+        let target = unregistered_project.join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // The plugin lies about repo_paths, claiming the entire $HOME is a
+        // "repo root" to widen containment.
+        let result = rt.block_on(delete_build_artifact_inner(
+            target.to_string_lossy().to_string(),
+            vec![tmp.path().to_string_lossy().to_string()],
+        ));
+
+        assert!(
+            result.is_err(),
+            "must reject: $HOME was never actually registered as a repo"
+        );
+        assert!(target.exists(), "artifact must survive the rejected delete");
+    }
+
+    // -- fs:watch per-plugin cap (story 157) --
+
+    #[cfg(feature = "desktop")]
+    fn add_watchers(state: &AppState, plugin_id: &str, n: usize) {
+        use notify::{Config, RecommendedWatcher, Watcher};
+        for _ in 0..n {
+            let (tx, _rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+            let w = RecommendedWatcher::new(tx, Config::default()).unwrap();
+            state
+                .plugin_watchers
+                .insert(uuid::Uuid::new_v4().to_string(), (plugin_id.to_string(), w));
+        }
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn watcher_cap_allows_under_limit() {
+        let state = crate::state::tests_support::make_test_app_state();
+        add_watchers(&state, "p", MAX_WATCHERS_PER_PLUGIN - 1);
+        assert!(check_watcher_cap(&state, "p").is_ok());
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn watcher_cap_rejects_at_limit_with_clear_error() {
+        let state = crate::state::tests_support::make_test_app_state();
+        add_watchers(&state, "p", MAX_WATCHERS_PER_PLUGIN);
+        let err = check_watcher_cap(&state, "p").unwrap_err();
+        assert!(err.contains("Watch limit reached"), "got: {err}");
+        assert!(
+            err.contains(&MAX_WATCHERS_PER_PLUGIN.to_string()),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn watcher_cap_is_counted_per_plugin() {
+        let state = crate::state::tests_support::make_test_app_state();
+        // Another plugin at its own limit must not consume this plugin's budget.
+        add_watchers(&state, "other", MAX_WATCHERS_PER_PLUGIN);
+        assert!(check_watcher_cap(&state, "p").is_ok());
+        // Fill "p" to its limit; "other" being full is irrelevant to "p".
+        add_watchers(&state, "p", MAX_WATCHERS_PER_PLUGIN);
+        assert!(check_watcher_cap(&state, "p").is_err());
+        // "other" is still independently over its own limit.
+        assert!(check_watcher_cap(&state, "other").is_err());
     }
 }

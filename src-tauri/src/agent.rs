@@ -807,16 +807,20 @@ pub(crate) fn agent_accepts_bare_prompt(agent_type: &str) -> bool {
     agent_type == "claude"
 }
 
-/// Default spawn arguments (with a `{prompt}` placeholder) for a non-Claude agent
-/// launched via MCP without an explicit run config. Mirrors the per-agent
-/// `spawnArgs` the frontend uses in `src/agents.ts` — the authoritative, shipped
-/// knowledge of each CLI's invocation. Lets `agent action=spawn agent_type=codex`
-/// work out of the box instead of failing the bare-prompt guard. Model/print
-/// flags are layered on separately by `merge_mcp_params_into_args`, so this only
-/// encodes the prompt-carrying shape. Returns `None` for agents we can't launch
-/// non-interactively (caller must pass explicit `args`).
+/// Default spawn arguments (with a `{prompt}` placeholder) for an agent launched
+/// via MCP without an explicit run config. Mirrors the per-agent `spawnArgs` the
+/// frontend uses in `src/agents.ts` — the authoritative, shipped knowledge of
+/// each CLI's invocation. Lets `agent action=spawn agent_type=codex` work out of
+/// the box. Model/print flags are layered on separately by
+/// `merge_mcp_params_into_args`, so this only encodes the prompt-carrying shape.
+/// Returns `None` for agents we can't launch non-interactively (caller must pass
+/// explicit `args`).
 pub(crate) fn default_prompt_args(agent_type: &str) -> Option<Vec<String>> {
     let args: &[&str] = match agent_type {
+        // Claude: bare positional prompt, submitted and run immediately.
+        // (Folded from the old dedicated spawn branch — story 092. Flag order
+        // is preserved by merge_mcp_params_into_args's claude flags-first rule.)
+        "claude" => &["{prompt}"],
         // Positional prompt (interactive with the task pre-filled).
         "gemini" | "codex" | "opencode" | "grok" | "amp" | "cursor" | "droid" => &["{prompt}"],
         // Aider: non-interactive single message, auto-confirm edits.
@@ -826,6 +830,23 @@ pub(crate) fn default_prompt_args(agent_type: &str) -> Option<Vec<String>> {
         _ => return None,
     };
     Some(args.iter().map(|s| s.to_string()).collect())
+}
+
+/// Agents whose positional argv cannot carry the task for an orchestrated
+/// spawn (verified live, story 091):
+/// - codex 0.142: the positional prompt only PREFILLS the interactive TUI input
+///   without submitting — the child parks at its ready prompt forever.
+/// - opencode: the default positional is a PROJECT PATH (`opencode [project]`),
+///   so a prompt argv crashes it with ENAMETOOLONG; `opencode run` is one-shot.
+///
+/// For these agents the spawn path launches the bare TUI and delivers the
+/// initial prompt through the pending-injection path (bracketed-paste + CR
+/// split write) once the TUI reaches its first idle, unifying initial-task
+/// delivery with peer-message delivery. One-shot subcommands (`codex exec`,
+/// `opencode run`) are NOT an alternative here: they exit after the task,
+/// collapsing the persistent session an orchestrator needs to keep messaging.
+pub(crate) fn prompt_prefill_only(agent_type: &str) -> bool {
+    matches!(agent_type, "codex" | "opencode")
 }
 
 /// Detect claude binary location (legacy, delegates to detect_agent_binary)
@@ -881,6 +902,7 @@ pub(crate) async fn spawn_agent(
 
     // Build agent command
     let mut cmd = CommandBuilder::new(&binary_path);
+    crate::pty::sanitize_pty_parent_env(&mut cmd);
 
     // If custom args are provided, use them directly
     if let Some(ref args) = agent_config.args {
@@ -1032,8 +1054,11 @@ mod tests {
                 "{agent} template must carry the {{prompt}} placeholder"
             );
         }
-        // Claude is handled by the dedicated bare-append branch, not a template.
-        assert_eq!(default_prompt_args("claude"), None);
+        // Claude: folded into the table (story 092) — bare positional prompt.
+        assert_eq!(
+            default_prompt_args("claude"),
+            Some(vec!["{prompt}".to_string()])
+        );
         // Unknown agents have no template → caller must pass explicit args.
         assert_eq!(default_prompt_args("totally-unknown"), None);
     }

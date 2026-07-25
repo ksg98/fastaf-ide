@@ -4,7 +4,9 @@ import { executeCleanup } from "../../hooks/usePostMergeCleanup";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
+import { autofixBranchName, createPrArgsFromBranch } from "../../stores/autofix";
 import { githubStore } from "../../stores/github";
+import { mdTabsStore } from "../../stores/mdTabs";
 import { repoSettingsStore } from "../../stores/repoSettings";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
@@ -13,6 +15,8 @@ import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
 import { handleOpenUrl } from "../../utils/openUrl";
+import { AutofixDialog } from "../AutofixDialog/AutofixDialog";
+import { ChangelogModal } from "../ChangelogModal/ChangelogModal";
 import { IssueDetailContent } from "../IssueDetailPopover/IssueDetailContent";
 import {
 	type CleanupStep,
@@ -40,14 +44,21 @@ export const GitHubPanel: Component<{
 	onClose: () => void;
 	onCheckout: (branchName: string) => void;
 	onCreateWorktree?: (branchName: string) => void;
+	onConflictAssist?: (prNumber: number) => void;
+	onPushBranch?: (worktreePath: string) => void;
+	onAutofix?: (issueNumber: number, prompt: string) => void;
 	onCleanupActive?: (active: boolean) => void;
 }> = (props) => {
 	const [issuesCollapsed, setIssuesCollapsed] = createSignal(false);
+	const [showChangelog, setShowChangelog] = createSignal(false);
 
 	// Issue accordion state
 	const [expandedIssue, setExpandedIssue] = createSignal<number | null>(null);
 	const [closingIssue, setClosingIssue] = createSignal<number | null>(null);
 	const [issueActionError, setIssueActionError] = createSignal<{ num: number; msg: string } | null>(null);
+	// Auto-fix prompt dialog target (issue number), and in-flight PR create.
+	const [autofixIssue, setAutofixIssue] = createSignal<number | null>(null);
+	const [creatingPr, setCreatingPr] = createSignal<number | null>(null);
 
 	// Post-merge cleanup state
 	const [cleanupCtx, setCleanupCtx] = createSignal<{
@@ -185,6 +196,37 @@ export const GitHubPanel: Component<{
 		writeClipboard(`#${issue.number}`).catch(() => {});
 	};
 
+	/** Create a gated draft PR from the issue's auto-fix branch. Pushing the
+	 *  branch is manual (out of scope) — the user clicks this once the agent has
+	 *  finished and the branch exists on the remote. */
+	const handleCreatePr = async (issue: GitHubIssue) => {
+		const branch = autofixBranchName(issue.number);
+		if (!window.confirm(t("github.createPrConfirm", `Create a draft PR from ${branch}?`))) return;
+		setCreatingPr(issue.number);
+		setIssueActionError(null);
+		try {
+			// Resolve the repo's default branch as the PR base (fallback "main").
+			let base = "main";
+			try {
+				const baseRefs = await invoke<{ name: string; is_default: boolean }[]>("list_base_ref_options", {
+					repoPath: props.repoPath,
+				});
+				base = baseRefs.find((r) => r.is_default)?.name ?? baseRefs[0]?.name ?? "main";
+			} catch (e) {
+				appLogger.warn("github", "list_base_ref_options failed — defaulting PR base to main", { error: String(e) });
+			}
+			const args = createPrArgsFromBranch(props.repoPath, branch, issue, base);
+			const pr = await invoke<{ number: number; url: string; title: string }>("create_pr", args);
+			appLogger.info("github", `Created draft PR #${pr.number} for issue #${issue.number}`);
+		} catch (e) {
+			const msg = String(e);
+			setIssueActionError({ num: issue.number, msg });
+			appLogger.warn("github", `Failed to create PR for issue #${issue.number}`, { error: msg });
+		} finally {
+			setCreatingPr(null);
+		}
+	};
+
 	return (
 		<Portal>
 			<Show when={cleanupCtx()}>
@@ -232,10 +274,43 @@ export const GitHubPanel: Component<{
 							/>
 						</svg>
 						<span>GitHub</span>
+						<button
+							class={s.ghChangelogBtn}
+							onClick={() => mdTabsStore.addGithubOps(props.repoPath)}
+							title={t("github.opsDashboard", "Ops Dashboard")}
+						>
+							<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+								<path d="M1.5 1a.5.5 0 0 0-.5.5v13a.5.5 0 0 0 .5.5h13a.5.5 0 0 0 .5-.5v-13a.5.5 0 0 0-.5-.5h-13ZM2 14V2h12v12H2Zm2.5-3a.5.5 0 0 1 .5.5v.5a.5.5 0 0 1-1 0v-.5a.5.5 0 0 1 .5-.5Zm2.5-3a.5.5 0 0 1 .5.5V12a.5.5 0 0 1-1 0V8.5a.5.5 0 0 1 .5-.5Zm3-3a.5.5 0 0 1 .5.5V12a.5.5 0 0 1-1 0V5.5a.5.5 0 0 1 .5-.5Z" />
+							</svg>
+						</button>
+						<button
+							class={s.ghChangelogBtn}
+							onClick={() => setShowChangelog(true)}
+							title={t("github.changelog", "Changelog")}
+						>
+							<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+								<path d="M4 1.5A1.5 1.5 0 0 0 2.5 3v10A1.5 1.5 0 0 0 4 14.5h8a1.5 1.5 0 0 0 1.5-1.5V5.5L9.5 1.5H4Zm5 1.06L12.44 6H9.5a.5.5 0 0 1-.5-.5V2.56ZM5 8h6v1H5V8Zm0 2.5h6v1H5v-1ZM5 5.5h2v1H5v-1Z" />
+							</svg>
+						</button>
 						<button class={s.ghPanelClose} onClick={props.onClose}>
 							&times;
 						</button>
 					</div>
+
+					<Show when={showChangelog()}>
+						<ChangelogModal repoPath={props.repoPath} onClose={() => setShowChangelog(false)} />
+					</Show>
+
+					<Show when={autofixIssue()}>
+						{(num) => (
+							<AutofixDialog
+								repoPath={props.repoPath}
+								issueNumber={num()}
+								onConfirm={(prompt) => props.onAutofix?.(num(), prompt)}
+								onClose={() => setAutofixIssue(null)}
+							/>
+						)}
+					</Show>
 
 					<div class={s.ghPanelBody}>
 						{/* ── My Pull Requests section ── */}
@@ -247,6 +322,8 @@ export const GitHubPanel: Component<{
 								icon="user"
 								onCheckout={props.onCheckout}
 								onCreateWorktree={props.onCreateWorktree}
+								onConflictAssist={props.onConflictAssist}
+								onPushBranch={props.onPushBranch}
 								onMerged={handleMerged}
 							/>
 						</Show>
@@ -259,6 +336,8 @@ export const GitHubPanel: Component<{
 							icon="pr"
 							onCheckout={props.onCheckout}
 							onCreateWorktree={props.onCreateWorktree}
+							onConflictAssist={props.onConflictAssist}
+							onPushBranch={props.onPushBranch}
 							onMerged={handleMerged}
 						/>
 
@@ -363,6 +442,23 @@ export const GitHubPanel: Component<{
 																					title={t("prDetail.openOnGithub", "Open on GitHub")}
 																				>
 																					GitHub {"↗"}
+																				</button>
+																			</Show>
+																			<Show when={issue.state?.toUpperCase() === "OPEN"}>
+																				<button
+																					class={s.ghActionBtn}
+																					onClick={() => setAutofixIssue(issue.number)}
+																					title={t("github.autofix", "Auto-fix in a worktree agent")}
+																				>
+																					{t("github.autofix", "Auto-fix")}
+																				</button>
+																				<button
+																					class={s.ghActionBtn}
+																					onClick={() => handleCreatePr(issue)}
+																					disabled={creatingPr() === issue.number}
+																					title={t("github.createPr", "Create draft PR from auto-fix branch")}
+																				>
+																					{creatingPr() === issue.number ? "..." : t("github.createPr", "Create PR")}
 																				</button>
 																			</Show>
 																			<SmartButtonStrip

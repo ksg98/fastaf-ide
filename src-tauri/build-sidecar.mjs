@@ -45,7 +45,8 @@ for (const { pkg, bin, crate: cratePath } of sidecars) {
     const cargoToml = join(srcTauri, cratePath, "Cargo.toml");
     let needsRebuild = false;
 
-    for (const checkPath of [cargoToml]) {
+    const workspaceCargoToml = join(srcTauri, "Cargo.toml");
+    for (const checkPath of [cargoToml, workspaceCargoToml]) {
       if (existsSync(checkPath) && statSync(checkPath).mtimeMs > binMtime) {
         needsRebuild = true;
         break;

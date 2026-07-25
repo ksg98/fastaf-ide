@@ -15,7 +15,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+/// Session discovery ignores session files/dirs older than this. Discovery
+/// fires on every idle↔busy transition (~every agent turn), not just the 30s
+/// poll — so without a bound its cost grows with the user's entire session
+/// history × open terminals. 300s (5 min) matches the Claude/Grok bound and is
+/// comfortably longer than the gap between an agent starting and writing its
+/// first session file, so a just-launched session is never aged out.
+const SESSION_MAX_AGE: Duration = Duration::from_secs(300);
 
 /// Scan a directory for agent session files and return the ID of the newest
 /// unclaimed session, or `None` if none can be found.
@@ -168,7 +176,7 @@ fn discover_claude_session(
                 .map(|stem| stem.to_string())
         },
         claimed_ids,
-        Some(std::time::Duration::from_secs(300)),
+        Some(SESSION_MAX_AGE),
     )
 }
 
@@ -206,6 +214,7 @@ fn discover_gemini_session(
     }
 
     // Collect (mtime, sessionId) from all session-*.json files across all project dirs
+    let now = SystemTime::now();
     let mut candidates: Vec<(SystemTime, String)> = Vec::new();
 
     let Ok(project_entries) = std::fs::read_dir(&tmp_dir) else {
@@ -216,7 +225,7 @@ fn discover_gemini_session(
         if !chats_dir.is_dir() {
             continue;
         }
-        collect_gemini_session_files(&chats_dir, &mut candidates);
+        collect_gemini_session_files(&chats_dir, now, &mut candidates);
     }
 
     // Sort newest first, return first unclaimed
@@ -227,7 +236,11 @@ fn discover_gemini_session(
         .map(|(_, id)| id)
 }
 
-fn collect_gemini_session_files(chats_dir: &PathBuf, out: &mut Vec<(SystemTime, String)>) {
+fn collect_gemini_session_files(
+    chats_dir: &PathBuf,
+    now: SystemTime,
+    out: &mut Vec<(SystemTime, String)>,
+) {
     let Ok(entries) = std::fs::read_dir(chats_dir) else {
         return;
     };
@@ -238,6 +251,12 @@ fn collect_gemini_session_files(chats_dir: &PathBuf, out: &mut Vec<(SystemTime, 
         }
         let Ok(meta) = entry.metadata() else { continue };
         let Ok(mtime) = meta.modified() else { continue };
+        // Skip stale files by mtime BEFORE reading/parsing their JSON — discovery
+        // fires ~every agent turn, so this caps I/O to recently-touched sessions
+        // instead of the user's full history.
+        if now.duration_since(mtime).unwrap_or_default() > SESSION_MAX_AGE {
+            continue;
+        }
         // Read the sessionId from the JSON content
         if let Ok(contents) = std::fs::read_to_string(entry.path())
             && let Some(session_id) = extract_json_string_field(&contents, "sessionId")
@@ -280,9 +299,14 @@ fn discover_codex_session(claimed_ids: &[String], codex_home: Option<&str>) -> O
         return None;
     }
 
-    // Recursively collect all rollout-*-<UUID>.jsonl files with their mtimes
+    // Walk only today's/yesterday's YYYY/MM/DD subtrees — a session younger than
+    // SESSION_MAX_AGE can only live there. This prunes the entire historical tree
+    // by date before walking, so cost stays bounded regardless of how much
+    // lifetime history has accumulated.
     let mut candidates: Vec<(SystemTime, String)> = Vec::new();
-    collect_codex_files(&sessions_root, &mut candidates);
+    for day_dir in codex_recent_day_dirs(&sessions_root, chrono::Local::now()) {
+        collect_codex_files(&day_dir, &mut candidates);
+    }
 
     // Sort newest first
     candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
@@ -291,6 +315,29 @@ fn discover_codex_session(claimed_ids: &[String], codex_home: Option<&str>) -> O
         .into_iter()
         .find(|(_, id)| !claimed_ids.contains(id))
         .map(|(_, id)| id)
+}
+
+/// Resolve the `<root>/YYYY/MM/DD` session dirs that can hold a session younger
+/// than `SESSION_MAX_AGE`. With a 5-min bound only today matters, but yesterday
+/// is kept too to stay correct across the midnight boundary and minor
+/// clock/timezone skew between TUIC and the Codex writer (Codex partitions by
+/// local date). Bounds the walk to ≤2 day-dirs regardless of total history.
+fn codex_recent_day_dirs(root: &Path, now: chrono::DateTime<chrono::Local>) -> Vec<PathBuf> {
+    use chrono::Datelike;
+    let today = now.date_naive();
+    let mut dates = vec![today];
+    if let Some(yesterday) = today.pred_opt() {
+        dates.push(yesterday);
+    }
+    dates
+        .into_iter()
+        .map(|d| {
+            root.join(format!("{:04}", d.year()))
+                .join(format!("{:02}", d.month()))
+                .join(format!("{:02}", d.day()))
+        })
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 fn collect_codex_files(dir: &PathBuf, out: &mut Vec<(SystemTime, String)>) {
@@ -502,7 +549,7 @@ fn discover_grok_session(cwd: &str, claimed_ids: &[String]) -> Option<String> {
         &dir,
         |name| is_uuid(name).then(|| name.to_string()),
         claimed_ids,
-        Some(std::time::Duration::from_secs(300)),
+        Some(SESSION_MAX_AGE),
     )
 }
 
@@ -920,6 +967,126 @@ mod tests {
             None,
         );
         assert!(result.is_none());
+    }
+
+    // ── gemini discovery mtime bound ──
+
+    #[test]
+    fn test_discover_gemini_session_filters_stale_by_mtime() {
+        let dir = TempDir::new().unwrap();
+        let chats = dir
+            .path()
+            .join(".gemini")
+            .join("tmp")
+            .join("projhash")
+            .join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let cli_home = dir.path().to_str().unwrap();
+
+        let stale_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let stale = chats.join("session-stale.json");
+        fs::write(&stale, format!(r#"{{"sessionId":"{stale_uuid}"}}"#)).unwrap();
+        // Backdate well beyond the 300s bound.
+        let old = SystemTime::now() - Duration::from_secs(10 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        // Only a stale file present → filtered out, nothing discovered.
+        assert!(
+            discover_gemini_session("/whatever", &[], Some(cli_home)).is_none(),
+            "stale gemini session must be filtered by mtime"
+        );
+
+        // Add a fresh file → it (and only it) is discovered.
+        let fresh_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        fs::write(
+            chats.join("session-fresh.json"),
+            format!(r#"{{"sessionId":"{fresh_uuid}"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            discover_gemini_session("/whatever", &[], Some(cli_home)),
+            Some(fresh_uuid.to_string()),
+            "fresh gemini session should be discovered, stale ignored"
+        );
+    }
+
+    // ── codex date-subtree pruning ──
+
+    fn codex_day_dir(root: &std::path::Path, y: i32, m: u32, d: u32) -> PathBuf {
+        root.join(format!("{y:04}"))
+            .join(format!("{m:02}"))
+            .join(format!("{d:02}"))
+    }
+
+    #[test]
+    fn test_codex_recent_day_dirs_prunes_old_subtrees() {
+        use chrono::Datelike;
+        let root = TempDir::new().unwrap();
+        let now = chrono::Local::now();
+        let today = now.date_naive();
+        let yesterday = today.pred_opt().unwrap();
+
+        for d in [
+            today,
+            yesterday,
+            chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+        ] {
+            fs::create_dir_all(codex_day_dir(root.path(), d.year(), d.month(), d.day())).unwrap();
+        }
+
+        let dirs = codex_recent_day_dirs(root.path(), now);
+        assert!(dirs.contains(&codex_day_dir(
+            root.path(),
+            today.year(),
+            today.month(),
+            today.day()
+        )));
+        assert!(dirs.contains(&codex_day_dir(
+            root.path(),
+            yesterday.year(),
+            yesterday.month(),
+            yesterday.day()
+        )));
+        assert!(
+            !dirs.contains(&codex_day_dir(root.path(), 2020, 1, 1)),
+            "stale date subtree must be pruned before walking"
+        );
+    }
+
+    #[test]
+    fn test_discover_codex_session_ignores_old_date_subtree() {
+        use chrono::Datelike;
+        let root = TempDir::new().unwrap();
+        let sessions = root.path().join("sessions");
+        let today = chrono::Local::now().date_naive();
+
+        let today_dir = codex_day_dir(&sessions, today.year(), today.month(), today.day());
+        let old_dir = codex_day_dir(&sessions, 2020, 1, 1);
+        fs::create_dir_all(&today_dir).unwrap();
+        fs::create_dir_all(&old_dir).unwrap();
+
+        let fresh = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let stale = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        make_file(
+            &today_dir,
+            &format!("rollout-2026-07-07T10-00-00-{fresh}.jsonl"),
+        );
+        // Create the stale file LAST so its mtime is newest — if the old subtree
+        // weren't pruned it would win the newest-first sort, so returning `fresh`
+        // proves the date prune worked.
+        std::thread::sleep(Duration::from_millis(10));
+        make_file(
+            &old_dir,
+            &format!("rollout-2020-01-01T10-00-00-{stale}.jsonl"),
+        );
+
+        let result = discover_codex_session(&[], Some(root.path().to_str().unwrap()));
+        assert_eq!(result, Some(fresh.to_string()));
     }
 
     // ── extract_codex_uuid ──

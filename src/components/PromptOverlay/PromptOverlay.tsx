@@ -2,6 +2,7 @@ import { type Component, createEffect, createSignal, For, onCleanup, Show } from
 import { usePty } from "../../hooks/usePty";
 import { t } from "../../i18n";
 import { appLogger } from "../../stores/appLogger";
+import { registerModal } from "../../stores/modalStack";
 import { promptStore } from "../../stores/prompt";
 import { cx } from "../../utils";
 import s from "./PromptOverlay.module.css";
@@ -27,6 +28,11 @@ export const PromptOverlay: Component<PromptOverlayProps> = (props) => {
 	// Handle keyboard events
 	createEffect(() => {
 		if (!isVisible()) return;
+
+		// Escape-to-dismiss is handled centrally (stores/modalStack): registering routes
+		// Escape to dismiss AND stops it reaching the terminal underneath. Other keys
+		// (1-9, arrows, Enter) are still handled by the local listener below.
+		registerModal(dismiss);
 
 		const handleKeydown = (e: KeyboardEvent) => {
 			const currentPrompt = prompt();
@@ -54,11 +60,6 @@ export const PromptOverlay: Component<PromptOverlayProps> = (props) => {
 				case "Enter":
 					e.preventDefault();
 					confirm();
-					break;
-				case "Escape":
-					e.preventDefault();
-					e.stopPropagation();
-					dismiss();
 					break;
 			}
 		};

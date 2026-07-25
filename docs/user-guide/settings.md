@@ -19,6 +19,7 @@ Open settings with `Cmd+,`. Settings are organized into tabs.
 | **Drag to select in full-screen apps** | Click-and-drag selects text even when an app (vim, htop, agent TUIs) captures the mouse; a plain click is still sent to the app on release. Shift+drag always selects. Enabled by default; turn off to always forward the mouse immediately. |
 | **Import from other tools** | Shows "Import from Claude Code / Codex / Cursor / superset.sh" in the sidebar's Add Repository menu. The import dialog discovers projects from those tools and can optionally restore recent Claude/Codex chat sessions as resumable terminals. Enabled by default. |
 | **Scroll sensitivity** | Terminal wheel/trackpad scroll speed, 20–200% (default 70%; 100% = raw device speed). |
+| **Allow OSC 52 clipboard writes** | Let terminal programs set the system clipboard via the OSC 52 escape sequence (used by tmux, vim, ssh yank-over-SSH, etc.). Because OSC 52 is honored from anywhere in the byte stream, a displayed file or log can also overwrite the clipboard — so a non-blocking "Clipboard updated" notice appears on every write. Disable to ignore OSC 52 entirely. Enabled by default. |
 | **Repository defaults** | Base branch, file handling, setup/run scripts applied to new repos |
 | **Experimental Features** | Master toggle for experimental features. When enabled, shows sub-toggles: **AI Chat** (AI Chat panel, shortcuts, command palette entry), **Scroll History** (scrollback overlay with search when scrolling up in agent mode). |
 
@@ -40,6 +41,7 @@ Open settings with `Cmd+,`. Settings are organized into tabs.
 | **Repository groups** | — | — | Create, rename, delete, and color-code groups |
 | **Reset panel sizes** | — | — | Restore sidebar and panel widths to defaults |
 | **Copy on Select** | `boolean` | `true` | Auto-copy terminal selection to clipboard |
+| **Allow OSC 52 clipboard writes** | `boolean` | `true` | Honor OSC 52 clipboard writes from terminal output (shows a notice per write) |
 | **Bell Style** | `none/visual/sound/both` | `visual` | Terminal bell behavior |
 
 ## Agents Tab
@@ -91,7 +93,7 @@ Native tools exposed to AI agents via MCP. Each tool can be individually enabled
 
 **Manual MCP configuration** (expandable) — shows the `tuic-bridge` binary path and a ready-to-paste JSON snippet for manually configuring MCP clients that aren't auto-installed. Click "Copy" to copy the snippet to clipboard.
 
-**Collapse tools** (checkbox) — when enabled, replaces the full tool list sent to AI agents with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`). Cuts the baseline MCP context cost from ~35k tokens to ~500 tokens per agent turn; the agent fetches schemas on demand via BM25-ranked search. Default: off. Toggling refreshes connected clients via `notifications/tools/list_changed`.
+**Collapse tools** (checkbox) — when enabled, replaces the full tool list sent to AI agents with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`). Cuts the baseline MCP context cost from ~35k tokens to ~500 tokens per agent turn; the agent fetches schemas on demand via BM25-ranked search. Default: off. Toggling emits `notifications/tools/list_changed`; compatible clients refresh automatically, while clients that ignore the notification may require a reconnect.
 
 Tools:
 - **session** — PTY terminal session management
@@ -103,6 +105,9 @@ Tools:
 - **plugin_dev_guide** — Plugin authoring reference
 
 ### Upstream MCP Servers
+
+Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
+OAuth upstreams show **Authorize** when consent is required. TUIC prepares the OAuth request, then displays a blocking in-app confirmation naming the authorization-server origin before opening the system browser. Cancelling that confirmation discards the pending request.
 
 Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
 - Add upstream servers via HTTP (Streamable MCP) or stdio (process) transport

@@ -43,6 +43,10 @@ export interface BaseRefOption {
 	is_default: boolean;
 }
 
+export interface RemoveWorktreeResult {
+	branch_delete_warning?: string | null;
+}
+
 /** Repository hook for git operations */
 export function useRepository() {
 	/** Get repository info */
@@ -91,8 +95,13 @@ export function useRepository() {
 		branchName: string,
 		deleteBranch: boolean,
 		force?: boolean,
-	): Promise<void> {
-		await invoke("remove_worktree", { repoPath, branchName, deleteBranch, force: force ?? false });
+	): Promise<RemoveWorktreeResult> {
+		return await invoke<RemoveWorktreeResult>("remove_worktree", {
+			repoPath,
+			branchName,
+			deleteBranch,
+			force: force ?? false,
+		});
 	}
 
 	/** Create a new worktree with a branch */
@@ -202,6 +211,7 @@ export function useRepository() {
 		merged: boolean;
 		action: string;
 		archive_path: string | null;
+		branch_delete_warning?: string | null;
 	}
 
 	/** Merge a worktree branch into target, then archive or delete */

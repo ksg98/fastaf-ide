@@ -10,8 +10,13 @@ const h = vi.hoisted(() => {
 	const repos: Record<string, { path: string; displayName: string }> = {};
 	const rpc = vi.fn((cmd: string, args?: Record<string, unknown>) => {
 		switch (cmd) {
-			case "github_resolve_repo":
-				return Promise.resolve(resolutions[String(args?.repoPath)] ?? { status: "unmonitored" });
+			case "github_resolve_repos": {
+				const map: Record<string, unknown> = {};
+				for (const p of (args?.repoPaths as string[]) ?? []) {
+					map[p] = resolutions[p] ?? { status: "unmonitored" };
+				}
+				return Promise.resolve(map);
+			}
 			case "github_bind_repo":
 				resolutions[String(args?.repoPath)] = {
 					status: "bound",

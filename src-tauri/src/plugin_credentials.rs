@@ -48,7 +48,11 @@ pub async fn plugin_read_credential(
     state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
 ) -> Result<Option<String>, String> {
     crate::plugins::check_plugin_capability(&state, &plugin_id, "credentials:read")?;
-    plugin_read_credential_inner(&service_name)
+    // The uncached path shells out to the OS keychain (`security` on macOS) or
+    // reads a JSON file — run it off the async runtime.
+    tokio::task::spawn_blocking(move || plugin_read_credential_inner(&service_name))
+        .await
+        .map_err(|e| format!("credential read task failed: {e}"))?
 }
 
 fn plugin_read_credential_inner(service_name: &str) -> Result<Option<String>, String> {
@@ -59,6 +63,16 @@ fn plugin_read_credential_inner(service_name: &str) -> Result<Option<String>, St
         return Err(
             "Service name contains invalid characters (allow: a-z A-Z 0-9 . - _ space)".into(),
         );
+    }
+    // Deny access to FastAF's OWN secrets vault. `credentials:read` is for
+    // reading OTHER tools' credentials (e.g. aws-cli creds), never the host's
+    // GitHub/LLM/MCP tokens. Reject the vault service and any legacy entry.
+    if service_name == crate::credentials::KEYRING_SERVICE
+        || crate::credentials::LEGACY_ENTRIES
+            .iter()
+            .any(|&(service, _)| service == service_name)
+    {
+        return Err("access to FastAF's own credential vault is denied".into());
     }
 
     cached_read(service_name)
@@ -180,6 +194,21 @@ mod tests {
         let result = plugin_read_credential_inner("");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn own_vault_service_is_denied() {
+        // The host's own vault service must never be readable by a plugin.
+        let result = plugin_read_credential_inner(crate::credentials::KEYRING_SERVICE);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("denied"));
+
+        // Legacy vault service names are denied too.
+        for &(service, _) in crate::credentials::LEGACY_ENTRIES {
+            let result = plugin_read_credential_inner(service);
+            assert!(result.is_err(), "expected {service} to be denied");
+            assert!(result.unwrap_err().contains("denied"));
+        }
     }
 
     #[cfg(target_os = "macos")]

@@ -52,6 +52,8 @@ pub struct DictationStatus {
     pub model_size_mb: u64,
     pub recording: bool,
     pub processing: bool,
+    /// Normalized 0.0–1.0 microphone level while recording.
+    pub audio_level: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +106,11 @@ pub fn get_dictation_status(
             model_size_mb: 0,
             recording: dictation.recording.load(Ordering::Acquire),
             processing: dictation.processing.load(Ordering::Acquire),
+            audio_level: dictation
+                .audio
+                .lock()
+                .as_ref()
+                .map_or(0.0, audio::AudioCapture::level),
         });
     }
 
@@ -125,6 +132,11 @@ pub fn get_dictation_status(
         model_size_mb: model::model_size_bytes(whisper_model) / 1_048_576,
         recording: dictation.recording.load(Ordering::Acquire),
         processing: dictation.processing.load(Ordering::Acquire),
+        audio_level: dictation
+            .audio
+            .lock()
+            .as_ref()
+            .map_or(0.0, audio::AudioCapture::level),
     })
 }
 
@@ -364,8 +376,9 @@ pub fn start_dictation(app: AppHandle, dictation: State<'_, DictationState>) -> 
     // Reset accumulated partials for this session
     dictation.accumulated_partials.lock().clear();
 
-    // Spawn event forwarder: reads partials from channel, emits Tauri events,
-    // and concatenates them for accuracy comparison at the end.
+    // Forward partial text to the live preview. The microphone meter is read
+    // through get_dictation_status so desktop IPC and HTTP clients use the same
+    // request/response surface.
     let app_clone = app.clone();
     let accumulated = dictation.inner().accumulated_partials.clone();
     std::thread::Builder::new()

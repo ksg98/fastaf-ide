@@ -1,10 +1,17 @@
 import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { activityDashboardStore } from "../../stores/activityDashboard";
 import { globalWorkspaceStore } from "../../stores/globalWorkspace";
+import { registerModal } from "../../stores/modalStack";
 import { rateLimitStore } from "../../stores/ratelimit";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
-import { projectName, reconcileActivityOrder, terminalStatusLabel } from "../../utils/activitySnapshot";
+import {
+	effectiveActivityState,
+	isActivityWorking,
+	projectName,
+	reconcileActivityOrder,
+	terminalStatusLabel,
+} from "../../utils/activitySnapshot";
 import { navigateToTerminal } from "../../utils/navigateToTerminal";
 import { getRepoColor } from "../../utils/repoColor";
 import { formatRelativeTime } from "../../utils/time";
@@ -93,20 +100,11 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 		onCleanup(() => clearInterval(interval));
 	});
 
-	// Keyboard navigation
+	// Escape-to-close is handled centrally (stores/modalStack): registering routes
+	// Escape to the dashboard close AND stops it reaching the terminal underneath.
 	createEffect(() => {
 		if (!isOpen()) return;
-
-		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				e.stopPropagation();
-				activityDashboardStore.close();
-			}
-		};
-
-		document.addEventListener("keydown", handleKeydown, true);
-		onCleanup(() => document.removeEventListener("keydown", handleKeydown, true));
+		registerModal(() => activityDashboardStore.close());
 	});
 
 	const handleRowClick = (termId: string) => {
@@ -125,7 +123,21 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 		const term = terminalsStore.get(id);
 		if (!term) return null;
 		const isRL = !!(term.sessionId && rateLimitStore.isRateLimited(term.sessionId));
-		const status = terminalStatusLabel(term.shellState, term.awaitingInput, isRL, statusClasses);
+		const effectiveState = effectiveActivityState(
+			term.shellState,
+			term.awaitingInput,
+			isRL,
+			term.agentState,
+			term.backgroundWork,
+		);
+		const status = terminalStatusLabel(
+			term.shellState,
+			term.awaitingInput,
+			isRL,
+			statusClasses,
+			term.agentState,
+			term.backgroundWork,
+		);
 		const repoPath = repositoriesStore.getRepoPathForTerminal(id);
 		return {
 			id,
@@ -134,7 +146,7 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 			projectColor: repoPath ? getRepoColor(repoPath) : undefined,
 			agent: term.agentType || "shell",
 			status,
-			isWorking: isRL || !!term.awaitingInput || terminalsStore.isBusy(id),
+			isWorking: isActivityWorking(effectiveState),
 			lastDataAt: terminalsStore.getLastDataAt(id),
 			idleSince: term.idleSince,
 			lastPrompt: term.lastPrompt,
@@ -156,7 +168,12 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 		const isWorking = (id: string): boolean => {
 			const term = terminalsStore.get(id);
 			const isRL = !!(term?.sessionId && rateLimitStore.isRateLimited(term.sessionId));
-			return isRL || !!term?.awaitingInput || terminalsStore.isBusy(id);
+			return (
+				!!term &&
+				isActivityWorking(
+					effectiveActivityState(term.shellState, term.awaitingInput, isRL, term.agentState, term.backgroundWork),
+				)
+			);
 		};
 		return reconcileActivityOrder(spine, terminalsStore.getAttachedIds(), isWorking);
 	});

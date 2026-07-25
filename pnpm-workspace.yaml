@@ -9,9 +9,8 @@ overrides:
   brace-expansion: ">=1.1.13"
   picomatch: ">=4.0.4"
   "rollup-plugin-visualizer>picomatch": ">=4.0.4"
-  # Pinned to the previous release 4.61.0 (2026-06-01) rather than the freshly
-  # published 4.61.1 (2026-06-04). Bump deliberately after a version has settled.
-  rollup: "4.61.0"
+  # Keep the direct build dependency and all transitive consumers on one version.
+  rollup: "4.62.2"
   # vite-plugin-purgecss@0.2.13 pulls in vite 6.x (CVE: dev-server file read,
   # path traversal) plus old postcss/ws. Pin the build-only vite to the patched line.
   "vite-plugin-purgecss>vite": ">=6.4.3"

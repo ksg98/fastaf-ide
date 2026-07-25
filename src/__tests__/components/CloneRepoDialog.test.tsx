@@ -55,9 +55,7 @@ describe("CloneRepoDialog", () => {
 	});
 
 	it("renders nothing when not visible", () => {
-		const { container } = render(() => (
-			<CloneRepoDialog visible={false} onClose={() => {}} onCloned={() => {}} />
-		));
+		const { container } = render(() => <CloneRepoDialog visible={false} onClose={() => {}} onCloned={() => {}} />);
 		expect(container.textContent).toBe("");
 	});
 
@@ -100,9 +98,7 @@ describe("CloneRepoDialog", () => {
 
 	it("shows connect hint when not authenticated (no repo fetch)", async () => {
 		routeInvoke({ github_auth_status: () => ({ authenticated: false }) });
-		const { getByText } = render(() => (
-			<CloneRepoDialog visible={true} onClose={() => {}} onCloned={() => {}} />
-		));
+		const { getByText } = render(() => <CloneRepoDialog visible={true} onClose={() => {}} onCloned={() => {}} />);
 		await waitFor(() => {
 			expect(getByText(/Connect GitHub in Settings/)).toBeTruthy();
 		});

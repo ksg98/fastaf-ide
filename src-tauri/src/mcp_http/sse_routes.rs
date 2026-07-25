@@ -105,6 +105,10 @@ fn event_type_name(event: &AppEvent) -> &'static str {
         AppEvent::CloseHtmlTabs { .. } => "close-html-tabs",
         AppEvent::ScheduledJobCompleted { .. } => "scheduled-job-completed",
         AppEvent::DiffTriageProgress { .. } => "triage-progress",
+        AppEvent::ReviewProgress { .. } => "review-progress",
+        AppEvent::ConflictAssistStatus { .. } => "conflict-assist-status",
+        AppEvent::ProposalsReady { .. } => "proposals-ready",
+        AppEvent::WorktreeCreateFailed { .. } => "worktree-create-failed",
     }
 }
 
@@ -122,8 +126,14 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
             session_id,
             cwd,
             agent_type,
+            display_name,
         } => {
-            serde_json::json!({ "session_id": session_id, "cwd": cwd, "agent_type": agent_type })
+            serde_json::json!({
+                "session_id": session_id,
+                "cwd": cwd,
+                "agent_type": agent_type,
+                "display_name": display_name,
+            })
         }
         AppEvent::SessionClosed { session_id, reason } => {
             serde_json::json!({ "session_id": session_id, "reason": reason })
@@ -229,5 +239,128 @@ fn event_payload(event: &AppEvent) -> serde_json::Value {
                 "llm_model": llm_model,
             })
         }
+        AppEvent::ReviewProgress { repo_path, payload }
+        | AppEvent::ConflictAssistStatus { repo_path, payload }
+        | AppEvent::ProposalsReady { repo_path, payload } => {
+            serde_json::json!({ "repo_path": repo_path, "payload": payload })
+        }
+        AppEvent::WorktreeCreateFailed {
+            repo_path,
+            branch,
+            reason,
+        } => {
+            // camelCase keys mirror the Tauri window `worktree-create-failed`
+            // event so the same frontend `handleWorktreeCreateFailed` consumes
+            // both transports unchanged.
+            serde_json::json!({ "repoPath": repo_path, "branch": branch, "reason": reason })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_created_preserves_stable_display_name() {
+        let event = AppEvent::SessionCreated {
+            session_id: "session-1".into(),
+            cwd: Some("/repo".into()),
+            agent_type: Some("codex".into()),
+            display_name: Some("linux-primary".into()),
+        };
+
+        assert_eq!(event_type_name(&event), "session-created");
+        let body = event_payload(&event);
+        assert_eq!(body["session_id"], "session-1");
+        assert_eq!(body["cwd"], "/repo");
+        assert_eq!(body["agent_type"], "codex");
+        assert_eq!(body["display_name"], "linux-primary");
+    }
+
+    /// The three GitHub Ops lifecycle events share a `{repo_path, payload}` shape.
+    /// Each must map to its own SSE `event:` name and round-trip the payload
+    /// verbatim so browser/PWA clients receive the same data as desktop.
+    #[test]
+    fn ops_lifecycle_events_have_distinct_names_and_passthrough_payload() {
+        let payload = serde_json::json!({ "pr_number": 42, "phase": "done", "done": true });
+        let cases: Vec<(AppEvent, &str)> = vec![
+            (
+                AppEvent::ReviewProgress {
+                    repo_path: "/repo".into(),
+                    payload: payload.clone(),
+                },
+                "review-progress",
+            ),
+            (
+                AppEvent::ConflictAssistStatus {
+                    repo_path: "/repo".into(),
+                    payload: payload.clone(),
+                },
+                "conflict-assist-status",
+            ),
+            (
+                AppEvent::ProposalsReady {
+                    repo_path: "/repo".into(),
+                    payload: payload.clone(),
+                },
+                "proposals-ready",
+            ),
+        ];
+
+        // Names must all be distinct and match the expected kebab-case tag.
+        let mut seen = std::collections::HashSet::new();
+        for (event, expected_name) in &cases {
+            assert_eq!(event_type_name(event), *expected_name);
+            assert!(
+                seen.insert(*expected_name),
+                "duplicate event name {expected_name}"
+            );
+            let body = event_payload(event);
+            assert_eq!(body["repo_path"], "/repo");
+            assert_eq!(body["payload"], payload);
+        }
+    }
+
+    #[test]
+    fn worktree_create_failed_uses_camelcase_matching_window_event() {
+        // The background stale-dir recreation dual-emits this on the bus (SSE)
+        // AND the Tauri window. The SSE payload MUST use the same camelCase keys
+        // as the window `worktree-create-failed` event so the frontend
+        // `handleWorktreeCreateFailed({ repoPath, branch, reason })` consumes
+        // both transports unchanged.
+        let event = AppEvent::WorktreeCreateFailed {
+            repo_path: "/repo".into(),
+            branch: "feat-x".into(),
+            reason: "recreation failed: boom".into(),
+        };
+        assert_eq!(event_type_name(&event), "worktree-create-failed");
+        let body = event_payload(&event);
+        assert_eq!(body["repoPath"], "/repo");
+        assert_eq!(body["branch"], "feat-x");
+        assert_eq!(body["reason"], "recreation failed: boom");
+        // No snake_case leakage that a browser handler wouldn't read.
+        assert!(body.get("repo_path").is_none());
+    }
+
+    #[test]
+    fn triage_progress_payload_is_flat_not_wrapped() {
+        let event = AppEvent::DiffTriageProgress {
+            repo_path: "/repo".into(),
+            summary: Some("s".into()),
+            files: vec![],
+            phase: "done".into(),
+            done: true,
+            llm_used: true,
+            llm_model: Some("m".into()),
+        };
+        assert_eq!(event_type_name(&event), "triage-progress");
+        let body = event_payload(&event);
+        // Working-tree triage keeps its flat shape (not the {repo_path,payload}
+        // envelope) — existing panel consumers depend on it.
+        assert_eq!(body["repo_path"], "/repo");
+        assert_eq!(body["phase"], "done");
+        assert_eq!(body["done"], true);
+        assert!(body.get("payload").is_none());
     }
 }

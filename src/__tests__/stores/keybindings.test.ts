@@ -223,7 +223,7 @@ describe("keybindingsStore", () => {
 		});
 
 		it("handles invoke failure gracefully", async () => {
-			const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
 			mockInvoke.mockImplementation((cmd: string) => {
 				if (cmd === "load_keybindings") {
@@ -237,9 +237,13 @@ describe("keybindingsStore", () => {
 
 			// All defaults should still work
 			expect(store.getActionForCombo("cmd+shift+d")).toBe("toggle-git-ops");
-			// Verify the error was logged
-			expect(debugSpy).toHaveBeenCalledWith("[config]", "Failed to load keybindings overrides", expect.any(Error));
-			debugSpy.mockRestore();
+			// Verify the error was logged (error level: hydrate failure disables persistence)
+			expect(errorSpy).toHaveBeenCalledWith(
+				"[config]",
+				"Failed to load keybindings overrides — persistence disabled for this session",
+				expect.any(Error),
+			);
+			errorSpy.mockRestore();
 		});
 	});
 
@@ -279,6 +283,7 @@ describe("keybindingsStore", () => {
 		it("calls save_keybindings with overrides", async () => {
 			mockInvoke.mockResolvedValue(undefined);
 
+			await store.hydrate();
 			await store.setOverride("toggle-git-ops", "Cmd+Y");
 
 			expect(mockInvoke).toHaveBeenCalledWith("save_keybindings", {
@@ -331,6 +336,7 @@ describe("keybindingsStore", () => {
 		it("persists empty overrides array", async () => {
 			mockInvoke.mockResolvedValue(undefined);
 
+			await store.hydrate();
 			await store.setOverride("toggle-git-ops", "Cmd+Y");
 			await store.resetAll();
 
@@ -344,6 +350,7 @@ describe("keybindingsStore", () => {
 		it("unbind removes both lookups for the action", async () => {
 			mockInvoke.mockResolvedValue(undefined);
 
+			await store.hydrate();
 			await store.unbind("toggle-git-ops");
 
 			expect(store.getKeyForAction("toggle-git-ops")).toBeUndefined();
@@ -370,6 +377,31 @@ describe("keybindingsStore", () => {
 			expect(store.getKeyForAction("toggle-git-ops")).toBeUndefined();
 			// And the new action has the combo.
 			expect(store.getKeyForAction("new-terminal")).toBe("Cmd+Shift+D");
+		});
+	});
+
+	describe("pre-hydrate write protection", () => {
+		it("does not persist before hydrate", async () => {
+			mockInvoke.mockResolvedValue(undefined);
+
+			await store.setOverride("toggle-git-ops", "Cmd+Y");
+
+			const saves = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_keybindings");
+			expect(saves).toHaveLength(0);
+			// State still updates locally
+			expect(store.getKeyForAction("toggle-git-ops")).toBe("Cmd+Y");
+		});
+
+		it("does not persist when hydrate failed", async () => {
+			mockInvoke.mockImplementation((cmd: string) =>
+				cmd === "load_keybindings" ? Promise.reject(new Error("no backend")) : Promise.resolve(undefined),
+			);
+
+			await store.hydrate();
+			await store.setOverride("toggle-git-ops", "Cmd+Y");
+
+			const saves = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_keybindings");
+			expect(saves).toHaveLength(0);
 		});
 	});
 

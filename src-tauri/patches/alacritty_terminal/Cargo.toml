@@ -31,6 +31,10 @@ license = "Apache-2.0"
 repository = "https://github.com/alacritty/alacritty"
 resolver = "2"
 
+[package.metadata.cargo-machete]
+# Used only by cfg(unix) modules in the vendored upstream crate.
+ignored = ["rustix"]
+
 [features]
 default = ["serde"]
 serde = [

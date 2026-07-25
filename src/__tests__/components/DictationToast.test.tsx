@@ -23,7 +23,7 @@ describe("DictationToast", () => {
 		expect(container.querySelector(".toast")).toBeNull();
 	});
 
-	it("shows toast when recording starts and partial text arrives", async () => {
+	it("shows the live preview and an idle meter when recording starts", async () => {
 		// Mock start_dictation to succeed
 		mockInvoke.mockResolvedValueOnce(undefined);
 
@@ -34,8 +34,11 @@ describe("DictationToast", () => {
 			await dictationStore.startRecording();
 			expect(dictationStore.state.recording).toBe(true);
 
-			// Toast should still be hidden (no partial text yet)
-			expect(container.querySelector(".toast")).toBeNull();
+			expect(container.querySelector(".toast")).not.toBeNull();
+			expect(container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe("0");
+
+			mockInvoke.mockResolvedValueOnce({ text: "", skip_reason: "no speech detected", duration_s: 0 });
+			await dictationStore.stopRecording();
 		});
 	});
 

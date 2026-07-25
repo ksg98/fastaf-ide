@@ -1,4 +1,14 @@
-import { type Component, createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	Match,
+	onCleanup,
+	onMount,
+	Show,
+	Switch,
+} from "solid-js";
 import { AGENT_DISPLAY } from "../../agents";
 import { useGitHub } from "../../hooks/useGitHub";
 import { t } from "../../i18n";
@@ -18,8 +28,9 @@ import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
 import { activePrStatus } from "../../utils/mergedPrGrace";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
-import { CiBadge, PrBadge, ZoomIndicator } from "../ui";
 import { AgentIcon } from "../ui/AgentIcon";
+import { CiBadge, PrBadge } from "../ui/StatusBadge";
+import { ZoomIndicator } from "../ui/ZoomIndicator";
 import s from "./StatusBar.module.css";
 import { TickerArea } from "./TickerArea";
 
@@ -271,33 +282,37 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 								<span style={{ color: display().color }}>
 									<AgentIcon agent={agentType()} size={12} />
 								</span>
-								{rl() ? (
-									<span class={s.agentRateLimited}> ⚠ {rl()!.remaining}</span>
-								) : claudeTicker() ? (
-									<span
-										class={cx(
-											s.agentUsage,
-											claudeTicker()!.priority >= 90 && s.agentUsageCritical,
-											claudeTicker()!.priority >= 50 && claudeTicker()!.priority < 90 && s.agentUsageWarning,
+								<Switch fallback={<span style={{ color: display().color }}> {agentType()}</span>}>
+									<Match when={rl()}>{(rl) => <span class={s.agentRateLimited}> ⚠ {rl().remaining}</span>}</Match>
+									<Match when={claudeTicker()}>
+										{(ticker) => (
+											<span
+												class={cx(
+													s.agentUsage,
+													ticker().priority >= 90 && s.agentUsageCritical,
+													ticker().priority >= 50 && ticker().priority < 90 && s.agentUsageWarning,
+												)}
+											>
+												{" "}
+												{ticker().text.replace(/^Claude:\s*/, "")}
+											</span>
 										)}
-									>
-										{" "}
-										{claudeTicker()!.text.replace(/^Claude:\s*/, "")}
-									</span>
-								) : ul() ? (
-									<span
-										class={cx(
-											s.agentUsage,
-											ul()!.percentage >= 90 && s.agentUsageCritical,
-											ul()!.percentage >= 70 && ul()!.percentage < 90 && s.agentUsageWarning,
+									</Match>
+									<Match when={ul()}>
+										{(ul) => (
+											<span
+												class={cx(
+													s.agentUsage,
+													ul().percentage >= 90 && s.agentUsageCritical,
+													ul().percentage >= 70 && ul().percentage < 90 && s.agentUsageWarning,
+												)}
+											>
+												{" "}
+												{ul().percentage}% {ul().limitType}
+											</span>
 										)}
-									>
-										{" "}
-										{ul()!.percentage}% {ul()!.limitType}
-									</span>
-								) : (
-									<span style={{ color: display().color }}> {agentType()}</span>
-								)}
+									</Match>
+								</Switch>
 							</span>
 						);
 					}}

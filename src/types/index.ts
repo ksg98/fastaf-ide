@@ -90,6 +90,8 @@ export interface CheckSummary {
 export interface CheckDetail {
 	context: string;
 	state: string;
+	/** External details URL (CheckRun.detailsUrl / StatusContext.targetUrl); empty when the provider gives none. */
+	html_url: string;
 }
 
 /** Merge state: MERGEABLE, CONFLICTING, UNKNOWN */
@@ -126,7 +128,9 @@ export interface BranchPrStatus {
 	additions: number;
 	deletions: number;
 	checks: CheckSummary;
-	check_details: CheckDetail[];
+	/** CI check rows. Absent from the batch (get_all_pr_statuses) payload —
+	 *  populated on-demand by githubStore.loadCheckDetails() via get_ci_checks. */
+	check_details?: CheckDetail[];
 	author: string;
 	commits: number;
 	mergeable: MergeableState;
@@ -204,6 +208,31 @@ export interface GitHubIssue {
 	comments_count: number;
 	created_at: string;
 	updated_at: string;
+}
+
+export interface CreatedIssue {
+	number: number;
+	url: string;
+	title: string;
+}
+
+export type ImprovementFocus = "refactor" | "testing" | "perf";
+
+export interface ImprovementProposal {
+	title: string;
+	summary: string;
+	rationale: string;
+	issue_title: string;
+	issue_body: string;
+	labels: string[];
+	impact: string;
+	effort: string;
+}
+
+export interface ImprovementScanResult {
+	repo_path: string;
+	focus: ImprovementFocus;
+	proposals: ImprovementProposal[];
 }
 
 /** Issue filter mode for the GitHub panel */

@@ -52,6 +52,13 @@ describe("platform detection", () => {
 			mockPlatform("SomeOtherOS");
 			expect(detectPlatform()).toBe("unknown");
 		});
+
+		it("does not misclassify a Darwin/X11 string as Windows", () => {
+			// Regression: includes("win") matched "darWINarm" — the substring
+			// "win" inside "Darwin" — so this must resolve via the x11 branch.
+			mockPlatform("X11; Darwin arm64");
+			expect(detectPlatform()).toBe("linux");
+		});
 	});
 
 	describe("isMacOS", () => {

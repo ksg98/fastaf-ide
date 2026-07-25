@@ -54,6 +54,7 @@ function createMockDeps(overrides: Partial<AppInitDeps> = {}): AppInitDeps {
 describe("initApp", () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
+		vi.mocked(listen).mockReset().mockResolvedValue(vi.fn());
 		resetStores();
 	});
 
@@ -70,6 +71,54 @@ describe("initApp", () => {
 		expect(deps.applyPlatformClass).toHaveBeenCalled();
 		expect(deps.stores.hydrate).toHaveBeenCalled();
 		expect(deps.stores.loadFontFromConfig).toHaveBeenCalled();
+	});
+
+	it("switches to the owning repo before focusing an MCP native file tab", async () => {
+		let uiTabCallback:
+			| ((event: {
+					payload: {
+						id: string;
+						title: string;
+						html: string;
+						pinned: boolean;
+						url: string;
+						focus: boolean;
+					};
+			  }) => void)
+			| null = null;
+		vi.mocked(listen).mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+			if (event === "ui-tab") uiTabCallback = handler as typeof uiTabCallback;
+			return Promise.resolve(vi.fn());
+		}) as unknown as typeof listen);
+
+		const sourceRepo = "/repos/investimenti";
+		const targetRepo = "/repos/aicheck";
+		for (const path of [sourceRepo, targetRepo]) {
+			repositoriesStore.add({ path, displayName: path.split("/").pop()! });
+			repositoriesStore.setBranch(path, "main", { name: "main", worktreePath: path });
+			repositoriesStore.setActiveBranch(path, "main");
+		}
+		repositoriesStore.setActive(sourceRepo);
+
+		const deps = createMockDeps();
+		await initApp(deps);
+		uiTabCallback!({
+			payload: {
+				id: "comparison",
+				title: "Comparison",
+				html: "",
+				pinned: false,
+				url: `tuic://open/${targetRepo}/reports/comparison.md`,
+				focus: true,
+			},
+		});
+
+		expect(repositoriesStore.state.activeRepoPath).toBe(targetRepo);
+		expect(deps.setCurrentRepoPath).toHaveBeenCalledWith(targetRepo);
+		expect(deps.setCurrentBranch).toHaveBeenCalledWith("main");
+		const activeTab = mdTabsStore.getActive();
+		expect(activeTab).toMatchObject({ repoPath: targetRepo, filePath: "reports/comparison.md" });
+		expect(mdTabsStore.getVisibleIds(`${targetRepo}|main`)).toContain(activeTab!.id);
 	});
 
 	it("re-adopts surviving PTY sessions", async () => {
@@ -89,6 +138,24 @@ describe("initApp", () => {
 		const ids = terminalsStore.getIds();
 		expect(terminalsStore.get(ids[0])?.sessionId).toBe("sess-1");
 		expect(terminalsStore.get(ids[1])?.sessionId).toBe("sess-2");
+		expect(terminalsStore.get(ids[0])?.nameIsCustom).toBe(false);
+	});
+
+	it("preserves a surviving session display name as custom", async () => {
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi
+					.fn()
+					.mockResolvedValue([{ session_id: "sess-named", cwd: "/repo", display_name: "linux-primary" }]),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		await initApp(deps);
+
+		const terminal = terminalsStore.getIds().map((id) => terminalsStore.get(id))[0];
+		expect(terminal?.name).toBe("linux-primary");
+		expect(terminal?.nameIsCustom).toBe(true);
 	});
 
 	it("matches surviving sessions to repos by cwd", async () => {
@@ -106,6 +173,236 @@ describe("initApp", () => {
 
 		const branch = repositoriesStore.get("/repo")?.branches["main"];
 		expect(branch?.terminals.length).toBe(1);
+	});
+
+	it("matches a surviving session whose cwd is nested below the repo", async () => {
+		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi.fn().mockResolvedValue([{ session_id: "sess-nested", cwd: "/repo/packages/app" }]),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		await initApp(deps);
+
+		const branch = repositoriesStore.get("/repo")?.branches["main"];
+		expect(branch?.terminals).toHaveLength(1);
+		expect(terminalsStore.get(branch!.terminals[0])?.sessionId).toBe("sess-nested");
+	});
+
+	it("assigns a surviving session to the most-specific nested repo", async () => {
+		repositoriesStore.add({ path: "/repo", displayName: "Outer" });
+		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+		repositoriesStore.setBranch("/repo", "embedded", { worktreePath: "/repo/packages/app/" });
+		repositoriesStore.add({ path: "/repo/packages/app", displayName: "Nested" });
+		repositoriesStore.setBranch("/repo/packages/app", "main", { worktreePath: null });
+		repositoriesStore.setActiveBranch("/repo/packages/app", "main");
+
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi
+					.fn()
+					.mockResolvedValue([{ session_id: "sess-nested-repo", cwd: "/repo/packages/app/src" }]),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		await initApp(deps);
+
+		expect(repositoriesStore.get("/repo")?.branches["main"].terminals).toHaveLength(0);
+		expect(repositoriesStore.get("/repo")?.branches["embedded"].terminals).toHaveLength(0);
+		const nestedBranch = repositoriesStore.get("/repo/packages/app")?.branches["main"];
+		expect(nestedBranch?.terminals).toHaveLength(1);
+		expect(terminalsStore.get(nestedBranch!.terminals[0])?.sessionId).toBe("sess-nested-repo");
+	});
+
+	it("prefers a longer external worktree over an enclosing repo root", async () => {
+		repositoriesStore.add({ path: "/external", displayName: "External" });
+		repositoriesStore.setBranch("/external", "main", { worktreePath: "/external" });
+		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+		repositoriesStore.setBranch("/repo", "feature", { worktreePath: "/external/feature" });
+
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi
+					.fn()
+					.mockResolvedValue([{ session_id: "sess-external-worktree", cwd: "/external/feature/src" }]),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		await initApp(deps);
+
+		expect(repositoriesStore.get("/external")?.branches["main"].terminals).toHaveLength(0);
+		const feature = repositoriesStore.get("/repo")?.branches["feature"];
+		expect(feature?.terminals).toHaveLength(1);
+		expect(terminalsStore.get(feature!.terminals[0])?.sessionId).toBe("sess-external-worktree");
+	});
+
+	it("deduplicates a session-created event while the surviving-session list is pending", async () => {
+		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+		repositoriesStore.setActiveBranch("/repo", "main");
+		repositoriesStore.setActive("/repo");
+
+		let sessionCreated:
+			| ((event: { payload: { session_id: string; cwd: string | null; agent_type?: string | null } }) => void)
+			| null = null;
+		vi.mocked(listen).mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+			if (event === "session-created") {
+				sessionCreated = handler as typeof sessionCreated;
+			}
+			return Promise.resolve(vi.fn());
+		}) as unknown as typeof listen);
+
+		let markListStarted!: () => void;
+		const listStarted = new Promise<void>((resolve) => {
+			markListStarted = resolve;
+		});
+		type SurvivingSession = {
+			session_id: string;
+			cwd: string | null;
+			state?: { shell_state?: "busy" | "idle"; agent_state?: "working" | "idle"; background_work?: boolean };
+		};
+		let resolveSessions!: (sessions: SurvivingSession[]) => void;
+		const sessions = new Promise<SurvivingSession[]>((resolve) => {
+			resolveSessions = resolve;
+		});
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi.fn(() => {
+					markListStarted();
+					return sessions;
+				}),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		const initializing = initApp(deps);
+		await listStarted;
+		sessionCreated!({ payload: { session_id: "sess-race", cwd: "/repo", agent_type: "codex" } });
+		resolveSessions([
+			{
+				session_id: "sess-race",
+				cwd: "/repo",
+				state: { shell_state: "idle", agent_state: "working", background_work: true },
+			},
+		]);
+		await initializing;
+
+		const branch = repositoriesStore.get("/repo")?.branches["main"];
+		expect(terminalsStore.getCount()).toBe(1);
+		expect(branch?.terminals).toHaveLength(1);
+		expect(new Set(branch?.terminals).size).toBe(1);
+		const terminal = terminalsStore.get(branch!.terminals[0]);
+		expect(terminal?.sessionId).toBe("sess-race");
+		expect(terminal?.shellState).toBe("idle");
+		expect(terminal?.agentState).toBe("working");
+		expect(terminal?.backgroundWork).toBe(true);
+	});
+
+	it("does not overwrite a newer shell event while reconciling a deduplicated surviving session", async () => {
+		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+		repositoriesStore.setActiveBranch("/repo", "main");
+		repositoriesStore.setActive("/repo");
+
+		let sessionCreated:
+			| ((event: { payload: { session_id: string; cwd: string | null; agent_type?: string | null } }) => void)
+			| null = null;
+		vi.mocked(listen).mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+			if (event === "session-created") sessionCreated = handler as typeof sessionCreated;
+			return Promise.resolve(vi.fn());
+		}) as unknown as typeof listen);
+
+		let markListStarted!: () => void;
+		const listStarted = new Promise<void>((resolve) => {
+			markListStarted = resolve;
+		});
+		let resolveSessions!: (
+			sessions: Array<{
+				session_id: string;
+				cwd: string | null;
+				state: { shell_state: "busy"; agent_state: "working"; background_work: true };
+			}>,
+		) => void;
+		const sessions = new Promise<
+			Array<{
+				session_id: string;
+				cwd: string | null;
+				state: { shell_state: "busy"; agent_state: "working"; background_work: true };
+			}>
+		>((resolve) => {
+			resolveSessions = resolve;
+		});
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi.fn(() => {
+					markListStarted();
+					return sessions;
+				}),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		const initializing = initApp(deps);
+		await listStarted;
+		sessionCreated!({ payload: { session_id: "sess-race-newer", cwd: "/repo", agent_type: "codex" } });
+		const terminalId = terminalsStore.getTerminalForSession("sess-race-newer")!;
+		terminalsStore.update(terminalId, { shellState: "idle" });
+		resolveSessions([
+			{
+				session_id: "sess-race-newer",
+				cwd: "/repo",
+				state: { shell_state: "busy", agent_state: "working", background_work: true },
+			},
+		]);
+		await initializing;
+
+		const terminal = terminalsStore.get(terminalId);
+		expect(terminal?.shellState).toBe("idle");
+		expect(terminal?.agentState).toBe("working");
+		expect(terminal?.backgroundWork).toBe(true);
+	});
+
+	it("applies a surviving shell snapshot newer than a pre-request shell event", async () => {
+		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+		repositoriesStore.setActiveBranch("/repo", "main");
+		repositoriesStore.setActive("/repo");
+
+		vi.mocked(listen).mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+			if (event === "session-created") {
+				handler({ payload: { session_id: "sess-before-request", cwd: "/repo", agent_type: "codex" } });
+				const terminalId = terminalsStore.getTerminalForSession("sess-before-request")!;
+				terminalsStore.update(terminalId, { shellState: "idle" });
+			}
+			return Promise.resolve(vi.fn());
+		}) as unknown as typeof listen);
+
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi.fn().mockResolvedValue([
+					{
+						session_id: "sess-before-request",
+						cwd: "/repo",
+						state: { shell_state: "busy", agent_state: "idle", background_work: false },
+					},
+				]),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		await initApp(deps);
+
+		const terminalId = terminalsStore.getTerminalForSession("sess-before-request")!;
+		const terminal = terminalsStore.get(terminalId);
+		expect(terminal?.shellState).toBe("busy");
+		expect(terminal?.agentState).toBe("idle");
 	});
 
 	it("restores active repo/branch and eagerly calls handleBranchSelect", async () => {
@@ -206,12 +503,12 @@ describe("initApp", () => {
 		expect(ids.length).toBe(1);
 	});
 
-	it("calls handleBranchSelect when surviving sessions have no valid terminals", async () => {
+	it("assigns an unmatched surviving session to the active branch without replacement", async () => {
 		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
 		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
 		repositoriesStore.setActiveBranch("/repo", "main");
+		repositoriesStore.setActive("/repo");
 
-		// Surviving session CWD doesn't match the branch
 		const deps = createMockDeps({
 			pty: {
 				listActiveSessions: vi.fn().mockResolvedValue([{ session_id: "sess-1", cwd: "/other" }]),
@@ -221,9 +518,11 @@ describe("initApp", () => {
 
 		await initApp(deps);
 
-		// The session is adopted but not matched to main branch terminals
-		// So handleBranchSelect should be called to create a proper terminal
-		expect(deps.handleBranchSelect).toHaveBeenCalledWith("/repo", "main");
+		const branch = repositoriesStore.get("/repo")?.branches["main"];
+		expect(branch?.terminals).toHaveLength(1);
+		expect(terminalsStore.get(branch!.terminals[0])?.sessionId).toBe("sess-1");
+		expect(terminalsStore.getCount()).toBe(1);
+		expect(deps.handleBranchSelect).not.toHaveBeenCalled();
 	});
 
 	it("snapshots agentSessionId into savedTerminals on beforeunload", async () => {
@@ -426,6 +725,55 @@ describe("initApp", () => {
 		// After debounce period (500ms), should fire
 		await vi.advanceTimersByTimeAsync(500);
 		expect(deps.refreshAllBranchStats).toHaveBeenCalledTimes(2);
+	});
+
+	it("repo-changed scopes the refresh to the repo that changed (no full fan-out)", async () => {
+		// Regression: a change to ONE repo must not re-scan every open repo. The
+		// debounced refresh is called with the changed repo's path so the fan-out
+		// stays bounded to that repo.
+		const listenMock = vi.mocked(listen);
+		let repoChangedCallback: ((event: { payload: { repo_path: string } }) => void) | null = null;
+		listenMock.mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+			if (event === "repo-changed") {
+				repoChangedCallback = handler as typeof repoChangedCallback;
+			}
+			return Promise.resolve(vi.fn());
+		}) as unknown as typeof listen);
+
+		const deps = createMockDeps();
+		await initApp(deps);
+		vi.mocked(deps.refreshAllBranchStats).mockClear();
+
+		repoChangedCallback!({ payload: { repo_path: "/repo-a" } });
+		await vi.advanceTimersByTimeAsync(500);
+
+		expect(deps.refreshAllBranchStats).toHaveBeenCalledTimes(1);
+		expect(deps.refreshAllBranchStats).toHaveBeenCalledWith("/repo-a");
+	});
+
+	it("repo-changed debounces each repo independently — one change never delays another", async () => {
+		// Two different repos changing within the same window each get their own
+		// scoped refresh; they are NOT coalesced into a single all-repos scan.
+		const listenMock = vi.mocked(listen);
+		let repoChangedCallback: ((event: { payload: { repo_path: string } }) => void) | null = null;
+		listenMock.mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+			if (event === "repo-changed") {
+				repoChangedCallback = handler as typeof repoChangedCallback;
+			}
+			return Promise.resolve(vi.fn());
+		}) as unknown as typeof listen);
+
+		const deps = createMockDeps();
+		await initApp(deps);
+		vi.mocked(deps.refreshAllBranchStats).mockClear();
+
+		repoChangedCallback!({ payload: { repo_path: "/repo-a" } });
+		repoChangedCallback!({ payload: { repo_path: "/repo-b" } });
+		await vi.advanceTimersByTimeAsync(500);
+
+		expect(deps.refreshAllBranchStats).toHaveBeenCalledTimes(2);
+		expect(deps.refreshAllBranchStats).toHaveBeenCalledWith("/repo-a");
+		expect(deps.refreshAllBranchStats).toHaveBeenCalledWith("/repo-b");
 	});
 
 	it("repo-changed debounce coalesces rapid events", async () => {
@@ -730,10 +1078,14 @@ describe("initApp", () => {
 				awaitingInput: null,
 				isRemote: true,
 			});
+			terminalsStore.update(termId, { agentState: "working", backgroundWork: true });
 
 			getCallback()!({ payload: { session_id: "remote-sess", reason: "process_exit", agent_type: "claude" } });
 
 			expect(terminalsStore.get(termId)?.shellState).toBe("exited");
+			expect(terminalsStore.get(termId)?.sessionId).toBeNull();
+			expect(terminalsStore.get(termId)?.agentState).toBeNull();
+			expect(terminalsStore.get(termId)?.backgroundWork).toBe(false);
 		});
 
 		it("does not set shellState when session_id has no matching terminal", async () => {
@@ -747,7 +1099,12 @@ describe("initApp", () => {
 	});
 
 	describe("session-closed auto-close path", () => {
-		type SessionCreatedPayload = { session_id: string; cwd: string | null; agent_type?: string | null };
+		type SessionCreatedPayload = {
+			session_id: string;
+			cwd: string | null;
+			agent_type?: string | null;
+			display_name?: string | null;
+		};
 		type SessionClosedPayload = { session_id: string; reason: string; agent_type?: string | null };
 
 		/** Captures both session-created and session-closed callbacks in a single mock pass. */
@@ -858,7 +1215,12 @@ describe("initApp", () => {
 	});
 
 	describe("session-created event (agent tab activation)", () => {
-		type SessionCreatedPayload = { session_id: string; cwd: string | null; agent_type?: string | null };
+		type SessionCreatedPayload = {
+			session_id: string;
+			cwd: string | null;
+			agent_type?: string | null;
+			display_name?: string | null;
+		};
 
 		function captureSessionCreated() {
 			const listenMock = vi.mocked(listen);
@@ -911,6 +1273,26 @@ describe("initApp", () => {
 			const newId = terminalsStore.getIds().find((id) => terminalsStore.get(id)?.sessionId === "new-sess");
 			expect(newId).toBeDefined();
 			expect(terminalsStore.state.activeId).toBe(newId);
+			expect(terminalsStore.get(newId!)?.nameIsCustom).toBe(false);
+		});
+
+		it("preserves a spawned agent display name as custom", async () => {
+			const { getCallback } = captureSessionCreated();
+			const deps = createMockDeps();
+			await initApp(deps);
+
+			getCallback()!({
+				payload: {
+					session_id: "named-sess",
+					cwd: "/repo",
+					agent_type: "codex",
+					display_name: "windows-primary",
+				},
+			});
+
+			const terminalId = terminalsStore.getIds().find((id) => terminalsStore.get(id)?.sessionId === "named-sess");
+			expect(terminalsStore.get(terminalId!)?.name).toBe("windows-primary");
+			expect(terminalsStore.get(terminalId!)?.nameIsCustom).toBe(true);
 		});
 
 		it("setActiveGroup called with first leaf when split but no active group", async () => {

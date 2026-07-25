@@ -82,5 +82,43 @@
         "author": "jklap"
       }
     ]
+  },
+  "1.6.1": {
+    "highlights": [
+      "Dictation preview now shows a live microphone meter so you can confirm your mic is picking up speech before transcription starts.",
+      "The status bar no longer crashes when the Claude usage badge rotates out at the moment it's being drawn.",
+      "Creating a branch based on a local branch whose name contains a slash (e.g. POC-0001/merge-radar) now works.",
+      "Agents stay marked busy through API connection-retry loops instead of falsely appearing idle between attempts.",
+      "CI auto-heal reaches the branch agent immediately on a failed job even while sibling jobs keep the workflow running.",
+      "Switching an MCP HTTP upstream from Bearer to OAuth now clears the old token and reconnects with the chosen method.",
+      "Saving settings no longer loses fields between panels or silently disables the Remote Access web server and global hotkey.",
+      "Restarting the remote HTTP server keeps stdio MCP clients like Claude connected with their tools instead of dropping to zero."
+    ],
+    "date": "2026-07-15"
+  },
+  "1.6.2": {
+    "highlights": [
+      "Multi-agent MCP orchestration is now far more reliable, with socket stalls, stale bindings, and blocking-wait races fixed.",
+      "Agent-to-agent messages now use bounded inboxes and never overwrite your typed input or leave ghost \"busy\" sessions behind.",
+      "Background work (Cargo builds, tests) keeps agents marked working instead of falsely reporting completion at a ready prompt.",
+      "Agent completion is now distinct from idle, with a separate task-level state so finished turns are reported accurately.",
+      "MCP-spawned agents accept an optional name that stays stable in terminal tabs across reconnects.",
+      "Codex and OpenCode spawning and message submission are now reliable, with correct model args and prompt placement.",
+      "Dev builds use a separate repository list, so running a dev instance no longer overwrites your installed app's repos.",
+      "Build Cleaner no longer rescans every repository after each reload, sharing one scan and reusing recent results."
+    ],
+    "date": "2026-07-20"
+  },
+  "1.6.3": {
+    "highlights": [
+      "Updated the entire dependency stack (Vite 8, Vitest 4, TypeScript 7, Tauri 2.11) for better security and performance.",
+      "Web Push now signs with P-256 directly, dropping a vulnerable RSA dependency and picking up the quick-xml security fix.",
+      "The Activity Dashboard now shows a ready agent as idle even when Codex keeps a background dev server alive.",
+      "Agent status rows no longer stick, flicker, or erase a visible choice prompt at turn boundaries.",
+      "Claude now recovers cleanly when an idle hook is missed after real turn activity.",
+      "MCP peer messages no longer create ghost turns or fail to wake an idle agent into a new turn.",
+      "Blocking MCP waits now honor their deadline (60s default, 300s max) instead of hitting a stray 10-second cutoff."
+    ],
+    "date": "2026-07-22"
   }
 }

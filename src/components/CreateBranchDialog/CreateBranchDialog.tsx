@@ -1,4 +1,5 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { registerModal } from "../../stores/modalStack";
 import { validateBranchName } from "../RenameBranchDialog/RenameBranchDialog";
 import d from "../shared/dialog.module.css";
 
@@ -31,11 +32,13 @@ export const CreateBranchDialog: Component<CreateBranchDialogProps> = (props) =>
 	// Enter to confirm, Escape to cancel.
 	createEffect(() => {
 		if (!props.visible) return;
+
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to props.onClose AND stops it reaching the terminal underneath.
+		registerModal(props.onClose);
+
 		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				props.onClose();
-			} else if (e.key === "Enter" && !isCreating()) {
+			if (e.key === "Enter" && !isCreating()) {
 				e.preventDefault();
 				void handleCreate();
 			}

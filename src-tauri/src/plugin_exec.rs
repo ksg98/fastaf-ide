@@ -64,6 +64,12 @@ fn check_rate_limit(plugin_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Drop a plugin's rate-limiter entry (called on uninstall so the id's call
+/// history doesn't linger for the process lifetime).
+pub(crate) fn clear_rate_limit(plugin_id: &str) {
+    rate_limiter().remove(plugin_id);
+}
+
 // ---------------------------------------------------------------------------
 // Binary resolution
 // ---------------------------------------------------------------------------
@@ -464,6 +470,24 @@ mod tests {
         let result = check_rate_limit(id);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("rate limit"));
+    }
+
+    #[test]
+    fn clear_rate_limit_drops_entry() {
+        let id = "test-rate-clear";
+        rate_limiter().remove(id);
+        // Saturate the window so further calls would be rejected.
+        for _ in 0..RATE_LIMIT_PER_MINUTE {
+            assert!(check_rate_limit(id).is_ok());
+        }
+        assert!(check_rate_limit(id).is_err());
+        assert!(rate_limiter().contains_key(id));
+
+        // Uninstall path: clearing the entry wipes the call history.
+        clear_rate_limit(id);
+        assert!(!rate_limiter().contains_key(id));
+        // The window is empty again, so calls succeed.
+        assert!(check_rate_limit(id).is_ok());
     }
 
     #[test]

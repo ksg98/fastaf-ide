@@ -1,5 +1,6 @@
 import { type Component, createSignal, For, onMount } from "solid-js";
 import { VARIABLE_DESCRIPTIONS } from "../../data/smartPromptsBuiltIn";
+import { registerModal } from "../../stores/modalStack";
 import s from "./VariableInputDialog.module.css";
 
 export interface VariableInputDialogProps {
@@ -41,12 +42,12 @@ export const VariableInputDialog: Component<VariableInputDialogProps> = (props) 
 		}
 	};
 
-	const handleKeyDown = (e: KeyboardEvent) => {
-		if (e.key === "Escape") props.onCancel();
-	};
+	// Escape-to-close is handled centrally (stores/modalStack): registering routes
+	// Escape to props.onCancel AND stops it reaching the terminal underneath.
+	registerModal(props.onCancel);
 
 	return (
-		<div class={s.overlay} onClick={props.onCancel} onKeyDown={handleKeyDown}>
+		<div class={s.overlay} onClick={props.onCancel}>
 			<form class={s.dialog} onClick={(e) => e.stopPropagation()} onSubmit={handleSubmit}>
 				<div class={s.header}>
 					<span class={s.title}>{props.promptName}</span>

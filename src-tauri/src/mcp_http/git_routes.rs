@@ -213,7 +213,11 @@ pub(super) async fn remote_url(Query(q): Query<PathQuery>) -> Response {
 }
 
 pub(super) async fn list_user_plugins_http() -> impl axum::response::IntoResponse {
-    Json(serde_json::json!(crate::plugins::list_user_plugins()))
+    // list_user_plugins() scans the plugin dir off disk — keep it off the runtime.
+    match tokio::task::spawn_blocking(crate::plugins::list_user_plugins).await {
+        Ok(plugins) => Json(serde_json::json!(plugins)).into_response(),
+        Err(e) => err_500(&format!("Task failed: {e}")),
+    }
 }
 
 // --- GitPanel commands ---

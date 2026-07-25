@@ -104,20 +104,58 @@ function removeConventionHeader(source: string): string {
 const INLINE_MARKERS_RE = /[*_`~]/g;
 
 /** Normalize a rendered selection for matching: drop inline markers, collapse whitespace. */
-function normalizeForMatch(text: string): string {
+export function normalizeForMatch(text: string): string {
 	return text.replace(INLINE_MARKERS_RE, "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Build a boolean mask over `source`, `false` for every character that is NOT
+ * visible in the rendered DOM: the convention header and every tweak marker's
+ * syntax (begin marker, and the end marker including its comment body). The
+ * highlighted text BETWEEN a begin/end pair stays visible. Handles nested
+ * markers because each marker is masked independently.
+ *
+ * This makes source-side occurrence counting align with the rendered DOM, which
+ * is where the caller's `occurrenceIndex` is measured — the header/markers/bodies
+ * are absent from the DOM, so they must not shift ordinals.
+ */
+function buildVisibilityMask(source: string): boolean[] {
+	const visible = new Array<boolean>(source.length).fill(true);
+	const hide = (start: number, end: number) => {
+		for (let i = start; i < end && i < source.length; i++) visible[i] = false;
+	};
+	// Convention header (exact or trailing-trimmed).
+	if (source.startsWith(CONVENTION_HEADER)) {
+		hide(0, CONVENTION_HEADER.length);
+	} else {
+		const trimmed = CONVENTION_HEADER.trimEnd();
+		if (source.startsWith(trimmed)) hide(0, trimmed.length);
+	}
+	// Marker syntax — begin markers and end markers (bodies included).
+	const beginRe = /<!--tweak:begin:[A-Za-z0-9_-]+-->/g;
+	const endRe = /<!--tweak:end:[A-Za-z0-9_-]+ @\S+\s[\s\S]*?-->/g;
+	for (const re of [beginRe, endRe]) {
+		re.lastIndex = 0;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(source)) !== null) hide(m.index, m.index + m[0].length);
+	}
+	return visible;
 }
 
 /**
  * Build a marker-stripped, whitespace-collapsed view of `source` alongside a map
  * from each normalized-string index to its originating source offset. This lets a
  * match found in the normalized view be translated back to a slice of the raw source.
+ * Characters hidden by `buildVisibilityMask` (header, marker syntax, comment bodies)
+ * are skipped so the normalized view matches the rendered DOM text.
  */
 function buildNormalizedIndex(source: string): { normalized: string; map: number[] } {
 	const chars: string[] = [];
 	const map: number[] = [];
+	const visible = buildVisibilityMask(source);
 	let prevWasSpace = false;
 	for (let i = 0; i < source.length; i++) {
+		if (!visible[i]) continue; // header / marker syntax / body — not in the DOM
 		const ch = source[i];
 		if (ch === "*" || ch === "_" || ch === "`" || ch === "~") continue; // invisible inline marker
 		if (/\s/.test(ch)) {
@@ -134,21 +172,39 @@ function buildNormalizedIndex(source: string): { normalized: string; map: number
 	return { normalized: chars.join(""), map };
 }
 
+/** Index of the `n`-th (0-based) occurrence of `needle` in `hay`, or -1. */
+function nthIndexOf(hay: string, needle: string, n: number): number {
+	let idx = -1;
+	for (let k = 0; k <= n; k++) {
+		idx = hay.indexOf(needle, idx + 1);
+		if (idx === -1) return -1;
+	}
+	return idx;
+}
+
 /**
  * Locate `selection` (text taken from the rendered DOM) within the raw markdown
- * `source`, returning the source offsets to wrap. Tries an exact match first
- * (fast path for plain text), then falls back to a normalized match that ignores
- * inline markdown formatting and whitespace differences (line wraps, `**bold**`,
- * `*italic*`, `` `code` ``, `~~strike~~`). Returns null when no match is found.
+ * `source`, returning the source offsets to wrap. Matching is done against a
+ * normalized view that ignores inline markdown formatting and whitespace
+ * differences (line wraps, `**bold**`, `*italic*`, `` `code` ``, `~~strike~~`)
+ * and skips invisible regions (convention header, marker syntax, comment bodies).
+ *
+ * `occurrenceIndex` selects WHICH occurrence to anchor when the selected text
+ * appears multiple times in the document — it is the 0-based ordinal of the
+ * user's actual selection among identical rendered occurrences (measured in the
+ * DOM by the caller). Without it, a repeated word ("reason" ×18) would always
+ * anchor to the first occurrence, leaving the user's real selection unhighlighted.
+ * Returns null when the requested occurrence cannot be located.
  */
-export function findSourceMatch(source: string, selection: string): { start: number; end: number } | null {
-	const direct = source.indexOf(selection);
-	if (direct !== -1) return { start: direct, end: direct + selection.length };
-
+export function findSourceMatch(
+	source: string,
+	selection: string,
+	occurrenceIndex = 0,
+): { start: number; end: number } | null {
 	const normSel = normalizeForMatch(selection);
 	if (!normSel) return null;
 	const { normalized, map } = buildNormalizedIndex(source);
-	const nIdx = normalized.indexOf(normSel);
+	const nIdx = nthIndexOf(normalized, normSel, occurrenceIndex);
 	if (nIdx === -1) return null;
 	// Map the normalized [start, last] back to raw-source offsets. The selection is
 	// trimmed, so its last normalized char is non-whitespace and maps cleanly.
@@ -157,17 +213,46 @@ export function findSourceMatch(source: string, selection: string): { start: num
 	return { start, end };
 }
 
+/** Source offsets [start, end) of every existing tweak-comment marker span. */
+function existingCommentSpans(source: string): Array<{ start: number; end: number }> {
+	const spans: Array<{ start: number; end: number }> = [];
+	FULL_RE.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = FULL_RE.exec(source)) !== null) {
+		spans.push({ start: match.index, end: match.index + match[0].length });
+	}
+	return spans;
+}
+
+/**
+ * Thrown by `insertTweakComment` when the selection overlaps an existing
+ * comment. Nesting one `<!--tweak-->` span inside another is unrepresentable:
+ * the lazy parser would swallow the inner comment into the outer's highlighted
+ * text, so it saves to disk but never parses or renders again (looks like it
+ * "didn't persist"). Callers surface this as a distinct, actionable message.
+ */
+export class OverlappingCommentError extends Error {}
+
 /**
  * Insert a tweak comment into the source by wrapping the source span that the
  * `highlighted` selection corresponds to with begin/end markers. The wrapped
  * span uses the RAW source text (markers included) so the rendered output and
- * round-trip removal stay correct. Throws if the text cannot be located.
+ * round-trip removal stay correct. Throws if the text cannot be located, or an
+ * `OverlappingCommentError` if it overlaps an existing comment (nesting is not
+ * supported — comment on plain text, or edit the existing comment instead).
  */
-export function insertTweakComment(source: string, comment: TweakComment): string {
-	const match = findSourceMatch(source, comment.highlighted);
+export function insertTweakComment(source: string, comment: TweakComment, occurrenceIndex = 0): string {
+	const match = findSourceMatch(source, comment.highlighted, occurrenceIndex);
 	if (!match) {
 		throw new Error(
 			`insertTweakComment: highlighted text not found in source: "${comment.highlighted.slice(0, 40)}..."`,
+		);
+	}
+	// Reject a span that intersects an existing comment — nesting corrupts both.
+	const overlaps = existingCommentSpans(source).some((sp) => match.start < sp.end && sp.start < match.end);
+	if (overlaps) {
+		throw new OverlappingCommentError(
+			`insertTweakComment: selection overlaps an existing comment: "${comment.highlighted.slice(0, 40)}..."`,
 		);
 	}
 	const sourceSlice = source.slice(match.start, match.end);

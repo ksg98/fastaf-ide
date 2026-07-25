@@ -44,10 +44,13 @@ App.tsx (central orchestrator)
 │   ├── ErrorLogPanel/        # Application error log viewer
 │   └── StatusBar/            # Status messages, agent badge, toggles
 │       └── ZoomIndicator     # Font size display
+├── TabBar/                   # Ordering, overflow, drag/drop, and menus
+│   └── TabViews              # Shared terminal, diff, Markdown, and editor tab views
 ├── SettingsPanel/            # Tabbed settings overlay
 │   ├── tabs/GeneralTab       # Font, shell, IDE, theme
 │   ├── tabs/AgentsTab        # Agent detection, run configs, Claude Usage toggle
-│   ├── tabs/ServicesTab      # MCP, remote access, dictation
+│   ├── tabs/ServicesTab      # Local MCP and remote-access composition
+│   │   └── services/         # Upstream MCP and remote-machine domain panels
 │   ├── tabs/GitHubTab        # GitHub OAuth login, token management
 │   ├── tabs/PluginsTab       # Plugin management, logs
 │   ├── tabs/KeyboardShortcutsTab # Rebindable keyboard shortcuts
@@ -77,6 +80,22 @@ App.tsx (central orchestrator)
 └── IdeLauncher/              # Open repository in IDE
 ```
 
+## Application Controllers
+
+Application lifecycles live in focused hooks under `src/hooks/`; `App.tsx`
+composes them and owns the top-level layout. Git operations retain the
+`useGitOperations` facade for callers, with stateful domains implemented under
+`src/hooks/git/`:
+
+- repository refresh and stale-result suppression;
+- serialized branch selection;
+- terminal/worktree ownership and OSC 7 reassignment;
+- worktree creation, setup, recovery, and removal;
+- merge, autofix, and conflict-assistance workflows.
+
+Each coordinator owns its timers, queues, generations, or locks. These are
+behavioral boundaries rather than generic service wrappers.
+
 ## Core Components
 
 ### Terminal (`Terminal/`)
@@ -91,6 +110,11 @@ Native terminal renderer with full PTY integration.
 - Applies font, theme, and zoom settings
 - Link detection for clickable URLs
 - Selection management for copy operations
+
+`CanvasTerminal` keeps frame decode, reconciliation, scheduling, and paint in
+one imperative hot path. Sibling controllers own selection/search state, link
+verification cancellation and caches, fractional scroll/cache handoff, and DOM
+input-listener cleanup. These controllers do not use reactive state.
 
 **Key behavior:** Terminals are **never unmounted** — they stay in the DOM when switching tabs. Only visibility is toggled. This preserves terminal state (scroll position, content, active processes).
 
@@ -108,6 +132,10 @@ Repository tree with branch management.
 - Context menu (right-click) for repo/branch operations
 - Resizable width via drag handle (200-500px)
 - Keyboard redirect to active terminal
+
+Shared PR presentation (`PrStateBadge`) and merge eligibility are leaf modules
+below the sidebar views. `RepoSection`, `GitHubPanel`, `PrSection`, and
+`RemoteOnlyPrPopover` do not import back through one another.
 
 ### TabBar (`TabBar/`)
 

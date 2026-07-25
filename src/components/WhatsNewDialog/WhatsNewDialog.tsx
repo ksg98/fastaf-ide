@@ -1,4 +1,5 @@
 import { type Component, createEffect, For, onCleanup, Show } from "solid-js";
+import { registerModal } from "../../stores/modalStack";
 import d from "../shared/dialog.module.css";
 
 export interface Contribution {
@@ -18,8 +19,12 @@ export const WhatsNewDialog: Component<WhatsNewDialogProps> = (props) => {
 	createEffect(() => {
 		if (!props.visible) return;
 
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to props.onClose AND stops it reaching the terminal underneath.
+		registerModal(props.onClose);
+
 		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape" || e.key === "Enter") {
+			if (e.key === "Enter") {
 				e.preventDefault();
 				props.onClose();
 			}

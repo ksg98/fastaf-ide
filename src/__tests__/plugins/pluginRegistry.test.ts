@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { dashboardRegistry } from "../../plugins/dashboardRegistry";
+import { filePreviewRegistry } from "../../plugins/filePreviewRegistry";
 import { markdownProviderRegistry } from "../../plugins/markdownProviderRegistry";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
 import type { PluginHost, TuiPlugin } from "../../plugins/types";
 import { PluginCapabilityError } from "../../plugins/types";
 import { activityStore } from "../../stores/activityStore";
+import { contextMenuActionsStore } from "../../stores/contextMenuActionsStore";
 import { mdTabsStore } from "../../stores/mdTabs";
 import { pluginStore } from "../../stores/pluginStore";
 import { repositoriesStore } from "../../stores/repositories";
+import { statusBarTicker } from "../../stores/statusBarTicker";
 import { terminalsStore } from "../../stores/terminals";
 
 // Mock invoke to avoid Tauri internals in test environment
@@ -36,8 +40,11 @@ function makePlugin(id: string, onload?: (host: PluginHost) => void, onunload?: 
 beforeEach(() => {
 	pluginRegistry.clear();
 	activityStore.clearAll();
+	contextMenuActionsStore.clear();
+	filePreviewRegistry.clear();
 	markdownProviderRegistry.clear();
 	pluginStore.clear();
+	statusBarTicker.clear();
 	mdTabsStore.clearAll();
 });
 
@@ -157,6 +164,29 @@ describe("PluginHost.addItem / removeItem / updateItem", () => {
 		expect(activityStore.getActive().some((i) => i.id === "item-1")).toBe(true);
 	});
 
+	it("activity item onClick errors are caught and logged", () => {
+		pluginRegistry.register(
+			makePlugin("p1", (host) => {
+				host.addItem({
+					...baseItem(),
+					onClick: () => {
+						throw new Error("activity boom");
+					},
+				});
+			}),
+		);
+		const item = activityStore.getActive().find((i) => i.id === "item-1");
+		expect(item?.onClick).toBeDefined();
+
+		expect(() => item?.onClick?.()).not.toThrow();
+		expect(
+			pluginStore
+				.getLogger("p1")
+				.getEntries()
+				.some((e) => e.level === "error" && e.message.includes("activity")),
+		).toBe(true);
+	});
+
 	it("removeItem removes from activityStore", () => {
 		pluginRegistry.register(
 			makePlugin("p1", (host) => {
@@ -175,6 +205,126 @@ describe("PluginHost.addItem / removeItem / updateItem", () => {
 			}),
 		);
 		expect(activityStore.getActive().find((i) => i.id === "item-1")?.title).toBe("Updated");
+	});
+
+	it("updateItem wraps replacement onClick handlers", () => {
+		pluginRegistry.register(
+			makePlugin("p1", (host) => {
+				host.addItem(baseItem());
+				host.updateItem("item-1", {
+					onClick: () => {
+						throw new Error("updated boom");
+					},
+				});
+			}),
+		);
+		const item = activityStore.getActive().find((i) => i.id === "item-1");
+
+		expect(() => item?.onClick?.()).not.toThrow();
+		expect(
+			pluginStore
+				.getLogger("p1")
+				.getEntries()
+				.some((e) => e.level === "error" && e.message.includes("activity")),
+		).toBe(true);
+	});
+});
+
+describe("PluginHost callback guards", () => {
+	it("file preview onOpen errors are caught and logged", () => {
+		pluginRegistry.register(
+			makePlugin("p1", (host) => {
+				host.registerFilePreview({
+					extensions: ["xyz"],
+					onOpen: () => {
+						throw new Error("preview boom");
+					},
+				});
+			}),
+		);
+		const handler = filePreviewRegistry.getHandler("demo.xyz");
+		expect(handler).toBeDefined();
+
+		expect(() => handler?.onOpen({ filePath: "demo.xyz", repoPath: "/repo", fsRoot: "/repo" })).not.toThrow();
+		expect(
+			pluginStore
+				.getLogger("p1")
+				.getEntries()
+				.some((e) => e.level === "error" && e.message.includes("file preview")),
+		).toBe(true);
+	});
+
+	it("context menu action and disabled callback errors are caught and logged", () => {
+		pluginRegistry.register(
+			makePlugin("p1", (host) => {
+				host.registerContextMenuAction({
+					id: "explode",
+					label: "Explode",
+					target: "repo",
+					disabled: () => {
+						throw new Error("disabled boom");
+					},
+					action: () => {
+						throw new Error("action boom");
+					},
+				});
+			}),
+		);
+		const action = contextMenuActionsStore.getContextActions("repo")[0];
+
+		expect(action.disabled?.({ target: "repo" })).toBe(true);
+		expect(() => action.action({ target: "repo" })).not.toThrow();
+		const entries = pluginStore.getLogger("p1").getEntries();
+		expect(entries.some((e) => e.level === "error" && e.message.includes("disabled"))).toBe(true);
+		expect(entries.some((e) => e.level === "error" && e.message.includes("context menu action"))).toBe(true);
+	});
+
+	it("terminal action errors are caught and logged", () => {
+		pluginRegistry.register(
+			makePlugin("p1", (host) => {
+				host.registerTerminalAction({
+					id: "explode",
+					label: "Explode",
+					action: () => {
+						throw new Error("terminal boom");
+					},
+				});
+			}),
+		);
+		const action = contextMenuActionsStore.getActions()[0];
+
+		expect(() => action.action({ sessionId: "s1", repoPath: "/repo" })).not.toThrow();
+		expect(
+			pluginStore
+				.getLogger("p1")
+				.getEntries()
+				.some((e) => e.level === "error" && e.message.includes("terminal action")),
+		).toBe(true);
+	});
+
+	it("ticker and dashboard callbacks are caught and logged", async () => {
+		pluginRegistry.register(
+			makePlugin("p1", (host) => {
+				host.setTicker({
+					id: "tick",
+					text: "Tick",
+					onClick: () => {
+						throw new Error("ticker boom");
+					},
+				});
+				host.registerDashboard({
+					open: () => {
+						throw new Error("dashboard boom");
+					},
+				});
+			}),
+		);
+
+		expect(() => statusBarTicker.getAll()[0].onClick?.()).not.toThrow();
+		await expect(dashboardRegistry.get("p1")?.open()).resolves.toBeUndefined();
+		const entries = pluginStore.getLogger("p1").getEntries();
+		expect(entries.some((e) => e.level === "error" && e.message.includes("ticker"))).toBe(true);
+		expect(entries.some((e) => e.level === "error" && e.message.includes("dashboard"))).toBe(true);
 	});
 });
 
@@ -1057,21 +1207,21 @@ describe("PluginHost — Tier 3c httpFetch capability gating", () => {
 		await expect(host!.httpFetch("https://example.com")).resolves.not.toThrow();
 	});
 
-	it("passes allowedUrls to the Rust command", async () => {
+	it("does NOT pass allowedUrls to the Rust command (manifest is source of truth)", async () => {
 		let host: PluginHost | null = null;
-		const allowedUrls = ["https://api.anthropic.com/*"];
 		await pluginRegistry.register(
 			makePlugin("ext", (h) => {
 				host = h;
 			}),
 			["net:http"],
-			allowedUrls,
 		);
 		await host!.httpFetch("https://api.anthropic.com/usage", {
 			method: "GET",
 			headers: { Authorization: "Bearer token" },
 		});
-		// Verify invoke was called with correct args
+		// The allowlist is re-read from the on-disk manifest by the backend, so the
+		// caller must NOT be able to supply it — otherwise a scoped plugin could
+		// widen its own allowlist and bypass the SSRF guard.
 		const { invoke } = await import("../../invoke");
 		expect(invoke).toHaveBeenCalledWith(
 			"plugin_http_fetch",
@@ -1079,10 +1229,13 @@ describe("PluginHost — Tier 3c httpFetch capability gating", () => {
 				url: "https://api.anthropic.com/usage",
 				method: "GET",
 				headers: { Authorization: "Bearer token" },
-				allowedUrls: ["https://api.anthropic.com/*"],
 				pluginId: "ext",
 			}),
 		);
+		const httpCall = (invoke as unknown as { mock: { calls: unknown[][] } }).mock.calls.find(
+			(c) => c[0] === "plugin_http_fetch",
+		);
+		expect(httpCall?.[1]).not.toHaveProperty("allowedUrls");
 	});
 });
 

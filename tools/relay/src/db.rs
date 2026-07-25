@@ -1,12 +1,12 @@
 use anyhow::Result;
-use tokio_rusqlite::Connection;
+use tokio_rusqlite::{rusqlite, Connection};
 use tracing::info;
 
 /// Initialize the SQLite database and create tables if needed.
 pub async fn init(path: &str) -> Result<Connection> {
     let conn = Connection::open(path).await?;
 
-    conn.call(|conn| {
+    conn.call(|conn| -> rusqlite::Result<()> {
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -53,7 +53,7 @@ pub async fn init(path: &str) -> Result<Connection> {
 pub async fn insert_token(conn: &Connection, token_hash: &str) -> Result<()> {
     let hash = token_hash.to_owned();
     let now = now_epoch();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "INSERT INTO tokens (token_hash, created_at, last_seen) VALUES (?1, ?2, ?3)",
             rusqlite::params![hash, now, now],
@@ -67,7 +67,7 @@ pub async fn insert_token(conn: &Connection, token_hash: &str) -> Result<()> {
 /// List all stored token hashes (for DB-fallback auth verification on cache miss).
 pub async fn list_token_hashes(conn: &Connection) -> Result<Vec<String>> {
     let hashes = conn
-        .call(|c| {
+        .call(|c| -> rusqlite::Result<Vec<String>> {
             let mut stmt = c.prepare("SELECT token_hash FROM tokens")?;
             let rows = stmt
                 .query_map([], |row| row.get(0))?
@@ -83,7 +83,7 @@ pub async fn validate_token(conn: &Connection, token_hash: &str) -> Result<bool>
     let hash = token_hash.to_owned();
     let now = now_epoch();
     let exists = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<bool> {
             let updated = c.execute(
                 "UPDATE tokens SET last_seen = ?1 WHERE token_hash = ?2",
                 rusqlite::params![now, hash],
@@ -99,7 +99,7 @@ pub async fn start_session(conn: &Connection, session_id: &str, token_hash: &str
     let sid = session_id.to_owned();
     let hash = token_hash.to_owned();
     let now = now_epoch();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "INSERT OR IGNORE INTO sessions (id, token_hash, started_at) VALUES (?1, ?2, ?3)",
             rusqlite::params![sid, hash, now],
@@ -118,7 +118,7 @@ pub async fn start_session(conn: &Connection, session_id: &str, token_hash: &str
 pub async fn end_session(conn: &Connection, session_id: &str, bytes: u64) -> Result<()> {
     let sid = session_id.to_owned();
     let now = now_epoch();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "UPDATE sessions SET ended_at = ?1, bytes_relayed = ?2 WHERE id = ?3",
             rusqlite::params![now, bytes as i64, sid],
@@ -133,7 +133,7 @@ pub async fn end_session(conn: &Connection, session_id: &str, bytes: u64) -> Res
 pub async fn token_stats(conn: &Connection, token_hash: &str) -> Result<Option<TokenStats>> {
     let hash = token_hash.to_owned();
     let stats = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<Option<TokenStats>> {
             let mut stmt = c.prepare(
                 "SELECT total_sessions, total_bytes, created_at, last_seen
                  FROM tokens WHERE token_hash = ?1",
@@ -149,7 +149,7 @@ pub async fn token_stats(conn: &Connection, token_hash: &str) -> Result<Option<T
             match row {
                 Ok(s) => Ok(Some(s)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(tokio_rusqlite::Error::Rusqlite(e)),
+                Err(e) => Err(e),
             }
         })
         .await?;
@@ -180,7 +180,7 @@ pub async fn insert_push_sub(
     let key = p256dh.to_owned();
     let a = auth.to_owned();
     let now = now_epoch();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "INSERT INTO push_subscriptions (token_hash, endpoint, p256dh, auth, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -194,15 +194,11 @@ pub async fn insert_push_sub(
 }
 
 /// Remove a push subscription. Returns true if a row was deleted.
-pub async fn delete_push_sub(
-    conn: &Connection,
-    token_hash: &str,
-    endpoint: &str,
-) -> Result<bool> {
+pub async fn delete_push_sub(conn: &Connection, token_hash: &str, endpoint: &str) -> Result<bool> {
     let hash = token_hash.to_owned();
     let ep = endpoint.to_owned();
     let deleted = conn
-        .call(move |c| {
+        .call(move |c| -> rusqlite::Result<bool> {
             let count = c.execute(
                 "DELETE FROM push_subscriptions WHERE token_hash = ?1 AND endpoint = ?2",
                 rusqlite::params![hash, ep],
@@ -220,23 +216,25 @@ pub async fn list_push_subs(
 ) -> Result<Vec<crate::types::PushSubscription>> {
     let hash = token_hash.to_owned();
     let subs = conn
-        .call(move |c| {
-            let mut stmt = c.prepare(
-                "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE token_hash = ?1",
-            )?;
-            let rows = stmt
-                .query_map(rusqlite::params![hash], |row| {
-                    Ok(crate::types::PushSubscription {
-                        endpoint: row.get(0)?,
-                        keys: crate::types::PushSubscriptionKeys {
-                            p256dh: row.get(1)?,
-                            auth: row.get(2)?,
-                        },
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
+        .call(
+            move |c| -> rusqlite::Result<Vec<crate::types::PushSubscription>> {
+                let mut stmt = c.prepare(
+                    "SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE token_hash = ?1",
+                )?;
+                let rows = stmt
+                    .query_map(rusqlite::params![hash], |row| {
+                        Ok(crate::types::PushSubscription {
+                            endpoint: row.get(0)?,
+                            keys: crate::types::PushSubscriptionKeys {
+                                p256dh: row.get(1)?,
+                                auth: row.get(2)?,
+                            },
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(rows)
+            },
+        )
         .await?;
     Ok(subs)
 }
@@ -244,7 +242,7 @@ pub async fn list_push_subs(
 /// Add relayed bytes to a token's total.
 pub async fn add_bytes(conn: &Connection, token_hash: &str, bytes: u64) -> Result<()> {
     let hash = token_hash.to_owned();
-    conn.call(move |c| {
+    conn.call(move |c| -> rusqlite::Result<()> {
         c.execute(
             "UPDATE tokens SET total_bytes = total_bytes + ?1 WHERE token_hash = ?2",
             rusqlite::params![bytes as i64, hash],

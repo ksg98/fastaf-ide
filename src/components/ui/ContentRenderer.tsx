@@ -1,10 +1,8 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import AnsiToHtml from "ansi-to-html";
-// dompurify pinned to 3.4.7 (exact) in package.json: 3.4.8 switched template
-// scrubbing to a NodeIterator walk that happy-dom implements incompletely, so under
-// the test env DOMPurify strips ALL tags (h1 gone) while letting <script> through.
-// Real webviews are unaffected; 3.4.7 works in both. Re-evaluate when happy-dom's
-// NodeIterator is complete.
+// DOMPurify's template scrubbing relies on a complete NodeIterator implementation.
+// The component tests therefore use jsdom instead of the suite-wide happy-dom
+// environment so security behavior matches real browser engines.
 import DOMPurify from "dompurify";
 import { marked, type Tokens } from "marked";
 import "./markdown-content.css";

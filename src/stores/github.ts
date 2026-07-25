@@ -116,7 +116,7 @@ function createGitHubStore() {
 		if (!repo) return [];
 		const pr = repo.branches[branch];
 		if (!pr) return [];
-		return pr.check_details;
+		return pr.check_details ?? [];
 	}
 
 	/** Get open PRs whose branch has no matching local branch/worktree */
@@ -201,13 +201,17 @@ function createGitHubStore() {
 	 *  Also recomputes CheckSummary from the fresh data so the badge/ring stay in sync. */
 	async function loadCheckDetails(repoPath: string, branch: string, prNumber: number): Promise<void> {
 		try {
-			const rawChecks = await invoke<{ name: string; status: string; conclusion: string }[]>("get_ci_checks", {
-				path: repoPath,
-				prNumber,
-			});
+			const rawChecks = await invoke<{ name: string; status: string; conclusion: string; html_url: string }[]>(
+				"get_ci_checks",
+				{
+					path: repoPath,
+					prNumber,
+				},
+			);
 			const details: CheckDetail[] = rawChecks.map((c) => ({
 				context: c.name,
 				state: c.conclusion || c.status,
+				html_url: c.html_url ?? "",
 			}));
 
 			let passed = 0,

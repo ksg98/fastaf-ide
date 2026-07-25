@@ -1,0 +1,17 @@
+.icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.bug {
+  color: var(--error);
+}
+
+.risk {
+  color: var(--warning);
+}
+
+.nit {
+  color: var(--fg-muted);
+}

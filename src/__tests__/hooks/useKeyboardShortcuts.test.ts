@@ -63,6 +63,7 @@ function createMockHandlers(): ShortcutHandlers {
 		toggleZoomPane: vi.fn(),
 		toggleFocusMode: vi.fn(),
 		closeActivePane: vi.fn(),
+		closeActiveTabOrPane: vi.fn(),
 		togglePromptLibrary: vi.fn(),
 		toggleDiffScroll: vi.fn(),
 		toggleGlobalWorkspace: vi.fn(),
@@ -164,18 +165,9 @@ describe("useKeyboardShortcuts", () => {
 			expect(handlers.createNewTerminal).toHaveBeenCalled();
 		});
 
-		it("Cmd+W closes active terminal", () => {
-			const id = terminalsStore.add({
-				sessionId: null,
-				fontSize: 14,
-				name: "T1",
-				cwd: null,
-				awaitingInput: null,
-			});
-			terminalsStore.setActive(id);
-
+		it("Cmd+W delegates to the shared close-tab-or-pane handler", () => {
 			fireKeydown("w", { metaKey: true });
-			expect(handlers.closeTerminal).toHaveBeenCalledWith(id);
+			expect(handlers.closeActiveTabOrPane).toHaveBeenCalledOnce();
 		});
 
 		it("Cmd+Shift+T reopens closed tab", () => {
@@ -345,36 +337,13 @@ describe("useKeyboardShortcuts", () => {
 		});
 	});
 
-	describe("Cmd+W in split mode", () => {
-		it("calls closeActivePane when pane tree is split", () => {
-			const id1 = terminalsStore.add(makeTerminal({ name: "T1" }));
-			terminalsStore.setActive(id1);
-
-			// Set up pane tree split
-			const g1 = paneLayoutStore.createGroup();
-			paneLayoutStore.addTab(g1, { id: id1, type: "terminal" });
-			paneLayoutStore.setRoot({ type: "leaf", id: g1 });
-			paneLayoutStore.setActiveGroup(g1);
-			paneLayoutStore.split(g1, "vertical");
-
+	describe("Cmd+W delegation", () => {
+		// The keyboard case only delegates; the split-vs-terminal decision (and the
+		// empty-pane cancellation) is owned by closeActiveTabOrPane / closeActivePane
+		// and covered in useSplitPanes.test.ts.
+		it("routes through closeActiveTabOrPane regardless of split state", () => {
 			fireKeydown("w", { metaKey: true });
-
-			expect(handlers.closeActivePane).toHaveBeenCalledOnce();
-			expect(handlers.closeTerminal).not.toHaveBeenCalled();
-		});
-
-		it("closes non-split active terminal", () => {
-			const id = terminalsStore.add(makeTerminal({ name: "T1" }));
-			terminalsStore.setActive(id);
-
-			fireKeydown("w", { metaKey: true });
-
-			expect(handlers.closeTerminal).toHaveBeenCalledWith(id);
-		});
-
-		it("does nothing when no active terminal", () => {
-			fireKeydown("w", { metaKey: true });
-
+			expect(handlers.closeActiveTabOrPane).toHaveBeenCalledOnce();
 			expect(handlers.closeTerminal).not.toHaveBeenCalled();
 			expect(handlers.closeActivePane).not.toHaveBeenCalled();
 		});

@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
+import { toastsStore } from "../../stores/toasts";
 import { rpc } from "../../transport";
 import styles from "./NewSessionSheet.module.css";
 
@@ -15,12 +16,15 @@ function repoName(path: string): string {
 
 export function NewSessionSheet(props: NewSessionSheetProps) {
 	async function createSession(cwd: string) {
-		props.onDismiss();
 		try {
 			await rpc("create_pty", { config: { cwd } });
+			// Dismiss only after the session is created; on failure keep the sheet
+			// open so the user can retry.
+			props.onDismiss();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appLogger.warn("network", `Failed to create session: ${msg}`);
+			toastsStore.add("Session failed", `Could not create session: ${msg}`, "error", true);
 		}
 	}
 

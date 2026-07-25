@@ -5,6 +5,7 @@ import {
 	findSourceMatch,
 	injectTweakSentinels,
 	insertTweakComment,
+	OverlappingCommentError,
 	parseTweakComments,
 	removeTweakComment,
 	serializeTweakComment,
@@ -162,6 +163,117 @@ describe("tweakComments parser/serializer", () => {
 					createdAt: "2026-04-05T10:00:00.000Z",
 				}),
 			).toThrow();
+		});
+
+		it("rejects commenting on already-commented text (no nesting)", () => {
+			// Regression: commenting text that already carries a comment used to nest
+			// the markers; the lazy parser swallowed the inner one, so it saved to
+			// disk but never parsed/rendered again — looked like it "didn't persist".
+			let src = "The reason for this Decision is clear.";
+			src = insertTweakComment(src, {
+				id: "c_outer",
+				highlighted: "reason",
+				comment: "outer",
+				createdAt: "2026-07-15T10:00:00.000Z",
+			});
+			expect(() =>
+				insertTweakComment(src, {
+					id: "c_inner",
+					highlighted: "reason",
+					comment: "inner",
+					createdAt: "2026-07-15T10:01:00.000Z",
+				}),
+			).toThrow(OverlappingCommentError);
+			// The file still holds exactly one, parseable comment.
+			expect(parseTweakComments(src).map((c) => c.id)).toEqual(["c_outer"]);
+		});
+
+		it("rejects a sub-selection inside an existing comment", () => {
+			let src = "unique-token appears once here.";
+			src = insertTweakComment(src, {
+				id: "c_1",
+				highlighted: "unique-token",
+				comment: "a",
+				createdAt: "2026-07-15T10:00:00.000Z",
+			});
+			// "token" only exists inside the already-commented span → must be rejected.
+			expect(() =>
+				insertTweakComment(src, {
+					id: "c_2",
+					highlighted: "token",
+					comment: "b",
+					createdAt: "2026-07-15T10:01:00.000Z",
+				}),
+			).toThrow(OverlappingCommentError);
+		});
+
+		it("allows a second comment on a different, non-overlapping occurrence", () => {
+			let src = "alpha and beta and gamma.";
+			src = insertTweakComment(src, {
+				id: "c_1",
+				highlighted: "alpha",
+				comment: "a",
+				createdAt: "2026-07-15T10:00:00.000Z",
+			});
+			src = insertTweakComment(src, {
+				id: "c_2",
+				highlighted: "gamma",
+				comment: "b",
+				createdAt: "2026-07-15T10:01:00.000Z",
+			});
+			expect(
+				parseTweakComments(src)
+					.map((c) => c.id)
+					.sort(),
+			).toEqual(["c_1", "c_2"]);
+			// Both render as independent highlight spans.
+			const rendered = injectTweakSentinels(src);
+			expect(rendered).toContain(tweakBeginSentinel("c_1"));
+			expect(rendered).toContain(tweakBeginSentinel("c_2"));
+		});
+
+		it("anchors the requested occurrence, not the first (repeated text)", () => {
+			// Regression: a word appearing many times used to always anchor to the
+			// FIRST occurrence, leaving the user's actual selection unhighlighted.
+			const src = "reason A. reason B. reason C.";
+			const out = insertTweakComment(
+				src,
+				{ id: "c_1", highlighted: "reason", comment: "x", createdAt: "2026-07-15T10:00:00.000Z" },
+				2, // the 3rd "reason"
+			);
+			const body = out.slice(CONVENTION_HEADER.length);
+			// First two "reason" stay bare; only the 3rd is wrapped.
+			expect(body).toBe(
+				"reason A. reason B. <!--tweak:begin:c_1-->reason<!--tweak:end:c_1 @2026-07-15T10:00:00.000Z\nx--> C.",
+			);
+		});
+
+		it("ignores occurrences inside the convention header and comment bodies when counting", () => {
+			// The header contains words like "comment"/"text" and bodies hold free
+			// text — both are invisible in the DOM, so they must NOT shift ordinals.
+			let src = "keep keep keep.";
+			// First comment on occurrence 0; its body deliberately contains "keep".
+			src = insertTweakComment(src, {
+				id: "c_1",
+				highlighted: "keep",
+				comment: "keep this in mind",
+				createdAt: "2026-07-15T10:00:00.000Z",
+			});
+			// Now anchor occurrence 2 (the 3rd visible "keep"). Body "keep" and any
+			// header words must not throw the count off.
+			src = insertTweakComment(
+				src,
+				{ id: "c_2", highlighted: "keep", comment: "y", createdAt: "2026-07-15T10:01:00.000Z" },
+				2,
+			);
+			const parsed = parseTweakComments(src);
+			expect(parsed.map((c) => c.id).sort()).toEqual(["c_1", "c_2"]);
+			// c_2 must wrap the LAST "keep", immediately before the period.
+			expect(src).toContain("<!--tweak:begin:c_2-->keep<!--tweak:end:c_2 @2026-07-15T10:01:00.000Z\ny-->.");
+		});
+
+		it("findSourceMatch returns null when the requested occurrence does not exist", () => {
+			expect(findSourceMatch("only one here", "one", 3)).toBeNull();
 		});
 
 		it("matches a rendered selection fully inside inline bold (markers stripped by the DOM)", () => {

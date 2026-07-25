@@ -2,19 +2,20 @@ import { type Component, For, Show } from "solid-js";
 import { t } from "../../i18n";
 import { cx } from "../../utils";
 import s from "../SettingsPanel/Settings.module.css";
-import { PRESET_COLORS } from "../SettingsPanel/tabs/AppearanceTab";
+import type { ColorPreset } from "./colorPresets";
 
 export interface ColorSwatchPickerProps {
 	color: string;
+	presets: readonly ColorPreset[];
 	onChange: (color: string) => void;
 }
 
 export const ColorSwatchPicker: Component<ColorSwatchPickerProps> = (props) => {
-	const isCustomColor = () => props.color && !PRESET_COLORS.some((p) => p.hex === props.color);
+	const isCustomColor = () => props.color && !props.presets.some((preset) => preset.hex === props.color);
 
 	return (
 		<div class={s.groupColorPicker}>
-			<For each={PRESET_COLORS}>
+			<For each={props.presets}>
 				{(preset) => (
 					<button
 						class={cx(s.colorSwatch, props.color === preset.hex && s.active)}

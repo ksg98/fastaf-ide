@@ -10,6 +10,7 @@ import { getFirstVisibleRepo, getVisibleLayout, getVisibleRepoSequence } from ".
 import { tunnelPanelStore } from "../../stores/tunnelPanel";
 import { tunnelsStore } from "../../stores/tunnels";
 import { uiStore } from "../../stores/ui";
+import { isTauri } from "../../transport";
 import { getRepoColor } from "../../utils/repoColor";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
@@ -49,6 +50,8 @@ export interface SidebarProps {
 	runningGitOps?: Set<string>;
 	onRefreshBranchStats?: () => Promise<void>;
 	onCheckoutRemoteBranch?: (repoPath: string, branchName: string) => void;
+	onAutofixIssue?: (repoPath: string, issueNumber: number, prompt: string) => void;
+	onConflictAssist?: (repoPath: string, prNumber: number) => void;
 	onSwitchBranch?: (repoPath: string, branchName: string) => void;
 	switchBranchLists?: Record<string, string[]>;
 	currentBranches?: Record<string, string>;
@@ -127,7 +130,8 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 				});
 			}
 		}
-		if (settingsStore.state.importToolsEnabled && props.onImportProjects) {
+		// Desktop-only: the scan reads the local machine's Claude/Codex/Cursor state.
+		if (isTauri() && settingsStore.state.importToolsEnabled && props.onImportProjects) {
 			items.push({
 				label: t("sidebar.importProjects", "Import from Claude Code / Codex / Cursor / superset.sh…"),
 				action: () => props.onImportProjects?.(),
@@ -386,6 +390,17 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 				}
 				onCheckoutRemoteBranch={
 					props.onCheckoutRemoteBranch ? (branch) => props.onCheckoutRemoteBranch!(repo.path, branch) : undefined
+				}
+				onAutofixIssue={
+					props.onAutofixIssue
+						? (issueNumber, prompt) => props.onAutofixIssue!(repo.path, issueNumber, prompt)
+						: undefined
+				}
+				onConflictAssist={
+					props.onConflictAssist ? (prNumber) => props.onConflictAssist!(repo.path, prNumber) : undefined
+				}
+				onPushBranch={
+					props.onBackgroundGit ? (worktreePath) => props.onBackgroundGit!(worktreePath, "push", ["push"]) : undefined
 				}
 				onSettings={() => props.onRepoSettings(repo.path)}
 				onRemove={() => props.onRemoveRepo(repo.path)}

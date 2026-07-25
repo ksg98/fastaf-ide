@@ -1,4 +1,5 @@
 import { fireEvent, render } from "@solidjs/testing-library";
+import { Suspense } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockInvoke } from "../mocks/tauri";
 
@@ -186,5 +187,29 @@ describe("ProvidersTab", () => {
 		mockStore.state.registry.slots = { main: "model-sonnet" };
 		const { getByTestId } = render(() => <ProvidersTab />);
 		expect(getByTestId("test-slot-main")).toBeTruthy();
+	});
+
+	// -- Suspense isolation --
+
+	it("does not collapse an ancestor Suspense while ollama models load", async () => {
+		const ollama = { id: "ollama-local", type: "ollama", label: "Ollama", base_url: null };
+		mockStore.state.registry.providers = [ollama] as unknown as (typeof anthropic)[];
+		// Keep every invoke (incl. check_ollama_models) pending forever — the
+		// tab must still render instead of suspending the whole settings dialog.
+		let resolveInvoke!: (value: unknown) => void;
+		mockInvoke.mockReturnValue(
+			new Promise((resolve) => {
+				resolveInvoke = resolve;
+			}),
+		);
+		const { queryByTestId } = render(() => (
+			<Suspense fallback={<div data-testid="suspense-fallback" />}>
+				<ProvidersTab />
+			</Suspense>
+		));
+		expect(queryByTestId("suspense-fallback")).toBeNull();
+		expect(queryByTestId("provider-card-ollama-local")).toBeTruthy();
+		resolveInvoke(undefined);
+		await Promise.resolve();
 	});
 });

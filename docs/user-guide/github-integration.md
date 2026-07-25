@@ -159,6 +159,10 @@ Polling starts automatically when a repository with a GitHub remote is active.
 | BLOCKED | Blocked | Branch protection prevents merge |
 | DRAFT | Draft | PR is in draft state |
 
+## CI Auto-Heal
+
+Enable **Auto-heal** in a blocked PR's detail popover to send failed GitHub Actions job logs to the agent terminal assigned to that branch. A completed failed job can trigger healing while other jobs in the same workflow are still running. The displayed three-attempt budget counts only prompts successfully delivered to the agent; log-fetch and terminal-delivery errors do not consume it.
+
 ## Review State Classification
 
 | Decision | Label |

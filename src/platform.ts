@@ -14,7 +14,10 @@ export function detectPlatform(): Platform {
 	if (platform.includes("mac")) {
 		return "macos";
 	}
-	if (platform.includes("win")) {
+	// startsWith, not includes: navigator.platform for Windows is always
+	// "Win32"/"Win64"/"Windows", whereas includes("win") false-positives on
+	// "Darwin" (the macOS kernel string some webviews/test DOMs report).
+	if (platform.startsWith("win")) {
 		return "windows";
 	}
 	if (platform.includes("linux") || platform.includes("x11")) {

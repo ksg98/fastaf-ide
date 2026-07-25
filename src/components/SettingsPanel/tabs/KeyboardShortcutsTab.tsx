@@ -354,6 +354,12 @@ export function getShortcutSections(): ShortcutSection[] {
 			title: t("helpPanel.generators", "Generators"),
 			shortcuts: [{ action: "open-generators", keys: keyFor("open-generators"), description: "Open generators" }],
 		},
+		{
+			title: t("helpPanel.remote", "Remote"),
+			shortcuts: [
+				{ action: "show-remote-qr", keys: keyFor("show-remote-qr"), description: "QR for Remote Mobile Connection" },
+			],
+		},
 	];
 }
 

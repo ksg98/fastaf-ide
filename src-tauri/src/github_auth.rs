@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires interactive Keychain access on macOS
+    #[ignore = "requires interactive Keychain access on macOS"]
     fn save_read_delete_round_trip() {
         let token = "gho_test_token_round_trip_xyz";
 
@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires interactive Keychain access on macOS
+    #[ignore = "requires interactive Keychain access on macOS"]
     fn overwrite_token() {
         let token_v1 = "gho_test_v1";
         let token_v2 = "gho_test_v2";

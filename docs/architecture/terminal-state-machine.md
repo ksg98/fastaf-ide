@@ -15,6 +15,8 @@ Each terminal has these reactive fields in `terminalsStore`:
 | `debouncedBusy` | `boolean` | `false` | Frontend (derived from shellState with 2s hold) |
 | `unseen` | `boolean` | `false` | Frontend (set by `fireCompletion`, cleared on tab focus) |
 | `agentType` | `AgentType \| null` | `null` | Frontend (from agent detection) |
+| `agentState` | `"starting" \| "working" \| "awaiting_input" \| "idle" \| "completed" \| null` | `null` | **Rust** (session lifecycle snapshot) |
+| `backgroundWork` | `boolean` | `false` | **Rust** (session lifecycle snapshot) |
 
 Rust-side per-session state:
 
@@ -30,6 +32,22 @@ Rust-side per-session state:
 | `active_sub_tasks` | `AppState.session_states` | Sub-agent count per session |
 | `shell_states` | `AppState.shell_states` | `DashMap<String, AtomicU8>`: 0=null, 1=busy, 2=idle. Transitions use `compare_exchange` to prevent duplicate events when reader thread and silence timer race. |
 | `last_output_ms` | `AppState.last_output_ms` | Epoch ms of last **real** output (not chrome-only). Stamped only when `!chrome_only`. |
+| `SessionState.background_work` | `AppState.session_states` | Meaningful live agent descendant; persistent integration-helper subtrees are excluded. Keeps task lifecycle working without changing terminal readiness. |
+
+The Activity Dashboard uses an effective state rather than raw `shellState`: rate
+limit/error/input take precedence; a ready composer is shown as `Idle` even when
+the backend still tracks a long-lived background terminal. Otherwise lifecycle
+`starting`/`working` (including `backgroundWork`) precedes `completed`, live shell
+activity, and lifecycle or shell `idle`. Live shell `busy` intentionally overrides
+a lagging lifecycle `idle` snapshot. The periodic session snapshot updates both lifecycle and shell state,
+is serialized with a bounded native-IPC timeout, and records both the session
+identity and shell-event revision at request start so a PTY event or session
+replacement received while it is in flight wins.
+A successful snapshot that omits a session marks its terminal exited and clears
+its session and lifecycle fields; a transport failure leaves the existing state
+untouched. The raw busy debounce is not a dashboard working signal, so a fresh
+`completed` snapshot cannot remain working-styled or working-ordered; lifecycle
+`idle` does so only when there is no newer live shell activity.
 
 ## 1. Tab Indicator — Visual Priority
 

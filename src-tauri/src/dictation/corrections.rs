@@ -38,14 +38,17 @@ impl TextCorrector {
         for key in &self.sorted_keys {
             if let Some(replacement) = self.replacements.get(key) {
                 let key_lower = key.to_lowercase();
-                // Scan for case-insensitive occurrences and replace them
+                // Scan for case-insensitive occurrences and replace them.
+                // Case folding can change byte length (e.g. U+0130 → "i̇"), so we
+                // match against the lowercase of each original prefix and advance
+                // by the ORIGINAL bytes actually consumed — always on a char
+                // boundary, never a byte-naive `key.len()` step.
                 let mut i = 0;
                 let mut output = String::with_capacity(result.len());
-                let result_lower = result.to_lowercase();
                 while i < result.len() {
-                    if result_lower[i..].starts_with(&key_lower) {
+                    if let Some(consumed) = Self::matched_prefix_len(&result[i..], &key_lower) {
                         output.push_str(replacement);
-                        i += key.len();
+                        i += consumed;
                     } else {
                         // Advance by one character (handle multi-byte UTF-8)
                         let ch = result[i..].chars().next().unwrap();
@@ -57,6 +60,25 @@ impl TextCorrector {
             }
         }
         result
+    }
+
+    /// If the lowercase of a leading char-boundary-aligned prefix of `tail`
+    /// equals `key_lower`, return the number of ORIGINAL bytes that prefix spans;
+    /// otherwise `None`. Accumulates lowercased chars from `tail` so that folds
+    /// which change byte length (e.g. U+0130 → "i̇") stay correctly aligned.
+    fn matched_prefix_len(tail: &str, key_lower: &str) -> Option<usize> {
+        let mut lowered = String::new();
+        for (idx, ch) in tail.char_indices() {
+            lowered.extend(ch.to_lowercase());
+            if lowered.len() == key_lower.len() {
+                return (lowered == *key_lower).then_some(idx + ch.len_utf8());
+            }
+            // Overshot or diverged before reaching the key length — no match here.
+            if lowered.len() > key_lower.len() || !key_lower.starts_with(&lowered) {
+                return None;
+            }
+        }
+        None
     }
 
     pub fn set_replacements(&mut self, replacements: HashMap<String, String>) {
@@ -221,6 +243,24 @@ mod tests {
         // Replace with empty map — old entries gone
         corrector.set_replacements(HashMap::new());
         assert_eq!(corrector.correct("foo"), "foo");
+    }
+
+    #[test]
+    fn test_multibyte_case_fold_length_change() {
+        // U+0130 (LATIN CAPITAL I WITH DOT ABOVE) is 2 bytes but lowercases to
+        // "i\u{307}" (3 bytes). The old loop advanced by key.len() (2) after a
+        // 3-byte normalized match, landing the cursor mid-codepoint in the
+        // lowercased string and panicking on the next slice.
+        let mut map = HashMap::new();
+        map.insert("\u{130}".to_string(), "I".to_string());
+        let corrector = TextCorrector::from_map(map);
+
+        // Standalone match.
+        assert_eq!(corrector.correct("\u{130}"), "I");
+        // Match embedded between accented text and an emoji — exercises both the
+        // replacement branch and multibyte char-boundary advancement in the
+        // non-match branch.
+        assert_eq!(corrector.correct("café \u{130} 🚀"), "café I 🚀");
     }
 
     #[test]

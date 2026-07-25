@@ -189,6 +189,22 @@ pub enum TermDamage<'a> {
     Partial(TermDamageIterator<'a>),
 }
 
+/// Parse-side terminal damage — a SECOND, independent damage view consumed by
+/// TUIC's PTY parse/ChangedRow path (`TerminalGrid::process`). It is accumulated
+/// at the same `damage_line` choke point as the render damage but is read and
+/// reset separately (`Term::parse_damage`/`reset_parse_damage`), so the two
+/// consumers never steal each other's damage. Unlike [`TermDamage`] it owns its
+/// line indices (no borrow) and does not carry render-only cursor damage.
+#[derive(Debug)]
+pub enum TermParseDamage {
+    /// A full re-read is required (initial frame, resize, scroll, alt-screen
+    /// switch, clear, config change).
+    Full,
+    /// Viewport-relative indices of lines whose content changed since the last
+    /// `reset_parse_damage`.
+    Partial(Vec<usize>),
+}
+
 /// Iterator over the terminal's viewport damaged lines.
 #[derive(Clone, Debug)]
 pub struct TermDamageIterator<'a> {
@@ -232,6 +248,14 @@ struct TermDamageState {
 
     /// Old terminal cursor point.
     last_cursor: Point,
+
+    /// Parse-side per-line damage flags for the second (TUIC ChangedRow) consumer.
+    /// Set at the same `damage_line` choke point as `lines`, but read+reset by the
+    /// parse consumer independently of the render consumer's `reset`.
+    parse_lines: Vec<bool>,
+
+    /// Parse-side full-damage flag (mirrors `full` for the parse consumer).
+    parse_full: bool,
 }
 
 impl TermDamageState {
@@ -244,6 +268,8 @@ impl TermDamageState {
             full: true,
             lines,
             last_cursor: Default::default(),
+            parse_lines: vec![false; num_lines],
+            parse_full: true,
         }
     }
 
@@ -258,6 +284,11 @@ impl TermDamageState {
         for line in 0..num_lines {
             self.lines.push(LineDamageBounds::undamaged(line, num_cols));
         }
+
+        // A resize forces a full re-read for the parse consumer too.
+        self.parse_full = true;
+        self.parse_lines.clear();
+        self.parse_lines.resize(num_lines, false);
     }
 
     /// Damage point inside of the viewport.
@@ -267,15 +298,38 @@ impl TermDamageState {
     }
 
     /// Expand `line`'s damage to span at least `left` to `right` column.
+    ///
+    /// This is the single choke point through which ALL line damage flows
+    /// (`damage_point` and the read-time cursor damage both route here), so
+    /// mirroring into `parse_lines` here guarantees the parse consumer sees every
+    /// content change the render consumer does.
     #[inline]
     fn damage_line(&mut self, line: usize, left: usize, right: usize) {
         self.lines[line].expand(left, right);
+        self.parse_lines[line] = true;
     }
 
-    /// Reset information about terminal damage.
+    /// Reset the RENDER damage. Deliberately leaves the parse-side state
+    /// (`parse_lines`/`parse_full`) untouched — the parse consumer resets it via
+    /// [`TermDamageState::reset_parse`] on its own cadence.
     fn reset(&mut self, num_cols: usize) {
         self.full = false;
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
+    }
+
+    /// Viewport-relative indices of parse-damaged lines (does not reset).
+    fn parse_damaged_lines(&self) -> Vec<usize> {
+        self.parse_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &damaged)| damaged.then_some(i))
+            .collect()
+    }
+
+    /// Reset the PARSE damage independently of the render damage.
+    fn reset_parse(&mut self) {
+        self.parse_full = false;
+        self.parse_lines.iter_mut().for_each(|d| *d = false);
     }
 }
 
@@ -508,9 +562,31 @@ impl<T> Term<T> {
         self.damage.reset(self.columns());
     }
 
+    /// Parse-side damage for TUIC's ChangedRow path — independent of `damage()`.
+    /// Returns `Full` when a full re-read is required (initial frame, resize,
+    /// scroll, alt-screen switch, clear, config change), otherwise `Partial` over
+    /// the viewport lines whose content changed since `reset_parse_damage`.
+    ///
+    /// Unlike `damage()` this does NOT synthesize cursor damage: pure cursor
+    /// movement changes no line text, so the caller's text-equality check would
+    /// discard it anyway. It also does not touch the render damage state.
+    pub fn parse_damage(&self) -> TermParseDamage {
+        if self.damage.parse_full {
+            TermParseDamage::Full
+        } else {
+            TermParseDamage::Partial(self.damage.parse_damaged_lines())
+        }
+    }
+
+    /// Reset the parse-side damage independently of `reset_damage`.
+    pub fn reset_parse_damage(&mut self) {
+        self.damage.reset_parse();
+    }
+
     #[inline]
     pub fn mark_fully_damaged(&mut self) {
         self.damage.full = true;
+        self.damage.parse_full = true;
     }
 
     /// Set new options for the [`Term`].
@@ -1136,6 +1212,18 @@ impl<T> Term<T> {
         cursor_cell.flags = flags;
         cursor_cell.cell_type = cell_type;
         cursor_cell.extra = extra;
+
+        // Record damage at the write site. Upstream reconstructs character-input
+        // damage lazily at `damage()` time from cursor deltas, which is fine for
+        // the render consumer but leaves the independent parse-damage consumer
+        // (`parse_damage`, used by TerminalGrid::process for ChangedRow detection)
+        // blind to typed text. Damaging the written cell here funnels through the
+        // single `damage_line` choke point so BOTH consumers see it. For the
+        // render consumer this is at worst a no-op over-damage of a line whose
+        // content just changed (and thus needs redrawing anyway).
+        let line = self.grid.cursor.point.line.0 as usize;
+        let col = self.grid.cursor.point.column.0;
+        self.damage.damage_line(line, col, col);
     }
 
     #[inline]

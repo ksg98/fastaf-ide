@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 
 /// Test-only override for the config directory.
@@ -144,10 +145,14 @@ fn recreate_symlink(source: &std::path::Path, dest: &std::path::Path) -> Result<
 /// so corrupt files are visible in logs instead of silently resetting state.
 pub(crate) fn load_json_config<T: DeserializeOwned + Default>(filename: &str) -> T {
     let path = config_dir().join(filename);
+    load_json_config_from_path(&path)
+}
+
+fn load_json_config_from_path<T: DeserializeOwned + Default>(path: &std::path::Path) -> T {
     if !path.exists() {
         return T::default();
     }
-    let content = match std::fs::read_to_string(&path) {
+    let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(path = %path.display(), "Could not read config: {e}");
@@ -168,7 +173,9 @@ pub(crate) fn persist_atomic(target: &std::path::Path, data: &[u8]) -> Result<()
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create directory: {e}"))?;
     }
-    let temp = target.with_extension(format!("tmp.{}", std::process::id()));
+    // Unique per-call temp name (uuid) — a per-process name lets two concurrent
+    // writers to the same target collide on the temp file and corrupt it (#117-a503).
+    let temp = target.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
     std::fs::write(&temp, data).map_err(|e| format!("Failed to write temp file: {e}"))?;
 
     #[cfg(unix)]
@@ -189,10 +196,17 @@ pub(crate) fn persist_atomic(target: &std::path::Path, data: &[u8]) -> Result<()
 /// Save a JSON config file atomically (temp file + rename).
 /// Sets 0600 permissions on Unix to protect sensitive data.
 pub(crate) fn save_json_config<T: Serialize>(filename: &str, config: &T) -> Result<(), String> {
+    let target = config_dir().join(filename);
+    save_json_config_to_path(&target, config)
+}
+
+fn save_json_config_to_path<T: Serialize>(
+    target: &std::path::Path,
+    config: &T,
+) -> Result<(), String> {
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
-    let target = config_dir().join(filename);
-    persist_atomic(&target, json.as_bytes())
+    persist_atomic(target, json.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -311,8 +325,10 @@ pub(crate) struct AuthConfig {
     pub(crate) username: String,
     #[serde(default)]
     pub(crate) password_hash: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) session_token: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) session_token_exists: bool,
     #[serde(default = "default_session_token_duration_secs")]
     pub(crate) session_token_duration_secs: u64,
     #[serde(default)]
@@ -336,6 +352,7 @@ impl Default for AuthConfig {
             username: String::new(),
             password_hash: String::new(),
             session_token: String::new(),
+            session_token_exists: false,
             session_token_duration_secs: default_session_token_duration_secs(),
             lan_auth_bypass: false,
             auth_rate_limit_max: default_auth_rate_limit_max(),
@@ -391,8 +408,17 @@ pub(crate) struct RelayConfig {
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) url: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) token: String,
+    // `Option<bool>` (unlike the plain `bool` used by session_token_exists /
+    // vapid_private_key_exists) so a partial JSON payload that OMITS this key
+    // (e.g. agent MCP `config/save`, or a partial PUT /config) deserializes to
+    // `None` ("caller didn't touch this") rather than defaulting to `false`
+    // ("caller explicitly cleared it"). preserve_redacted_app_config_secrets
+    // relies on that distinction to avoid silently deleting the stored relay
+    // token — see DATA-1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token_exists: Option<bool>,
     #[serde(default)]
     pub(crate) session_id: String,
 }
@@ -401,8 +427,10 @@ pub(crate) struct RelayConfig {
 pub(crate) struct PushConfig {
     #[serde(default)]
     pub(crate) enabled: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) vapid_private_key: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) vapid_private_key_exists: bool,
     #[serde(default)]
     pub(crate) vapid_public_key: String,
     #[serde(default = "default_vapid_subject")]
@@ -414,6 +442,7 @@ impl Default for PushConfig {
         Self {
             enabled: false,
             vapid_private_key: String::new(),
+            vapid_private_key_exists: false,
             vapid_public_key: String::new(),
             vapid_subject: default_vapid_subject(),
         }
@@ -432,27 +461,6 @@ pub(crate) struct ServicesConfig {
     pub(crate) relay: RelayConfig,
     #[serde(default)]
     pub(crate) push: PushConfig,
-}
-
-impl ServicesConfig {
-    #[allow(dead_code)]
-    pub(crate) fn validate(&self) -> Vec<String> {
-        let mut warnings = Vec::new();
-        if self.server.enabled && self.auth.password_hash.is_empty() && !self.auth.lan_auth_bypass {
-            warnings.push(
-                "Remote access enabled with no password and LAN bypass off — \
-                 all connections will require auth but no password is set"
-                    .to_string(),
-            );
-        }
-        if self.relay.enabled && self.relay.token.is_empty() {
-            warnings.push("Relay enabled but relay token is empty".to_string());
-        }
-        if self.push.enabled && self.push.vapid_private_key.is_empty() {
-            warnings.push("Push enabled but VAPID private key is empty".to_string());
-        }
-        warnings
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -546,6 +554,11 @@ pub(crate) struct AppConfig {
     /// Auto-copy terminal selection to clipboard
     #[serde(default = "default_true")]
     pub(crate) copy_on_select: bool,
+    /// Honor OSC 52 clipboard-write sequences from terminal output. Disable to
+    /// ignore clipboard writes emitted by displayed files/logs. Frontend-gated
+    /// (the OSC 52 write executes in the renderer); stored here for persistence.
+    #[serde(default = "default_true")]
+    pub(crate) osc52_clipboard: bool,
     /// Show last prompt overlay bar at the top of the terminal
     #[serde(default = "default_true")]
     pub(crate) show_last_prompt: bool,
@@ -660,6 +673,10 @@ fn default_vapid_subject() -> String {
     "mailto:noreply@tuicommander.com".to_string()
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_update_channel() -> String {
     "stable".to_string()
 }
@@ -746,6 +763,7 @@ impl Default for AppConfig {
             intent_tab_title: true,
             suggest_followups: true,
             copy_on_select: true,
+            osc52_clipboard: true,
             show_last_prompt: true,
             bell_style: default_bell_style(),
             global_hotkey: None,
@@ -1317,6 +1335,136 @@ fn migrate_flat_services(val: &mut serde_json::Value) {
     );
 }
 
+fn read_secret(cred: crate::credentials::Credential<'_>) -> Option<String> {
+    match crate::credentials::get(cred) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                source = "config",
+                "Failed to read secret from credential vault: {e}"
+            );
+            None
+        }
+    }
+}
+
+fn hydrate_app_config_secrets(config: &mut AppConfig) {
+    if config.services.auth.session_token.is_empty() {
+        if let Some(token) = read_secret(crate::credentials::Credential::RemoteSessionToken) {
+            config.services.auth.session_token = token;
+        }
+    } else if let Err(e) = crate::credentials::set(
+        crate::credentials::Credential::RemoteSessionToken,
+        &config.services.auth.session_token,
+    ) {
+        tracing::warn!(
+            source = "config",
+            "Failed to migrate session token to vault: {e}"
+        );
+    }
+    config.services.auth.session_token_exists = !config.services.auth.session_token.is_empty();
+
+    if config.services.relay.token.is_empty() {
+        if let Some(token) = read_secret(crate::credentials::Credential::RelayToken) {
+            config.services.relay.token = token;
+        }
+    } else if let Err(e) = crate::credentials::set(
+        crate::credentials::Credential::RelayToken,
+        &config.services.relay.token,
+    ) {
+        tracing::warn!(
+            source = "config",
+            "Failed to migrate relay token to vault: {e}"
+        );
+    }
+    config.services.relay.token_exists = Some(!config.services.relay.token.is_empty());
+
+    if config.services.push.vapid_private_key.is_empty() {
+        if let Some(key) = read_secret(crate::credentials::Credential::PushVapidPrivateKey) {
+            config.services.push.vapid_private_key = key;
+        }
+    } else if let Err(e) = crate::credentials::set(
+        crate::credentials::Credential::PushVapidPrivateKey,
+        &config.services.push.vapid_private_key,
+    ) {
+        tracing::warn!(
+            source = "config",
+            "Failed to migrate VAPID private key to vault: {e}"
+        );
+    }
+    config.services.push.vapid_private_key_exists =
+        !config.services.push.vapid_private_key.is_empty();
+}
+
+fn persist_secret(
+    cred: crate::credentials::Credential<'_>,
+    value: &str,
+    exists: bool,
+) -> Result<bool, String> {
+    if !value.is_empty() {
+        crate::credentials::set(cred, value)?;
+        Ok(true)
+    } else if exists {
+        Ok(true)
+    } else {
+        crate::credentials::delete(cred)?;
+        Ok(false)
+    }
+}
+
+fn config_for_disk(mut config: AppConfig) -> Result<AppConfig, String> {
+    config.services.auth.session_token_exists = persist_secret(
+        crate::credentials::Credential::RemoteSessionToken,
+        &config.services.auth.session_token,
+        config.services.auth.session_token_exists,
+    )?;
+    config.services.auth.session_token.clear();
+
+    config.services.relay.token_exists = Some(persist_secret(
+        crate::credentials::Credential::RelayToken,
+        &config.services.relay.token,
+        // `None` (never resolved by preserve_redacted_app_config_secrets) is
+        // treated as "not known to exist" — matches the prior `bool` default.
+        config.services.relay.token_exists.unwrap_or(false),
+    )?);
+    config.services.relay.token.clear();
+
+    config.services.push.vapid_private_key_exists = persist_secret(
+        crate::credentials::Credential::PushVapidPrivateKey,
+        &config.services.push.vapid_private_key,
+        config.services.push.vapid_private_key_exists,
+    )?;
+    config.services.push.vapid_private_key.clear();
+
+    Ok(config)
+}
+
+pub(crate) fn preserve_redacted_app_config_secrets(config: &mut AppConfig, current: &AppConfig) {
+    if config.services.auth.session_token.is_empty() && current.services.auth.session_token_exists {
+        config.services.auth.session_token = current.services.auth.session_token.clone();
+        config.services.auth.session_token_exists = true;
+    }
+    // DATA-1: `token_exists` is `Option<bool>` for relay specifically so we can tell
+    // "caller omitted this field" (None — preserve) apart from "caller explicitly
+    // cleared it" (Some(false) — honor the clear, matches ServicesTab.tsx's
+    // `token_exists = v.length > 0` on the bearer-token input). A partial payload
+    // (agent MCP `config/save`, partial PUT /config) that simply doesn't mention
+    // relay.token_exists must NOT be treated the same as an explicit clear.
+    if config.services.relay.token.is_empty()
+        && config.services.relay.token_exists != Some(false)
+        && current.services.relay.token_exists.unwrap_or(false)
+    {
+        config.services.relay.token = current.services.relay.token.clone();
+        config.services.relay.token_exists = Some(true);
+    }
+    if config.services.push.vapid_private_key.is_empty()
+        && current.services.push.vapid_private_key_exists
+    {
+        config.services.push.vapid_private_key = current.services.push.vapid_private_key.clone();
+        config.services.push.vapid_private_key_exists = true;
+    }
+}
+
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_app_config() -> AppConfig {
     let path = config_dir().join(APP_CONFIG_FILE);
@@ -1339,7 +1487,10 @@ pub(crate) fn load_app_config() -> AppConfig {
     };
     migrate_flat_services(&mut val);
     match serde_json::from_value(val) {
-        Ok(cfg) => cfg,
+        Ok(mut cfg) => {
+            hydrate_app_config_secrets(&mut cfg);
+            cfg
+        }
         Err(e) => {
             tracing::error!(path = %path.display(), "Config deserialization failed after migration: {e}. Using defaults.");
             AppConfig::default()
@@ -1349,7 +1500,8 @@ pub(crate) fn load_app_config() -> AppConfig {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn save_app_config(config: AppConfig) -> Result<(), String> {
-    save_json_config(APP_CONFIG_FILE, &config)
+    let disk_config = config_for_disk(config)?;
+    save_json_config(APP_CONFIG_FILE, &disk_config)
 }
 
 // Notification config
@@ -1547,7 +1699,8 @@ pub(crate) fn save_repo_local_config(repo_path: String) -> Result<(), String> {
     };
     let json = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
     let file = dir.join(REPO_LOCAL_CONFIG_FILE);
-    std::fs::write(&file, json).map_err(|e| format!("Failed to write {}: {e}", file.display()))?;
+    persist_atomic(&file, json.as_bytes())
+        .map_err(|e| format!("Failed to write {}: {e}", file.display()))?;
     Ok(())
 }
 
@@ -1589,14 +1742,137 @@ fn resolve_setup_script_from(
 }
 
 // Repositories (opaque JSON — schema owned by frontend)
+
+#[derive(Debug, PartialEq, Eq)]
+enum SeedPublishOutcome {
+    Published,
+    AlreadyExists,
+    NoSource,
+}
+
+fn seed_repository_file_with_before_publish(
+    production_file: &std::path::Path,
+    dev_file: &std::path::Path,
+    before_publish: impl FnOnce(),
+) -> Result<SeedPublishOutcome, String> {
+    if dev_file.exists() {
+        return Ok(SeedPublishOutcome::AlreadyExists);
+    }
+    if !production_file.exists() {
+        return Ok(SeedPublishOutcome::NoSource);
+    }
+
+    let data = std::fs::read(production_file).map_err(|e| {
+        format!(
+            "Failed to read repository seed {}: {e}",
+            production_file.display()
+        )
+    })?;
+    let parent = dev_file
+        .parent()
+        .ok_or_else(|| format!("Repository path has no parent: {}", dev_file.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+
+    // Publish through a same-directory hard link. The link operation is atomic
+    // and fails if another process created the dev file first, so migration can
+    // never replace an existing dev repository list.
+    let temp = dev_file.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| format!("Failed to create repository seed temp file: {e}"))?;
+    if let Err(e) = file.write_all(&data) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("Failed to write repository seed temp file: {e}"));
+    }
+    drop(file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!("Failed to set repository seed permissions: {e}"));
+        }
+    }
+
+    before_publish();
+    let result = match std::fs::hard_link(&temp, dev_file) {
+        Ok(()) => Ok(SeedPublishOutcome::Published),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(SeedPublishOutcome::AlreadyExists)
+        }
+        Err(e) => Err(format!(
+            "Failed to publish repository seed {}: {e}",
+            dev_file.display()
+        )),
+    };
+    let _ = std::fs::remove_file(&temp);
+    result
+}
+
+fn seed_repository_file(
+    production_file: &std::path::Path,
+    dev_file: &std::path::Path,
+) -> Result<(), String> {
+    seed_repository_file_with_before_publish(production_file, dev_file, || {}).map(|_| ())
+}
+
+fn repository_file_for_build(
+    debug: bool,
+    production_config_dir: &std::path::Path,
+    dev_config_dir: &std::path::Path,
+) -> PathBuf {
+    let production_file = production_config_dir.join(REPOSITORIES_FILE);
+    if !debug {
+        return production_file;
+    }
+
+    let dev_file = dev_config_dir.join(REPOSITORIES_FILE);
+    if let Err(e) = seed_repository_file(&production_file, &dev_file) {
+        tracing::warn!(error = %e, "Failed to seed development repositories");
+    }
+    dev_file
+}
+
+fn repository_file_from_home(
+    debug: bool,
+    production_config_dir: &std::path::Path,
+    home_dir: &std::path::Path,
+) -> PathBuf {
+    repository_file_for_build(
+        debug,
+        production_config_dir,
+        &home_dir.join(".tuicommander-dev"),
+    )
+}
+
+fn repository_file() -> PathBuf {
+    #[cfg(test)]
+    {
+        // Preserve the config-dir override contract for tests in other modules;
+        // isolation behavior is covered through the explicit-path resolver.
+        config_dir().join(REPOSITORIES_FILE)
+    }
+
+    #[cfg(not(test))]
+    {
+        let production_config_dir = config_dir();
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        repository_file_from_home(cfg!(debug_assertions), &production_config_dir, &home_dir)
+    }
+}
+
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_repositories() -> serde_json::Value {
-    load_json_config(REPOSITORIES_FILE)
+    load_json_config_from_path(&repository_file())
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn save_repositories(config: serde_json::Value) -> Result<(), String> {
-    save_json_config(REPOSITORIES_FILE, &config)
+    save_json_config_to_path(&repository_file(), &config)
 }
 
 // Pane layout (schema owned by frontend)
@@ -1815,6 +2091,201 @@ mod tests {
         read_back
     }
 
+    fn read_json(path: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn debug_repositories_seed_only_once() {
+        let dir = TempDir::new().unwrap();
+        let production_dir = dir.path().join("production");
+        let dev_dir = dir.path().join("dev");
+        fs::create_dir_all(&production_dir).unwrap();
+        let production_file = production_dir.join(REPOSITORIES_FILE);
+        fs::write(&production_file, br#"{"repos":{"/production":{}}}"#).unwrap();
+
+        let first = repository_file_for_build(true, &production_dir, &dev_dir);
+        assert_eq!(
+            read_json(&first)["repos"]["/production"],
+            serde_json::json!({})
+        );
+
+        fs::write(&production_file, br#"{"repos":{"/changed":{}}}"#).unwrap();
+        let second = repository_file_for_build(true, &production_dir, &dev_dir);
+        assert_eq!(first, second);
+        assert_eq!(
+            read_json(&second)["repos"]["/production"],
+            serde_json::json!({})
+        );
+        assert!(read_json(&second)["repos"].get("/changed").is_none());
+    }
+
+    #[test]
+    fn concurrent_first_run_seed_keeps_the_published_winner() {
+        let dir = TempDir::new().unwrap();
+        let first_production = dir.path().join("production-first.json");
+        let second_production = dir.path().join("production-second.json");
+        let dev_file = dir.path().join("dev").join(REPOSITORIES_FILE);
+        let first_data = br#"{"repos":{"/first":{}}}"#;
+        let second_data = br#"{"repos":{"/second":{}}}"#;
+        fs::write(&first_production, first_data).unwrap();
+        fs::write(&second_production, second_data).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first_barrier = std::sync::Arc::clone(&barrier);
+        let second_barrier = std::sync::Arc::clone(&barrier);
+        let first_dev_file = dev_file.clone();
+        let second_dev_file = dev_file.clone();
+
+        let first = std::thread::spawn(move || {
+            let outcome = seed_repository_file_with_before_publish(
+                &first_production,
+                &first_dev_file,
+                || {
+                    first_barrier.wait();
+                },
+            )
+            .unwrap();
+            (outcome, first_data.as_slice())
+        });
+        let second = std::thread::spawn(move || {
+            let outcome = seed_repository_file_with_before_publish(
+                &second_production,
+                &second_dev_file,
+                || {
+                    second_barrier.wait();
+                },
+            )
+            .unwrap();
+            (outcome, second_data.as_slice())
+        });
+
+        let results = [first.join().unwrap(), second.join().unwrap()];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(outcome, _)| *outcome == SeedPublishOutcome::Published)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(outcome, _)| *outcome == SeedPublishOutcome::AlreadyExists)
+                .count(),
+            1
+        );
+
+        let winner_data = results
+            .iter()
+            .find_map(|(outcome, data)| {
+                (*outcome == SeedPublishOutcome::Published).then_some(*data)
+            })
+            .unwrap();
+        assert_eq!(fs::read(dev_file).unwrap(), winner_data);
+    }
+
+    #[test]
+    fn debug_repositories_persist_across_restart() {
+        let dir = TempDir::new().unwrap();
+        let production_dir = dir.path().join("production");
+        let dev_dir = dir.path().join("dev");
+        fs::create_dir_all(&production_dir).unwrap();
+        fs::write(
+            production_dir.join(REPOSITORIES_FILE),
+            br#"{"repos":{"/seed":{}}}"#,
+        )
+        .unwrap();
+
+        let first = repository_file_for_build(true, &production_dir, &dev_dir);
+        save_json_config_to_path(&first, &serde_json::json!({"repos": {"/dev-only": {}}})).unwrap();
+
+        let after_restart = repository_file_for_build(true, &production_dir, &dev_dir);
+        assert_eq!(
+            load_json_config_from_path::<serde_json::Value>(&after_restart)["repos"]["/dev-only"],
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn existing_dev_repositories_take_precedence() {
+        let dir = TempDir::new().unwrap();
+        let production_dir = dir.path().join("production");
+        let dev_dir = dir.path().join("dev");
+        fs::create_dir_all(&production_dir).unwrap();
+        fs::create_dir_all(&dev_dir).unwrap();
+        fs::write(
+            production_dir.join(REPOSITORIES_FILE),
+            br#"{"repos":{"/production":{}}}"#,
+        )
+        .unwrap();
+        let dev_file = dev_dir.join(REPOSITORIES_FILE);
+        fs::write(&dev_file, br#"{"repos":{"/existing-dev":{}}}"#).unwrap();
+
+        let selected = repository_file_for_build(true, &production_dir, &dev_dir);
+        assert_eq!(selected, dev_file);
+        assert_eq!(
+            read_json(&selected)["repos"]["/existing-dev"],
+            serde_json::json!({})
+        );
+        assert!(read_json(&selected)["repos"].get("/production").is_none());
+    }
+
+    #[test]
+    fn release_repositories_stay_shared_and_seed_source_is_not_mutated() {
+        let dir = TempDir::new().unwrap();
+        let production_dir = dir.path().join("production");
+        let dev_dir = dir.path().join("dev");
+        fs::create_dir_all(&production_dir).unwrap();
+        let production_file = production_dir.join(REPOSITORIES_FILE);
+        let production_data = br#"{"repos":{"/shared":{}}}"#;
+        fs::write(&production_file, production_data).unwrap();
+
+        let release_file = repository_file_for_build(false, &production_dir, &dev_dir);
+        assert_eq!(release_file, production_file);
+        assert!(!dev_dir.exists());
+
+        let dev_file = repository_file_for_build(true, &production_dir, &dev_dir);
+        save_json_config_to_path(&dev_file, &serde_json::json!({"repos": {"/dev-only": {}}}))
+            .unwrap();
+        assert_eq!(fs::read(&production_file).unwrap(), production_data);
+    }
+
+    #[test]
+    fn repository_selector_routes_debug_and_release_persistence() {
+        let dir = TempDir::new().unwrap();
+        let production_dir = dir.path().join("production");
+        let home_dir = dir.path().join("home");
+        fs::create_dir_all(&production_dir).unwrap();
+        let production_file = production_dir.join(REPOSITORIES_FILE);
+        let production_data = serde_json::json!({"repos": {"/production": {}}});
+        save_json_config_to_path(&production_file, &production_data).unwrap();
+
+        let debug_file = repository_file_from_home(true, &production_dir, &home_dir);
+        assert_eq!(
+            debug_file,
+            home_dir.join(".tuicommander-dev").join(REPOSITORIES_FILE)
+        );
+        assert_eq!(
+            load_json_config_from_path::<serde_json::Value>(&debug_file),
+            production_data
+        );
+
+        let debug_data = serde_json::json!({"repos": {"/debug": {}}});
+        save_json_config_to_path(&debug_file, &debug_data).unwrap();
+        assert_eq!(
+            load_json_config_from_path::<serde_json::Value>(&debug_file),
+            debug_data
+        );
+
+        let release_file = repository_file_from_home(false, &production_dir, &home_dir);
+        assert_eq!(release_file, production_file);
+        assert_eq!(
+            load_json_config_from_path::<serde_json::Value>(&release_file),
+            production_data
+        );
+    }
+
     #[test]
     fn app_config_round_trip() {
         let dir = TempDir::new().unwrap();
@@ -1870,6 +2341,7 @@ mod tests {
             suggest_followups: false,
             global_hotkey: Some("CommandOrControl+Shift+T".to_string()),
             copy_on_select: true,
+            osc52_clipboard: true,
             show_last_prompt: false,
             bell_style: "visual".to_string(),
             collapse_tools: true,
@@ -2045,6 +2517,108 @@ mod tests {
         assert_eq!(username, "user2");
         // flat field NOT consumed (migration skipped)
         assert!(val.get("remote_access_enabled").is_some());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn app_config_secrets_roundtrip_through_credential_vault() {
+        let tmp = TempDir::new().unwrap();
+        let _guard = set_config_dir_override(tmp.path().to_path_buf());
+        let _ = crate::credentials::delete(crate::credentials::Credential::RemoteSessionToken);
+        let _ = crate::credentials::delete(crate::credentials::Credential::RelayToken);
+        let _ = crate::credentials::delete(crate::credentials::Credential::PushVapidPrivateKey);
+
+        let mut cfg = AppConfig::default();
+        cfg.services.auth.session_token = "session-secret".to_string();
+        cfg.services.relay.token = "relay-secret".to_string();
+        cfg.services.push.vapid_private_key = "vapid-secret".to_string();
+        cfg.services.push.vapid_public_key = "vapid-public".to_string();
+
+        save_app_config(cfg).unwrap();
+
+        let disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(tmp.path().join("config.json")).unwrap())
+                .unwrap();
+        assert!(disk.pointer("/services/auth/session_token").is_none());
+        assert_eq!(
+            disk.pointer("/services/auth/session_token_exists"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(disk.pointer("/services/relay/token").is_none());
+        assert_eq!(
+            disk.pointer("/services/relay/token_exists"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        assert!(disk.pointer("/services/push/vapid_private_key").is_none());
+        assert_eq!(
+            disk.pointer("/services/push/vapid_private_key_exists"),
+            Some(&serde_json::Value::Bool(true))
+        );
+
+        let loaded = load_app_config();
+        assert_eq!(loaded.services.auth.session_token, "session-secret");
+        assert!(loaded.services.auth.session_token_exists);
+        assert_eq!(loaded.services.relay.token, "relay-secret");
+        assert_eq!(loaded.services.relay.token_exists, Some(true));
+        assert_eq!(loaded.services.push.vapid_private_key, "vapid-secret");
+        assert!(loaded.services.push.vapid_private_key_exists);
+    }
+
+    #[test]
+    fn relay_token_exists_omitted_in_json_deserializes_to_none() {
+        // Sanity-check the serde attribute itself: a JSON object that never
+        // mentions "token_exists" must deserialize to `None`, not `Some(false)`.
+        let relay: RelayConfig = serde_json::from_str(
+            r#"{"enabled": true, "url": "wss://relay.example.com", "session_id": "abc"}"#,
+        )
+        .unwrap();
+        assert_eq!(relay.token_exists, None);
+    }
+
+    #[test]
+    fn preserve_redacted_secrets_keeps_relay_token_when_payload_omits_exists_flag() {
+        // DATA-1 regression test: an agent MCP `config/save` (or partial PUT
+        // /config) that never mentions `relay.token_exists` must NOT delete the
+        // stored relay token. Before the fix, `token_exists` was a plain `bool`
+        // that defaulted to `false` on omission, which the old guard read as an
+        // explicit "no token exists" signal and wiped the stored token.
+        let mut current = AppConfig::default();
+        current.services.relay.token = "existing-secret".to_string();
+        current.services.relay.token_exists = Some(true);
+
+        // Simulate a partial payload: caller only touched an unrelated field,
+        // so relay.token / relay.token_exists come back at their JSON defaults
+        // (empty string / None) exactly as `#[serde(default)]` would produce
+        // for a JSON object that omits both keys.
+        let mut incoming = AppConfig::default();
+        assert_eq!(incoming.services.relay.token_exists, None);
+        assert!(incoming.services.relay.token.is_empty());
+
+        preserve_redacted_app_config_secrets(&mut incoming, &current);
+
+        assert_eq!(incoming.services.relay.token, "existing-secret");
+        assert_eq!(incoming.services.relay.token_exists, Some(true));
+    }
+
+    #[test]
+    fn preserve_redacted_secrets_honors_explicit_relay_token_clear() {
+        // The explicit-clear affordance (ServicesTab.tsx sets
+        // `token_exists = v.length > 0` on every keystroke of the bearer-token
+        // input) must keep working: an incoming payload that explicitly says
+        // `token_exists: false` alongside an empty token means "the user
+        // cleared this field" and must NOT be restored from `current`.
+        let mut current = AppConfig::default();
+        current.services.relay.token = "existing-secret".to_string();
+        current.services.relay.token_exists = Some(true);
+
+        let mut incoming = AppConfig::default();
+        incoming.services.relay.token_exists = Some(false);
+        assert!(incoming.services.relay.token.is_empty());
+
+        preserve_redacted_app_config_secrets(&mut incoming, &current);
+
+        assert!(incoming.services.relay.token.is_empty());
+        assert_eq!(incoming.services.relay.token_exists, Some(false));
     }
 
     #[test]
@@ -2263,6 +2837,56 @@ mod tests {
 
         // Verify no temp file remains
         assert!(!temp.exists());
+    }
+
+    #[test]
+    fn persist_atomic_survives_concurrent_writers() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let target = Arc::new(dir.path().join("concurrent.bin"));
+
+        // Eight writers hammer the SAME target with distinct homogeneous payloads.
+        // With a per-call unique temp name no two writers ever share a temp path,
+        // so every rename atomically installs a fully-written payload. A per-process
+        // temp name (the old bug) would make the writers collide: one truncates the
+        // temp while another renames it, yielding a truncated/interleaved file or a
+        // rename error (panics the thread).
+        let payloads: Vec<Vec<u8>> = (0..8u8).map(|i| vec![b'A' + i; 4096]).collect();
+        let mut handles = Vec::new();
+        for p in payloads.clone() {
+            let target = Arc::clone(&target);
+            handles.push(thread::spawn(move || {
+                for _ in 0..40 {
+                    persist_atomic(&target, &p).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // The final file must be exactly one writer's full, homogeneous payload.
+        let content = fs::read(&*target).unwrap();
+        assert_eq!(content.len(), 4096, "file truncated → temp-name collision");
+        let byte = content[0];
+        assert!(
+            payloads.iter().any(|p| p[0] == byte),
+            "file byte {byte} matches no writer"
+        );
+        assert!(
+            content.iter().all(|&b| b == byte),
+            "interleaved content → concurrent-write race"
+        );
+
+        // No temp files left behind by any writer.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
     }
 
     #[cfg(unix)]

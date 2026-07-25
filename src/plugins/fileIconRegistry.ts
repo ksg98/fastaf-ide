@@ -1,4 +1,5 @@
 import { createSignal } from "solid-js";
+import { reportPluginCallbackError } from "./pluginCallbackGuard";
 import type { Disposable, FileIconProvider } from "./types";
 
 /**
@@ -13,19 +14,22 @@ import type { Disposable, FileIconProvider } from "./types";
  */
 function createFileIconRegistry() {
 	const [version, setVersion] = createSignal(0);
-	let activeProvider: FileIconProvider | null = null;
-	let previousProvider: FileIconProvider | null = null;
+	// Registration stack — the top (last element) is the active provider.
+	// Register pushes; dispose removes by identity, so out-of-order disposal
+	// of any registration keeps the remaining chain intact (mirrors
+	// markdownProviderRegistry's per-registration restore semantics).
+	const providers: Array<{ pluginId?: string; provider: FileIconProvider }> = [];
 
-	function register(provider: FileIconProvider): Disposable {
-		previousProvider = activeProvider;
-		activeProvider = provider;
+	function register(provider: FileIconProvider, pluginId?: string): Disposable {
+		const entry = { pluginId, provider };
+		providers.push(entry);
 		setVersion((v) => v + 1);
 
 		return {
 			dispose() {
-				if (activeProvider === provider) {
-					activeProvider = previousProvider;
-					previousProvider = null;
+				const index = providers.lastIndexOf(entry);
+				if (index !== -1) {
+					providers.splice(index, 1);
 					setVersion((v) => v + 1);
 				}
 			},
@@ -33,8 +37,14 @@ function createFileIconRegistry() {
 	}
 
 	function resolve(name: string, isDir: boolean): string | null {
+		const activeProvider = providers[providers.length - 1];
 		if (!activeProvider) return null;
-		return activeProvider.resolveFileIcon(name, isDir);
+		try {
+			return activeProvider.provider.resolveFileIcon(name, isDir);
+		} catch (err) {
+			reportPluginCallbackError(activeProvider.pluginId, "file icon resolve", err);
+			return null;
+		}
 	}
 
 	/** Reactive version number — read this in components to trigger re-render on provider change */
@@ -44,8 +54,7 @@ function createFileIconRegistry() {
 
 	/** Remove all registrations (for testing). */
 	function clear(): void {
-		activeProvider = null;
-		previousProvider = null;
+		providers.length = 0;
 		setVersion(0);
 	}
 

@@ -400,6 +400,19 @@ impl GixGitReads {
             .all()
             .ok()?;
 
+        // Bound the walk so a "last N commits" page costs O(N), not O(total
+        // history). The walk yields newest-commit-time first, and in a normal
+        // (monotonic) history the first `count` topo commits are exactly the
+        // `count` newest by commit-time — loading just those is sufficient. The
+        // slack margin absorbs non-monotonic anomalies (clock skew, rebases)
+        // where a parent's timestamp is newer than its child's, so a commit can
+        // be pulled ahead of newer-timestamped siblings. 256 comfortably covers
+        // realistic skew while capping the worst case; past the cap, older
+        // parents simply drop out of the in-set indegree, which is harmless
+        // because we never emit that far.
+        const TOPO_WALK_SLACK: usize = 256;
+        let walk_cap = count.saturating_add(TOPO_WALK_SLACK);
+
         let mut parents: HashMap<gix::ObjectId, Vec<gix::ObjectId>> = HashMap::new();
         let mut time: HashMap<gix::ObjectId, i64> = HashMap::new();
         let mut indegree: HashMap<gix::ObjectId, i32> = HashMap::new();
@@ -409,6 +422,9 @@ impl GixGitReads {
             time.insert(info.id, info.commit_time.unwrap_or(0));
             indegree.entry(info.id).or_insert(1);
             parents.insert(info.id, ps);
+            if parents.len() >= walk_cap {
+                break;
+            }
         }
         // indegree[c] = 1 + (# of in-set children). Bump parents per child.
         for ps in parents.values() {
@@ -1497,6 +1513,48 @@ mod tests {
         let a2 = cli.commit_log(&repo, Some(2), Some(b_oid.clone())).unwrap();
         let b2 = gix.commit_log(&repo, Some(2), Some(b_oid)).unwrap();
         assert_eq!(json(&a2), json(&b2), "commit_log(after,count) gix != cli");
+    }
+
+    /// The bounded walk (TOPO_WALK_SLACK cutoff) must still yield a correct
+    /// topo page: on a linear history LONGER than the walk cap, requesting a
+    /// small page returns the same commits (byte-for-byte) as the CLI, proving
+    /// truncation of the walk doesn't corrupt the first N results.
+    #[test]
+    fn topo_walk_bounded_stays_correct() {
+        use super::test_fixtures::run_git_at;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_path_buf();
+        run_git(&p, &["init", "-b", "main"]);
+        run_git(&p, &["config", "user.email", "t@t"]);
+        run_git(&p, &["config", "user.name", "T"]);
+        run_git(&p, &["config", "core.hooksPath", "/dev/null"]);
+
+        // Well past the 256-commit walk cap, with strictly increasing (distinct)
+        // timestamps so topo order is fully determined and gix/cli agree.
+        let total = 300;
+        for i in 0..total {
+            let ts = format!("2026-01-01T00:{:02}:{:02}Z", i / 60, i % 60);
+            run_git_at(
+                &p,
+                &ts,
+                &["commit", "--allow-empty", "-m", &format!("c{i}")],
+            );
+        }
+
+        let cli = CliGitReads;
+        let gix = GixGitReads::new();
+        let a = cli.graph_commits(&p, 10).unwrap();
+        let b = gix.graph_commits(&p, 10).unwrap();
+        assert_eq!(
+            b.len(),
+            10,
+            "page should return exactly the requested count"
+        );
+        assert_eq!(
+            format!("{a:?}"),
+            format!("{b:?}"),
+            "bounded gix topo page != cli"
+        );
     }
 
     /// Step 6: gix can open the fixture repo and the handle cache reuses the

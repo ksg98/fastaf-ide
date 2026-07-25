@@ -1,6 +1,7 @@
 import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { BaseRefOption } from "../../hooks/useRepository";
 import { t } from "../../i18n";
+import { registerModal } from "../../stores/modalStack";
 import { validateBranchName } from "../RenameBranchDialog/RenameBranchDialog";
 import d from "../shared/dialog.module.css";
 import s from "./CreateWorktreeDialog.module.css";
@@ -151,11 +152,12 @@ export const CreateWorktreeDialog: Component<CreateWorktreeDialogProps> = (props
 	createEffect(() => {
 		if (!props.visible) return;
 
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to props.onClose AND stops it reaching the terminal underneath.
+		registerModal(props.onClose);
+
 		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				props.onClose();
-			} else if (e.key === "Enter") {
+			if (e.key === "Enter") {
 				e.preventDefault();
 				handleCreate();
 			}

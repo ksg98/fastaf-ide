@@ -32,6 +32,7 @@ pub enum AppEvent {
         session_id: String,
         cwd: Option<String>,
         agent_type: Option<String>,
+        display_name: Option<String>,
     },
     #[serde(rename = "session-closed")]
     SessionClosed { session_id: String, reason: String },
@@ -133,6 +134,50 @@ pub enum AppEvent {
         llm_used: bool,
         llm_model: Option<String>,
     },
+    /// Reserved lifecycle events for GitHub Ops workflows. Producers are wired
+    /// incrementally as each workflow graduates from primitive to runtime flow.
+    #[allow(dead_code)]
+    #[serde(rename = "review-progress")]
+    ReviewProgress {
+        repo_path: String,
+        payload: serde_json::Value,
+    },
+    #[allow(dead_code)]
+    #[serde(rename = "conflict-assist-status")]
+    ConflictAssistStatus {
+        repo_path: String,
+        payload: serde_json::Value,
+    },
+    #[allow(dead_code)]
+    #[serde(rename = "proposals-ready")]
+    ProposalsReady {
+        repo_path: String,
+        payload: serde_json::Value,
+    },
+    /// Background recreation of a stale worktree directory failed. Emitted on the
+    /// bus (SSE) AND the Tauri window so browser/PWA/remote clients learn the
+    /// outcome, not just the desktop app.
+    #[serde(rename = "worktree-create-failed")]
+    WorktreeCreateFailed {
+        repo_path: String,
+        branch: String,
+        reason: String,
+    },
+}
+
+impl AppEvent {
+    /// Session id for the PTY-scoped variants that are routed to a per-session
+    /// channel in addition to the global bus. `None` for all other variants
+    /// (they ride the global `event_bus` only). Keep this in sync with the
+    /// variants the session-scoped WS handlers care about.
+    pub(crate) fn pty_session_id(&self) -> Option<&str> {
+        match self {
+            AppEvent::PtyParsed { session_id, .. }
+            | AppEvent::PtyExit { session_id }
+            | AppEvent::SessionClosed { session_id, .. } => Some(session_id),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +218,29 @@ pub(crate) struct SessionState {
     /// Computed on-the-fly when serializing; None for sessions with no output yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell_state: Option<String>,
+    /// Agent task lifecycle, distinct from PTY activity. `completed` requires
+    /// the explicit `suggest:` protocol marker; silence alone remains `idle`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<String>,
+    /// True while the agent owns a meaningful background descendant even if
+    /// its terminal composer is ready for input. Persistent integration helpers
+    /// are excluded by the PTY process-tree classifier.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub background_work: bool,
+    /// Turn whose confirmed-ready observation is waiting for a process snapshot
+    /// newer than `background_probe_after_generation`.
+    #[serde(skip)]
+    pub(crate) background_probe_turn_epoch: Option<u64>,
+    /// Snapshot generation visible when the ready observation was made.
+    #[serde(skip)]
+    pub(crate) background_probe_after_generation: Option<u64>,
+    /// Turn whose ready probe has been reconciled against a newer snapshot.
+    #[serde(skip)]
+    pub(crate) background_probe_satisfied_turn_epoch: Option<u64>,
+    /// Last process snapshot applied to this session. Prevents repeated work
+    /// from one shared cache generation.
+    #[serde(skip)]
+    pub(crate) background_snapshot_generation: u64,
     /// Timestamp of last activity (any event for this session).
     /// Excluded from PartialEq — telemetry field, not logical state.
     pub last_activity_ms: u64,
@@ -205,6 +273,10 @@ pub(crate) struct SessionState {
     /// Suggested follow-up actions from the agent (from `suggest: ...` tokens)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_actions: Option<Vec<String>>,
+    /// Monotonic input-turn epoch. Suggest events carry the epoch in which they
+    /// were parsed so the async accumulator cannot restore prior-turn completion.
+    #[serde(skip)]
+    pub(crate) turn_epoch: u64,
     /// Slash command menu items (from slash-menu parsed events)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slash_menu_items: Option<Vec<crate::output_parser::SlashMenuItem>>,
@@ -220,6 +292,33 @@ pub(crate) struct SessionState {
     pub last_push_ms: Option<u64>,
 }
 
+impl SessionState {
+    pub(crate) fn has_pending_background_probe(&self) -> bool {
+        self.background_probe_turn_epoch == Some(self.turn_epoch)
+    }
+}
+
+pub(crate) fn resolve_choice_prompt_input(state: &AppState, session_id: &str, data: &str) -> bool {
+    let Some(mut session) = state.session_states.get_mut(session_id) else {
+        return false;
+    };
+    let Some(prompt) = session.choice_prompt.as_ref() else {
+        return false;
+    };
+    let resolves = prompt.options.iter().any(|option| option.key == data)
+        || matches!(data, "\r" | "\n")
+        || (data == "\x1b" && prompt.dismiss_key.is_some())
+        || (data == "\t" && prompt.amend_key.is_some());
+    if !resolves {
+        return false;
+    }
+    session.choice_prompt = None;
+    session.awaiting_input = false;
+    session.question_text = None;
+    session.question_confident = false;
+    true
+}
+
 /// PartialEq excludes last_activity_ms (telemetry, not logical state).
 /// Used by WS dedup to avoid sending identical state frames.
 impl PartialEq for SessionState {
@@ -231,6 +330,8 @@ impl PartialEq for SessionState {
             && self.retry_after_ms == other.retry_after_ms
             && self.usage_limit_pct == other.usage_limit_pct
             && self.shell_state == other.shell_state
+            && self.agent_state == other.agent_state
+            && self.background_work == other.background_work
             && self.agent_type == other.agent_type
             && self.last_error == other.last_error
             && self.agent_intent == other.agent_intent
@@ -815,7 +916,7 @@ pub struct PeerAgent {
 }
 
 /// A message in the inter-agent mailbox.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentMessage {
     /// Unique message ID
     pub id: String,
@@ -825,14 +926,64 @@ pub struct AgentMessage {
     pub from_name: String,
     /// Message body (max 64 KB)
     pub content: String,
-    /// Unix millis timestamp
+    /// Per-recipient logical unix-millis cursor
     pub timestamp: u64,
     /// Whether this message was pushed via SSE channel notification
     pub delivered_via_channel: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentDeliveryOwner {
+    Waiter,
+    WaiterObserved,
+    TerminalPending,
+    TerminalDispatched,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentDeliveryAssignment {
+    Waiter,
+    Terminal,
+    InboxOnly,
+}
+
+#[derive(Debug)]
+pub(crate) struct AgentDeliveryGate {
+    next_lease: u64,
+    active_waiters: std::collections::HashSet<u64>,
+    owners: HashMap<String, AgentDeliveryOwner>,
+    inbox_revision: u64,
+    inbox_events: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for AgentDeliveryGate {
+    fn default() -> Self {
+        let (inbox_events, _) = tokio::sync::watch::channel(0);
+        Self {
+            next_lease: 0,
+            active_waiters: std::collections::HashSet::new(),
+            owners: HashMap::new(),
+            inbox_revision: 0,
+            inbox_events,
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AgentWaitFinish {
+    pub fresh_count: usize,
+    pub messages: Vec<AgentMessage>,
+    pub terminal_handoff: Vec<String>,
+}
+
 /// Max messages per agent inbox before FIFO eviction.
 pub(crate) const AGENT_INBOX_CAPACITY: usize = 100;
+
+/// Message-id prefix marking auto-generated lifecycle/system notifications
+/// (child exited/idle/died). These are low-volume and critical — losing one
+/// silently strands the orchestrator waiting on a child it thinks is alive —
+/// so `push_agent_inbox` protects them from eviction by chatty peer `send`s.
+pub(crate) const LIFECYCLE_MSG_ID_PREFIX: &str = "tuic-auto-";
 
 /// Max message body size in bytes (64 KB).
 pub(crate) const AGENT_MESSAGE_MAX_BYTES: usize = 64 * 1024;
@@ -917,8 +1068,9 @@ pub struct AppState {
     /// tripping the MCP bridge's 3-failure / 9s health threshold and flipping
     /// it offline.
     pub(crate) ipc_started: std::sync::atomic::AtomicBool,
-    /// Random session token for browser cookie auth — regenerated on each server start.
-    /// Browsers auto-send cookies in fetch(), unlike stored Basic Auth credentials.
+    /// Random session token for browser cookie auth — generated once when empty,
+    /// then persisted in config and reused across server starts (not regenerated
+    /// per start). Browsers auto-send cookies in fetch(), unlike stored Basic Auth.
     /// Behind RwLock so it can be regenerated at runtime (invalidating all sessions).
     pub(crate) session_token: parking_lot::RwLock<String>,
     pub(crate) auth_rate_limits: DashMap<std::net::IpAddr, (u32, Instant)>,
@@ -1075,6 +1227,14 @@ pub struct AppState {
     /// arrives for a busy/awaiting agent; drained by `flush_pending_injections`.
     /// The inbox always holds the authoritative copy — this is only the wake-up path.
     pub(crate) pending_injections: DashMap<String, VecDeque<String>>,
+    /// Initial prompts awaiting successful PTY submission. Used only by the
+    /// one-shot delivery watchdog; successful delivery removes the marker and
+    /// emits nothing, while timeout emits one parent notification.
+    pub(crate) pending_initial_prompts: DashMap<String, String>,
+    /// Per-peer atomic handoff between blocking waiters and terminal delivery.
+    /// Each message has exactly one wake-up owner while remaining visible in
+    /// the authoritative inbox for backward-compatible reads.
+    pub(crate) active_agent_waiters: DashMap<String, Mutex<AgentDeliveryGate>>,
     /// HTML tab IDs (pluginIds) created by each session (tuic_session → [tab_id]).
     /// Populated by ui(tab) calls from registered agents; cleared on session exit
     /// so orphan tabs can be auto-closed by the frontend.
@@ -1109,6 +1269,14 @@ pub struct AppState {
     /// Per-MCP-session broadcast channels for inter-agent messaging notifications.
     /// Each SSE listener subscribes; `send` action pushes here for real-time delivery.
     pub(crate) messaging_channels: DashMap<String, tokio::sync::broadcast::Sender<String>>,
+    /// Per-PTY-session broadcast channels carrying that session's `AppEvent`s
+    /// (`PtyParsed`/`PtyExit`/`SessionClosed`). Populated by `emit_pty_event`
+    /// ALONGSIDE the global `event_bus` (which still feeds `/events` SSE and the
+    /// state accumulator). The session-scoped WS handlers subscribe here instead
+    /// of the global bus, so a session's events are no longer cloned+filtered by
+    /// every other session's WS receiver. Created on-demand when a WS handler
+    /// subscribes; reaped in `cleanup_session`/`tombstone_transient_cleanup`.
+    pub(crate) pty_event_channels: DashMap<String, tokio::sync::broadcast::Sender<AppEvent>>,
     /// Per-session command outcome + error/fix knowledge store.
     /// Populated by pty.rs OSC 133 hooks and SessionState transitions.
     /// Consumed by the agent loop for context injection.
@@ -1158,11 +1326,326 @@ pub struct AppState {
     /// Sessions currently in standby (SIGSTOP'd). session_id → epoch ms when stopped.
     #[cfg(unix)]
     pub(crate) standby_sessions: DashMap<String, u64>,
+    /// App-wide process-tree snapshot shared by agent lifecycle polling.
+    pub(crate) process_snapshot_cache: crate::pty::ProcessSnapshotCache,
     /// Repos with active terminals — used to throttle watcher/polling for cold repos.
     pub(crate) hot_repo_paths: parking_lot::RwLock<std::collections::HashSet<String>>,
 }
 
 impl AppState {
+    /// Emit a PTY-scoped `AppEvent` (`PtyParsed`/`PtyExit`/`SessionClosed`) to
+    /// BOTH transports: the per-session channel (so the session-scoped WS
+    /// handlers receive it directly, without every other session's receiver
+    /// cloning+filtering it) AND the global `event_bus` (which still feeds
+    /// `/events` SSE, the session-state accumulator, relay, watcher, etc.).
+    ///
+    /// The per-session send is best-effort: it only fires when a WS handler has
+    /// created the channel (via `subscribe`) — we never create it on the emit
+    /// side, so sessions no client ever attaches to don't leak a channel. A send
+    /// with no live receivers is a harmless no-op (`Err` dropped), exactly like
+    /// the global bus with no subscribers.
+    ///
+    /// Non-PTY events (repo/dir/github/UI/...) must keep using `event_bus.send`
+    /// directly; `pty_session_id()` returns `None` for them so they'd never reach
+    /// a per-session channel anyway.
+    pub(crate) fn emit_pty_event(&self, event: AppEvent) {
+        if let Some(sid) = event.pty_session_id()
+            && let Some(tx) = self.pty_event_channels.get(sid)
+        {
+            let _ = tx.send(event.clone());
+        }
+        let _ = self.event_bus.send(event);
+    }
+
+    /// Subscribe to lifecycle events for one PTY session. Subscription happens
+    /// before callers inspect current state, closing the check-then-sleep race:
+    /// a transition after subscription is retained by the receiver, while a
+    /// transition before it is visible in the initial state check.
+    pub(crate) fn subscribe_pty_events(
+        &self,
+        session_id: &str,
+    ) -> tokio::sync::broadcast::Receiver<AppEvent> {
+        const CHANNEL_CAPACITY: usize = 256;
+        self.pty_event_channels
+            .entry(session_id.to_string())
+            .or_insert_with(|| tokio::sync::broadcast::channel(CHANNEL_CAPACITY).0)
+            .subscribe()
+    }
+
+    /// Buffer a message into `recipient`'s inbox with bounded, lifecycle-aware
+    /// FIFO eviction. Single source of truth for BOTH push sites (peer `send`
+    /// and auto lifecycle notifications) so the two can't drift in how they
+    /// handle overflow.
+    ///
+    /// On overflow we evict the oldest *non-lifecycle* message first, so peer
+    /// chatter can never silently drop a `tuic-auto-*` lifecycle notification;
+    /// we only fall back to evicting the oldest message overall when the inbox
+    /// is entirely lifecycle notifications (orchestrator badly stuck). Every
+    /// genuine eviction bumps `agent_inbox_evictions`, surfaced as
+    /// `missed_count` on the next `inbox` read — nothing is dropped silently.
+    pub(crate) fn push_agent_inbox(&self, recipient: &str, mut msg: AgentMessage) {
+        let evicted_id = {
+            let mut inbox = self.agent_inbox.entry(recipient.to_string()).or_default();
+            if let Some(last_timestamp) = inbox.back().map(|message| message.timestamp)
+                && msg.timestamp <= last_timestamp
+            {
+                // Millisecond wall-clock timestamps can collide. Treat the serialized
+                // timestamp as a per-recipient logical cursor while avoiding wrap at
+                // the theoretical u64 ceiling.
+                msg.timestamp = last_timestamp.saturating_add(1);
+            }
+            let evicted = if inbox.len() >= AGENT_INBOX_CAPACITY {
+                let evict_idx = inbox
+                    .iter()
+                    .position(|m| !m.id.starts_with(LIFECYCLE_MSG_ID_PREFIX))
+                    .unwrap_or(0);
+                inbox.remove(evict_idx).map(|message| message.id)
+            } else {
+                None
+            };
+            inbox.push_back(msg);
+            evicted
+        };
+        if let Some(evicted_id) = evicted_id {
+            *self
+                .agent_inbox_evictions
+                .entry(recipient.to_string())
+                .or_insert(0) += 1;
+            if let Some(gate) = self.active_agent_waiters.get(recipient) {
+                gate.lock().owners.remove(&evicted_id);
+            }
+        }
+        if let Some(gate) = self.active_agent_waiters.get(recipient) {
+            let mut gate = gate.lock();
+            gate.inbox_revision = gate.inbox_revision.wrapping_add(1);
+            let revision = gate.inbox_revision;
+            gate.inbox_events.send_replace(revision);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_agent_wait(&self, tuic_session: &str) -> u64 {
+        self.begin_agent_wait_with_events(tuic_session).0
+    }
+
+    pub(crate) fn begin_agent_wait_with_events(
+        &self,
+        tuic_session: &str,
+    ) -> (u64, tokio::sync::watch::Receiver<u64>) {
+        let gate = self
+            .active_agent_waiters
+            .entry(tuic_session.to_string())
+            .or_default();
+        let mut gate = gate.lock();
+        gate.next_lease = gate.next_lease.wrapping_add(1).max(1);
+        let lease = gate.next_lease;
+        gate.active_waiters.insert(lease);
+        (lease, gate.inbox_events.subscribe())
+    }
+
+    pub(crate) fn finish_agent_wait(
+        &self,
+        tuic_session: &str,
+        lease: u64,
+        since: u64,
+        observed: bool,
+    ) -> AgentWaitFinish {
+        let Some(gate) = self.active_agent_waiters.get(tuic_session) else {
+            return AgentWaitFinish::default();
+        };
+        let mut gate = gate.lock();
+        gate.active_waiters.remove(&lease);
+        let last_waiter = gate.active_waiters.is_empty();
+        let fresh_messages: Vec<AgentMessage> = self
+            .agent_inbox
+            .get(tuic_session)
+            .map(|inbox| {
+                inbox
+                    .iter()
+                    .filter(|message| message.timestamp > since)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let fresh_ids: std::collections::HashSet<&str> = fresh_messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        let mut finish = AgentWaitFinish::default();
+        let mut observed_ids = std::collections::HashSet::new();
+        for (message_id, owner) in &mut gate.owners {
+            if !fresh_ids.contains(message_id.as_str()) || *owner != AgentDeliveryOwner::Waiter {
+                continue;
+            }
+            if observed {
+                *owner = AgentDeliveryOwner::WaiterObserved;
+                observed_ids.insert(message_id.clone());
+            } else if last_waiter {
+                *owner = AgentDeliveryOwner::TerminalPending;
+                finish.terminal_handoff.push(message_id.clone());
+            }
+        }
+        finish.messages = fresh_messages
+            .into_iter()
+            .filter(|message| observed_ids.contains(&message.id))
+            .collect();
+        finish.fresh_count = finish.messages.len();
+        finish
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_active_agent_waiter(&self, tuic_session: &str) -> bool {
+        self.active_agent_waiters
+            .get(tuic_session)
+            .is_some_and(|gate| !gate.lock().active_waiters.is_empty())
+    }
+
+    pub(crate) fn assign_agent_delivery(
+        &self,
+        tuic_session: &str,
+        message_id: &str,
+        terminal_delivery_available: bool,
+    ) -> AgentDeliveryAssignment {
+        let gate = self
+            .active_agent_waiters
+            .entry(tuic_session.to_string())
+            .or_default();
+        let mut gate = gate.lock();
+        if let Some(owner) = gate.owners.get(message_id) {
+            return match owner {
+                AgentDeliveryOwner::Waiter | AgentDeliveryOwner::WaiterObserved => {
+                    AgentDeliveryAssignment::Waiter
+                }
+                AgentDeliveryOwner::TerminalPending | AgentDeliveryOwner::TerminalDispatched => {
+                    AgentDeliveryAssignment::Terminal
+                }
+            };
+        }
+        if !gate.active_waiters.is_empty() {
+            gate.owners
+                .insert(message_id.to_string(), AgentDeliveryOwner::Waiter);
+            AgentDeliveryAssignment::Waiter
+        } else if terminal_delivery_available {
+            gate.owners
+                .insert(message_id.to_string(), AgentDeliveryOwner::TerminalPending);
+            AgentDeliveryAssignment::Terminal
+        } else {
+            AgentDeliveryAssignment::InboxOnly
+        }
+    }
+
+    pub(crate) fn assign_agent_delivery_with_terminal_attempt<F>(
+        &self,
+        tuic_session: &str,
+        message_id: &str,
+        terminal_fallback_available: bool,
+        attempt_terminal_delivery: F,
+    ) -> (AgentDeliveryAssignment, bool)
+    where
+        F: FnOnce() -> bool,
+    {
+        let gate = self
+            .active_agent_waiters
+            .entry(tuic_session.to_string())
+            .or_default();
+        let mut gate = gate.lock();
+        if let Some(owner) = gate.owners.get(message_id) {
+            return match owner {
+                AgentDeliveryOwner::Waiter | AgentDeliveryOwner::WaiterObserved => {
+                    (AgentDeliveryAssignment::Waiter, false)
+                }
+                AgentDeliveryOwner::TerminalPending => (AgentDeliveryAssignment::Terminal, false),
+                AgentDeliveryOwner::TerminalDispatched => (AgentDeliveryAssignment::Terminal, true),
+            };
+        }
+        if !gate.active_waiters.is_empty() {
+            gate.owners
+                .insert(message_id.to_string(), AgentDeliveryOwner::Waiter);
+            return (AgentDeliveryAssignment::Waiter, false);
+        }
+        if attempt_terminal_delivery() {
+            gate.owners.insert(
+                message_id.to_string(),
+                AgentDeliveryOwner::TerminalDispatched,
+            );
+            return (AgentDeliveryAssignment::Terminal, true);
+        }
+        if terminal_fallback_available {
+            gate.owners
+                .insert(message_id.to_string(), AgentDeliveryOwner::TerminalPending);
+            return (AgentDeliveryAssignment::Terminal, false);
+        }
+        (AgentDeliveryAssignment::InboxOnly, false)
+    }
+
+    pub(crate) fn waiter_fresh_message_count(&self, tuic_session: &str, since: u64) -> usize {
+        let gate = self
+            .active_agent_waiters
+            .entry(tuic_session.to_string())
+            .or_default();
+        let mut gate = gate.lock();
+        let fresh: Vec<String> = self
+            .agent_inbox
+            .get(tuic_session)
+            .map(|inbox| {
+                inbox
+                    .iter()
+                    .filter(|message| message.timestamp > since)
+                    .map(|message| message.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let waiter_active = !gate.active_waiters.is_empty();
+        fresh
+            .into_iter()
+            .filter(|message_id| match gate.owners.get(message_id).copied() {
+                Some(
+                    AgentDeliveryOwner::TerminalPending | AgentDeliveryOwner::TerminalDispatched,
+                ) => false,
+                Some(AgentDeliveryOwner::Waiter) => true,
+                Some(AgentDeliveryOwner::WaiterObserved) => false,
+                None if waiter_active => {
+                    gate.owners
+                        .insert(message_id.clone(), AgentDeliveryOwner::Waiter);
+                    true
+                }
+                None => false,
+            })
+            .count()
+    }
+
+    pub(crate) fn mark_terminal_delivery_dispatched(&self, tuic_session: &str, message_id: &str) {
+        if let Some(gate) = self.active_agent_waiters.get(tuic_session) {
+            let mut gate = gate.lock();
+            if gate.owners.get(message_id) == Some(&AgentDeliveryOwner::TerminalPending) {
+                gate.owners.insert(
+                    message_id.to_string(),
+                    AgentDeliveryOwner::TerminalDispatched,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn release_terminal_delivery(&self, tuic_session: &str, message_id: &str) {
+        if let Some(gate) = self.active_agent_waiters.get(tuic_session) {
+            let mut gate = gate.lock();
+            if gate.owners.get(message_id) == Some(&AgentDeliveryOwner::TerminalPending) {
+                gate.owners.remove(message_id);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_delivery_owner(
+        &self,
+        tuic_session: &str,
+        message_id: &str,
+    ) -> Option<AgentDeliveryOwner> {
+        self.active_agent_waiters
+            .get(tuic_session)
+            .and_then(|gate| gate.lock().owners.get(message_id).copied())
+    }
+
     /// Acquire one slot in the monitoring-git concurrency limit. Hold the
     /// returned permit for the lifetime of the background git subprocess, then
     /// drop it. Operational (user-initiated) git must NOT call this.
@@ -1269,11 +1752,14 @@ impl AppState {
             agent_inbox: DashMap::new(),
             agent_inbox_evictions: DashMap::new(),
             pending_injections: DashMap::new(),
+            pending_initial_prompts: DashMap::new(),
+            active_agent_waiters: DashMap::new(),
             session_html_tabs: DashMap::new(),
             mcp_to_session: DashMap::new(),
             session_to_mcp: DashMap::new(),
             session_parent: DashMap::new(),
             messaging_channels: DashMap::new(),
+            pty_event_channels: DashMap::new(),
             session_knowledge: DashMap::new(),
             knowledge_dirty: DashMap::new(),
             has_osc133_integration: DashMap::new(),
@@ -1299,6 +1785,7 @@ impl AppState {
             screenshot_responses: DashMap::new(),
             #[cfg(unix)]
             standby_sessions: DashMap::new(),
+            process_snapshot_cache: crate::pty::ProcessSnapshotCache::default(),
             hot_repo_paths: parking_lot::RwLock::new(std::collections::HashSet::new()),
         }
     }
@@ -1450,15 +1937,20 @@ fn repo_name_to_prefix(name: &str, existing: &DashMap<String, String>) -> String
     }
 
     let segments = split_name_segments(name);
-    let base = if segments.len() >= 2 {
-        segments.iter().map(|s| &s[..1]).collect::<String>()
-    } else {
-        let s = &segments[0];
-        if s.len() < 3 {
-            s.clone()
-        } else {
-            s[..2].to_string()
+    let base = match segments.as_slice() {
+        // split_name_segments never returns empty (it pushes "sh"), but guard
+        // defensively so a future change can't reintroduce an OOB index.
+        [] => "sh".to_string(),
+        [single] => {
+            if single.chars().count() < 3 {
+                single.clone()
+            } else {
+                single.chars().take(2).collect()
+            }
         }
+        // Multi-word: take the first char of each segment. chars() (not byte
+        // slicing) so multibyte directory names never panic mid-codepoint.
+        multi => multi.iter().filter_map(|s| s.chars().next()).collect(),
     };
 
     let used_prefixes: std::collections::HashSet<String> = existing
@@ -1699,14 +2191,43 @@ impl AppState {
                 entry.rate_limit_set_ms = 0;
             }
         }
-        self.session_states.get(session_id).map(|s| {
-            let mut state = s.clone();
-            state.shell_state = self.shell_states.get(session_id).map(|atom| {
-                crate::pty::shell_state_str(atom.load(std::sync::atomic::Ordering::Relaxed))
-                    .to_string()
+        // Clone before consulting SilenceState so no session_states shard guard
+        // is held across that mutex. Completion emission uses the inverse order
+        // to serialize against a newly submitted input epoch.
+        let mut state = self.session_states.get(session_id).map(|s| s.clone())?;
+        state.shell_state = self.shell_states.get(session_id).map(|atom| {
+            crate::pty::shell_state_str(atom.load(std::sync::atomic::Ordering::Relaxed)).to_string()
+        });
+        let completion_declared = state.suggested_actions.is_some()
+            || self.silence_states.get(session_id).is_some_and(|silence| {
+                silence
+                    .lock()
+                    .completion_declared_for_epoch(state.turn_epoch)
             });
-            state
-        })
+        let background_work = state.has_pending_background_probe() || state.background_work;
+        // A current-turn completion marker is stronger than a stale BUSY atom
+        // (for example a completed Codex screen that still contains its last
+        // Working row). Keep real background work authoritative, but normalize
+        // the terminal state once the agent has explicitly ended the turn.
+        if completion_declared && !background_work {
+            state.shell_state = Some("idle".to_string());
+        }
+        state.agent_state = if state.agent_type.is_none() {
+            None
+        } else if state.awaiting_input || state.choice_prompt.is_some() {
+            Some("awaiting_input".to_string())
+        } else if background_work {
+            Some("working".to_string())
+        } else if completion_declared {
+            Some("completed".to_string())
+        } else if state.shell_state.as_deref() == Some("busy") {
+            Some("working".to_string())
+        } else if state.shell_state.as_deref() == Some("idle") {
+            Some("idle".to_string())
+        } else {
+            Some("starting".to_string())
+        };
+        Some(state)
     }
 
     /// Spawn a background task that subscribes to the event bus and updates
@@ -1777,6 +2298,7 @@ impl AppState {
             }
             AppEvent::PtyParsed { session_id, parsed } => {
                 let event_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let event_turn_epoch = parsed.get("_turn_epoch").and_then(|v| v.as_u64());
 
                 // Collect push notification data outside the DashMap lock
                 let mut push_data: Option<(String, String)> = None;
@@ -1874,7 +2396,6 @@ impl AppState {
                                 s.rate_limit_set_ms = 0;
                                 s.last_error = None;
                                 s.suggested_actions = None;
-                                s.choice_prompt = None;
                                 // Only update current_task + activity timestamp when task changes.
                                 // Spinner rotations (same task name) are suppressed to avoid
                                 // churning the state and flooding WS clients.
@@ -1892,7 +2413,9 @@ impl AppState {
                                     .and_then(|v| v.as_str())
                                     .map(|t| t.to_string());
                             }
-                            "suggest" => {
+                            "suggest"
+                                if event_turn_epoch.is_none_or(|epoch| epoch == s.turn_epoch) =>
+                            {
                                 s.suggested_actions =
                                     parsed.get("items").and_then(|v| v.as_array()).map(|arr| {
                                         arr.iter()
@@ -1942,6 +2465,16 @@ impl AppState {
                         last_activity_ms: now_ms,
                         ..Default::default()
                     });
+
+                // Unblock-triggered flush (story 091): user-input just cleared
+                // question_confident. If the agent answered a confident question but
+                // stays idle, there is no BUSY→IDLE transition to drain its queued
+                // peer messages — deliver them now. flush_pending_injections is
+                // self-guarded (idle agent, no confident question), and this runs
+                // outside the session_states entry lock to avoid re-entrancy.
+                if event_type == "user-input" {
+                    crate::pty::flush_pending_injections(state, session_id);
+                }
 
                 // Spawn push notification outside the DashMap lock
                 if let Some((sid, prompt)) = push_data
@@ -2007,7 +2540,11 @@ impl AppState {
             | AppEvent::GitHubIssuesUpdate { .. }
             | AppEvent::CloseHtmlTabs { .. }
             | AppEvent::ScheduledJobCompleted { .. }
-            | AppEvent::DiffTriageProgress { .. } => {}
+            | AppEvent::DiffTriageProgress { .. }
+            | AppEvent::ReviewProgress { .. }
+            | AppEvent::ConflictAssistStatus { .. }
+            | AppEvent::ProposalsReady { .. }
+            | AppEvent::WorktreeCreateFailed { .. } => {}
         }
     }
 
@@ -2397,6 +2934,18 @@ impl VtLogBuffer {
         self.grid.screen_text_rows_ref()
     }
 
+    pub(crate) fn cursor_point(&self) -> (usize, usize) {
+        self.grid.cursor_point()
+    }
+
+    pub(crate) fn logical_prefix_at_cursor(&self) -> Option<crate::terminal_grid::LogicalPrefix> {
+        self.grid.logical_prefix_at_cursor()
+    }
+
+    pub(crate) fn physical_prefix_at_cursor(&self) -> Option<crate::terminal_grid::LogicalPrefix> {
+        self.grid.physical_prefix_at_cursor()
+    }
+
     /// Current visible screen rows as styled LogLines (with ANSI color attributes).
     /// Used by mobile/REST to render screen content with colors.
     pub fn screen_log_lines(&self) -> Vec<LogLine> {
@@ -2534,10 +3083,6 @@ impl VtLogBuffer {
         self.grid.get_cursor_row_text()
     }
 
-    pub(crate) fn cursor_point(&self) -> (usize, usize) {
-        self.grid.cursor_point()
-    }
-
     pub(crate) fn grid_get_selection_text(
         &self,
         start_row: usize,
@@ -2651,6 +3196,390 @@ pub(crate) mod tests_support {
 mod tests {
     use super::*;
 
+    fn make_msg(id: &str) -> AgentMessage {
+        AgentMessage {
+            id: id.to_string(),
+            from_tuic_session: "sender".to_string(),
+            from_name: "sender".to_string(),
+            content: "x".to_string(),
+            timestamp: 1,
+            delivered_via_channel: false,
+        }
+    }
+
+    // ── push_agent_inbox: lifecycle notifications survive peer-send flooding ──
+
+    #[test]
+    fn push_agent_inbox_protects_lifecycle_from_send_eviction() {
+        let state = tests_support::make_test_app_state();
+        let rcpt = "orchestrator";
+
+        // A single critical lifecycle notification arrives first.
+        state.push_agent_inbox(rcpt, make_msg("tuic-auto-child-exit-1"));
+
+        // Then a peer floods the inbox well past capacity with chatter.
+        for i in 0..(AGENT_INBOX_CAPACITY + 50) {
+            state.push_agent_inbox(rcpt, make_msg(&format!("send-{i}")));
+        }
+
+        let inbox = state.agent_inbox.get(rcpt).expect("inbox exists");
+        // Hard bound respected …
+        assert_eq!(inbox.len(), AGENT_INBOX_CAPACITY);
+        // … but the lifecycle message was NOT the one evicted.
+        assert!(
+            inbox.iter().any(|m| m.id == "tuic-auto-child-exit-1"),
+            "lifecycle notification must survive send flooding"
+        );
+        // Evictions are counted (nothing dropped silently).
+        assert!(
+            *state.agent_inbox_evictions.get(rcpt).unwrap() > 0,
+            "genuine evictions must bump the missed-count counter"
+        );
+    }
+
+    #[test]
+    fn push_agent_inbox_falls_back_to_oldest_when_all_lifecycle() {
+        let state = tests_support::make_test_app_state();
+        let rcpt = "orchestrator";
+
+        // Inbox entirely lifecycle: fallback evicts the oldest to keep the bound.
+        for i in 0..(AGENT_INBOX_CAPACITY + 1) {
+            state.push_agent_inbox(rcpt, make_msg(&format!("tuic-auto-{i}")));
+        }
+
+        let inbox = state.agent_inbox.get(rcpt).expect("inbox exists");
+        assert_eq!(inbox.len(), AGENT_INBOX_CAPACITY);
+        // Oldest (index 0) evicted; the newest is retained.
+        assert_eq!(inbox.front().unwrap().id, "tuic-auto-1");
+        assert_eq!(
+            inbox.back().unwrap().id,
+            format!("tuic-auto-{AGENT_INBOX_CAPACITY}")
+        );
+    }
+
+    #[test]
+    fn push_agent_inbox_assigns_monotonic_logical_timestamps() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        for id in ["first", "second", "third"] {
+            state.push_agent_inbox(recipient, make_msg(id));
+        }
+
+        let inbox = state.agent_inbox.get(recipient).unwrap();
+        let timestamps: Vec<_> = inbox.iter().map(|message| message.timestamp).collect();
+        assert_eq!(timestamps, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn push_agent_inbox_timestamp_saturation_never_wraps() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "orchestrator";
+        state.push_agent_inbox(
+            recipient,
+            AgentMessage {
+                timestamp: u64::MAX,
+                ..make_msg("ceiling")
+            },
+        );
+        state.push_agent_inbox(recipient, make_msg("after-ceiling"));
+
+        let inbox = state.agent_inbox.get(recipient).unwrap();
+        assert_eq!(inbox[0].timestamp, u64::MAX);
+        assert_eq!(inbox[1].timestamp, u64::MAX);
+    }
+
+    #[test]
+    fn active_agent_waiters_are_reference_counted() {
+        let state = tests_support::make_test_app_state();
+        let first = state.begin_agent_wait("peer");
+        let second = state.begin_agent_wait("peer");
+        assert!(state.has_active_agent_waiter("peer"));
+        state.finish_agent_wait("peer", first, 0, true);
+        assert!(state.has_active_agent_waiter("peer"));
+        state.finish_agent_wait("peer", second, 0, true);
+        assert!(!state.has_active_agent_waiter("peer"));
+    }
+
+    #[test]
+    fn waiter_send_handoff_assigns_exactly_one_owner_in_both_deadline_orders() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+
+        let lease = state.begin_agent_wait(recipient);
+        state.push_agent_inbox(recipient, make_msg("during-wait"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "during-wait", true),
+            AgentDeliveryAssignment::Waiter
+        );
+        assert_eq!(state.waiter_fresh_message_count(recipient, 0), 1);
+        let finish = state.finish_agent_wait(recipient, lease, 0, true);
+        assert_eq!(finish.fresh_count, 1);
+        assert_eq!(finish.messages, vec![make_msg("during-wait")]);
+        assert!(finish.terminal_handoff.is_empty());
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "during-wait"),
+            Some(AgentDeliveryOwner::WaiterObserved)
+        );
+
+        let lease = state.begin_agent_wait(recipient);
+        assert!(
+            state
+                .finish_agent_wait(recipient, lease, 1, false)
+                .terminal_handoff
+                .is_empty()
+        );
+        state.push_agent_inbox(
+            recipient,
+            AgentMessage {
+                timestamp: 2,
+                ..make_msg("after-timeout")
+            },
+        );
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "after-timeout", true),
+            AgentDeliveryAssignment::Terminal
+        );
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "after-timeout"),
+            Some(AgentDeliveryOwner::TerminalPending)
+        );
+    }
+
+    #[test]
+    fn delayed_delivery_assignment_preserves_waiter_observation() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+        let lease = state.begin_agent_wait(recipient);
+        state.push_agent_inbox(recipient, make_msg("claimed-before-assignment"));
+
+        assert_eq!(state.waiter_fresh_message_count(recipient, 0), 1);
+        let finish = state.finish_agent_wait(recipient, lease, 0, true);
+        assert_eq!(finish.messages, vec![make_msg("claimed-before-assignment")]);
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "claimed-before-assignment", true),
+            AgentDeliveryAssignment::Waiter
+        );
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "claimed-before-assignment"),
+            Some(AgentDeliveryOwner::WaiterObserved)
+        );
+    }
+
+    #[test]
+    fn terminal_attempt_assigns_exact_owner_for_success_failure_and_waiter() {
+        let state = tests_support::make_test_app_state();
+        state.push_agent_inbox("failed-peer", make_msg("failed-sse"));
+        assert_eq!(
+            state.assign_agent_delivery_with_terminal_attempt(
+                "failed-peer",
+                "failed-sse",
+                false,
+                || false,
+            ),
+            (AgentDeliveryAssignment::InboxOnly, false)
+        );
+        assert_eq!(
+            state.agent_delivery_owner("failed-peer", "failed-sse"),
+            None
+        );
+
+        let lease = state.begin_agent_wait("failed-peer");
+        assert_eq!(state.waiter_fresh_message_count("failed-peer", 0), 1);
+        let finish = state.finish_agent_wait("failed-peer", lease, 0, true);
+        assert_eq!(finish.messages, vec![make_msg("failed-sse")]);
+
+        state.push_agent_inbox("live-peer", make_msg("live-sse"));
+        assert_eq!(
+            state.assign_agent_delivery_with_terminal_attempt(
+                "live-peer",
+                "live-sse",
+                false,
+                || true,
+            ),
+            (AgentDeliveryAssignment::Terminal, true)
+        );
+        assert_eq!(
+            state.agent_delivery_owner("live-peer", "live-sse"),
+            Some(AgentDeliveryOwner::TerminalDispatched)
+        );
+
+        let waiter = state.begin_agent_wait("waiting-peer");
+        state.push_agent_inbox("waiting-peer", make_msg("waiter-owned"));
+        let terminal_attempted = std::cell::Cell::new(false);
+        assert_eq!(
+            state.assign_agent_delivery_with_terminal_attempt(
+                "waiting-peer",
+                "waiter-owned",
+                true,
+                || {
+                    terminal_attempted.set(true);
+                    true
+                },
+            ),
+            (AgentDeliveryAssignment::Waiter, false)
+        );
+        assert!(!terminal_attempted.get());
+        assert_eq!(
+            state
+                .finish_agent_wait("waiting-peer", waiter, 0, true)
+                .messages,
+            vec![make_msg("waiter-owned")]
+        );
+
+        state.push_agent_inbox("vanished-peer", make_msg("pty-race"));
+        assert_eq!(
+            state.assign_agent_delivery("vanished-peer", "pty-race", true),
+            AgentDeliveryAssignment::Terminal
+        );
+        state.release_terminal_delivery("vanished-peer", "pty-race");
+        assert_eq!(
+            state.agent_delivery_owner("vanished-peer", "pty-race"),
+            None
+        );
+        let waiter = state.begin_agent_wait("vanished-peer");
+        assert_eq!(state.waiter_fresh_message_count("vanished-peer", 0), 1);
+        assert_eq!(
+            state
+                .finish_agent_wait("vanished-peer", waiter, 0, true)
+                .messages,
+            vec![make_msg("pty-race")]
+        );
+    }
+
+    #[test]
+    fn concurrent_waiter_does_not_report_message_observed_by_another_lease() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+        let first = state.begin_agent_wait(recipient);
+        let second = state.begin_agent_wait(recipient);
+        state.push_agent_inbox(recipient, make_msg("one-owner"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "one-owner", true),
+            AgentDeliveryAssignment::Waiter
+        );
+
+        assert_eq!(state.waiter_fresh_message_count(recipient, 0), 1);
+        let observed = state.finish_agent_wait(recipient, first, 0, true);
+        assert_eq!(observed.messages, vec![make_msg("one-owner")]);
+
+        assert_eq!(
+            state.waiter_fresh_message_count(recipient, 0),
+            0,
+            "a second lease must not report readiness for an already observed message"
+        );
+        assert_eq!(
+            state.finish_agent_wait(recipient, second, 0, true),
+            AgentWaitFinish::default()
+        );
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "one-owner"),
+            Some(AgentDeliveryOwner::WaiterObserved),
+            "exactly-once wake ownership must remain with the first waiter"
+        );
+    }
+
+    #[test]
+    fn cancelled_last_waiter_hands_unobserved_message_to_terminal_once() {
+        let state = tests_support::make_test_app_state();
+        let recipient = "peer";
+        let lease = state.begin_agent_wait(recipient);
+        state.push_agent_inbox(recipient, make_msg("cancel-race"));
+        assert_eq!(
+            state.assign_agent_delivery(recipient, "cancel-race", true),
+            AgentDeliveryAssignment::Waiter
+        );
+
+        assert_eq!(
+            state
+                .finish_agent_wait(recipient, lease, 0, false)
+                .terminal_handoff,
+            vec!["cancel-race".to_string()]
+        );
+        assert_eq!(
+            state.agent_delivery_owner(recipient, "cancel-race"),
+            Some(AgentDeliveryOwner::TerminalPending)
+        );
+        assert!(
+            state
+                .finish_agent_wait(recipient, lease, 0, false)
+                .terminal_handoff
+                .is_empty(),
+            "releasing the same lease twice must not duplicate terminal handoff"
+        );
+    }
+
+    // ── emit_pty_event: per-session channel + global-bus parity (story 140) ──
+
+    #[tokio::test]
+    async fn emit_pty_event_isolates_per_session_and_mirrors_global_bus() {
+        let state = tests_support::make_test_app_state();
+
+        // A session-scoped WS handler for "a" creates + subscribes to its channel.
+        let mut rx_a = state
+            .pty_event_channels
+            .entry("a".to_string())
+            .or_insert_with(|| tokio::sync::broadcast::channel(16).0)
+            .subscribe();
+        // A global-bus consumer (e.g. /events SSE, state accumulator) sees all.
+        let mut bus_rx = state.event_bus.subscribe();
+
+        // One event for "a" (has a channel) and one for "b" (no channel attached).
+        state.emit_pty_event(AppEvent::PtyParsed {
+            session_id: "a".to_string(),
+            parsed: serde_json::json!({ "type": "x" }),
+        });
+        state.emit_pty_event(AppEvent::PtyExit {
+            session_id: "b".to_string(),
+        });
+
+        // "a"'s channel receives ONLY a's event — no cross-session leakage, and
+        // no per-session filter block needed on the handler side.
+        match rx_a.try_recv() {
+            Ok(AppEvent::PtyParsed { session_id, .. }) => assert_eq!(session_id, "a"),
+            other => panic!("expected PtyParsed for a, got {other:?}"),
+        }
+        assert!(
+            rx_a.try_recv().is_err(),
+            "session a's channel must not receive session b's event"
+        );
+
+        // The global bus still received BOTH events (parity for SSE/accumulator).
+        let mut seen = Vec::new();
+        while let Ok(e) = bus_rx.try_recv() {
+            seen.push(e.pty_session_id().map(str::to_string));
+        }
+        assert_eq!(seen, vec![Some("a".to_string()), Some("b".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn session_closed_survives_channel_reap() {
+        // Critical invariant: the final "closed" frame must reach the client even
+        // though cleanup reaps the per-session channel right after emitting it.
+        // broadcast drains buffered messages before signalling Closed.
+        let state = tests_support::make_test_app_state();
+        let mut rx = state
+            .pty_event_channels
+            .entry("s".to_string())
+            .or_insert_with(|| tokio::sync::broadcast::channel(16).0)
+            .subscribe();
+
+        state.emit_pty_event(AppEvent::SessionClosed {
+            session_id: "s".to_string(),
+            reason: "process_exit".to_string(),
+        });
+        // Simulate cleanup_session/tombstone_transient_cleanup dropping the sender.
+        state.pty_event_channels.remove("s");
+
+        match rx.recv().await {
+            Ok(AppEvent::SessionClosed { reason, .. }) => assert_eq!(reason, "process_exit"),
+            other => panic!("closed frame must survive channel reap, got {other:?}"),
+        }
+        assert!(matches!(
+            rx.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Closed)
+        ));
+    }
+
     // ── data_dir ─────────────────────────────────────────────
 
     #[test]
@@ -2762,6 +3691,35 @@ mod tests {
     fn prefix_three_word() {
         let m = DashMap::new();
         assert_eq!(repo_name_to_prefix("my-awesome-project", &m), "map");
+    }
+
+    #[test]
+    fn prefix_separator_only_no_panic() {
+        // A directory literally named "---" or "..." splits into no segments;
+        // split_name_segments falls back to ["sh"]. Must not panic.
+        let m = DashMap::new();
+        assert_eq!(repo_name_to_prefix("---", &m), "sh");
+        assert_eq!(repo_name_to_prefix("...", &m), "sh");
+        assert_eq!(repo_name_to_prefix("_._", &m), "sh");
+    }
+
+    #[test]
+    fn prefix_multibyte_single_word_no_panic() {
+        // Non-ASCII single-word name: old &s[..2] byte slice panicked on a
+        // multibyte char boundary. chars().take(2) is safe.
+        let m = DashMap::new();
+        assert_eq!(repo_name_to_prefix("über", &m), "üb");
+        // 2-char multibyte word stays as-is (< 3 chars).
+        assert_eq!(repo_name_to_prefix("ök", &m), "ök");
+    }
+
+    #[test]
+    fn prefix_multibyte_multi_word_no_panic() {
+        // Multi-word name whose first segment starts with a multibyte char:
+        // old &s[..1] byte slice panicked. chars().next() is safe.
+        let m = DashMap::new();
+        assert_eq!(repo_name_to_prefix("über-café", &m), "üc");
+        assert_eq!(repo_name_to_prefix("日本-project", &m), "日p");
     }
 
     // ── assign_term_alias (prefix + counter) ──────────────
@@ -3339,11 +4297,14 @@ mod tests {
             agent_inbox: DashMap::new(),
             agent_inbox_evictions: DashMap::new(),
             pending_injections: DashMap::new(),
+            pending_initial_prompts: DashMap::new(),
+            active_agent_waiters: DashMap::new(),
             session_html_tabs: DashMap::new(),
             mcp_to_session: DashMap::new(),
             session_to_mcp: DashMap::new(),
             session_parent: DashMap::new(),
             messaging_channels: DashMap::new(),
+            pty_event_channels: DashMap::new(),
             session_knowledge: DashMap::new(),
             knowledge_dirty: DashMap::new(),
             has_osc133_integration: DashMap::new(),
@@ -3381,6 +4342,7 @@ mod tests {
             connections_lock: tokio::sync::Mutex::new(()),
             screenshot_responses: DashMap::new(),
             standby_sessions: DashMap::new(),
+            process_snapshot_cache: crate::pty::ProcessSnapshotCache::default(),
             hot_repo_paths: parking_lot::RwLock::new(std::collections::HashSet::new()),
         }
     }
@@ -3797,6 +4759,10 @@ mod tests {
             .insert("s1".to_string(), SessionState::default());
         // Initialize last_output_ms for shell_state derivation
         s.last_output_ms.insert("s1".to_string(), AtomicU64::new(0));
+        let mut silence = crate::pty::SilenceState::new();
+        silence.confirm_idle();
+        s.silence_states
+            .insert("s1".to_string(), Arc::new(parking_lot::Mutex::new(silence)));
         s
     }
 
@@ -3885,6 +4851,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn queued_prior_turn_suggest_cannot_restore_completion_after_submission() {
+        let state = fresh_state();
+        state.session_states.get_mut("s1").unwrap().agent_type = Some("codex".to_string());
+        state.shell_states.insert(
+            "s1".to_string(),
+            std::sync::atomic::AtomicU8::new(crate::pty::SHELL_IDLE),
+        );
+        let queued_suggest = make_parsed(
+            "suggest",
+            serde_json::json!({
+                "items": ["stale action"],
+                "_turn_epoch": 0,
+            }),
+        );
+
+        AppState::spawn_session_state_accumulator(state.clone());
+        state.emit_pty_event(queued_suggest);
+        // No await above: the Suggest is queued in the async accumulator when
+        // the new input advances the turn epoch.
+        crate::pty::note_submitted_input(&state, "s1");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if state
+                    .session_states
+                    .get("s1")
+                    .is_some_and(|session| session.last_activity_ms > 0)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued Suggest must drain through the accumulator");
+        state
+            .shell_states
+            .get("s1")
+            .unwrap()
+            .store(crate::pty::SHELL_IDLE, std::sync::atomic::Ordering::Release);
+
+        let snapshot = state.session_state_with_shell("s1").unwrap();
+        assert_eq!(snapshot.turn_epoch, 1);
+        assert!(snapshot.suggested_actions.is_none());
+        assert_eq!(snapshot.agent_state.as_deref(), Some("idle"));
+    }
+
     #[test]
     fn test_session_state_status_line_clears_suggested_actions() {
         let state = fresh_state();
@@ -3951,6 +4964,36 @@ mod tests {
     }
 
     #[test]
+    fn test_user_input_unblock_requeues_when_test_pty_is_missing() {
+        // A peer message queued while a confident question blocked injection must
+        // drain when the user answers (user-input) and the agent stays idle —
+        // there is no BUSY→IDLE transition on that path (story 091 unblock flush).
+        use std::collections::VecDeque;
+        use std::sync::atomic::AtomicU8;
+        let state = fresh_state();
+        state.session_states.get_mut("s1").unwrap().agent_type = Some("claude".to_string());
+        state
+            .shell_states
+            .insert("s1".to_string(), AtomicU8::new(crate::pty::SHELL_IDLE));
+        let q = make_parsed(
+            "question",
+            serde_json::json!({ "prompt_text": "Enter to select", "confident": true }),
+        );
+        apply(&state, &q);
+        let mut pending = VecDeque::new();
+        pending.push_back("[TUIC message from peer] wake".to_string());
+        state.pending_injections.insert("s1".to_string(), pending);
+
+        let ui = make_parsed("user-input", serde_json::json!({ "content": "yes" }));
+        apply(&state, &ui);
+        assert_eq!(
+            state.pending_injections.get("s1").map(|q| q.len()),
+            Some(1),
+            "missing PTY lookup must roll back and keep the unblocked message retryable"
+        );
+    }
+
+    #[test]
     fn test_session_state_user_input_clears_awaiting() {
         let state = fresh_state();
         // First go to question state
@@ -4010,6 +5053,70 @@ mod tests {
             !s2.awaiting_input,
             "user-input clears the confident question"
         );
+    }
+
+    #[test]
+    fn test_session_state_status_line_keeps_choice_prompt() {
+        let state = fresh_state();
+        let choice = make_parsed(
+            "choice-prompt",
+            serde_json::json!({
+                "title": "Which approach should I use?",
+                "options": [{
+                    "key": "1",
+                    "label": "Proceed",
+                    "highlighted": true,
+                    "destructive": false
+                }],
+                "dismiss_key": "cancel",
+                "amend_key": "amend"
+            }),
+        );
+        apply(&state, &choice);
+
+        let status = make_parsed("status-line", serde_json::json!({ "task_name": "Waiting" }));
+        let session = apply(&state, &status);
+        assert!(
+            session.choice_prompt.is_some(),
+            "an animated status row must not erase a visible choice prompt"
+        );
+        state.session_states.get_mut("s1").unwrap().agent_type = Some("claude".into());
+        let snapshot = state.session_state_with_shell("s1").unwrap();
+        assert_eq!(snapshot.agent_state.as_deref(), Some("awaiting_input"));
+    }
+
+    #[test]
+    fn test_non_hook_choice_prompt_clears_on_single_key_reply() {
+        let state = fresh_state();
+        let choice = make_parsed(
+            "choice-prompt",
+            serde_json::json!({
+                "title": "Which approach should I use?",
+                "options": [{
+                    "key": "1",
+                    "label": "Proceed",
+                    "highlighted": true,
+                    "destructive": false
+                }],
+                "dismiss_key": "cancel",
+                "amend_key": "amend"
+            }),
+        );
+        apply(&state, &choice);
+        assert!(!resolve_choice_prompt_input(&state, "s1", "\x1b[B"));
+        assert!(
+            state
+                .session_states
+                .get("s1")
+                .unwrap()
+                .choice_prompt
+                .is_some()
+        );
+
+        assert!(resolve_choice_prompt_input(&state, "s1", "1"));
+        let session = state.session_states.get("s1").unwrap();
+        assert!(session.choice_prompt.is_none());
+        assert!(!session.awaiting_input);
     }
 
     #[test]
@@ -4076,6 +5183,48 @@ mod tests {
             ss.shell_state.is_none(),
             "no shell_states entry should produce None, not derive from timing"
         );
+    }
+
+    #[test]
+    fn test_current_turn_completion_normalizes_stale_busy_shell() {
+        let state = fresh_state();
+        {
+            let mut session = state.session_states.get_mut("s1").unwrap();
+            session.agent_type = Some("codex".into());
+            session.suggested_actions = Some(vec!["Review diff".into()]);
+        }
+        state.shell_states.insert(
+            "s1".into(),
+            std::sync::atomic::AtomicU8::new(crate::pty::SHELL_BUSY),
+        );
+
+        let snapshot = state.session_state_with_shell("s1").unwrap();
+        assert_eq!(snapshot.shell_state.as_deref(), Some("idle"));
+        assert_eq!(snapshot.agent_state.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn test_completion_does_not_override_confirmed_or_pending_background_work() {
+        for pending_probe in [false, true] {
+            let state = fresh_state();
+            {
+                let mut session = state.session_states.get_mut("s1").unwrap();
+                session.agent_type = Some("claude".into());
+                session.suggested_actions = Some(vec!["Review result".into()]);
+                session.background_work = !pending_probe;
+                if pending_probe {
+                    session.background_probe_turn_epoch = Some(session.turn_epoch);
+                }
+            }
+            state.shell_states.insert(
+                "s1".into(),
+                std::sync::atomic::AtomicU8::new(crate::pty::SHELL_BUSY),
+            );
+
+            let snapshot = state.session_state_with_shell("s1").unwrap();
+            assert_eq!(snapshot.shell_state.as_deref(), Some("busy"));
+            assert_eq!(snapshot.agent_state.as_deref(), Some("working"));
+        }
     }
 
     #[test]

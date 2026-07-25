@@ -170,30 +170,40 @@ function createCommandPaletteStore() {
 		cancelled = false;
 		setState({ terminalResults: [], terminalSearching: true });
 
-		const allResults: TerminalMatch[] = [];
 		const terminals = terminalsStore.state.terminals as Record<
 			string,
 			{ id: string; ref?: { searchBuffer?: (q: string) => TerminalMatch[] | Promise<TerminalMatch[]> } }
 		>;
 		const detached = terminalsStore.state.detachedWindows as Record<string, string>;
 
+		// Fire every attached terminal's searchBuffer concurrently; the cancelled
+		// check happens once at aggregation instead of per-round-trip.
+		const searchers: Array<(q: string) => TerminalMatch[] | Promise<TerminalMatch[]>> = [];
 		for (const id of Object.keys(terminals)) {
-			if (cancelled) break;
 			// Skip detached terminals
 			if (detached[id]) continue;
 			const ref = terminals[id]?.ref;
 			if (!ref?.searchBuffer) continue;
-			const matches = await ref.searchBuffer(searchQuery);
-			allResults.push(...matches);
+			searchers.push(ref.searchBuffer);
+		}
+		const settled = await Promise.allSettled(searchers.map((search) => search(searchQuery)));
+
+		if (cancelled) return;
+
+		const allResults: TerminalMatch[] = [];
+		for (const result of settled) {
+			if (result.status === "rejected") {
+				appLogger.error("app", "Terminal buffer search failed", result.reason);
+				continue;
+			}
+			allResults.push(...result.value);
 			if (allResults.length >= MAX_TERMINAL_RESULTS) break;
 		}
 
-		if (!cancelled) {
-			setState({
-				terminalResults: allResults.slice(0, MAX_TERMINAL_RESULTS),
-				terminalSearching: false,
-			});
-		}
+		setState({
+			terminalResults: allResults.slice(0, MAX_TERMINAL_RESULTS),
+			terminalSearching: false,
+		});
 	}
 
 	return {

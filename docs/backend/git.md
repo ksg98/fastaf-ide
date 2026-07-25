@@ -89,7 +89,7 @@ The frontend uses `get_repo_structure` (Phase 1) and `get_repo_diff_stats` (Phas
 | Command | Signature | Description |
 |---------|-----------|-------------|
 | `rename_branch` | `(path, old_name, new_name) -> ()` | Rename a branch |
-| `update_from_base` | `(path, branch) -> String` | Fetch base ref (if remote) and rebase branch onto it |
+| `update_from_base` | `(path, branch, strategy?) -> String` | Fetch base ref (if remote) and rebase or merge the branch onto it. On conflict, reports `(aborted)` only after `git rebase/merge --abort` succeeds; if abort fails, the error says the repo may still be conflicted and includes the manual abort command. |
 | `get_branch_base` | `(path, branch) -> Option<String>` | Read stored base ref from `git config branch.<name>.tuicommander-base` |
 | `git_apply_reverse_patch` | `(path, patch) -> ()` | Apply a reverse patch for hunk/line-level restore |
 

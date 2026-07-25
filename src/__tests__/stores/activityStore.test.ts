@@ -29,6 +29,7 @@ describe("activityStore", () => {
 	});
 
 	afterEach(() => {
+		activityStore._testCancelPendingSave();
 		consoleSpy.mockRestore();
 	});
 
@@ -271,6 +272,10 @@ describe("activityStore persistence", () => {
 		mockInvoke.mockReset().mockResolvedValue(undefined);
 		vi.doMock("@tauri-apps/api/core", () => ({ invoke: mockInvoke }));
 		store = (await import("../../stores/activityStore")).activityStore;
+	});
+
+	afterEach(() => {
+		store._testCancelPendingSave();
 	});
 
 	describe("hydrate()", () => {

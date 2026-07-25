@@ -279,16 +279,16 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
-        // DEFERRED (2026-06-24) — story 056-7545 (grid-level Ink duplication into
-        // scrollback). When Claude Code's Ink TUI re-renders a tall block in place
-        // (cursor-up + erase-in-display/line + reprint) and the redrawn region
-        // crosses the scroll-region/screen boundary, the intermediate/old render
-        // appears to land here in history (region.start == 0 → lines committed to
-        // scrollback) instead of being overwritten, so the grid itself accumulates
-        // duplicate copies. NOT yet root-caused/fixed: requires a live make-dev
-        // repro Boss can watch (grid vs reference terminal) before touching this —
-        // blind fork surgery here is high-risk. Distinct from 055-2027 (frontend
-        // rowCache drift, grid clean). See story work logs for the captured repro.
+        // DEFERRED (2026-06-24, re-evaluated 2026-07-06) — story 056-7545 (Ink
+        // duplication into scrollback). RESOLVED FOR THE MAIN REPRO: raw-ring
+        // capture (mdkb `ink-banner-dup-raw-ring-2026-07-06`) proved the grid is
+        // FAITHFUL — Claude Code's Ink itself re-emits its full frame (banner
+        // included) via ~28×CRLF (pushes the old frame into scrollback) + ESC[H +
+        // per-line erase + reprint whenever its frame exceeds the viewport or the
+        // width changes. The duplicates are IN the byte stream; any terminal
+        // records them. Do NOT patch scroll_up for this. If a future repro shows
+        // grid copies > raw emissions (compare search-buffer hits vs raw-ring
+        // occurrences), only then suspect this code path again.
 
         // When rotating the entire region with fixed lines at the top, just reset everything.
         if region.end - region.start <= positions && region.start != 0 {

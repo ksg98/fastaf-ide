@@ -208,7 +208,8 @@ describe("appLogger", () => {
 			expect(mockRpc).toHaveBeenCalledWith("push_log", expect.objectContaining({ level: "error", source: "terminal" }));
 		});
 		const call = mockRpc.mock.calls.find((c) => c[0] === "push_log");
-		const parsed = JSON.parse((call?.[1] as { dataJson: string }).dataJson);
+		expect(call).toBeDefined();
+		const parsed = JSON.parse((call![1] as { dataJson: string }).dataJson);
 		expect(parsed.sessionId).toBe("s1");
 		// Plain JSON.stringify would emit {} here — the replacer must surface the failure.
 		expect(parsed.error.message).toBe("boom");

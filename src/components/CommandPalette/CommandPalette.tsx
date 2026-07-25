@@ -1,6 +1,7 @@
 import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { ActionEntry } from "../../actions/actionRegistry";
 import { commandPaletteStore } from "../../stores/commandPalette";
+import { registerModal } from "../../stores/modalStack";
 import { paneLayoutStore } from "../../stores/paneLayout";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
@@ -93,7 +94,8 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	// Focus input when opened
 	createEffect(() => {
 		if (isOpen()) {
-			requestAnimationFrame(() => inputRef?.focus());
+			const frame = requestAnimationFrame(() => inputRef?.focus());
+			onCleanup(() => cancelAnimationFrame(frame));
 		}
 	});
 
@@ -149,6 +151,11 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	createEffect(() => {
 		if (!isOpen()) return;
 
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to close AND stops it reaching the terminal underneath. Arrow/Enter
+		// navigation is still handled by the local listener below.
+		registerModal(() => commandPaletteStore.close());
+
 		const handleKeydown = (e: KeyboardEvent) => {
 			const count = itemCount();
 
@@ -179,11 +186,6 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 						const action = filteredActions()[selectedIndex()];
 						if (action) executeAction(action);
 					}
-					break;
-				case "Escape":
-					e.preventDefault();
-					e.stopPropagation();
-					commandPaletteStore.close();
 					break;
 			}
 		};

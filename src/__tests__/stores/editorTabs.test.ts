@@ -73,12 +73,15 @@ describe("editorTabsStore", () => {
 			});
 		});
 
-		it("falls back to last remaining tab as active", () => {
+		it("does not promote another tab when the active one is removed (caller selects the replacement)", () => {
 			testInScope(() => {
 				const id1 = editorTabsStore.add("/repo", "a.ts");
 				const id2 = editorTabsStore.add("/repo", "b.ts");
 				editorTabsStore.remove(id2); // remove active
-				expect(editorTabsStore.state.activeId).toBe(id1);
+				expect(editorTabsStore.get(id1)).toBeDefined();
+				// No auto-promotion: id1 could be scoped to another branch/repo —
+				// visibility-aware selection happens in useTerminalLifecycle.
+				expect(editorTabsStore.state.activeId).toBeNull();
 			});
 		});
 

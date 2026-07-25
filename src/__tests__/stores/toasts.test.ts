@@ -75,6 +75,34 @@ describe("toastsStore", () => {
 		});
 	});
 
+	it("warn toasts linger past 4s and auto-dismiss at 15s", () => {
+		testInScope(() => {
+			toastsStore.add("Careful", "heads up", "warn");
+			vi.advanceTimersByTime(4000);
+			expect(toastsStore.toasts).toHaveLength(1); // still visible past the info window
+			vi.advanceTimersByTime(11000); // total 15s
+			expect(toastsStore.toasts).toHaveLength(0);
+		});
+	});
+
+	it("error toasts are sticky (never auto-dismiss)", () => {
+		testInScope(() => {
+			const id = toastsStore.add("Broke", "bad", "error");
+			vi.advanceTimersByTime(60000);
+			expect(toastsStore.toasts).toHaveLength(1);
+			toastsStore.remove(id); // only manual dismissal clears it
+			expect(toastsStore.toasts).toHaveLength(0);
+		});
+	});
+
+	it("an explicit duration overrides the per-level default", () => {
+		testInScope(() => {
+			toastsStore.add("Quick warn", "", "warn", false, undefined, 1000);
+			vi.advanceTimersByTime(1000);
+			expect(toastsStore.toasts).toHaveLength(0);
+		});
+	});
+
 	it("accepts sound parameter without error", () => {
 		testInScope(() => {
 			const id = toastsStore.add("Ding", "", "info", true);

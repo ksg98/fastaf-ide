@@ -84,12 +84,16 @@ describe("CommandWidget", () => {
 		const { container } = render(() => <CommandWidget sessionId="s1" agentType="claude" onDismiss={onDismiss} />);
 		const buttons = container.querySelectorAll("button");
 		const permBtn = Array.from(buttons).find((b) => b.textContent?.includes("Permission"))!;
-		await fireEvent.click(permBtn);
-		expect(rpc).toHaveBeenCalledWith("write_pty", {
-			sessionId: "s1",
-			data: "\x1b[Z",
+		fireEvent.click(permBtn);
+		await waitFor(() => {
+			expect(rpc).toHaveBeenCalledWith("write_pty", {
+				sessionId: "s1",
+				data: "\x1b[Z",
+			});
+			// Sheet dismisses only after the write resolves (see AC: sheets not
+			// dismissed before the write succeeds).
+			expect(onDismiss).toHaveBeenCalled();
 		});
-		expect(onDismiss).toHaveBeenCalled();
 	});
 
 	it("does not render model section for aider", () => {

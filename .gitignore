@@ -49,6 +49,9 @@ CLAUDE.md
 scripts/*
 !scripts/dev-install.sh
 !scripts/generate-release-notes.sh
+!scripts/report-frontend-bundles.mjs
+!scripts/check-frontend-cycles.mjs
+!scripts/hooks/
 !scripts/perf/
 scripts/perf/results/
 competitor-analysis
@@ -83,3 +86,6 @@ test-width.txt
 
 # Scratch planning / triage docs (local only)
 PR.md
+
+# Scratch worktree consolidation / temp working dir (local only)
+.tmp/

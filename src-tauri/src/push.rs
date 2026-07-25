@@ -3,6 +3,7 @@
 use base64ct::{Base64UrlUnpadded, Encoding};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use web_push_native::p256;
 
 /// Known push service host suffixes. Endpoints not matching these are rejected (SSRF prevention).
 const ALLOWED_PUSH_HOSTS: &[&str] = &[
@@ -148,9 +149,8 @@ impl PushStore {
 /// Returns (private_key_base64url, public_key_base64url).
 pub(crate) fn generate_vapid_keys() -> Result<(String, String), String> {
     use p256::ecdsa::SigningKey;
-    use rand_core::OsRng;
 
-    let signing_key = SigningKey::random(&mut OsRng);
+    let signing_key = SigningKey::random(&mut rand_core::OsRng);
     let private_b64 = Base64UrlUnpadded::encode_string(signing_key.to_bytes().as_ref());
     let uncompressed = signing_key.verifying_key().to_encoded_point(false);
     let public_b64 = Base64UrlUnpadded::encode_string(uncompressed.as_bytes());
@@ -497,9 +497,8 @@ mod tests {
     fn build_vapid_authorization_produces_valid_jwt_structure() {
         use base64ct::Encoding;
         use p256::ecdsa::SigningKey;
-        use rand_core::OsRng;
 
-        let signing_key = SigningKey::random(&mut OsRng);
+        let signing_key = SigningKey::random(&mut rand_core::OsRng);
         let endpoint: axum::http::Uri = "https://fcm.googleapis.com/fcm/send/test".parse().unwrap();
         let header_val =
             build_vapid_authorization(&signing_key, &endpoint, "mailto:test@example.com", 3600)

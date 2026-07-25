@@ -1,5 +1,5 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rand_core::{OsRng, RngCore};
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -48,7 +48,7 @@ pub fn generate_value(request: GeneratorRequest) -> Result<GeneratorResult, Stri
                 } => gen_password(length, uppercase, lowercase, numbers, symbols)?,
                 GeneratorRequest::UuidV4 => uuid::Uuid::new_v4().to_string(),
                 GeneratorRequest::UuidV7 => uuid::Uuid::now_v7().to_string(),
-                GeneratorRequest::Ulid => ulid::Ulid::new().to_string(),
+                GeneratorRequest::Ulid => ulid::Ulid::generate().to_string(),
                 GeneratorRequest::Cuid2 => cuid2::create_id(),
                 GeneratorRequest::JwtSecret => gen_hex_bytes(32),
                 GeneratorRequest::TotpSecret => gen_base32_bytes(20),
@@ -88,7 +88,7 @@ fn gen_password(
         return Err("at least one character class must be enabled".into());
     }
     let len = length.clamp(4, 128) as usize;
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let pw: String = (0..len)
         .map(|_| charset[random_idx(&mut rng, charset.len())] as char)
         .collect();
@@ -97,20 +97,20 @@ fn gen_password(
 
 fn gen_hex_bytes(n: usize) -> String {
     let mut buf = Zeroizing::new(vec![0u8; n]);
-    OsRng.fill_bytes(&mut buf);
+    rand::fill(&mut buf);
     hex::encode(&*buf)
 }
 
 fn gen_base32_bytes(n: usize) -> String {
     let mut buf = Zeroizing::new(vec![0u8; n]);
-    OsRng.fill_bytes(&mut buf);
-    base32::encode(base32::Alphabet::RFC4648 { padding: false }, &buf)
+    rand::fill(&mut buf);
+    base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &buf)
 }
 
 fn gen_nanoid(length: u8) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
     let len = length.clamp(4, 64) as usize;
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     (0..len)
         .map(|_| ALPHABET[random_idx(&mut rng, ALPHABET.len())] as char)
         .collect()
@@ -133,7 +133,7 @@ fn gen_slug() -> String {
         "epoch","fjord","glyph","haze","inlet","junction","kite","lens","manor","nova",
         "oasis","prism","quest","realm","shard","tower","umber","vertex","wisp","apex",
     ];
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let adj = ADJ[random_idx(&mut rng, ADJ.len())];
     let noun = NOUN[random_idx(&mut rng, NOUN.len())];
     let n = (rng.next_u32() & 0xFFFF) as u16;
@@ -141,16 +141,8 @@ fn gen_slug() -> String {
 }
 
 /// Unbiased index in [0, len) using rejection sampling — avoids modulo bias.
-fn random_idx(rng: &mut OsRng, len: usize) -> usize {
-    assert!(len > 0 && u32::try_from(len).is_ok());
-    let len32 = len as u32;
-    let threshold = u32::MAX - (u32::MAX % len32);
-    loop {
-        let v = rng.next_u32();
-        if v <= threshold {
-            return (v % len32) as usize;
-        }
-    }
+fn random_idx(rng: &mut impl Rng, len: usize) -> usize {
+    rng.random_range(0..len)
 }
 
 fn gen_ed25519_keypair() -> Result<GeneratorResult, String> {

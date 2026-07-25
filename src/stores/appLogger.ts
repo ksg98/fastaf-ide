@@ -18,6 +18,9 @@
 
 import { batch, createSignal } from "solid-js";
 import { rpc } from "../transport";
+import { previewLogPayload, setTransportLogger } from "../transportRuntime";
+
+export { previewLogPayload };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -73,16 +76,6 @@ export interface AppLogEntry {
 	audience?: AppLogAudience;
 	/** How many consecutive duplicate messages were coalesced (0 = first, 1 = seen twice, etc.) */
 	repeatCount?: number;
-}
-
-/** Max characters of a raw payload to keep when logging malformed/oversized
- *  network frames — enough to diagnose, bounded so a bad frame can't flood the
- *  ring buffer. */
-const LOG_PAYLOAD_PREVIEW = 500;
-
-/** Truncate an arbitrary payload string for safe inclusion in a log entry. */
-export function previewLogPayload(value: string): string {
-	return value.length > LOG_PAYLOAD_PREVIEW ? `${value.slice(0, LOG_PAYLOAD_PREVIEW)}...` : value;
 }
 
 /** Shape returned by the Rust get_logs command */
@@ -485,3 +478,4 @@ function createAppLogger() {
 }
 
 export const appLogger = createAppLogger();
+setTransportLogger(appLogger);

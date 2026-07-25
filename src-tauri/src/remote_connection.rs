@@ -154,6 +154,26 @@ impl RemoteConnectionStore {
     }
 }
 
+/// Validate then upsert `connection` into the store at `data_dir`.
+///
+/// Shared by the Tauri `save_remote_connection` command and the HTTP
+/// `put_remote_connection` route so both enforce `validate()` identically
+/// (IPC/HTTP parity) — the Tauri command used to skip validation. Callers hold
+/// `state.connections_lock` around this to serialize concurrent writers.
+pub(crate) fn upsert_remote_connection(
+    data_dir: &Path,
+    connection: RemoteConnection,
+) -> Result<(), String> {
+    connection.validate()?;
+    let mut connections = RemoteConnectionStore::load(data_dir).map_err(|e| e.to_string())?;
+    if let Some(existing) = connections.iter_mut().find(|c| c.id == connection.id) {
+        *existing = connection;
+    } else {
+        connections.push(connection);
+    }
+    RemoteConnectionStore::save(data_dir, &connections).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -173,14 +193,7 @@ pub async fn save_remote_connection(
     connection: RemoteConnection,
 ) -> Result<(), String> {
     let _guard = state.connections_lock.lock().await;
-    let mut connections =
-        RemoteConnectionStore::load(&state.data_dir).map_err(|e| e.to_string())?;
-    if let Some(existing) = connections.iter_mut().find(|c| c.id == connection.id) {
-        *existing = connection;
-    } else {
-        connections.push(connection);
-    }
-    RemoteConnectionStore::save(&state.data_dir, &connections).map_err(|e| e.to_string())
+    upsert_remote_connection(&state.data_dir, connection)
 }
 
 #[cfg(feature = "desktop")]
@@ -340,5 +353,45 @@ mod tests {
     fn validate_empty_url_rejected() {
         let conn = RemoteConnection::new_direct("d", "  ", "u");
         assert!(conn.validate().is_err());
+    }
+
+    // --- IPC/HTTP parity: shared save path enforces validate() (story 127-89ec) -
+    // `upsert_remote_connection` is the single persist path behind both the Tauri
+    // `save_remote_connection` command (which previously skipped validation) and
+    // the HTTP `put_remote_connection` route. This proves invalid input is
+    // rejected before it can be persisted, on either transport.
+
+    #[test]
+    fn upsert_rejects_invalid_before_persisting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = RemoteConnection::new_ssh("server", "host", "alice");
+        bad.id = "../../escape".to_string(); // invalid UUID
+        let err = upsert_remote_connection(dir.path(), bad).unwrap_err();
+        assert!(
+            err.contains("valid UUID"),
+            "expected UUID error, got: {err}"
+        );
+        assert!(
+            RemoteConnectionStore::load(dir.path()).unwrap().is_empty(),
+            "invalid input must not be written to the store"
+        );
+    }
+
+    #[test]
+    fn upsert_persists_valid_and_updates_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = RemoteConnection::new_ssh("server", "host.example.com", "alice");
+        let id = conn.id.clone();
+        upsert_remote_connection(dir.path(), conn).unwrap();
+        assert_eq!(RemoteConnectionStore::load(dir.path()).unwrap().len(), 1);
+
+        // Same id updates in place rather than appending a duplicate.
+        let mut updated = RemoteConnection::new_ssh("renamed", "host.example.com", "alice");
+        updated.id = id.clone();
+        upsert_remote_connection(dir.path(), updated).unwrap();
+        let loaded = RemoteConnectionStore::load(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, id);
+        assert_eq!(loaded[0].name, "renamed");
     }
 }

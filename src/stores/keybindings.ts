@@ -37,6 +37,10 @@ export function createKeybindingsStore() {
 	const dynamicActions = new Map<string, DynamicAction>();
 	// Reactivity: bump version when bindings change so SolidJS re-renders
 	const [version, setVersion] = createSignal(0);
+	// Write lock: save() persists the ENTIRE overrides set, so a save before a
+	// successful hydrate would overwrite keybindings.json with an empty/partial
+	// set. No successful hydrate, no persist.
+	let hydrated = false;
 
 	/** Merge static defaults with dynamic plugin defaults */
 	function allDefaults(): Record<string, string | undefined> {
@@ -109,6 +113,8 @@ export function createKeybindingsStore() {
 		async hydrate(): Promise<void> {
 			try {
 				const overrides = await invoke<KeybindingOverride[]>("load_keybindings");
+				// Load succeeded (even if empty/missing file) — unlock persistence
+				hydrated = true;
 				if (!Array.isArray(overrides) || overrides.length === 0) return;
 
 				userOverrides = new Map();
@@ -126,8 +132,8 @@ export function createKeybindingsStore() {
 				rebuildMaps(getMergedBindings());
 				setVersion((v) => v + 1);
 			} catch (err) {
-				appLogger.debug("config", "Failed to load keybindings overrides", err);
-				// Keep defaults
+				appLogger.error("config", "Failed to load keybindings overrides — persistence disabled for this session", err);
+				// Keep defaults; hydrated stays false so save() cannot clobber the file
 			}
 		},
 
@@ -223,6 +229,13 @@ export function createKeybindingsStore() {
 
 		/** Persist current overrides to keybindings.json */
 		async save(): Promise<void> {
+			if (!hydrated) {
+				appLogger.error(
+					"config",
+					"Refusing to persist keybindings: store not hydrated — would clobber keybindings.json",
+				);
+				return;
+			}
 			try {
 				await invoke("save_keybindings", { config: toOverridesArray() });
 			} catch (err) {

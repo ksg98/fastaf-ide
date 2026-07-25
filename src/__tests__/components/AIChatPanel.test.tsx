@@ -108,6 +108,10 @@ vi.mock("../../transport", () => ({
 	isTauri: () => true,
 }));
 
+vi.mock("../../components/ui/ContentRenderer", () => ({
+	ContentRenderer: (props: { content: string }) => <div>{props.content}</div>,
+}));
+
 import { AIChatPanel } from "../../components/AIChatPanel/AIChatPanel";
 
 describe("AIChatPanel lifecycle", () => {
@@ -171,13 +175,13 @@ describe("AIChatPanel extended-thinking disclosure", () => {
 		expect(container.querySelector("details")).toBeNull();
 	});
 
-	it("renders the Thinking disclosure when reasoning is present", () => {
+	it("renders the Thinking disclosure when reasoning is present", async () => {
 		mockReasoningChunks.mockReturnValue("planning the steps");
 		const { container } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
 		const details = container.querySelector("details");
 		expect(details).not.toBeNull();
 		expect(details?.querySelector("summary")?.textContent).toBe("Thinking");
-		expect(details?.textContent).toContain("planning the steps");
+		await vi.waitFor(() => expect(details?.textContent).toContain("planning the steps"));
 	});
 
 	it("auto-opens the disclosure while the model is thinking", () => {

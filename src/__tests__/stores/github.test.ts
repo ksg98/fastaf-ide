@@ -69,8 +69,8 @@ describe("githubStore", () => {
 			deletions: 5,
 			checks: { passed: 2, failed: 0, pending: 0, total: 2 },
 			check_details: [
-				{ context: "build", state: "SUCCESS" },
-				{ context: "test", state: "SUCCESS" },
+				{ context: "build", state: "SUCCESS", html_url: "https://github.com/org/repo/runs/1" },
+				{ context: "test", state: "SUCCESS", html_url: "https://github.com/org/repo/runs/2" },
 			],
 			author: "alice",
 			commits: 3,
@@ -211,6 +211,30 @@ describe("githubStore", () => {
 		it("returns empty array for unknown branch", () => {
 			testInScope(() => {
 				expect(store.getCheckDetails("/unknown", "feature/x")).toEqual([]);
+			});
+		});
+	});
+
+	describe("loadCheckDetails()", () => {
+		it("carries html_url from get_ci_checks through to CheckDetail (story 096-2ac0)", async () => {
+			await testInScopeAsync(async () => {
+				store.updateRepoData("/repo1", [makePrStatus()]);
+				mockInvoke.mockImplementation((cmd: string) =>
+					cmd === "get_ci_checks"
+						? Promise.resolve([
+								{ name: "build", status: "completed", conclusion: "success", html_url: "https://ci.example/build/1" },
+								// A provider with no URL — must map to "" so the row stays inert.
+								{ name: "legacy", status: "completed", conclusion: "success", html_url: "" },
+							])
+						: Promise.resolve(undefined),
+				);
+
+				await store.loadCheckDetails("/repo1", "feature/x", 42);
+
+				const details = store.getCheckDetails("/repo1", "feature/x");
+				expect(details).toHaveLength(2);
+				expect(details[0]).toEqual({ context: "build", state: "success", html_url: "https://ci.example/build/1" });
+				expect(details[1].html_url).toBe("");
 			});
 		});
 	});

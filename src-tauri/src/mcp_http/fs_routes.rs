@@ -186,6 +186,16 @@ pub(super) async fn write_file_http(Json(body): Json<FsWriteFileRequest>) -> Res
     }
 }
 
+pub(super) async fn create_file_http(Json(body): Json<FsFileCreateRequest>) -> Response {
+    if let Err(e) = validate_repo_path(&body.repo_path) {
+        return e.into_response();
+    }
+    match crate::fs::create_file(body.repo_path, body.file) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => err_500(&e),
+    }
+}
+
 pub(super) async fn create_directory_http(Json(body): Json<FsDirCreateRequest>) -> Response {
     if let Err(e) = validate_repo_path(&body.repo_path) {
         return e.into_response();

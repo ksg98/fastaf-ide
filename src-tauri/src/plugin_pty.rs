@@ -64,3 +64,104 @@ pub(crate) fn plugin_read_session_output_impl(
     all.extend(screen);
     Ok(all.join("\n"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::VtLogBuffer;
+
+    fn state() -> Arc<AppState> {
+        Arc::new(crate::state::tests_support::make_test_app_state())
+    }
+
+    fn grant(state: &AppState, plugin_id: &str, caps: &[&str]) {
+        state.loaded_plugins.insert(
+            plugin_id.to_string(),
+            caps.iter().map(|c| c.to_string()).collect(),
+        );
+    }
+
+    /// Insert a session buffer, feeding `bytes` through the VT100 grid so
+    /// scrolled-off lines accumulate in the log. A 2-row grid keeps the visible
+    /// screen tiny so tests can reason about log vs screen line counts.
+    fn insert_session(state: &AppState, sid: &str, bytes: &[u8]) {
+        let mut vt = VtLogBuffer::new(2, 80, 5000);
+        vt.process(bytes);
+        state
+            .vt_log_buffers
+            .insert(sid.to_string(), parking_lot::Mutex::new(vt));
+    }
+
+    #[test]
+    fn read_requires_pty_read_capability() {
+        let st = state();
+        // Unregistered plugin → capabilities cannot be verified at all.
+        let err =
+            plugin_read_session_output_impl(&st, "s".into(), None, "ghost".into()).unwrap_err();
+        assert!(err.contains("not registered"), "got: {err}");
+        // Registered but WITHOUT pty:read → rejected before any buffer access.
+        grant(&st, "reader", &["fs:read"]);
+        let err =
+            plugin_read_session_output_impl(&st, "s".into(), None, "reader".into()).unwrap_err();
+        assert!(
+            err.contains("pty:read") && err.contains("did not declare"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_errors_when_session_missing() {
+        let st = state();
+        grant(&st, "reader", &["pty:read"]);
+        // Capability granted, but the session buffer does not exist.
+        let err =
+            plugin_read_session_output_impl(&st, "nope".into(), None, "reader".into()).unwrap_err();
+        assert_eq!(err, "Session not found: nope");
+    }
+
+    #[test]
+    fn read_returns_tail_and_clamps_line_count() {
+        let st = state();
+        grant(&st, "reader", &["pty:read"]);
+
+        // Feed 2100 numbered lines so ~2099 scroll into the log (capacity 5000
+        // retains them all) — comfortably above the MAX_LINES clamp.
+        let mut feed = String::new();
+        for i in 0..2100 {
+            feed.push_str(&format!("L{i:04}\r\n"));
+        }
+        insert_session(&st, "s", feed.as_bytes());
+        let total = st.vt_log_buffers.get("s").unwrap().lock().total_lines();
+        assert!(
+            total > MAX_LINES,
+            "fixture must exceed the clamp, got {total}"
+        );
+
+        // A request far above MAX_LINES is clamped to at most MAX_LINES log lines
+        // (plus the ≤2 visible screen rows), never the full ~2100.
+        let out =
+            plugin_read_session_output_impl(&st, "s".into(), Some(1_000_000), "reader".into())
+                .unwrap();
+        let log_count = out.lines().filter(|l| l.starts_with('L')).count();
+        assert!(
+            (MAX_LINES - 50..=MAX_LINES + 5).contains(&log_count),
+            "huge request must clamp to ~MAX_LINES, got {log_count}"
+        );
+        // The clamp keeps the TAIL: newest line present, oldest dropped.
+        assert!(out.contains("L2099"), "newest line must survive");
+        assert!(!out.contains("L0000"), "oldest line must be clamped out");
+
+        // Omitting max_lines falls back to DEFAULT_LINES, not the whole buffer.
+        let out_default =
+            plugin_read_session_output_impl(&st, "s".into(), None, "reader".into()).unwrap();
+        let default_count = out_default.lines().filter(|l| l.starts_with('L')).count();
+        assert!(
+            (0..=DEFAULT_LINES + 5).contains(&default_count),
+            "default must clamp to DEFAULT_LINES, got {default_count}"
+        );
+        assert!(
+            out_default.contains("L2099"),
+            "default read is still the tail"
+        );
+    }
+}

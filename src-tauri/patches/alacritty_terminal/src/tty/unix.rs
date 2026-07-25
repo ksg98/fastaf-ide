@@ -139,30 +139,19 @@ impl ShellUser {
     fn from_env() -> Result<Self> {
         let mut buf = [0; 1024];
         let pw = get_pw_entry(&mut buf);
-
-        let user = match env::var("USER") {
-            Ok(user) => user,
-            Err(_) => match pw {
-                Ok(ref pw) => pw.name.to_owned(),
-                Err(err) => return Err(err),
-            },
+        let user = env::var("USER");
+        let home = env::var("HOME");
+        let shell = env::var("SHELL");
+        let pw = if user.is_err() || home.is_err() || shell.is_err() {
+            Some(pw?)
+        } else {
+            None
         };
+        let pw = pw.as_ref();
 
-        let home = match env::var("HOME") {
-            Ok(home) => home,
-            Err(_) => match pw {
-                Ok(ref pw) => pw.dir.to_owned(),
-                Err(err) => return Err(err),
-            },
-        };
-
-        let shell = match env::var("SHELL") {
-            Ok(shell) => shell,
-            Err(_) => match pw {
-                Ok(ref pw) => pw.shell.to_owned(),
-                Err(err) => return Err(err),
-            },
-        };
+        let user = user.unwrap_or_else(|_| pw.expect("missing passwd fallback").name.to_owned());
+        let home = home.unwrap_or_else(|_| pw.expect("missing passwd fallback").dir.to_owned());
+        let shell = shell.unwrap_or_else(|_| pw.expect("missing passwd fallback").shell.to_owned());
 
         Ok(Self { user, home, shell })
     }

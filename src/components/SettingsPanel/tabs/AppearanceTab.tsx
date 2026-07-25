@@ -9,6 +9,7 @@ import { uiStore } from "../../../stores/ui";
 import { getTerminalTheme, getThemeNames } from "../../../themes";
 import { UiLegend } from "../../HelpPanel/UiLegend";
 import { ColorSwatchPicker } from "../../shared/ColorSwatchPicker";
+import { DEFAULT_COLOR_PRESETS } from "../../shared/colorPresets";
 import { SettingSelect, SettingSlider, SettingToggle } from "../SettingFields";
 import s from "../Settings.module.css";
 
@@ -286,16 +287,7 @@ const TerminalPreview: Component = () => {
 };
 
 /** Preset colors for groups and sidebar */
-export const PRESET_COLORS = [
-	{ hex: "#4A9EFF", name: "Blue" },
-	{ hex: "#FF6B6B", name: "Red" },
-	{ hex: "#50C878", name: "Green" },
-	{ hex: "#FFB347", name: "Orange" },
-	{ hex: "#B19CD9", name: "Purple" },
-	{ hex: "#FF85A2", name: "Pink" },
-	{ hex: "#5BC0BE", name: "Teal" },
-	{ hex: "#FFD93D", name: "Yellow" },
-];
+export { DEFAULT_COLOR_PRESETS as PRESET_COLORS } from "../../shared/colorPresets";
 
 /** Single group row in the settings list */
 const GroupSettingsItem: Component<{
@@ -364,6 +356,7 @@ const GroupSettingsItem: Component<{
 			</Show>
 			<ColorSwatchPicker
 				color={props.group.color}
+				presets={DEFAULT_COLOR_PRESETS}
 				onChange={(c) => repositoriesStore.setGroupColor(props.group.id, c)}
 			/>
 		</div>

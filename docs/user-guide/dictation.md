@@ -66,6 +66,7 @@ Select which microphone to use from the dropdown in dictation settings. Lists al
 |-----------|---------|
 | Mic button (status bar) | Click/hold to start recording |
 | Recording animation | Audio is being captured |
+| Live level meter in the dictation preview | The selected microphone is receiving sound; it appears immediately while recording |
 | Processing spinner | Whisper is transcribing |
 | Model downloading | Progress bar with percentage |
 

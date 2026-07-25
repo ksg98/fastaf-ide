@@ -1,4 +1,5 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { registerModal } from "../../stores/modalStack";
 import d from "../shared/dialog.module.css";
 
 export interface ConfirmDialogProps {
@@ -50,11 +51,12 @@ export const ConfirmDialog: Component<ConfirmDialogProps> = (props) => {
 	createEffect(() => {
 		if (!props.visible) return;
 
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to props.onClose AND stops it reaching the terminal underneath.
+		registerModal(props.onClose);
+
 		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				props.onClose();
-			} else if (e.key === "Enter") {
+			if (e.key === "Enter") {
 				e.preventDefault();
 				// Enter activates the configured default button. Destructive dialogs
 				// point it at Cancel so an accidental Enter takes the safe path.

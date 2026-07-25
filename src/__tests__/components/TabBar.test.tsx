@@ -26,10 +26,13 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 
 import { TabBar } from "../../components/TabBar/TabBar";
 import { diffTabsStore } from "../../stores/diffTabs";
+import { editorTabsStore } from "../../stores/editorTabs";
 import { globalWorkspaceStore } from "../../stores/globalWorkspace";
 import { mdTabsStore } from "../../stores/mdTabs";
 import { paneLayoutStore } from "../../stores/paneLayout";
 import { repositoriesStore } from "../../stores/repositories";
+import { settingsStore, type TabOrderingMode } from "../../stores/settings";
+import { tabOrderingStore } from "../../stores/tabOrdering";
 import { terminalsStore } from "../../stores/terminals";
 
 describe("TabBar", () => {
@@ -52,6 +55,11 @@ describe("TabBar", () => {
 		for (const id of mdTabsStore.getIds()) {
 			mdTabsStore.remove(id);
 		}
+		for (const id of editorTabsStore.getIds()) {
+			editorTabsStore.remove(id);
+		}
+		tabOrderingStore.clear();
+		settingsStore.setTabOrderingMode("grouped-by-type");
 		// Deactivate global workspace
 		if (globalWorkspaceStore.isActive()) {
 			globalWorkspaceStore.deactivate();
@@ -613,6 +621,7 @@ describe("TabBar", () => {
 		/** Set up an active repo+branch so diff/md tab visibility filtering works */
 		function setupActiveRepo() {
 			repositoriesStore.add({ path: "/repo", displayName: "repo" });
+			repositoriesStore.setBranch("/repo", "main", { isMain: true, worktreePath: null });
 			repositoriesStore.setActive("/repo");
 			repositoriesStore.setActiveBranch("/repo", "main");
 		}
@@ -754,6 +763,49 @@ describe("TabBar", () => {
 			fireEvent.click(closeBtn);
 			expect(handleClose).toHaveBeenCalledWith(id);
 		});
+	});
+
+	describe("tab-kind parity across ordering modes", () => {
+		it.each(["grouped-by-type", "free"] satisfies TabOrderingMode[])(
+			"renders and selects every tab kind in %s mode",
+			(mode) => {
+				repositoriesStore.add({ path: "/repo", displayName: "repo" });
+				repositoriesStore.setBranch("/repo", "main", { isMain: true, worktreePath: null });
+				repositoriesStore.setActive("/repo");
+				repositoriesStore.setActiveBranch("/repo", "main");
+
+				const terminalId = addTerminal({ name: "Terminal parity" });
+				repositoriesStore.addTerminalToBranch("/repo", "main", terminalId);
+				const diffId = diffTabsStore.add("/repo", "/repo/change.ts", "M");
+				const markdownId = mdTabsStore.add("/repo", "/repo/readme.md");
+				const editorId = editorTabsStore.add("/repo", "/repo/edit.ts");
+				settingsStore.setTabOrderingMode(mode);
+
+				const onTabSelect = vi.fn();
+				const { container } = render(() => (
+					<TabBar
+						onTabSelect={onTabSelect}
+						onTabClose={() => {}}
+						onCloseOthers={() => {}}
+						onCloseToRight={() => {}}
+						onNewTab={() => {}}
+					/>
+				));
+
+				for (const [id, label] of [
+					[terminalId, "Terminal parity"],
+					[diffId, "change.ts"],
+					[markdownId, "readme.md"],
+					[editorId, "edit.ts"],
+				] as const) {
+					const tab = container.querySelector(`[data-tab-id="${id}"]`);
+					expect(tab, `${mode}:${id}`).not.toBeNull();
+					expect(tab!.querySelector(".tabName")?.textContent).toContain(label);
+					fireEvent.click(tab!);
+					expect(onTabSelect).toHaveBeenLastCalledWith(id);
+				}
+			},
+		);
 	});
 
 	describe("tab rename", () => {

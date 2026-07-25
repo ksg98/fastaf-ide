@@ -112,6 +112,53 @@ export function shouldFireReconcile(g: ReconcileGate): boolean {
 	return g.alive && !g.isScrolling && g.scrollPosF == null && g.displayOffset === 0;
 }
 
+/**
+ * Terminal grid dimensions for a pixel box — THE single source of truth shared
+ * by CanvasTerminal's remeasure and Terminal's reconnect path. The width loses
+ * the left gutter and the scrollbar strip before dividing into columns.
+ *
+ * Keeping both callers on this one formula matters: when the reconnect resize
+ * (Terminal.tsx initSession) computed columns from the RAW width, it disagreed
+ * with CanvasTerminal by ~2 cols, so every tab re-entry fired TWO SIGWINCHes
+ * with different widths — and each one makes Ink (Claude Code) clear+reprint
+ * its full frame, duplicating blocks into scrollback (mdkb
+ * `ink-banner-dup-raw-ring-2026-07-06`). Identical dims instead hit the
+ * backend's resize no-op guard: zero spurious SIGWINCH.
+ */
+export function gridDimsForBox(
+	widthPx: number,
+	heightPx: number,
+	cellWidth: number,
+	cellHeight: number,
+): { rows: number; cols: number } {
+	return {
+		cols: Math.floor((widthPx - GUTTER_PX - SCROLLBAR_PX) / cellWidth),
+		rows: Math.floor(heightPx / cellHeight),
+	};
+}
+
+/** Trailing-debounce window for the full-frame reconcile self-heal. */
+export const RECONCILE_DEBOUNCE_MS = 250;
+/** Hard cap on how long a reschedule burst can defer the reconcile. */
+export const RECONCILE_MAX_WAIT_MS = 1_000;
+
+/**
+ * Delay for the (re)scheduled reconcile timer: a plain trailing debounce
+ * (RECONCILE_DEBOUNCE_MS) capped so the timer fires no later than
+ * `burstStartedAt + RECONCILE_MAX_WAIT_MS`.
+ *
+ * Without the cap, sustained partial-frame output (an active agent repainting
+ * every 16-33ms for minutes) resets the debounce on every frame and the
+ * self-heal never fires — stale rows stranded on the canvas persist for the
+ * whole burst (mdkb `ink-banner-dup-raw-ring-2026-07-06`). With the cap, the
+ * heal runs at most ~1/s under continuous output and keeps the cheap trailing
+ * behavior for short bursts. Pure, unit-tested.
+ */
+export function reconcileDelay(now: number, burstStartedAt: number): number {
+	const deadline = burstStartedAt + RECONCILE_MAX_WAIT_MS;
+	return Math.max(0, Math.min(RECONCILE_DEBOUNCE_MS, deadline - now));
+}
+
 export interface CellMetrics {
 	cellWidth: number;
 	cellHeight: number;
@@ -275,20 +322,6 @@ export function decodeStyledRange(buffer: ArrayBuffer): StyledRange | null {
 		rows.push({ abs, row: { index: 0, count: colCount, codepoints, fg, bg, attrs } });
 	}
 	return { startAbs, historySize, cols, rows };
-}
-
-/** Measure natural character height via DOM span — matches xterm.js CharSizeService. */
-export function measureCharHeightDOM(fontSize: number, fontFamily: string, fontWeight: number = 400): number {
-	const span = document.createElement("span");
-	span.style.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
-	span.style.lineHeight = "normal";
-	span.style.position = "absolute";
-	span.style.visibility = "hidden";
-	span.textContent = "W";
-	document.body.appendChild(span);
-	const h = span.getBoundingClientRect().height;
-	document.body.removeChild(span);
-	return h;
 }
 
 /** Snap lineHeight to integer device pixels to prevent sub-pixel seams between rows. */

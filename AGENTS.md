@@ -7,6 +7,7 @@ Read [`docs/sync-matrix.md`](docs/sync-matrix.md) before any feature/API/config 
 ## Tests
 
 - Tests are the spec. When a test fails after a code change, investigate BOTH sides before deciding which to fix.
+- **Finding a story partially implemented does NOT mean it's done.** When you pick up a story and discover the feature already exists, verify EVERY part of the story is honored — each acceptance criterion, edge case, and requirement — before marking it complete. Never assume the whole story is satisfied just because one part is implemented. Check each criterion against the code and prove it, or the story isn't done.
 - `to-test.md` tracks features awaiting manual testing — add items there for minor features.
 - **`[HUMAN]` is a last resort.** Before marking a to-test item `[HUMAN]`, you MUST attempt verification through this escalation ladder:
   1. **Code inspection** — read the source, confirm the logic exists at file:line
@@ -27,6 +28,15 @@ There are TWO running FastAF instances; do not confuse them:
 
 Canvas rendering (selection highlight, smooth-scroll visuals, cursor) is **not observable over HTTP** — those still need a visual check with Boss.
 
+## Web-UI testing with agent-browser (browser mode, not Tauri)
+
+You can exercise features through the **web UI** instead of the Tauri desktop app — every instance serves the full frontend at `http://localhost:<port>/` (`static_files.rs` `FRONTEND_DIST`). Loading it in a real browser is **browser mode** (`isTauri() === false`), the exact web/PWA path a remote client sees.
+
+- **Port:** the primary/only instance serves on **:9876**; if that's free (no conflict), point the browser there. If the orchestrator already holds 9876, bring up a **second debug instance** — it auto-retries to **:9877** (the single-instance lock is `#[cfg(not(debug_assertions))]`, so a *debug* build can run a 2nd copy alongside the orchestrator). Note: `TUIC_PORT` is honored ONLY by the headless `tuic-remote` binary — the desktop `make dev` build **ignores** it and relies on the `9876→9877→9878` retry. So: use :9876 when unconflicted, else :9877.
+- **Drive it with `agent-browser`**, always via the stealth wrapper (see global rules). `@ref` CDP clicks are trusted and work (open modals/panels/tabs); **JS-dispatched keydown is `isTrusted:false`** so app keyboard shortcuts (Cmd+P, etc.) are ignored — click UI, never synthesize keys. Use a persistent `--session <name>`, restart the browser periodically (snapshots/clicks degrade after many calls), and wrap each call in a `perl alarm` timeout (macOS has no `timeout`/`gtimeout`).
+- **Isolation caveat:** a 2nd debug instance has isolated backend/sessions BUT **shares the filesystem + config dir** with the orchestrator — never run repo-mutating tests against Boss's repos, and expect possible SQLite contention.
+- **Desktop-only features do NOT render in web mode** — Command Palette is `<Show when={isTauri()}>` (no Cmd+P/file/content search for browser users), plus IdeLauncher, Dictation, Global Hotkey, detach-panel windows, updater, native file drop, user-plugin install, MCP/hooks config. Built-in plugins DO load. See mdkb `web-mode-verification-2026-07-02` for the verified inventory before reporting a feature "missing".
+
 ## Visual
 
 - All UI work MUST follow [`docs/frontend/STYLE_GUIDE.md`](docs/frontend/STYLE_GUIDE.md).
@@ -44,12 +54,25 @@ When a commit resolves a **GitHub issue**, use a closing keyword so GitHub auto-
 
 - Use the GitHub-issue keyword only for the commit that actually fixes it; reference-only commits keep `(#N)`.
 - This is distinct from **mdkb story ids** (7-char hex like `#abc1234`): those follow the wiz convention — `(#abc1234)` for traceability, `(closes #abc1234)` on story completion — and are unrelated to GitHub issue auto-close.
+- **Enforced by the `pre-push` hook** (`scripts/hooks/pre-push`, installed by `make hooks` / `make dev`): a push to `main` is blocked if a pushed commit references an **open** issue with a bare `#N` and no closing keyword. Reference-only pushes bypass with `git push --no-verify` (or `TUIC_SKIP_ISSUE_CHECK=1`). The hook skips silently when `gh` is missing/unauthenticated/offline — it never blocks on a verification failure.
 
 ## Building
 
 **NEVER use `cargo build --release` directly.** It produces a binary that points to the Vite dev server (`localhost:1420`) instead of embedding frontend assets — result: white screen. Always use `make build` or `pnpm tauri build`, which runs `beforeBuildCommand` (frontend build + sidecar) and embeds the dist/ into the binary.
 
 To debug the WebView in a release build, temporarily add `"devtools"` to the tauri features in `Cargo.toml`, add `w.open_devtools()` in the `setup` closure (after getting the main webview window), and rebuild with `make build`. Remove both before committing.
+
+## Dev Hot Reload
+
+**`make dev` runs `pnpm tauri dev --no-watch` — the Rust backend NEVER hot-reloads.** The Tauri CLI file watcher is disabled on purpose: editing anything under `src-tauri/**` (including editor/RTK `.rs.tmp.*` scratch files) will NOT rebuild or restart the Rust process. Only Vite HMR reloads the UI (frontend runs as a separate `beforeDevCommand` process). This is intentional — a mid-session Rust restart tears down every live PTY/agent session Boss is running.
+
+**Consequence for agents:** when your change touches Rust (`src-tauri/**`), it will NOT take effect in Boss's live `make dev` session. Do NOT assume it did. Instead:
+
+1. Make the Rust change as normal.
+2. **Create a story** capturing what changed and that it needs a rebuild (`/wiz:stories create` — title like "Rebuild: <what> (Rust change, needs make dev restart)").
+3. **Tell Boss explicitly** that the Rust change is staged but requires a manual `make dev` restart (or `make build` for release) to load, and to run it when he's ready to lose the current session.
+
+Never silently ship a Rust edit expecting hot reload — it will look like your fix did nothing.
 
 ## Cross-Platform
 

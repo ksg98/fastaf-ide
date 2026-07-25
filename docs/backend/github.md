@@ -1,6 +1,6 @@
 # GitHub Integration
 
-**Modules:** `src-tauri/src/github.rs`, `src-tauri/src/github_auth.rs`, `src-tauri/src/github_account.rs`
+**Modules:** `src-tauri/src/github.rs`, `src-tauri/src/github_auth.rs`, `src-tauri/src/github_account.rs`, `src-tauri/src/improvement_scan.rs`
 
 Integrates with GitHub via GraphQL API for PR status, CI checks, and batch queries. Supports OAuth Device Flow login as an alternative to gh CLI tokens, plus **multiple accounts** (additional github.com logins and GitHub Enterprise Server) with per-repo bindings.
 
@@ -59,9 +59,11 @@ The active token source is tracked in `AppState.github_token_source` as a `Token
 | `get_repo_pr_statuses` | `(path: String, include_merged: bool) -> Vec<BranchPrStatus>` | Batch PR status for all branches |
 | `approve_pr` | `(repo_path: String, pr_number: i32) -> String` | Submit approving review via GitHub API |
 | `get_all_pr_statuses` | `(path: String) -> Vec<BranchPrStatus>` | Batch PR status for all branches (includes merged) |
-| `get_pr_diff` | `(repo_path: String, pr_number: i32) -> String` | Get PR diff content |
+| `get_pr_diff` | `(repo_path: String, pr_number: i32) -> String` | Get PR diff content; falls back to a local-clone `git diff` when GitHub rejects oversized diffs |
 | `merge_pr_via_github` | `(repo_path: String, pr_number: i32, merge_method: String) -> String` | Merge PR via GitHub API |
 | `fetch_ci_failure_logs` | `(repo_path: String, run_id: i64) -> String` | Fetch failure logs from a GitHub Actions run for CI auto-heal |
+| `run_improvement_scan` | `(repo_path: String, focus: ImprovementFocus) -> ImprovementScanResult` | Headless-slot one-shot AI scan for refactor/testing/perf proposals; emits `proposals-ready` |
+| `create_issue_from_proposal` | `(repo_path: String, proposal: ImprovementProposal) -> CreatedIssue` | Explicit issue creation from a proposal; scan never creates issues automatically |
 | `check_github_circuit` | `(path: String) -> CircuitState` | Check GitHub API circuit breaker state |
 
 ## Data Types
@@ -104,7 +106,6 @@ struct BranchPrStatus {
     additions: i32,
     deletions: i32,
     checks: CheckSummary,        // passed/failed/pending/total
-    check_details: Vec<CheckDetail>,
     author: String,
     commits: i32,
     mergeable: String,           // "MERGEABLE", "CONFLICTING", "UNKNOWN"
@@ -242,9 +243,15 @@ The `filter` parameter in `poll_issues` controls which issues are fetched:
 
 Submits an approving review on a pull request via `gh api`. Used by the remote-only PR popover.
 
+### PR Diff Fetching
+
+PR diff reads use the GitHub REST diff representation first. If GitHub returns the oversized-diff `406 Not Acceptable` response, the backend fetches the PR refs into the local clone and returns a local `git diff base...head` unified diff instead, so AI Review can still run on PRs that exceed GitHub's rendered diff file cap.
+
 ### CI Auto-Heal (`fetch_ci_failure_logs`)
 
-Fetches the latest failure logs from a GitHub Actions run. Used by the CI auto-heal hook (`useCiHeal`) to inject failure context into agent terminals for automatic fix cycles (up to 3 attempts per cycle).
+Lists workflow runs for the branch's latest head commit, inspects their jobs, and downloads logs for every completed failed job through the GitHub Actions jobs API. Job-level retrieval works while sibling jobs are still running, before the containing workflow has a final `failure` conclusion. Used by the CI auto-heal hook (`useCiHeal`) to inject failure context into agent terminals for automatic fix cycles (up to 3 delivered attempts per cycle).
+
+**GitHub Actions only.** The aggregated PR check summary (which triggers `ci_failed`) also counts external CI — CircleCI, Codacy, etc. — but this fetcher reads only GitHub Actions logs. When the red checks are all external, it returns a clear error naming them (`… failing checks run on external CI (not supported): ci/circleci: lint-blades, on_pr …`) instead of the misleading "no jobs found". The auto-heal hook surfaces that message as a warn toast and does **not** consume an attempt (attempts increment only after a fix prompt is delivered). Provider is classified from the check's detail link (`is_github_actions_link`: GHA links contain `/actions/runs/`).
 
 ## Stale PR Filtering
 

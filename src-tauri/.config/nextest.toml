@@ -9,6 +9,18 @@
 # (~7s), so the 30s warn threshold never fires falsely.
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# The git_reads parity/shootout tests each spawn several `git` subprocesses in
+# their own TempDir fixture. Under the full parallel run they occasionally hit
+# transient git-subprocess contention (observed: cli_parity_with_legacy failing
+# once, passing on re-run and in isolation — observed 2026-07-06 on
+# cli_parity_with_legacy). Run the group serially.
+[test-groups]
+git-subprocess = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/^git_reads::tests::/)'
+test-group = 'git-subprocess'
+
 [profile.ci]
 # On CI, keep going after a failure so a run reports every failing test, and
 # retry twice to absorb infrastructure flakiness (shared runners, port races).

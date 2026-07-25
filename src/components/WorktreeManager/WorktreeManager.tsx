@@ -2,6 +2,7 @@ import { type Component, createEffect, createMemo, createSignal, For, onCleanup,
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import { githubStore } from "../../stores/github";
+import { registerModal } from "../../stores/modalStack";
 import { repoSettingsStore } from "../../stores/repoSettings";
 import { repositoriesStore } from "../../stores/repositories";
 import { worktreeManagerStore } from "../../stores/worktreeManager";
@@ -47,18 +48,11 @@ export interface WorktreeActions {
 export const WorktreeManager: Component<{ actions?: WorktreeActions }> = (props) => {
 	const isOpen = () => worktreeManagerStore.state.isOpen;
 
-	// Escape to close
+	// Escape-to-close is handled centrally (stores/modalStack): registering routes
+	// Escape to the manager close AND stops it reaching the terminal underneath.
 	createEffect(() => {
 		if (!isOpen()) return;
-		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				e.stopPropagation();
-				worktreeManagerStore.close();
-			}
-		};
-		document.addEventListener("keydown", handleKeydown, true);
-		onCleanup(() => document.removeEventListener("keydown", handleKeydown, true));
+		registerModal(() => worktreeManagerStore.close());
 	});
 
 	// Orphan worktree detection (with cancellation guard for rapid open/close)

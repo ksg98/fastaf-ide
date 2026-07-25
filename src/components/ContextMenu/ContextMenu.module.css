@@ -6,6 +6,7 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-dropdown);
   padding: 4px;
+  overflow-y: auto;
   z-index: 1000;
   animation: fadeIn 0.1s ease-out;
 }

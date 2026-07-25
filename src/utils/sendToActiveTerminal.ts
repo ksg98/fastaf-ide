@@ -11,10 +11,10 @@ import { getShellFamily, sendCommand } from "./sendCommand";
  *  Bypassing `sendCommand` (raw `write_pty` text + "\r") submits in browser
  *  thanks to the per-session HTTP write-queue gap, but NOT in Tauri — the back-
  *  to-back IPC writes land in one PTY read chunk and Ink swallows the Enter. */
-export async function sendTextToSession(sessionId: string, text: string): Promise<void> {
+export async function sendTextToSession(sessionId: string, text: string, submit = true): Promise<void> {
 	const agentType = terminalsStore.getAgentTypeForSession(sessionId);
 	const shellFamily = await getShellFamily(sessionId);
-	await sendCommand((data) => invoke("write_pty", { sessionId, data }), text, agentType, shellFamily);
+	await sendCommand((data) => invoke("write_pty", { sessionId, data }), text, agentType, shellFamily, submit);
 }
 
 /** Send text to the currently-active terminal as a command.

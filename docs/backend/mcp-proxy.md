@@ -30,9 +30,7 @@ The entry point for all MCP traffic is `POST /mcp` (Streamable HTTP transport, s
 
 ## Tool Namespace
 
-All proxied tools are exposed with the prefix `{upstream_name}__{tool_name}`. The double underscore (`__`) is the routing discriminator — native TUIC tools never contain it. The separator splits only on the first occurrence, so tool names with internal underscores work correctly (e.g. `upstream__tool__with__underscores` routes to upstream `upstream`, tool `tool__with__underscores`).
-
-The tool description is also annotated with `[via {upstream_name}]` so the downstream AI client knows the origin.
+All proxied tools are exposed with the prefix `{upstream_name}__{tool_name}`. The double underscore (`__`) is the routing discriminator — native TUIC tools never contain it. The separator splits only on the first occurrence, so tool names with internal underscores work correctly (e.g. `upstream__tool__with__underscores` routes to upstream `upstream`, tool `tool__with__underscores`). The namespace identifies the origin; the upstream description is preserved byte-for-byte so TUIC instructions are not duplicated across every discovered tool.
 
 ## UpstreamRegistry
 
@@ -79,7 +77,10 @@ To avoid serving a stale tool list, the registry exposes a one-shot settle gate:
 - `mark_initial_connect_complete()` — set by `auto_connect_saved_upstreams` once every upstream is registered (at both exits, including the empty-config early return). Async `initialize` may still be in flight.
 - `await_initial_settle(timeout)` — the first `tools/list` calls this before `merged_tool_definitions()`. It blocks (≤ `timeout`, default 3s) until auto-connect is complete **and** no entry is still `Connecting`, then serves. A global `initial_settle_done` latch makes every later call a no-op, so steady-state `tools/list` never blocks. On timeout it logs a warning and serves a possibly-partial list rather than hanging.
 
-This works around [anthropics/claude-code#4118](https://github.com/anthropics/claude-code/issues/4118): Claude Code fetches `tools/list` during its handshake — before async upstream init finishes — and never refetches on `notifications/tools/list_changed`, so without the settle wait the proxied tools (e.g. `quill__*`) would be missing until a manual reconnect.
+This also protects clients and older client versions that fetch `tools/list` during
+their handshake but do not apply a later `notifications/tools/list_changed`.
+Compatible current clients can refresh live; clients that ignore the notification
+still receive the complete settled list at connection time.
 
 ### Tool Aggregation
 
@@ -293,4 +294,12 @@ if tool_name.contains("__") {
 
 The `tools/list` response merges native tools with upstream tools via `merged_tool_definitions()`.
 
-The `build_mcp_instructions()` function that generates the system prompt for connecting agents also documents the proxied upstream tools and their statuses, giving the AI client situational awareness about which upstream servers are available.
+The `build_mcp_instructions()` function supplies TUIC protocol and orchestration context once in the initialize response. Proxied upstream descriptions remain upstream-owned and do not repeat that preamble.
+
+Successful proxied `tools/call` responses that are valid MCP `CallToolResult` objects
+(an object with a `content` array) pass through as the downstream JSON-RPC result.
+TUIC does not re-wrap or mutate their `content`, `isError`, `structuredContent`, or
+extension fields. The same passthrough is used when `collapse_tools` routes an upstream
+call through the `call_tool` meta-tool. If an upstream returns a malformed result, TUIC
+falls back to a compact JSON text content envelope; native TUIC tools always use that
+compact envelope.

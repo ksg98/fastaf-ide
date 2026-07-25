@@ -1,5 +1,6 @@
 import { createEffect, createSignal, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
+import { toastsStore } from "../../stores/toasts";
 import { rpc } from "../../transport";
 import { sendPtyKey } from "../../utils/sendCommand";
 import type { ChoicePrompt, SlashMenuItem } from "../useSessions";
@@ -151,6 +152,7 @@ export function CommandInput(props: CommandInputProps) {
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appLogger.error("network", `Failed to send command after retries: ${msg}`);
+			toastsStore.add("Send failed", `Could not send command: ${msg}`, "error", true);
 		}
 	}
 
@@ -189,6 +191,8 @@ export function CommandInput(props: CommandInputProps) {
 			}
 		} catch (err) {
 			appLogger.warn("terminal", "ChoicePrompt sendPtyKey failed", { error: err });
+			const msg = err instanceof Error ? err.message : String(err);
+			toastsStore.add("Send failed", `Could not send choice: ${msg}`, "error", true);
 		}
 	}
 

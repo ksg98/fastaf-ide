@@ -375,7 +375,6 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			setCreating(false);
 			return;
 		}
-		setCreating(false);
 		try {
 			await invoke("create_branch", {
 				path: props.repoPath,
@@ -383,10 +382,14 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 				startPoint: state.startPoint,
 				checkout: state.checkout,
 			});
+			// Only close the form once the branch actually exists — on failure the
+			// form stays open so the user can correct the name and retry.
+			setCreating(false);
 			repositoriesStore.bumpRevision(props.repoPath);
 			appLogger.info("git", `Created branch: ${name}`);
 		} catch (err) {
 			appLogger.error("git", `Failed to create branch ${name}`, err);
+			toastsStore.add("Create branch failed", `Could not create "${name}": ${String(err)}`, "error", true);
 		}
 	}
 
@@ -587,28 +590,50 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		if (d?.type !== "rebase" || !props.repoPath) return;
 		const { branch } = d;
 		setDialog(null);
-		try {
-			await invoke("run_git_command", { path: props.repoPath, args: ["rebase", branch.name] });
-			repositoriesStore.bumpRevision(props.repoPath);
-			appLogger.info("git", `Rebased current branch onto ${branch.name}`);
-		} catch (err) {
-			appLogger.error("git", `Rebase onto ${branch.name} failed`, err);
-			repositoriesStore.bumpRevision(props.repoPath!);
-		}
+		await runGitAction(["rebase", branch.name], "Rebase failed", `Could not rebase onto "${branch.name}"`, () =>
+			appLogger.info("git", `Rebased current branch onto ${branch.name}`),
+		);
 	}
 
 	// --- Push / Pull / Fetch ---
 
-	async function doPush(branch: BranchDetail) {
+	/**
+	 * Run a git subcommand via `run_git_command`, bump the repo revision, and
+	 * surface failures via toast. `run_git_command` never throws on git failure —
+	 * it returns success=false with stderr — so we inspect the result explicitly
+	 * (mirrors doMerge). Both the invoke throwing (backend/IPC error) and a
+	 * git non-zero exit surface a toast. `onSuccess` runs only on success.
+	 */
+	async function runGitAction(
+		args: string[],
+		failTitle: string,
+		failMessage: string,
+		onSuccess?: () => void,
+	): Promise<void> {
 		if (!props.repoPath) return;
+		let res: GitCommandResult;
 		try {
-			const args = branch.upstream ? ["push"] : ["push", "-u", "origin", branch.name];
-			await invoke("run_git_command", { path: props.repoPath, args });
-			repositoriesStore.bumpRevision(props.repoPath);
-			appLogger.info("git", `Pushed ${branch.name}`);
+			res = await invoke<GitCommandResult>("run_git_command", { path: props.repoPath, args });
 		} catch (err) {
-			appLogger.error("git", `Push failed for ${branch.name}`, err);
+			appLogger.error("git", `${failTitle}: ${String(err)}`, err);
+			toastsStore.add(failTitle, failMessage, "error", true);
+			return;
 		}
+		repositoriesStore.bumpRevision(props.repoPath);
+		if (!res.success) {
+			const detail = (res.stderr || res.stdout).trim();
+			appLogger.error("git", `${failTitle}: ${detail}`);
+			toastsStore.add(failTitle, detail || failMessage, "error", true);
+			return;
+		}
+		onSuccess?.();
+	}
+
+	async function doPush(branch: BranchDetail) {
+		const args = branch.upstream ? ["push"] : ["push", "-u", "origin", branch.name];
+		await runGitAction(args, "Push failed", `Could not push "${branch.name}"`, () =>
+			appLogger.info("git", `Pushed ${branch.name}`),
+		);
 	}
 
 	async function doPull(branch: BranchDetail) {
@@ -617,13 +642,9 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			appLogger.warn("git", "Pull only works for the currently checked-out branch");
 			return;
 		}
-		try {
-			await invoke("run_git_command", { path: props.repoPath, args: ["pull"] });
-			repositoriesStore.bumpRevision(props.repoPath);
-			appLogger.info("git", `Pulled ${branch.name}`);
-		} catch (err) {
-			appLogger.error("git", `Pull failed for ${branch.name}`, err);
-		}
+		await runGitAction(["pull"], "Pull failed", `Could not pull "${branch.name}"`, () =>
+			appLogger.info("git", `Pulled ${branch.name}`),
+		);
 	}
 
 	async function openBranchOnGitHub(branch: BranchDetail) {
@@ -642,14 +663,9 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	}
 
 	async function doFetch(branch: BranchDetail) {
-		if (!props.repoPath) return;
-		try {
-			await invoke("run_git_command", { path: props.repoPath, args: ["fetch", "origin", branch.name] });
-			repositoriesStore.bumpRevision(props.repoPath);
-			appLogger.info("git", `Fetched ${branch.name}`);
-		} catch (err) {
-			appLogger.error("git", `Fetch failed for ${branch.name}`, err);
-		}
+		await runGitAction(["fetch", "origin", branch.name], "Fetch failed", `Could not fetch "${branch.name}"`, () =>
+			appLogger.info("git", `Fetched ${branch.name}`),
+		);
 	}
 
 	// --- Compare branches ---

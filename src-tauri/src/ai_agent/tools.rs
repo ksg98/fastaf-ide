@@ -509,6 +509,31 @@ pub fn redact_secrets(text: &str) -> String {
                 .unwrap(),
                 "${1}[REDACTED]",
             ),
+            // Docker `~/.docker/config.json` credential blobs: `"auth": "base64"`
+            // (base64(user:password)). Also covers `identitytoken`/`registrytoken`.
+            (
+                Regex::new(r#"(?i)("(?:auth|identitytoken|registrytoken)"\s*:\s*")[A-Za-z0-9+/=]+"#)
+                    .unwrap(),
+                "${1}[REDACTED]",
+            ),
+            // .npmrc auth: `_authToken=…`, legacy `_auth=…` (base64). `_password=`
+            // is already covered by the .env PASSWORD rule above.
+            (
+                Regex::new(r"(?i)(_auth(?:token)?\s*=\s*)\S+").unwrap(),
+                "${1}[REDACTED]",
+            ),
+            // .netrc credentials: `login <user> password <secret>` (inline or the
+            // indented multiline form — \s+ spans the newline + indentation).
+            (
+                Regex::new(r"(?i)(login\s+\S+\s+password\s+)\S+").unwrap(),
+                "${1}[REDACTED]",
+            ),
+            // JSON Web Tokens (kubeconfig `token:`, OIDC ids, bare Bearer bodies) —
+            // the distinctive `eyJ` header ({" base64url-encoded) keeps this precise.
+            (
+                Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+").unwrap(),
+                "[REDACTED]",
+            ),
         ]
     });
 
@@ -1184,6 +1209,16 @@ fn is_session_unrestricted(state: &AppState, session_id: &str) -> bool {
     state.unrestricted_sessions.contains_key(session_id)
 }
 
+/// Whether the optional, off-by-default "warn before reading known secret
+/// files" setting is enabled, via the `TUIC_WARN_SECRET_READS` env var
+/// (`1`/`true`). This ONLY toggles a log line — reads are never blocked or
+/// gated (per AGENTS.md "Security Scope": the local user is the trust boundary).
+fn warn_secret_reads_enabled() -> bool {
+    std::env::var("TUIC_WARN_SECRET_READS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Resolve a file path for reading. Absolute paths are used as-is (unrestricted);
 /// relative paths are always anchored to the sandbox root so `read_file("src/main.rs")`
 /// works naturally. The sandbox jail is bypassed for reads — only writes are sandboxed.
@@ -1294,6 +1329,19 @@ fn exec_read_file(state: &AppState, session_id: &str, args: &Value) -> ToolResul
     }
     if FileSandbox::is_binary(&resolved) {
         return ToolResult::err("binary file rejected".to_string());
+    }
+
+    // Optional, off-by-default warning: the read itself stays unrestricted (a
+    // power-user feature) — contents are always redacted below regardless.
+    if warn_secret_reads_enabled()
+        && let Some(kind) = super::safety::secret_file_kind(file_path)
+    {
+        tracing::warn!(
+            session_id,
+            file = %file_path,
+            kind,
+            "agent read a known secret file (contents redacted before returning to the LLM)"
+        );
     }
 
     let content = match std::fs::read_to_string(&resolved) {
@@ -2787,6 +2835,102 @@ mod tests {
         );
     }
 
+    // ── Docker / .npmrc / .netrc / JWT redaction ──────────────
+
+    #[test]
+    fn redact_docker_auth_blob() {
+        let input = r#"{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNzd29yZA=="}}}"#;
+        let output = redact_secrets(input);
+        assert!(
+            !output.contains("dXNlcjpwYXNzd29yZA=="),
+            "docker auth leaked: {output}"
+        );
+        assert!(output.contains("\"auth\":\"[REDACTED]\""), "got: {output}");
+    }
+
+    #[test]
+    fn redact_docker_identitytoken() {
+        let input = r#""identitytoken": "abc123DEF456ghi789=""#;
+        let output = redact_secrets(input);
+        assert!(!output.contains("abc123DEF456"), "leaked: {output}");
+        assert!(output.contains("[REDACTED]"), "got: {output}");
+    }
+
+    #[test]
+    fn no_redact_docker_auths_key() {
+        // The outer `"auths"` object key must survive — only inner `"auth"` values go.
+        let input = r#"{"auths": {}}"#;
+        assert_eq!(redact_secrets(input), input);
+    }
+
+    #[test]
+    fn redact_npmrc_auth_token() {
+        let input = "//registry.npmjs.org/:_authToken=npm_ABCDEFghijklmnop123456";
+        let output = redact_secrets(input);
+        assert!(!output.contains("npm_ABCDEF"), "token leaked: {output}");
+        assert!(output.contains("_authToken=[REDACTED]"), "got: {output}");
+    }
+
+    #[test]
+    fn redact_npmrc_legacy_auth() {
+        let input = "//registry.npmjs.org/:_auth=dXNlcjpwYXNzd29yZA==";
+        let output = redact_secrets(input);
+        assert!(
+            !output.contains("dXNlcjpwYXNzd29yZA"),
+            "legacy _auth leaked: {output}"
+        );
+        assert!(output.contains("_auth=[REDACTED]"), "got: {output}");
+    }
+
+    #[test]
+    fn redact_npmrc_password() {
+        // Covered by the existing .env PASSWORD rule — assert it still holds.
+        let input = "//registry.npmjs.org/:_password=aHVudGVyMg==";
+        let output = redact_secrets(input);
+        assert!(!output.contains("aHVudGVyMg"), "password leaked: {output}");
+    }
+
+    #[test]
+    fn redact_netrc_inline() {
+        let input = "machine api.example.com login me@example.com password s3cr3tPass";
+        let output = redact_secrets(input);
+        assert!(
+            !output.contains("s3cr3tPass"),
+            "netrc password leaked: {output}"
+        );
+        assert!(
+            output.contains("login me@example.com password [REDACTED]"),
+            "got: {output}"
+        );
+    }
+
+    #[test]
+    fn redact_netrc_multiline() {
+        let input = "machine api.example.com\n  login me@example.com\n  password s3cr3tPass\n";
+        let output = redact_secrets(input);
+        assert!(
+            !output.contains("s3cr3tPass"),
+            "netrc password leaked: {output}"
+        );
+        assert!(output.contains("[REDACTED]"), "got: {output}");
+    }
+
+    #[test]
+    fn redact_jwt_token() {
+        // kubeconfig `token:` / OIDC — bare JWT with no Bearer prefix.
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let output = redact_secrets(&format!("    token: {jwt}"));
+        assert!(!output.contains("eyJhbGci"), "jwt leaked: {output}");
+        assert!(output.contains("[REDACTED]"), "got: {output}");
+    }
+
+    #[test]
+    fn no_redact_lockfile_integrity_with_new_patterns() {
+        // sha512 integrity blob must still survive the added JWT/base64 patterns.
+        let pkg_lock = format!(r#""integrity": "sha512-{}=""#, "b".repeat(128));
+        assert_eq!(redact_secrets(&pkg_lock), pkg_lock);
+    }
+
     // ── map_key ────────────────────────────────────────────────
 
     #[test]
@@ -3495,6 +3639,67 @@ mod tests {
         assert!(r.output.contains("2\tbeta"));
         assert!(r.output.contains("3\tgamma"));
         assert!(!r.output.contains("truncated"));
+    }
+
+    #[test]
+    fn warn_secret_reads_off_by_default() {
+        // Default (env unset) must be off — reads stay unrestricted with no warn.
+        unsafe { std::env::remove_var("TUIC_WARN_SECRET_READS") };
+        assert!(!warn_secret_reads_enabled());
+    }
+
+    #[test]
+    fn warn_secret_reads_honors_env() {
+        unsafe { std::env::set_var("TUIC_WARN_SECRET_READS", "1") };
+        assert!(warn_secret_reads_enabled());
+        unsafe { std::env::set_var("TUIC_WARN_SECRET_READS", "true") };
+        assert!(warn_secret_reads_enabled());
+        unsafe { std::env::set_var("TUIC_WARN_SECRET_READS", "0") };
+        assert!(!warn_secret_reads_enabled());
+        unsafe { std::env::remove_var("TUIC_WARN_SECRET_READS") };
+    }
+
+    #[tokio::test]
+    async fn read_secret_file_default_path_no_approval() {
+        // AC3: reading a known secret file on the default path must NOT prompt for
+        // approval and must succeed unrestricted — only the content is redacted.
+        let (dir, state) = fs_test_state("s1");
+        std::fs::write(
+            dir.path().join(".env"),
+            "STRIPE_SECRET_KEY=sk_live_abc123def456\n",
+        )
+        .unwrap();
+        let r = dispatch(&state, "s1", "read_file", &json!({ "file_path": ".env" })).await;
+        assert!(r.success, "{}", r.output);
+        assert!(!r.needs_approval, "reads must never gate on approval");
+        assert!(
+            !r.output.contains("sk_live_abc123def456"),
+            "secret leaked: {}",
+            r.output
+        );
+        assert!(r.output.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn read_secret_file_with_warn_on_still_unrestricted() {
+        // AC2: with the opt-in warn enabled, the read still succeeds unrestricted
+        // (warn is a log side-effect only, never a gate).
+        unsafe { std::env::set_var("TUIC_WARN_SECRET_READS", "1") };
+        let (dir, state) = fs_test_state("s1");
+        std::fs::write(
+            dir.path().join(".netrc"),
+            "machine x login u password topsecretpw\n",
+        )
+        .unwrap();
+        let r = dispatch(&state, "s1", "read_file", &json!({ "file_path": ".netrc" })).await;
+        unsafe { std::env::remove_var("TUIC_WARN_SECRET_READS") };
+        assert!(r.success, "{}", r.output);
+        assert!(!r.needs_approval);
+        assert!(
+            !r.output.contains("topsecretpw"),
+            "netrc password leaked: {}",
+            r.output
+        );
     }
 
     #[tokio::test]
