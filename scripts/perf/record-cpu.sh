@@ -28,7 +28,7 @@ cd "$ROOT/src-tauri"
 # Release build with debug symbols for meaningful flamegraphs
 CARGO_PROFILE_RELEASE_DEBUG=2 cargo build --release 2>&1 | tail -3
 
-BINARY="$ROOT/src-tauri/target/release/tuicommander"
+BINARY="$ROOT/src-tauri/target/release/FastAF"
 if [[ ! -f "$BINARY" ]]; then
   echo "ERROR: Binary not found at $BINARY"
   exit 1

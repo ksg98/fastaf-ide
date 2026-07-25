@@ -18,7 +18,14 @@ version.workspace = true
 description = "FastAF - Native platform for AI coding agents"
 authors = ["Stefano Straus <github.com/sstraus>"]
 edition = "2024"
-default-run = "tuicommander"
+# The binary is what macOS labels the app with when it runs unbundled (`tauri
+# dev`), so it carries the product name even though the crate keeps its
+# upstream name to avoid churn in every `tuicommander_lib::` path.
+default-run = "FastAF"
+
+[[bin]]
+name = "FastAF"
+path = "src/main.rs"
 
 [package.metadata.cargo-machete]
 # Used from build.rs behind the desktop feature; cargo-machete does not inspect

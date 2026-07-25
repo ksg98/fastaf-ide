@@ -18,7 +18,7 @@ echo "=== Building with tokio-console feature ==="
 cd "$ROOT/src-tauri"
 RUSTFLAGS="--cfg tokio_unstable" cargo build --features tokio-console 2>&1 | tail -3
 
-BINARY="$ROOT/src-tauri/target/debug/tuicommander"
+BINARY="$ROOT/src-tauri/target/debug/FastAF"
 
 echo ""
 echo "=== Launching FastAF + tokio-console ==="
