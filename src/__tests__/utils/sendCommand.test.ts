@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { sendCommand } from "../../utils/sendCommand";
+import { containsShellMetacharacters, sendCommand, shouldAutoSubmitSuggestion } from "../../utils/sendCommand";
 
 /**
  * Fake writer that records every call in order. Returns a resolved promise
@@ -100,5 +100,59 @@ describe("sendCommand", () => {
 		await sendCommand(writeFn, "foo", null, "posix");
 		expect(calls.length).toBe(2);
 		expect(calls[1]).toBe("\r");
+	});
+
+	it("withholds the trailing Enter when submit is false", async () => {
+		setPlatform("MacIntel");
+		const { writeFn, calls } = makeRecorder();
+		await sendCommand(writeFn, "rm -rf /", null, "posix", false);
+		// Text is typed (with Ctrl-U prefix) but NOT executed — user must press Enter.
+		expect(calls).toEqual(["\x15rm -rf /"]);
+	});
+
+	it("submits by default (submit omitted) — backward compatible", async () => {
+		setPlatform("MacIntel");
+		const { writeFn, calls } = makeRecorder();
+		await sendCommand(writeFn, "ls", null, "posix");
+		expect(calls).toEqual(["\x15ls", "\r"]);
+	});
+});
+
+describe("containsShellMetacharacters", () => {
+	it("flags command chaining, substitution, and redirection", () => {
+		for (const s of ["a; b", "a | b", "a && b", "$(whoami)", "`id`", "echo > f", "cat < f", "a\nb"]) {
+			expect(containsShellMetacharacters(s)).toBe(true);
+		}
+	});
+
+	it("does not flag plain suggestion prose", () => {
+		for (const s of ["Fix the bug", "Run tests", "Deploy", "Refactor auth module"]) {
+			expect(containsShellMetacharacters(s)).toBe(false);
+		}
+	});
+});
+
+describe("shouldAutoSubmitSuggestion", () => {
+	it("always submits on an agent, even multi-line or metachar-bearing text", () => {
+		for (const s of ["Fix the bug", "line one\nline two", "a; b", "$(whoami)", "echo > f"]) {
+			expect(shouldAutoSubmitSuggestion("codex", s)).toBe(true);
+			expect(shouldAutoSubmitSuggestion("claude", s)).toBe(true);
+		}
+	});
+
+	it("withholds submit on a shell for metachar-bearing or multi-line text", () => {
+		for (const agentType of [null, undefined]) {
+			for (const s of ["a; b", "a | b", "$(whoami)", "echo > f", "line one\nline two"]) {
+				expect(shouldAutoSubmitSuggestion(agentType, s)).toBe(false);
+			}
+		}
+	});
+
+	it("submits on a shell for plain single-line prose", () => {
+		for (const agentType of [null, undefined]) {
+			for (const s of ["Run tests", "Deploy", "Fix the bug"]) {
+				expect(shouldAutoSubmitSuggestion(agentType, s)).toBe(true);
+			}
+		}
 	});
 });

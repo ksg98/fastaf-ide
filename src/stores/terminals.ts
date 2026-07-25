@@ -29,6 +29,8 @@ export interface CommandBlock {
 
 /** Shell activity state: null=never had output, busy=producing output, idle=waiting for input, exited=process terminated */
 export type ShellState = "busy" | "idle" | "exited" | null;
+/** Authoritative task lifecycle from the backend; distinct from PTY activity. */
+export type AgentLifecycleState = "starting" | "working" | "awaiting_input" | "idle" | "completed" | null;
 
 const VALID_SHELL_STATES = new Set<string>(["busy", "idle", "exited"]);
 
@@ -51,6 +53,10 @@ export interface TerminalData {
 	unseen: boolean; // Terminal completed work while user wasn't viewing it
 	progress: number | null; // OSC 9;4 progress (0-100), null when inactive
 	shellState: ShellState;
+	/** Monotonic local event revision; prevents a stale session snapshot from overwriting PTY state. */
+	shellStateRevision: number;
+	agentState: AgentLifecycleState;
+	backgroundWork: boolean;
 	agentType: AgentType | null; // Detected foreground agent process (e.g. "claude")
 	agentLaunchCommand: string | null; // Run-config command used to launch (e.g. "c"), for accurate resume
 	pendingResumeCommand: string | null; // Set at restore time, consumed on first shell idle
@@ -84,6 +90,9 @@ type TerminalCreateData = Omit<
 	| "unseen"
 	| "progress"
 	| "shellState"
+	| "shellStateRevision"
+	| "agentState"
+	| "backgroundWork"
 	| "nameIsCustom"
 	| "agentType"
 	| "agentLaunchCommand"
@@ -112,6 +121,7 @@ type TerminalCreateData = Omit<
 > & {
 	tuicSession?: string | null;
 	isRemote?: boolean;
+	nameIsCustom?: boolean;
 	agentType?: AgentType | null;
 	agentSessionId?: string | null;
 	agentLaunchCommand?: string | null;
@@ -381,6 +391,9 @@ function createTerminalsStore() {
 				unseen: false,
 				progress: null,
 				shellState: null,
+				shellStateRevision: 0,
+				agentState: null,
+				backgroundWork: false,
 				nameIsCustom: false,
 				agentType: null,
 				agentLaunchCommand: null,
@@ -420,6 +433,9 @@ function createTerminalsStore() {
 				unseen: false,
 				progress: null,
 				shellState: null,
+				shellStateRevision: 0,
+				agentState: null,
+				backgroundWork: false,
 				nameIsCustom: false,
 				agentType: null,
 				agentLaunchCommand: null,
@@ -525,6 +541,7 @@ function createTerminalsStore() {
 					const prev = state.terminals[id]?.shellState ?? null;
 					const next = data.shellState ?? null;
 					if (prev !== next) handleShellStateChange(id, prev, next);
+					setState("terminals", id, "shellStateRevision", (revision) => revision + 1);
 				}
 				// Agent exited back to a plain shell (agentType set→null). Any pending
 				// question/error was the agent's — a shell can't be "awaiting input" on
@@ -549,6 +566,13 @@ function createTerminalsStore() {
 					if (prev) sessionToTerminal.delete(prev);
 					const next = data.sessionId ?? null;
 					if (next) sessionToTerminal.set(next, id);
+					if (!next) {
+						// Lifecycle is scoped to a live backend session. Clearing it here
+						// prevents an exited agent tab from retaining a stale Working badge
+						// after it can no longer appear in the next session-list snapshot.
+						setState("terminals", id, "agentState", null);
+						setState("terminals", id, "backgroundWork", false);
+					}
 				}
 				setState("terminals", id, data);
 			});
@@ -905,6 +929,11 @@ function createTerminalsStore() {
 			return lastDataAtMap.get(id) ?? state.terminals[id]?.lastDataAt ?? null;
 		},
 
+		/** Revision of the last shell-state event for snapshot freshness checks. */
+		getShellStateRevision(id: string): number | null {
+			return state.terminals[id]?.shellStateRevision ?? null;
+		},
+
 		/** Flush all pending lastDataAt values to the reactive store */
 		flushLastDataAt(): void {
 			if (lastDataAtMap.size === 0) return;
@@ -920,6 +949,10 @@ function createTerminalsStore() {
 		state,
 		...actions,
 		_testCancelPendingTimers(): void {
+			for (const timer of cooldownTimers.values()) clearTimeout(timer);
+			cooldownTimers.clear();
+			for (const timer of staleQuestionTimers.values()) clearTimeout(timer);
+			staleQuestionTimers.clear();
 			if (lastDataAtFlushTimer) {
 				clearInterval(lastDataAtFlushTimer);
 				lastDataAtFlushTimer = null;

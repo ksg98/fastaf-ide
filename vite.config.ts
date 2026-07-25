@@ -9,6 +9,7 @@ import { Features } from "lightningcss";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+const typescriptWatchApi = import.meta.resolve("@typescript/typescript6");
 
 // Read app version from tauri.conf.json
 const tauriConf = JSON.parse(readFileSync("./src-tauri/tauri.conf.json", "utf-8"));
@@ -31,7 +32,16 @@ export default defineConfig(async ({ command }) => ({
     // dev`). One-shot builds run `tsc` up front (`pnpm build` = `tsc && vite
     // build`, and `make check` runs it too), so keeping the checker in build
     // mode just type-checks twice — skip it. Speeds up make dev/preview/build.
-    ...(command === "serve" ? [checker({ typescript: true })] : []),
+    ...(command === "serve"
+      ? [
+          checker({
+            // TypeScript 7 intentionally ships without the JavaScript compiler
+            // API. Keep the native TS7 CLI for builds and use Microsoft's TS6
+            // compatibility package for the checker's watch API.
+            typescript: { typescriptPath: typescriptWatchApi },
+          }),
+        ]
+      : []),
     visualizer({ filename: "dist/bundle-stats.html", gzipSize: true }),
     purgecss({
       // Do NOT pass `content` — the plugin auto-scans the bundled JS output.
@@ -86,13 +96,6 @@ export default defineConfig(async ({ command }) => ({
       input: {
         main: "index.html",
         mobile: "mobile.html",
-      },
-      output: {
-        manualChunks(id: string) {
-          if (id.includes("@codemirror/") || id.includes("@lezer/")) return "codemirror";
-          if (id.includes("@git-diff-view/core")) return "diff-view";
-          if (id.includes("/marked/") || id.includes("/dompurify/")) return "markdown";
-        },
       },
     },
   },

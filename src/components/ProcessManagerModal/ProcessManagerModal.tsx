@@ -1,6 +1,7 @@
 import { type Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
+import { registerModal } from "../../stores/modalStack";
 import d from "../shared/dialog.module.css";
 import s from "./ProcessManagerModal.module.css";
 
@@ -48,6 +49,10 @@ export const ProcessManagerModal: Component<ProcessManagerModalProps> = (props) 
 	onCleanup(() => {
 		if (timer) clearInterval(timer);
 	});
+
+	// Escape-to-close is handled centrally (stores/modalStack): registering routes
+	// Escape to props.onClose AND stops it reaching the terminal underneath.
+	registerModal(props.onClose);
 
 	function handleSort(key: SortKey): void {
 		if (sortKey() === key) {

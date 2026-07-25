@@ -85,34 +85,115 @@ pub(super) async fn write_to_session(
     Path(session_id): Path<String>,
     Json(body): Json<WriteRequest>,
 ) -> impl IntoResponse {
-    let entry = match state.sessions.get(&session_id) {
-        Some(e) => e,
-        None => return session_not_found(),
-    };
-    let mut session = entry.lock();
-    if let Err(e) = session.writer.write_all(body.data.as_bytes()) {
+    if let Err(e) = write_pty_input(&state, &session_id, &body.data) {
+        if e == "Session not found" {
+            return session_not_found();
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Write failed: {}", e)})),
+            Json(serde_json::json!({"error": e})),
         );
     }
-    if let Err(e) = session.writer.flush() {
-        tracing::warn!(session_id = %session_id, "PTY flush failed: {e}");
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+}
+
+pub(crate) fn write_pty_input(
+    state: &Arc<AppState>,
+    session_id: &str,
+    data: &str,
+) -> Result<(), String> {
+    let entry = state
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| "Session not found".to_string())?;
+    {
+        let mut session = entry.lock();
+        session
+            .writer
+            .write_all(data.as_bytes())
+            .map_err(|e| format!("Write failed: {e}"))?;
+        if let Err(e) = session.writer.flush() {
+            tracing::warn!(session_id = %session_id, "PTY flush failed: {e}");
+        }
     }
+    drop(entry);
+
+    apply_input_bookkeeping(state, session_id, data);
+
+    Ok(())
+}
+
+/// Write two input parts (e.g. text + a special-key sequence) to a session's
+/// PTY under a SINGLE lock acquisition, then run the same post-write
+/// bookkeeping (input-time stamp + InputLineBuffer FSM feed) that two
+/// sequential `write_pty_input` calls would have run — once per part, in
+/// order. Closes the interleave window a concurrent writer (peer injection,
+/// desktop `write_pty`) could otherwise land in between the text write and
+/// the Enter keystroke when the two writes took the PTY mutex separately.
+pub(crate) fn write_pty_input_pair(
+    state: &Arc<AppState>,
+    session_id: &str,
+    text: &str,
+    key: &str,
+) -> Result<(), String> {
+    let entry = state
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| "Session not found".to_string())?;
+    {
+        let mut session = entry.lock();
+        session
+            .writer
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("Write failed: {e}"))?;
+        session
+            .writer
+            .write_all(key.as_bytes())
+            .map_err(|e| format!("Write failed: {e}"))?;
+        if let Err(e) = session.writer.flush() {
+            tracing::warn!(session_id = %session_id, "PTY flush failed: {e}");
+        }
+    }
+    drop(entry);
+
+    apply_input_bookkeeping(state, session_id, text);
+    apply_input_bookkeeping(state, session_id, key);
+
+    Ok(())
+}
+
+/// Post-write bookkeeping shared by `write_pty_input` and
+/// `write_pty_input_pair`: stamps last-input time and feeds the
+/// InputLineBuffer FSM to track slash_mode accurately. Runs once per input
+/// part, after the PTY lock for that part's write has already been released.
+pub(crate) fn apply_input_bookkeeping(state: &Arc<AppState>, session_id: &str, data: &str) {
     // Stamp last-input time (same as desktop write_pty) so the grid ticker
     // throttles frames for remote/PWA typing under CPU saturation too.
-    crate::pty::stamp_input_ms(&state, &session_id);
+    crate::pty::stamp_input_ms(state, session_id);
+    crate::state::resolve_choice_prompt_input(state, session_id, data);
 
     // Feed input through InputLineBuffer FSM to track slash_mode accurately.
     // The old substring heuristic false-positived on pastes starting with '/'.
-    let input_entry = state
-        .input_buffers
-        .entry(session_id.clone())
-        .or_insert_with(|| {
-            parking_lot::Mutex::new(crate::input_line_buffer::InputLineBuffer::new())
-        });
-    let mut buf = input_entry.lock();
-    let actions = buf.feed(&body.data);
+    // Copy the FSM result and composer content, then release BOTH the inner
+    // mutex and DashMap entry guard before any transition/delivery callback.
+    // `flush_pending_injections` re-reads input_buffers; retaining the entry
+    // guard across that call self-deadlocks its DashMap shard.
+    let (actions, buffer_content) = {
+        let input_entry = state
+            .input_buffers
+            .entry(session_id.to_string())
+            .or_insert_with(|| {
+                parking_lot::Mutex::new(crate::input_line_buffer::InputLineBuffer::new())
+            });
+        let mut buf = input_entry.lock();
+        let actions = buf.feed(data);
+        let buffer_content = buf.content();
+        (actions, buffer_content)
+    };
+    let interrupted = actions
+        .iter()
+        .any(|a| matches!(a, crate::input_line_buffer::InputAction::Interrupt));
     let line_submitted = actions.iter().any(|a| {
         matches!(
             a,
@@ -120,40 +201,50 @@ pub(super) async fn write_to_session(
                 | crate::input_line_buffer::InputAction::Interrupt
         )
     });
+    let nonempty_line_submitted = actions.iter().any(|a| {
+        matches!(a, crate::input_line_buffer::InputAction::Line(content) if !content.is_empty())
+    });
+    if interrupted || data == "\x1b" {
+        if let Some(sl) = state.silence_states.get(session_id) {
+            sl.lock().note_interrupt_requested();
+        }
+    } else if nonempty_line_submitted {
+        crate::pty::note_submitted_input(state, session_id);
+    }
     // Determine slash mode. The InputLineBuffer may accumulate junk from
     // terminal responses (e.g. DA reply "1;2c"), so buf.content() alone is
     // unreliable. Use multiple signals:
     let in_slash = if line_submitted {
         false
-    } else if buf.content().starts_with('/') {
+    } else if buffer_content.starts_with('/') {
         true
-    } else if body.data == "/" {
-        // Fresh slash keystroke from PWA — always enters slash mode
+    } else if data == "/" {
+        // Fresh slash keystroke from PWA/MCP — always enters slash mode
         true
     } else {
         // Maintain current slash_mode for subsequent chars (delta sync sends
         // one char at a time after the initial "/"), unless dismissed
-        let is_bare_esc =
-            body.data == "\x1b" || (body.data.contains('\x1b') && !body.data.contains("\x1b["));
-        let dismissed = is_bare_esc || body.data.contains('\x03');
+        let is_bare_esc = data == "\x1b" || (data.contains('\x1b') && !data.contains("\x1b["));
+        let dismissed = is_bare_esc || data.contains('\x03');
         !dismissed
             && state
                 .slash_mode
-                .get(&session_id)
+                .get(session_id)
                 .is_some_and(|v| v.load(std::sync::atomic::Ordering::Relaxed))
     };
     tracing::trace!(
         "write_pty slash_mode: in_slash={in_slash} buf='{}' data='{}'",
-        buf.content(),
-        body.data
+        buffer_content,
+        data
     );
     state
         .slash_mode
-        .entry(session_id.clone())
+        .entry(session_id.to_string())
         .or_insert_with(|| std::sync::atomic::AtomicBool::new(false))
         .store(in_slash, std::sync::atomic::Ordering::Relaxed);
-
-    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+    if buffer_content.is_empty() {
+        crate::pty::flush_pending_injections(state, session_id);
+    }
 }
 
 pub(super) async fn set_session_name(
@@ -315,11 +406,13 @@ pub(super) async fn close_session(
             let _ = session.writer.write_all(&[0x03]);
             let _ = session.writer.flush();
         }
-        crate::pty::cleanup_session(&session_id, &state);
-
-        // Broadcast to SSE/WebSocket consumers
+        // Broadcast to SSE/WebSocket consumers BEFORE cleanup: cleanup_session reaps
+        // this session's per-session PTY channel, so the closed frame must be emitted
+        // while the channel still exists. broadcast keeps the buffered frame available
+        // to live subscribers even after the sender is dropped, so they drain the
+        // "closed" frame and THEN see the channel close (no lost close notification).
         tracing::info!(source = "session", session_id = %session_id, "Session closed: explicit close");
-        let _ = state.event_bus.send(crate::state::AppEvent::SessionClosed {
+        state.emit_pty_event(crate::state::AppEvent::SessionClosed {
             session_id: session_id.clone(),
             reason: "explicit_close".to_string(),
         });
@@ -333,6 +426,8 @@ pub(super) async fn close_session(
                 }),
             );
         }
+
+        crate::pty::cleanup_session(&session_id, &state);
 
         (StatusCode::OK, Json(serde_json::json!({"ok": true})))
     } else {
@@ -448,6 +543,7 @@ pub(super) fn spawn_pty_session(
             session_id: session_id.clone(),
             cwd: cwd.clone(),
             agent_type: None,
+            display_name: None,
         });
 
     #[cfg(feature = "desktop")]
@@ -461,6 +557,7 @@ pub(super) fn spawn_pty_session(
             serde_json::json!({
                 "session_id": session_id,
                 "cwd": cwd,
+                "display_name": null,
             }),
         );
     }
@@ -888,8 +985,8 @@ async fn handle_ws_session(
         return;
     }
 
-    // Subscribe to broadcast channel for parsed events (filtered by session_id)
-    let mut event_rx = state.event_bus.subscribe();
+    // Subscribe to this session's per-session PTY event channel (no global-bus fan-out).
+    let mut event_rx = state.subscribe_pty_events(&session_id);
 
     // Snapshot the ring buffer and register the live mpsc subscription
     // atomically while holding ring.lock(). The PTY writer takes the same
@@ -956,16 +1053,8 @@ async fn handle_ws_session(
                 result = event_rx.recv() => {
                     match result {
                         Ok(event) => {
-                            // Filter: only forward events for this session
-                            let matches = match &event {
-                                crate::state::AppEvent::PtyParsed { session_id: sid, .. } => sid == &sid_for_events,
-                                crate::state::AppEvent::PtyExit { session_id: sid } => sid == &sid_for_events,
-                                crate::state::AppEvent::SessionClosed { session_id: sid, .. } => sid == &sid_for_events,
-                                _ => false,
-                            };
-                            if !matches { continue; }
-
-                            // Extract the inner payload (without serde tag wrapping)
+                            // Per-session channel — every event belongs to this session.
+                            // Extract the inner payload (without serde tag wrapping).
                             let payload = match &event {
                                 crate::state::AppEvent::PtyParsed { parsed, .. } => {
                                     serde_json::json!({"type": "parsed", "event": parsed})
@@ -1085,7 +1174,7 @@ async fn handle_ws_log_session(
     let state_poll = state.clone();
     let send_task = tokio::spawn(async move {
         let mut offset = initial_offset;
-        let mut event_rx = state_poll.event_bus.subscribe();
+        let mut event_rx = state_poll.subscribe_pty_events(&sid_poll);
         let mut prev_screen_hash: u64 = 0;
         // Dedup: only send state frames when SessionState actually changed
         let mut prev_state: Option<crate::state::SessionState> = None;
@@ -1119,14 +1208,15 @@ async fn handle_ws_log_session(
                     }
                 }
                 event = event_rx.recv() => {
-                    let Ok(event) = event else { continue };
-                    let is_relevant = match &event {
-                        crate::state::AppEvent::PtyParsed { session_id: sid, .. }
-                        | crate::state::AppEvent::PtyExit { session_id: sid }
-                        | crate::state::AppEvent::SessionClosed { session_id: sid, .. } => sid == &sid_poll,
-                        _ => false,
-                    };
-                    if is_relevant { LoopAction::Event } else { LoopAction::Skip }
+                    // Per-session channel — every delivered event belongs to this
+                    // session, so any Ok triggers a state re-check. On Closed the
+                    // channel was reaped (session gone): exit instead of spinning on
+                    // the immediately-ready error arm. Lagged is a transient skip.
+                    match event {
+                        Ok(_) => LoopAction::Event,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => LoopAction::SessionGone,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => LoopAction::Skip,
+                    }
                 }
             };
 
@@ -1293,8 +1383,8 @@ async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Ar
         return;
     }
 
-    // Subscribe to event bus for parsed events (exit, closed, etc.)
-    let mut event_rx = state.event_bus.subscribe();
+    // Subscribe to this session's per-session PTY event channel (exit, closed, parsed).
+    let mut event_rx = state.subscribe_pty_events(&session_id);
     let sid_for_events = session_id.clone();
 
     let send_task = tokio::spawn(async move {
@@ -1317,14 +1407,7 @@ async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Ar
                 result = event_rx.recv() => {
                     match result {
                         Ok(event) => {
-                            let matches = match &event {
-                                crate::state::AppEvent::PtyParsed { session_id: sid, .. } => sid == &sid_for_events,
-                                crate::state::AppEvent::PtyExit { session_id: sid } => sid == &sid_for_events,
-                                crate::state::AppEvent::SessionClosed { session_id: sid, .. } => sid == &sid_for_events,
-                                _ => false,
-                            };
-                            if !matches { continue; }
-
+                            // Per-session channel — every event belongs to this session.
                             let payload = match &event {
                                 crate::state::AppEvent::PtyParsed { parsed, .. } => {
                                     serde_json::json!({"type": "parsed", "event": parsed})
@@ -1660,6 +1743,34 @@ pub(super) async fn terminal_request_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_regression_input_bookkeeping_releases_guard_before_pending_delivery() {
+        let state = super::super::tests::test_state();
+        let session_id = "deadlock-regression";
+        state.session_states.insert(
+            session_id.to_string(),
+            crate::state::SessionState {
+                agent_type: Some("codex".to_string()),
+                ..Default::default()
+            },
+        );
+        state
+            .pending_injections
+            .entry(session_id.to_string())
+            .or_default()
+            .push_back("queued message".to_string());
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            apply_input_bookkeeping(&state, session_id, "\r");
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("input bookkeeping must not self-deadlock while checking pending delivery");
+    }
 
     // is_separator_line tests live in chrome.rs (canonical location)
 

@@ -37,27 +37,46 @@ function matchesShortcut(e: KeyboardEvent, shortcut: string): boolean {
 	return e.key.toLowerCase() === key.toLowerCase();
 }
 
+const VIEWPORT_MARGIN = 8;
+
+const viewportLimit = (axis: "width" | "height") => {
+	const size = axis === "width" ? window.innerWidth : window.innerHeight;
+	return Math.max(0, size - VIEWPORT_MARGIN * 2);
+};
+
+const constrainPopupSize = (el: HTMLDivElement) => {
+	el.style.maxWidth = `${viewportLimit("width")}px`;
+	el.style.maxHeight = `${viewportLimit("height")}px`;
+};
+
+const clampAxis = (value: number, extent: number, viewportExtent: number) => {
+	const max = Math.max(VIEWPORT_MARGIN, viewportExtent - extent - VIEWPORT_MARGIN);
+	return Math.max(VIEWPORT_MARGIN, Math.min(value, max));
+};
+
 /** Clamp a submenu position so it stays within the viewport (8px margin). */
 const clampSubmenu = (wrapEl: HTMLDivElement, submenuEl: HTMLDivElement) => {
+	constrainPopupSize(submenuEl);
 	const parentRect = wrapEl.getBoundingClientRect();
 	const subRect = submenuEl.getBoundingClientRect();
 	const vw = window.innerWidth;
 	const vh = window.innerHeight;
-	const margin = 8;
+	const subWidth = Math.min(subRect.width || 160, viewportLimit("width"));
+	const subHeight = Math.min(subRect.height || 36, viewportLimit("height"));
 
 	// Horizontal: prefer right of parent, flip left if needed, clamp to viewport
 	let left = parentRect.right;
-	if (left + subRect.width > vw - margin) {
-		left = parentRect.left - subRect.width;
+	if (left + subWidth > vw - VIEWPORT_MARGIN) {
+		left = parentRect.left - subWidth;
 	}
-	left = Math.max(margin, Math.min(left, vw - subRect.width - margin));
+	left = clampAxis(left, subWidth, vw);
 
 	// Vertical: align top with parent item, clamp to viewport
 	let top = parentRect.top;
-	if (top + subRect.height > vh - margin) {
-		top = vh - subRect.height - margin;
+	if (top + subHeight > vh - VIEWPORT_MARGIN) {
+		top = vh - subHeight - VIEWPORT_MARGIN;
 	}
-	top = Math.max(margin, top);
+	top = clampAxis(top, subHeight, vh);
 
 	submenuEl.style.left = `${left}px`;
 	submenuEl.style.top = `${top}px`;
@@ -198,29 +217,28 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
 	// Reposition menu after render to use measured dimensions
 	const clampToViewport = () => {
 		if (!menuRef) return;
+		constrainPopupSize(menuRef);
 		const rect = menuRef.getBoundingClientRect();
 		// Fallback estimates when getBoundingClientRect returns 0 (e.g. jsdom)
-		const menuWidth = rect.width || 180;
-		const menuHeight = rect.height || props.items.length * 36 + 8;
+		const menuWidth = Math.min(rect.width || 180, viewportLimit("width"));
+		const menuHeight = Math.min(rect.height || props.items.length * 36 + 8, viewportLimit("height"));
 		const vw = window.innerWidth;
 		const vh = window.innerHeight;
-		const margin = 8;
 
 		let x = props.x;
 		let y = props.y;
 
 		// Horizontal: flip left if overflows right
-		if (x + menuWidth > vw - margin) {
-			x = vw - menuWidth - margin;
+		if (x + menuWidth > vw - VIEWPORT_MARGIN) {
+			x = vw - menuWidth - VIEWPORT_MARGIN;
 		}
-		x = Math.max(margin, x);
+		x = clampAxis(x, menuWidth, vw);
 
 		// Vertical: if menu doesn't fit below click point, grow upward
-		if (y + menuHeight > vh - margin) {
+		if (y + menuHeight > vh - VIEWPORT_MARGIN) {
 			y = props.y - menuHeight;
 		}
-		// Clamp to viewport top
-		y = Math.max(margin, y);
+		y = clampAxis(y, menuHeight, vh);
 
 		menuRef.style.left = `${x}px`;
 		menuRef.style.top = `${y}px`;

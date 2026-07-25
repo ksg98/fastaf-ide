@@ -67,6 +67,25 @@ pub(super) fn validate_basic_auth(
     }
 }
 
+/// Constant-time byte-slice comparison. `mcp_http` serves non-loopback clients
+/// (LAN/relay/Tailscale), so comparing secrets with `==` — which short-circuits
+/// on the first mismatching byte — is a timing side-channel an attacker could
+/// use to recover the session token/cookie byte-by-byte. Always scans the full
+/// length of both inputs; never exits early on a byte mismatch. The upfront
+/// length check is not itself a secret-dependent branch (input lengths are
+/// attacker-visible regardless), so it doesn't reintroduce the leak this
+/// guards against.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Check whether the request carries a valid session cookie.
 /// This is the fast path — avoids bcrypt on every API call after the first auth.
 fn has_valid_session_cookie(req: &Request<axum::body::Body>, session_token: &str) -> bool {
@@ -79,7 +98,7 @@ fn has_valid_session_cookie(req: &Request<axum::body::Body>, session_token: &str
     cookie_header
         .split(';')
         .map(str::trim)
-        .any(|c| c == expected)
+        .any(|c| ct_eq(c.as_bytes(), expected.as_bytes()))
 }
 
 /// Check whether the request carries a valid `?token=<session_token>` query param.
@@ -88,7 +107,9 @@ fn has_valid_session_cookie(req: &Request<axum::body::Body>, session_token: &str
 fn has_valid_url_token(req: &Request<axum::body::Body>, session_token: &str) -> bool {
     let query = req.uri().query().unwrap_or("");
     let expected = format!("token={session_token}");
-    query.split('&').any(|param| param == expected)
+    query
+        .split('&')
+        .any(|param| ct_eq(param.as_bytes(), expected.as_bytes()))
 }
 
 /// Build a Set-Cookie header value for the session token.
@@ -341,9 +362,47 @@ fn record_auth_failure(
         .or_insert((1, now));
 }
 
+/// Evict rate-limit entries whose window has fully elapsed. Called periodically
+/// by the background reaper so the map can't grow unbounded for IPs that fail
+/// once and never return (scanners cycling IPs, trivial over IPv6). An expired
+/// entry carries no rate-limiting value — the next failure resets it anyway
+/// (see `record_auth_failure`), and the rate check treats an elapsed window as
+/// not-limited — so dropping it is safe. Returns the number of entries removed.
+pub(super) fn sweep_expired_rate_limits(
+    rate_limits: &dashmap::DashMap<std::net::IpAddr, (u32, std::time::Instant)>,
+    window_secs: u64,
+) -> usize {
+    let window = std::time::Duration::from_secs(window_secs);
+    let before = rate_limits.len();
+    rate_limits.retain(|_, (_, start)| start.elapsed() < window);
+    before - rate_limits.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- ct_eq tests ---
+
+    #[test]
+    fn ct_eq_matches_equal_slices() {
+        assert!(ct_eq(b"same-token-value", b"same-token-value"));
+    }
+
+    #[test]
+    fn ct_eq_rejects_different_content_same_length() {
+        assert!(!ct_eq(b"token-aaaaaaaaaa", b"token-bbbbbbbbbb"));
+    }
+
+    #[test]
+    fn ct_eq_rejects_different_length() {
+        assert!(!ct_eq(b"short", b"much-longer-value"));
+    }
+
+    #[test]
+    fn ct_eq_empty_slices_are_equal() {
+        assert!(ct_eq(b"", b""));
+    }
 
     // --- is_private_ip tests ---
 
@@ -592,6 +651,36 @@ mod tests {
         record_auth_failure(&map, ip2, 300);
         assert_eq!(map.get(&ip1).unwrap().0, 3);
         assert_eq!(map.get(&ip2).unwrap().0, 1);
+    }
+
+    #[test]
+    fn sweep_evicts_only_expired_rate_limits() {
+        let map = dashmap::DashMap::new();
+        let expired: IpAddr = "10.0.0.1".parse().unwrap();
+        let fresh: IpAddr = "10.0.0.2".parse().unwrap();
+        // Expired entry: window_start is older than the 300s window.
+        map.insert(
+            expired,
+            (
+                7,
+                std::time::Instant::now() - std::time::Duration::from_secs(301),
+            ),
+        );
+        // Fresh entry: still inside the window.
+        map.insert(fresh, (2, std::time::Instant::now()));
+
+        let removed = sweep_expired_rate_limits(&map, 300);
+
+        assert_eq!(removed, 1, "only the expired entry should be evicted");
+        assert!(map.get(&expired).is_none(), "expired entry gone");
+        assert!(map.get(&fresh).is_some(), "fresh entry retained");
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn sweep_empty_map_is_noop() {
+        let map: dashmap::DashMap<IpAddr, (u32, std::time::Instant)> = dashmap::DashMap::new();
+        assert_eq!(sweep_expired_rate_limits(&map, 300), 0);
     }
 
     #[test]

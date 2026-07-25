@@ -97,6 +97,9 @@ A compact list where each row shows:
 | Red | Agent is rate-limited (with countdown) |
 | Gray | Terminal is idle |
 
+A terminal with a ready input composer is shown as idle even if the agent left a
+long-lived background terminal, such as a development server, running.
+
 ### Interactions
 
 - **Click any row** — Switches to that terminal and closes the dashboard

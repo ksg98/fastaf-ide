@@ -1,4 +1,15 @@
-import { type Component, createEffect, createMemo, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	For,
+	type JSX,
+	lazy,
+	onCleanup,
+	Show,
+	Suspense,
+} from "solid-js";
 import noTuiOpenImg from "../assets/no-tui-open.png";
 import { useFileDrop } from "../hooks/useFileDrop";
 import { activityDashboardStore } from "../stores/activityDashboard";
@@ -14,15 +25,19 @@ import { terminalsStore } from "../stores/terminals";
 import { applyTrackResize, computeGrid } from "../utils/multiviewGrid";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { getRepoColor } from "../utils/repoColor";
+import { shouldAutoSubmitSuggestion } from "../utils/sendCommand";
 import { sendTextToSession } from "../utils/sendToActiveTerminal";
-import { CodeEditorTab } from "./CodeEditorPanel";
-import { DiffTab } from "./DiffTab";
 import { PaneNodeView } from "./PaneTree/PaneTree";
 import SuggestOverlay from "./SuggestOverlay/SuggestOverlay";
 import { MdTabContent } from "./shared/MdTabContent";
 import { Terminal } from "./Terminal";
 import s from "./TerminalArea.module.css";
 import TipOfTheDay from "./TipOfTheDay/TipOfTheDay";
+
+const CodeEditorTab = lazy(() =>
+	import("./CodeEditorPanel/CodeEditorTab").then((module) => ({ default: module.CodeEditorTab })),
+);
+const DiffTab = lazy(() => import("./DiffTab/DiffTab").then((module) => ({ default: module.DiffTab })));
 
 export interface TerminalAreaProps {
 	onTerminalFocus: (id: string) => void;
@@ -54,7 +69,12 @@ const SuggestOverlayContainer: Component = () => {
 						onSelect={async (text) => {
 							terminalsStore.dismissSuggestedActions(capturedId);
 							if (capturedSid) {
-								await sendTextToSession(capturedSid, text);
+								// OSC 7770 `suggest=` is emittable by any (untrusted) output; withhold
+								// auto-Enter for metacharacter-bearing chips on a SHELL so a click cannot
+								// silently execute a chained/redirected command. On an AGENT a chip is
+								// just prompt text and must submit — see shouldAutoSubmitSuggestion.
+								const agentType = terminalsStore.getAgentTypeForSession(capturedSid);
+								await sendTextToSession(capturedSid, text, shouldAutoSubmitSuggestion(agentType, text));
 							}
 						}}
 						onDismiss={() => {
@@ -394,14 +414,16 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 											onContextMenu={(e) => e.stopPropagation()}
 										>
 											{diffTab && (
-												<DiffTab
-													tabId={id}
-													repoPath={diffTab.repoPath}
-													filePath={diffTab.filePath}
-													scope={diffTab.scope}
-													untracked={diffTab.untracked}
-													onClose={() => props.onCloseTab(id)}
-												/>
+												<Suspense>
+													<DiffTab
+														tabId={id}
+														repoPath={diffTab.repoPath}
+														filePath={diffTab.filePath}
+														scope={diffTab.scope}
+														untracked={diffTab.untracked}
+														onClose={() => props.onCloseTab(id)}
+													/>
+												</Suspense>
 											)}
 										</div>
 									);
@@ -435,15 +457,17 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 											onContextMenu={(e) => e.stopPropagation()}
 										>
 											{editTab && (
-												<CodeEditorTab
-													id={id}
-													repoPath={editTab.repoPath}
-													fsRoot={editTab.fsRoot}
-													filePath={editTab.filePath}
-													initialLine={editTab.initialLine}
-													externalEditable={editTab.externalEditable}
-													onClose={() => props.onCloseTab(id)}
-												/>
+												<Suspense>
+													<CodeEditorTab
+														id={id}
+														repoPath={editTab.repoPath}
+														fsRoot={editTab.fsRoot}
+														filePath={editTab.filePath}
+														initialLine={editTab.initialLine}
+														externalEditable={editTab.externalEditable}
+														onClose={() => props.onCloseTab(id)}
+													/>
+												</Suspense>
 											)}
 										</div>
 									);

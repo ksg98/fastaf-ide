@@ -1,4 +1,5 @@
-import { type Component, createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createVirtualizer } from "@tanstack/solid-virtual";
+import { type Component, createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
 import { aiTriageStore, type FileClassification, type Relevance, type TriageStats } from "../../stores/aiTriageStore";
 import { diffTabsStore } from "../../stores/diffTabs";
 import { editorTabsStore } from "../../stores/editorTabs";
@@ -6,8 +7,36 @@ import { repositoriesStore } from "../../stores/repositories";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import p from "../shared/panel.module.css";
+import { SeverityIcon } from "../shared/SeverityIcon";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import s from "./AiTriagePanel.module.css";
+
+/** One entry in the flat, virtualized triage list: either a file card or the
+ *  low-relevance group's collapse/expand header. */
+export type TriageRow = { kind: "file"; file: FileClassification } | { kind: "lowHeader" };
+
+/**
+ * Flatten the three relevance buckets into a single ordered row list for the
+ * virtualizer: all high rows, then all medium rows, then (when any low files
+ * exist) the low-group header, followed by the low rows ONLY when the group is
+ * expanded. Keeping low rows out of the list while collapsed is what makes the
+ * group lazy — a 100-file low bucket contributes nothing until opened.
+ */
+export function buildTriageRows(
+	high: FileClassification[],
+	medium: FileClassification[],
+	low: FileClassification[],
+	lowGroupOpen: boolean,
+): TriageRow[] {
+	const out: TriageRow[] = [];
+	for (const f of high) out.push({ kind: "file", file: f });
+	for (const f of medium) out.push({ kind: "file", file: f });
+	if (low.length > 0) {
+		out.push({ kind: "lowHeader" });
+		if (lowGroupOpen) for (const f of low) out.push({ kind: "file", file: f });
+	}
+	return out;
+}
 
 function relevanceClass(r: Relevance): string {
 	if (r === "high") return s.relevanceHigh;
@@ -78,6 +107,27 @@ export const AiTriagePanel: Component<AiTriagePanelProps> = (props) => {
 
 	const [lowGroupOpen, setLowGroupOpen] = createSignal(false);
 
+	// Flat, heterogeneous row model driving a single virtualizer, so one
+	// virtualizer mounts just the in-viewport FileRow instances instead of
+	// every row — avoiding a main-thread render freeze on large dirty trees.
+	const rows = createMemo(() => buildTriageRows(highFiles(), mediumFiles(), lowFiles(), lowGroupOpen()));
+
+	let scrollEl: HTMLDivElement | undefined;
+	const virtualizer = createVirtualizer({
+		get count() {
+			return rows().length;
+		},
+		getScrollElement: () => scrollEl ?? null,
+		// Rough first-paint estimate; measureElement corrects each row's real
+		// (variable) height — findings lists make rows taller than the header.
+		estimateSize: () => 90,
+		overscan: 4,
+		getItemKey: (i) => {
+			const r = rows()[i];
+			return r?.kind === "file" ? r.file.path : "__low_header__";
+		},
+	});
+
 	function handleEdit(path: string) {
 		if (props.repoPath) editorTabsStore.add(props.repoPath, path);
 	}
@@ -124,6 +174,25 @@ export const AiTriagePanel: Component<AiTriagePanelProps> = (props) => {
 							</Show>
 						</span>
 					</div>
+					<Show when={(file.findings?.length ?? 0) > 0}>
+						<div class={s.findingsList}>
+							<For each={file.findings}>
+								{(finding) => (
+									<div class={s.findingItem}>
+										<SeverityIcon severity={finding.severity} />
+										<span class={s.findingBody}>
+											<Show when={finding.line != null}>
+												<button class={s.findingLine} title="Open in editor" onClick={() => handleEdit(file.path)}>
+													:{finding.line}
+												</button>
+											</Show>
+											<span class={s.findingMessage}>{finding.message}</span>
+										</span>
+									</div>
+								)}
+							</For>
+						</div>
+					</Show>
 				</div>
 			</div>
 		);
@@ -158,7 +227,7 @@ export const AiTriagePanel: Component<AiTriagePanelProps> = (props) => {
 				</div>
 			</div>
 
-			<div class={s.content}>
+			<div class={s.content} ref={(el) => (scrollEl = el)}>
 				<Show when={state().error}>
 					<div class={s.error}>{state().error}</div>
 				</Show>
@@ -171,27 +240,39 @@ export const AiTriagePanel: Component<AiTriagePanelProps> = (props) => {
 					<div class={s.empty}>No changes detected</div>
 				</Show>
 
-				<For each={highFiles()}>{(file) => <FileRow file={file} />}</For>
-
-				<For each={mediumFiles()}>{(file) => <FileRow file={file} />}</For>
-
-				<Show when={lowFiles().length > 0}>
-					<div class={s.lowGroup}>
-						<div
-							class={s.lowGroupHeader}
-							role="button"
-							tabIndex={0}
-							onClick={() => setLowGroupOpen(!lowGroupOpen())}
-							onKeyDown={onClickKeyDown(() => setLowGroupOpen(!lowGroupOpen()))}
-						>
-							<span class={cx(s.chevron, lowGroupOpen() && s.chevronOpen)}>&#9656;</span>
-							{lowFiles().length} low-relevance files
-						</div>
-						<Show when={lowGroupOpen()}>
-							<div class={s.lowGroupContent}>
-								<For each={lowFiles()}>{(file) => <FileRow file={file} />}</For>
-							</div>
-						</Show>
+				<Show when={rows().length > 0}>
+					<div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative", width: "100%" }}>
+						<For each={virtualizer.getVirtualItems()}>
+							{(vi) => {
+								const row = () => rows()[vi.index];
+								return (
+									<div
+										data-index={vi.index}
+										ref={(el) => virtualizer.measureElement(el)}
+										class={s.virtualRow}
+										style={{ position: "absolute", top: `${vi.start}px`, left: "0", width: "100%" }}
+									>
+										<Switch>
+											<Match when={row()?.kind === "lowHeader"}>
+												<div
+													class={s.lowGroupHeader}
+													role="button"
+													tabIndex={0}
+													onClick={() => setLowGroupOpen(!lowGroupOpen())}
+													onKeyDown={onClickKeyDown(() => setLowGroupOpen(!lowGroupOpen()))}
+												>
+													<span class={cx(s.chevron, lowGroupOpen() && s.chevronOpen)}>&#9656;</span>
+													{lowFiles().length} low-relevance files
+												</div>
+											</Match>
+											<Match when={row()?.kind === "file"}>
+												<FileRow file={(row() as Extract<TriageRow, { kind: "file" }>).file} />
+											</Match>
+										</Switch>
+									</div>
+								);
+							}}
+						</For>
 					</div>
 				</Show>
 			</div>

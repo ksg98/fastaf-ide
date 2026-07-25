@@ -26,6 +26,15 @@ vi.mock("../../stores/pluginStore", () => ({
 	},
 }));
 
+vi.mock("../../stores/appLogger", () => ({
+	appLogger: {
+		debug: vi.fn(),
+		info: vi.fn(),
+		warn: vi.fn(),
+		error: vi.fn(),
+	},
+}));
+
 import { invoke, listen } from "../../invoke";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
 import { pluginStore } from "../../stores/pluginStore";

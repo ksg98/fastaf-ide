@@ -1,5 +1,6 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { t } from "../../i18n";
+import { registerModal } from "../../stores/modalStack";
 import { cx } from "../../utils";
 import d from "../shared/dialog.module.css";
 import s from "./RunCommandDialog.module.css";
@@ -32,12 +33,12 @@ export const RunCommandDialog: Component<RunCommandDialogProps> = (props) => {
 	createEffect(() => {
 		if (!props.visible) return;
 
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to props.onClose AND stops it reaching the terminal underneath.
+		registerModal(props.onClose);
+
 		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				e.stopPropagation();
-				props.onClose();
-			} else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+			if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
 				e.preventDefault();
 				handleSaveAndRun();
 			}

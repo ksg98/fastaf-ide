@@ -29,13 +29,15 @@ When I show the file list:
 {"summary": "2-3 sentence changeset overview"}
 
 When I show a file diff:
-{"path": "...", "relevance": "high|medium|low", \
-"category": "business-logic|api-surface|schema|config|test|boilerplate|style", \
-"risk": "breaking-change|behavioral-change|cosmetic", \
-"summary": "one sentence"}
+{"path": "...", "summary": "one sentence", "findings": [\
+{"path": "...", "line": 123, "hunk": "optional hunk/context", \
+"severity": "bug|risk|nit", "message": "actionable review finding", \
+"confidence": 0.0}]}
 
-Rules: high=must review, medium=worth a look, low=skip. \
-Tests covering the main change are medium. \
+Rules: findings are line-level and actionable. \
+Use severity=bug for likely defects, risk for plausible regressions, nit for minor cleanup. \
+Use confidence 0.0-1.0; omit low-confidence speculation by using confidence below 0.7. \
+If no actionable finding exists, return an empty findings array. \
 Relate files to each other. ONLY output the JSON line.`;
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 #[cfg(feature = "desktop")]
 use tauri::Emitter;
+#[cfg(feature = "desktop")]
+use tauri::State;
 
 // ---------------------------------------------------------------------------
 // Per-repo LLM triage session — persistent conversation + diff hash cache
@@ -34,6 +36,11 @@ struct TriageSession {
     file_set_hash: u64,
     model: String,
     created_at: std::time::Instant,
+    /// PR-review only: the head SHA this session's conversation was built
+    /// against. `None` for working-tree triage sessions, which have no PR
+    /// head to track. A new commit on the PR changes this and invalidates
+    /// the cached conversation (see `run_pr_review_impl`).
+    head_sha: Option<String>,
 }
 
 impl TriageSession {
@@ -46,6 +53,7 @@ impl TriageSession {
             file_set_hash: 0,
             model,
             created_at: std::time::Instant::now(),
+            head_sha: None,
         }
     }
 
@@ -61,6 +69,29 @@ fn triage_sessions() -> &'static Mutex<HashMap<String, TriageSession>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// PR-review LLM sessions, keyed by `{repo_path}#{pr_number}` — one entry
+/// per open PR, not per commit. Kept separate from the working-tree triage
+/// store so a re-review of an unchanged PR head reuses its multi-turn
+/// context (and per-file hash cache) without colliding with, or being
+/// pruned by, working-tree triage.
+///
+/// The key deliberately excludes `head_sha`: keying by commit would leak a
+/// new entry on every push to the PR (head_sha changes each commit) with
+/// nothing ever removing stale ones. Instead the current head_sha is
+/// stored on the session itself (`TriageSession::head_sha`) and checked by
+/// `run_pr_review_impl`, which discards (overwrites) the cached session
+/// when the PR has moved to a new commit. This bounds the map by open-PR
+/// count instead of growing forever.
+fn pr_review_sessions() -> &'static Mutex<HashMap<String, TriageSession>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, TriageSession>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Build the `pr_review_sessions` key from repo + PR number.
+fn pr_review_session_key(repo_path: &str, pr_number: i64) -> String {
+    format!("{repo_path}#{pr_number}")
+}
+
 fn hash_diff(diff: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     diff.hash(&mut hasher);
@@ -74,9 +105,29 @@ pub struct FileClassification {
     pub category: Category,
     pub risk: Risk,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
     pub source: ClassificationSource,
     pub additions: u32,
     pub deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Finding {
+    pub path: String,
+    pub line: Option<u32>,
+    pub hunk: Option<String>,
+    pub severity: Severity,
+    pub message: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Bug,
+    Risk,
+    Nit,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -116,6 +167,25 @@ pub enum ClassificationSource {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TriageResult {
+    pub summary: Option<String>,
+    pub files: Vec<FileClassification>,
+    pub llm_used: bool,
+    pub llm_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnifiedDiffFile {
+    pub path: String,
+    pub diff: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrReviewResult {
+    pub repo_path: String,
+    pub pr_number: i64,
+    pub head_sha: String,
     pub summary: Option<String>,
     pub files: Vec<FileClassification>,
     pub llm_used: bool,
@@ -262,6 +332,7 @@ fn make(
         category,
         risk,
         summary: summary.to_string(),
+        findings: Vec::new(),
         source: ClassificationSource::Heuristic,
         additions: 0,
         deletions: 0,
@@ -443,12 +514,87 @@ struct FileLine {
     summary: String,
 }
 
+#[derive(Deserialize)]
+struct FileFindingsLine {
+    path: String,
+    summary: String,
+    findings: Vec<Finding>,
+}
+
 struct LlmParsed {
     summary: Option<String>,
     files: Vec<FileClassification>,
 }
 
-fn extract_json(text: &str) -> &str {
+const DEFAULT_FINDING_CONFIDENCE_THRESHOLD: f32 = 0.7;
+
+pub(crate) fn finding_confidence_threshold() -> f32 {
+    std::env::var("TUIC_REVIEW_CONFIDENCE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| (0.0..=1.0).contains(v))
+        .unwrap_or(DEFAULT_FINDING_CONFIDENCE_THRESHOLD)
+}
+
+pub(crate) fn filter_findings_by_confidence(findings: &[Finding], threshold: f32) -> Vec<Finding> {
+    findings
+        .iter()
+        .filter(|f| f.confidence.is_finite() && f.confidence >= threshold && f.confidence <= 1.0)
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn relevance_from_findings(findings: &[Finding]) -> Relevance {
+    if findings.iter().any(|f| f.severity == Severity::Bug) {
+        Relevance::High
+    } else if findings.iter().any(|f| f.severity == Severity::Risk) {
+        Relevance::Medium
+    } else {
+        Relevance::Low
+    }
+}
+
+fn category_risk_from_findings(findings: &[Finding]) -> (Category, Risk) {
+    // Any actionable finding (bug or risk) marks the file as a behavioral change
+    // in business logic; a file with only nits is cosmetic/style.
+    if findings
+        .iter()
+        .any(|f| matches!(f.severity, Severity::Bug | Severity::Risk))
+    {
+        (Category::BusinessLogic, Risk::BehavioralChange)
+    } else {
+        (Category::Style, Risk::Cosmetic)
+    }
+}
+
+fn classification_from_findings_line(f: FileFindingsLine) -> Option<FileClassification> {
+    if f.findings.iter().any(|finding| {
+        !finding.confidence.is_finite() || !(0.0..=1.0).contains(&finding.confidence)
+    }) {
+        return None;
+    }
+    let findings = filter_findings_by_confidence(&f.findings, finding_confidence_threshold());
+    if findings.iter().any(|finding| finding.path != f.path) {
+        return None;
+    }
+    let relevance = relevance_from_findings(&findings);
+    let (category, risk) = category_risk_from_findings(&findings);
+    Some(FileClassification {
+        path: f.path,
+        relevance,
+        category,
+        risk,
+        summary: f.summary,
+        findings,
+        source: ClassificationSource::Llm,
+        additions: 0,
+        deletions: 0,
+    })
+}
+
+/// Extract the JSON payload from a possibly fenced/prose-wrapped LLM response.
+/// Shared by the triage JSONL parser, `changelog`, and `improvement_scan`.
+pub(crate) fn extract_json(text: &str) -> &str {
     let trimmed = text.trim();
     // Strip markdown code fences: ```json\n{...}\n``` or ```\n{...}\n```
     if let Some(rest) = trimmed.strip_prefix("```") {
@@ -483,10 +629,16 @@ fn parse_jsonl_line(line: &str) -> JsonlParsed {
             category: f.category,
             risk: f.risk,
             summary: f.summary,
+            findings: Vec::new(),
             source: ClassificationSource::Llm,
             additions: 0,
             deletions: 0,
         });
+    }
+    if let Ok(f) = serde_json::from_str::<FileFindingsLine>(json)
+        && let Some(fc) = classification_from_findings_line(f)
+    {
+        return JsonlParsed::File(fc);
     }
     JsonlParsed::Skip
 }
@@ -723,6 +875,7 @@ fn fallback_classification(
         category,
         risk,
         summary,
+        findings: Vec::new(),
         source: ClassificationSource::Heuristic,
         additions,
         deletions,
@@ -758,12 +911,14 @@ RESPONSES — always a single JSON line, nothing else:\n\n\
 When I show the file list:\n\
 {\"summary\": \"2-3 sentence changeset overview\"}\n\n\
 When I show a file diff:\n\
-{\"path\": \"...\", \"relevance\": \"high|medium|low\", \
-\"category\": \"business-logic|api-surface|schema|config|test|boilerplate|style\", \
-\"risk\": \"breaking-change|behavioral-change|cosmetic\", \
-\"summary\": \"one sentence\"}\n\n\
-Rules: high=must review, medium=worth a look, low=skip. \
-Tests covering the main change are medium. \
+{\"path\": \"...\", \"summary\": \"one sentence\", \"findings\": [\
+{\"path\": \"...\", \"line\": 123, \"hunk\": \"optional hunk/context\", \
+\"severity\": \"bug|risk|nit\", \"message\": \"actionable review finding\", \
+\"confidence\": 0.0}]}\n\n\
+Rules: findings are line-level and actionable. \
+Use severity=bug for likely defects, risk for plausible regressions, nit for minor cleanup. \
+Use confidence 0.0-1.0; omit low-confidence speculation by using confidence below 0.7. \
+If no actionable finding exists, return an empty findings array. \
 Relate files to each other. ONLY output the JSON line.";
 
 /// Builds the overview user message for the first turn of a multi-turn session.
@@ -793,8 +948,71 @@ fn build_file_msg(path: &str, diff: &str, additions: u32, deletions: u32) -> Str
         String::new()
     };
     format!(
-        "<file path=\"{path}\" +{additions} -{deletions}>\n{truncated}{truncation_note}\n</file>\n\nClassify this file."
+        "<file path=\"{path}\" +{additions} -{deletions}>\n{truncated}{truncation_note}\n</file>\n\nReview this file and return line-level findings."
     )
+}
+
+pub(crate) fn split_unified_diff(diff: &str) -> Vec<UnifiedDiffFile> {
+    let mut files = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_lines: Vec<String> = Vec::new();
+    let mut additions = 0u32;
+    let mut deletions = 0u32;
+
+    let flush = |files: &mut Vec<UnifiedDiffFile>,
+                 current_path: &mut Option<String>,
+                 current_lines: &mut Vec<String>,
+                 additions: &mut u32,
+                 deletions: &mut u32| {
+        if let Some(path) = current_path.take() {
+            files.push(UnifiedDiffFile {
+                path,
+                diff: current_lines.join("\n"),
+                additions: *additions,
+                deletions: *deletions,
+            });
+        }
+        current_lines.clear();
+        *additions = 0;
+        *deletions = 0;
+    };
+
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            flush(
+                &mut files,
+                &mut current_path,
+                &mut current_lines,
+                &mut additions,
+                &mut deletions,
+            );
+            let path = rest
+                .split_whitespace()
+                .nth(1)
+                .or_else(|| rest.split_whitespace().next())
+                .unwrap_or("")
+                .trim_start_matches("b/")
+                .trim_start_matches("a/")
+                .to_string();
+            current_path = (!path.is_empty()).then_some(path);
+        }
+        if current_path.is_some() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                additions = additions.saturating_add(1);
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                deletions = deletions.saturating_add(1);
+            }
+            current_lines.push(line.to_string());
+        }
+    }
+    flush(
+        &mut files,
+        &mut current_path,
+        &mut current_lines,
+        &mut additions,
+        &mut deletions,
+    );
+    files
 }
 
 /// Builds a ChatRequest from session history + a new user message, placing
@@ -1039,6 +1257,74 @@ async fn do_turn(
     None
 }
 
+/// Where per-file review progress is streamed. The multi-turn engine is shared
+/// between working-tree triage and PR review; only the emitted event differs.
+#[cfg(feature = "desktop")]
+enum ProgressSink<'a> {
+    /// Working-tree triage → `DiffTriageProgress` ("triage-progress").
+    Triage { app: &'a tauri::AppHandle },
+    /// PR review → `ReviewProgress` ("review-progress"), keyed by PR number so
+    /// it never pollutes the working-tree triage panel.
+    PrReview {
+        app: Option<&'a tauri::AppHandle>,
+        state: &'a crate::AppState,
+        pr_number: i64,
+    },
+}
+
+#[cfg(feature = "desktop")]
+impl ProgressSink<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn emit(
+        &self,
+        repo_path: &str,
+        summary: Option<&str>,
+        files: &[FileClassification],
+        phase: &'static str,
+        done: bool,
+        llm_used: bool,
+        llm_model: Option<&str>,
+    ) {
+        match self {
+            ProgressSink::Triage { app } => {
+                emit_progress(
+                    app, repo_path, summary, files, phase, done, llm_used, llm_model,
+                );
+            }
+            ProgressSink::PrReview {
+                app,
+                state,
+                pr_number,
+            } => {
+                let payload = serde_json::json!({
+                    "pr_number": pr_number,
+                    "summary": summary,
+                    "files": files,
+                    "phase": phase,
+                    "done": done,
+                    "llm_used": llm_used,
+                    "llm_model": llm_model,
+                });
+                // Desktop window event (native listener), if a handle exists.
+                if let Some(app) = app {
+                    let _ = app.emit(
+                        "review-progress",
+                        serde_json::json!({ "repo_path": repo_path, "payload": payload }),
+                    );
+                }
+                // Event bus → SSE bridge (browser/PWA parity). Dual-emit: there
+                // is no bus→window forwarder, so both paths are required.
+                let _ = state
+                    .event_bus
+                    .send(crate::state::AppEvent::ReviewProgress {
+                        repo_path: repo_path.to_string(),
+                        payload,
+                    });
+            }
+        }
+    }
+}
+
 #[cfg(feature = "desktop")]
 /// Multi-turn LLM classification: overview turn + per-file turns with tool use.
 /// Skips unchanged files (hash match). Updates session in place.
@@ -1049,7 +1335,7 @@ async fn classify_multi_turn(
     session: &mut TriageSession,
     files: &[(String, String, u32, u32)],
     heuristic_names: &[(&str, &str)],
-    app: &tauri::AppHandle,
+    sink: &ProgressSink<'_>,
     repo_path: &str,
     stats: &HashMap<&str, (u32, u32)>,
     system_prompt: &str,
@@ -1083,8 +1369,7 @@ async fn classify_multi_turn(
             && let JsonlParsed::Summary(s) = parse_jsonl_line(&text)
         {
             session.summary = Some(s.clone());
-            emit_progress(
-                app,
+            sink.emit(
                 repo_path,
                 Some(&s),
                 &[],
@@ -1107,8 +1392,7 @@ async fn classify_multi_turn(
             let mut fc = cached.clone();
             fc.additions = *additions;
             fc.deletions = *deletions;
-            emit_progress(
-                app,
+            sink.emit(
                 repo_path,
                 session.summary.as_deref(),
                 &[fc.clone()],
@@ -1165,8 +1449,7 @@ async fn classify_multi_turn(
         } else {
             "fallback"
         };
-        emit_progress(
-            app,
+        sink.emit(
             repo_path,
             session.summary.as_deref(),
             &[fc.clone()],
@@ -1397,7 +1680,7 @@ pub(crate) async fn run_diff_triage(
         &mut session,
         &files_with_diffs,
         &heuristic_names,
-        &app,
+        &ProgressSink::Triage { app: &app },
         &repo_path,
         &stats,
         system_prompt,
@@ -1450,6 +1733,196 @@ pub(crate) async fn run_diff_triage(
         llm_used: true,
         llm_model: Some(model_name),
     })
+}
+
+/// Review a PR's unified diff with the same multi-turn engine as working-tree
+/// triage, but on the **Main** slot. The diff is fetched once, split per file,
+/// heuristic-filtered (boilerplate skips the LLM), and the remainder fed to the
+/// engine. The multi-turn session is keyed by `(repo, pr_number)` — one entry
+/// per open PR — with `head_sha` (a content hash of the diff) tracked on the
+/// session itself rather than in the key: a re-review of an unchanged head
+/// reuses context and the per-file hash cache for free, while a new commit
+/// (different head_sha) discards the stale conversation and starts fresh
+/// under the same key, keeping the session map bounded by open-PR count.
+#[cfg(feature = "desktop")]
+pub(crate) async fn run_pr_review_impl(
+    repo_path: String,
+    pr_number: i64,
+    state: &crate::AppState,
+) -> Result<PrReviewResult, String> {
+    let diff = crate::github::get_pr_diff_impl(&repo_path, pr_number, state).await?;
+    let head_sha = format!("{:016x}", hash_diff(&diff));
+
+    // Split + heuristic pre-filter (shared with working-tree triage).
+    let mut heuristic: Vec<FileClassification> = Vec::new();
+    let mut needs_llm: Vec<(String, String, u32, u32)> = Vec::new();
+    for f in split_unified_diff(&diff) {
+        if let Some(c) = heuristic_classify(&f.path, f.additions, f.deletions) {
+            heuristic.push(c);
+        } else {
+            needs_llm.push((f.path, f.diff, f.additions, f.deletions));
+        }
+    }
+
+    // Nothing needs the LLM (pure boilerplate / empty diff) — return heuristics.
+    if needs_llm.is_empty() {
+        heuristic.sort_by_key(|a| a.relevance);
+        let n = heuristic.len();
+        return Ok(PrReviewResult {
+            repo_path,
+            pr_number,
+            head_sha,
+            summary: Some(format!(
+                "Reviewed {n} file{}",
+                if n == 1 { "" } else { "s" }
+            )),
+            files: heuristic,
+            llm_used: false,
+            llm_model: None,
+        });
+    }
+
+    // Resolve the Main slot — PR review is an on-demand, higher-quality pass.
+    let registry = crate::provider_registry::load_registry();
+    let resolved = crate::provider_registry::resolve_slot(
+        &registry,
+        crate::provider_registry::SlotName::Main,
+    )
+    .map_err(|e| {
+        format!(
+            "No AI provider configured for review. Set the Main slot in Settings → Providers. ({e})"
+        )
+    })?;
+    let model_name = resolved.config.model.clone();
+
+    // Files beyond the per-pass cap fall back to heuristic classification so the
+    // result still lists every changed file (matches working-tree triage).
+    let llm_files: Vec<(String, String, u32, u32)> =
+        needs_llm.iter().take(MAX_FILES_TO_LLM).cloned().collect();
+    let overflow: Vec<FileClassification> = needs_llm
+        .iter()
+        .skip(MAX_FILES_TO_LLM)
+        .map(|(path, d, a, del)| fallback_classification(path, Some(d), *a, *del))
+        .collect();
+
+    let stats: HashMap<&str, (u32, u32)> = llm_files
+        .iter()
+        .map(|(p, _, a, d)| (p.as_str(), (*a, *d)))
+        .collect();
+    let heuristic_labels: Vec<(String, String)> = heuristic
+        .iter()
+        .map(|c| {
+            let label = serde_json::to_value(c.category)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            (c.path.clone(), label)
+        })
+        .collect();
+    let heuristic_names: Vec<(&str, &str)> = heuristic_labels
+        .iter()
+        .map(|(p, l)| (p.as_str(), l.as_str()))
+        .collect();
+
+    // Reuse the multi-turn session for this (repo, pr) if fresh AND still on
+    // the same head_sha — a new commit on the PR invalidates the cached
+    // conversation just like a stale model/TTL would, and the fresh session
+    // overwrites the same key rather than leaking a new one.
+    let session_key = pr_review_session_key(&repo_path, pr_number);
+    let mut session = {
+        let mut sessions = pr_review_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if sessions.get(&session_key).is_some_and(|s| {
+            s.is_valid(&model_name) && s.head_sha.as_deref() == Some(head_sha.as_str())
+        }) {
+            sessions
+                .remove(&session_key)
+                .unwrap_or_else(|| TriageSession::new(model_name.clone()))
+        } else {
+            sessions.remove(&session_key);
+            TriageSession::new(model_name.clone())
+        }
+    };
+    session.head_sha = Some(head_sha.clone());
+
+    let client = crate::llm_api::build_client(&resolved.config, &resolved.api_key);
+    let prompts_config = crate::config::load_ai_prompts();
+    let system_prompt = prompts_config
+        .diff_triage_system_prompt
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(MULTI_TURN_SYSTEM_PROMPT);
+
+    let app = state.app_handle.read().clone();
+    let sink = ProgressSink::PrReview {
+        app: app.as_ref(),
+        state,
+        pr_number,
+    };
+
+    let parsed = classify_multi_turn(
+        &client,
+        &model_name,
+        &mut session,
+        &llm_files,
+        &heuristic_names,
+        &sink,
+        &repo_path,
+        &stats,
+        system_prompt,
+    )
+    .await;
+
+    // Prune session entries for files no longer in this PR, then store it back.
+    let current_paths: std::collections::HashSet<&str> =
+        llm_files.iter().map(|(p, _, _, _)| p.as_str()).collect();
+    session
+        .file_hashes
+        .retain(|k, _| current_paths.contains(k.as_str()));
+    session
+        .classifications
+        .retain(|k, _| current_paths.contains(k.as_str()));
+    if let Ok(mut sessions) = pr_review_sessions().lock() {
+        sessions.insert(session_key, session);
+    }
+
+    let summary = parsed.summary.clone();
+    let mut files = heuristic;
+    files.extend(parsed.files);
+    files.extend(overflow);
+    files.sort_by_key(|a| a.relevance);
+
+    sink.emit(
+        &repo_path,
+        summary.as_deref(),
+        &[],
+        "done",
+        true,
+        true,
+        Some(&model_name),
+    );
+
+    Ok(PrReviewResult {
+        repo_path,
+        pr_number,
+        head_sha,
+        summary,
+        files,
+        llm_used: true,
+        llm_model: Some(model_name),
+    })
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn run_pr_review(
+    repo_path: String,
+    pr_number: i64,
+    state: State<'_, std::sync::Arc<crate::AppState>>,
+) -> Result<PrReviewResult, String> {
+    let state = state.inner().clone();
+    run_pr_review_impl(repo_path, pr_number, &state).await
 }
 
 #[cfg(test)]
@@ -1655,10 +2128,172 @@ mod tests {
                 assert_eq!(fc.relevance, Relevance::High);
                 assert_eq!(fc.category, Category::ApiSurface);
                 assert_eq!(fc.risk, Risk::BreakingChange);
+                assert!(fc.findings.is_empty());
                 assert_eq!(fc.source, ClassificationSource::Llm);
             }
             _ => panic!("expected File"),
         }
+    }
+
+    #[test]
+    fn parse_jsonl_findings_line() {
+        let line = r#"{"path":"src/config.rs","summary":"Found one issue","findings":[{"path":"src/config.rs","line":42,"hunk":"@@ fn load @@","severity":"bug","message":"Missing error handling","confidence":0.91},{"path":"src/config.rs","line":50,"hunk":null,"severity":"nit","message":"Rename temp var","confidence":0.61}]}"#;
+        match parse_jsonl_line(line) {
+            JsonlParsed::File(fc) => {
+                assert_eq!(fc.path, "src/config.rs");
+                assert_eq!(fc.summary, "Found one issue");
+                assert_eq!(fc.relevance, Relevance::High);
+                assert_eq!(fc.category, Category::BusinessLogic);
+                assert_eq!(fc.risk, Risk::BehavioralChange);
+                assert_eq!(fc.findings.len(), 1, "confidence gate keeps >=0.7 only");
+                assert_eq!(fc.findings[0].severity, Severity::Bug);
+            }
+            _ => panic!("expected findings file"),
+        }
+    }
+
+    #[test]
+    fn parse_jsonl_findings_rejects_bad_severity_and_confidence() {
+        assert!(matches!(
+            parse_jsonl_line(
+                r#"{"path":"a.rs","summary":"x","findings":[{"path":"a.rs","line":1,"hunk":null,"severity":"oops","message":"x","confidence":0.9}]}"#
+            ),
+            JsonlParsed::Skip
+        ));
+        assert!(matches!(
+            parse_jsonl_line(
+                r#"{"path":"a.rs","summary":"x","findings":[{"path":"a.rs","line":1,"hunk":null,"severity":"risk","message":"x","confidence":1.2}]}"#
+            ),
+            JsonlParsed::Skip
+        ));
+    }
+
+    #[test]
+    fn parse_jsonl_rejects_findings_with_mismatched_path() {
+        // Nested finding declares a path different from the outer file's
+        // `path` — reject the line rather than silently attributing the
+        // finding to the wrong file. Confidence (0.9) is kept well above the
+        // default 0.7 gate so the finding survives the confidence filter and
+        // actually reaches the path-mismatch guard.
+        assert!(matches!(
+            parse_jsonl_line(
+                r#"{"path":"a.rs","summary":"x","findings":[{"path":"b.rs","line":1,"hunk":null,"severity":"bug","message":"x","confidence":0.9}]}"#
+            ),
+            JsonlParsed::Skip
+        ));
+    }
+
+    #[test]
+    fn findings_all_below_confidence_or_nit_only_yields_style_cosmetic() {
+        // Every finding is below the confidence gate — filtered out entirely,
+        // but the file classification itself must still come through as
+        // Style/Cosmetic with an empty findings list (not dropped).
+        match parse_jsonl_line(
+            r#"{"path":"a.rs","summary":"low confidence","findings":[{"path":"a.rs","line":1,"hunk":null,"severity":"bug","message":"x","confidence":0.2}]}"#,
+        ) {
+            JsonlParsed::File(fc) => {
+                assert!(
+                    fc.findings.is_empty(),
+                    "below-threshold finding must be filtered out"
+                );
+                assert_eq!(fc.category, Category::Style);
+                assert_eq!(fc.risk, Risk::Cosmetic);
+                assert_eq!(fc.relevance, Relevance::Low);
+            }
+            _ => panic!("expected File even when all findings are filtered out"),
+        }
+
+        // Every remaining finding is Nit severity (still above the confidence
+        // gate) — nits alone are style/cosmetic, not business-logic.
+        match parse_jsonl_line(
+            r#"{"path":"b.rs","summary":"nit only","findings":[{"path":"b.rs","line":2,"hunk":null,"severity":"nit","message":"y","confidence":0.95}]}"#,
+        ) {
+            JsonlParsed::File(fc) => {
+                assert_eq!(fc.findings.len(), 1, "nit finding above threshold is kept");
+                assert_eq!(fc.category, Category::Style);
+                assert_eq!(fc.risk, Risk::Cosmetic);
+            }
+            _ => panic!("expected File for nit-only findings"),
+        }
+    }
+
+    // --- finding_confidence_threshold tests ---
+    // Must run serially: TUIC_REVIEW_CONFIDENCE_THRESHOLD is process-global
+    // env state (same pattern as resolve_github_token's env-var tests).
+
+    #[test]
+    #[serial_test::serial]
+    fn finding_confidence_threshold_valid_override() {
+        unsafe {
+            std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "0.4");
+        }
+        assert_eq!(finding_confidence_threshold(), 0.4);
+        unsafe {
+            std::env::remove_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn finding_confidence_threshold_out_of_range_falls_back_to_default() {
+        unsafe {
+            std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "1.5");
+        }
+        assert_eq!(
+            finding_confidence_threshold(),
+            DEFAULT_FINDING_CONFIDENCE_THRESHOLD
+        );
+
+        unsafe {
+            std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "-0.1");
+        }
+        assert_eq!(
+            finding_confidence_threshold(),
+            DEFAULT_FINDING_CONFIDENCE_THRESHOLD
+        );
+
+        unsafe {
+            std::env::remove_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn finding_confidence_threshold_unparseable_falls_back_to_default() {
+        unsafe {
+            std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "not-a-number");
+        }
+        assert_eq!(
+            finding_confidence_threshold(),
+            DEFAULT_FINDING_CONFIDENCE_THRESHOLD
+        );
+        unsafe {
+            std::env::remove_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD");
+        }
+    }
+
+    #[test]
+    fn relevance_from_findings_maps_highest_severity() {
+        let mk = |severity| Finding {
+            path: "a.rs".to_string(),
+            line: Some(1),
+            hunk: None,
+            severity,
+            message: "x".to_string(),
+            confidence: 0.9,
+        };
+        assert_eq!(
+            relevance_from_findings(&[mk(Severity::Nit)]),
+            Relevance::Low
+        );
+        assert_eq!(
+            relevance_from_findings(&[mk(Severity::Nit), mk(Severity::Risk)]),
+            Relevance::Medium
+        );
+        assert_eq!(
+            relevance_from_findings(&[mk(Severity::Risk), mk(Severity::Bug)]),
+            Relevance::High
+        );
     }
 
     #[test]
@@ -1765,6 +2400,62 @@ mod tests {
     }
 
     #[test]
+    fn split_unified_diff_splits_files_and_counts_changed_lines() {
+        let diff = "\
+diff --git a/src/a.rs b/src/a.rs
+index 111..222 100644
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,2 +1,3 @@
+ unchanged
++added
+-removed
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -1 +1 @@
+-old
++new";
+        let files = split_unified_diff(diff);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "src/a.rs");
+        assert_eq!(files[0].additions, 1);
+        assert_eq!(files[0].deletions, 1);
+        assert!(files[0].diff.contains("diff --git a/src/a.rs b/src/a.rs"));
+        assert_eq!(files[1].path, "src/b.rs");
+        assert_eq!(files[1].additions, 1);
+        assert_eq!(files[1].deletions, 1);
+    }
+
+    #[test]
+    fn pr_review_session_key_combines_repo_and_pr() {
+        let key = pr_review_session_key("/work/repo", 128);
+        assert_eq!(key, "/work/repo#128");
+        // Distinct PRs on the same repo never collide.
+        assert_ne!(
+            pr_review_session_key("/work/repo", 128),
+            pr_review_session_key("/work/repo", 129)
+        );
+        // Same (repo, pr) always keys the same, regardless of commit — the
+        // map is bounded by open-PR count, not by every push (head_sha is
+        // tracked on the session itself, not the key; see PERF-1).
+        assert_eq!(
+            pr_review_session_key("/work/repo", 128),
+            pr_review_session_key("/work/repo", 128)
+        );
+    }
+
+    #[test]
+    fn session_head_sha_starts_none_and_can_be_set() {
+        // New sessions (working-tree or PR) start with no head_sha tracked.
+        let mut s = TriageSession::new("haiku".to_string());
+        assert_eq!(s.head_sha, None);
+        // run_pr_review_impl stamps it after taking/creating a session.
+        s.head_sha = Some("deadbeef".to_string());
+        assert_eq!(s.head_sha.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
     fn build_chat_request_cache_control_on_system_and_last() {
         let session = TriageSession::new("haiku".to_string());
         let req = build_chat_request(&session, "classify this file", MULTI_TURN_SYSTEM_PROMPT);
@@ -1855,6 +2546,7 @@ mod tests {
             category: Category::BusinessLogic,
             risk: Risk::BehavioralChange,
             summary: "does stuff".to_string(),
+            findings: Vec::new(),
             source: ClassificationSource::Llm,
             additions: 10,
             deletions: 2,

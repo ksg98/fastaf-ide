@@ -87,10 +87,21 @@ pub fn is_chrome_row(text: &str) -> bool {
     false
 }
 
-/// Returns true when the row contains an animated spinner character, proving
-/// the agent is alive. This is a subset of `is_chrome_row`: mode-line prefixes
+/// Returns true when the row is an agent's animated working spinner, proving the
+/// agent is alive. This is a subset of `is_chrome_row`: mode-line prefixes
 /// (⏵ ⏸ ›), box borders (▀ ▄), and interrupt markers (■) are static chrome
 /// and return false here.
+///
+/// A spinner is matched STRUCTURALLY: the LEADING glyph of the (trimmed) line
+/// must be a spinner character. Every supported agent renders its spinner at the
+/// very start of the status row — `✻ Cogitating…`, `· Proofing…`, `⠴ Reading…`,
+/// Aider's `█░ Waiting…`. Requiring the glyph to LEAD the line (not merely appear
+/// somewhere) is what keeps a status-line HUD (`[Opus] ██░░ 17% · …`), a welcome
+/// banner (`│ ▐▛███▜▌ │ … · …`), or prose that happens to contain a `·`/block
+/// from being read as a live spinner — the regression that pinned Claude BUSY
+/// forever under a wiz status bar whose progress bar ticks every second
+/// (#446-596f). Chasing individual glyphs is whack-a-mole; the position is the
+/// invariant.
 pub fn is_spinner_row(text: &str) -> bool {
     // junie's idle status-bar effort icon (◐◑◒◓) is static chrome, not an animated
     // spinner — suppress it here so junie's idle state is detected (otherwise the
@@ -101,24 +112,24 @@ pub fn is_spinner_row(text: &str) -> bool {
     if is_codex_chrome_bullet(text) {
         return true;
     }
-    for c in text.chars() {
-        match c {
-            '\u{00B7}'        // · — Claude Code middle-dot spinner prefix
-            | '\u{2591}'      // ░ — Aider Knight Rider spinner (light shade)
-            | '\u{2588}'      // █ — Aider Knight Rider spinner (full block)
-            | '\u{25D0}'      // ◐ — Claude Code tool progress spinner
-            | '\u{25D1}'      // ◑ — Claude Code tool progress spinner
-            | '\u{25D2}'      // ◒ — Claude Code tool progress spinner
-            | '\u{25D3}'      // ◓ — Claude Code tool progress spinner
-            => return true,
-            // Claude Code spinner dingbats (U+2720–U+273F): ✢✣✤...✻✼✽✾✿
-            c if ('\u{2720}'..='\u{273F}').contains(&c) => return true,
-            // Braille spinner chars (U+2800–U+28FF): ⠋⠙⠹⠸⠴⠦⠧⠇ — Gemini CLI
-            c if ('\u{2800}'..='\u{28FF}').contains(&c) => return true,
-            _ => {}
-        }
-    }
-    false
+    // The spinner must LEAD the line. `•`/`◦` (Codex) are handled above.
+    let lead = match text.trim_start().chars().next() {
+        Some(c) => c,
+        None => return false,
+    };
+    matches!(lead,
+        '\u{00B7}'        // · — Claude Code middle-dot spinner prefix
+        | '\u{2591}'      // ░ — Aider Knight Rider spinner (light shade)
+        | '\u{2588}'      // █ — Aider Knight Rider spinner (full block)
+        | '\u{25D0}'      // ◐ — Claude Code tool progress spinner
+        | '\u{25D1}'      // ◑ — Claude Code tool progress spinner
+        | '\u{25D2}'      // ◒ — Claude Code tool progress spinner
+        | '\u{25D3}'      // ◓ — Claude Code tool progress spinner
+    )
+        // Claude Code spinner dingbats (U+2720–U+273F): ✢✣✤...✻✼✽✾✿
+        || ('\u{2720}'..='\u{273F}').contains(&lead)
+        // Braille spinner chars (U+2800–U+28FF): ⠋⠙⠹⠸⠴⠦⠧⠇ — Gemini CLI
+        || ('\u{2800}'..='\u{28FF}').contains(&lead)
 }
 
 /// Codex uses `•` (U+2022) for both chrome (spinner) and real output (action results).
@@ -240,24 +251,18 @@ pub fn find_chrome_cutoff(rows: &[&str]) -> Option<usize> {
         (None, None) => None,
     };
 
-    let cutoff = match anchor {
-        Some(mut idx) => {
-            // Extend cutoff up past separators, empty lines, and task list
-            // rows (⎿ ◻ ✔) above the anchor. Note: is_chrome_row is NOT
-            // included here — spinners above the separator are agent output
-            // indicators (e.g. Gemini braille), not footer chrome.
-            while idx > 0 {
-                let above = rows[idx - 1].trim();
-                if above.is_empty() || is_separator_line(above) || is_task_list_row(above) {
-                    idx -= 1;
-                } else {
-                    break;
-                }
-            }
-            idx
+    let mut cutoff = anchor?;
+    // Extend cutoff up past separators, empty lines, and task list rows (⎿ ◻ ✔)
+    // above the anchor. Note: is_chrome_row is NOT included here — spinners above
+    // the separator are agent output indicators (e.g. Gemini braille), not footer chrome.
+    while cutoff > 0 {
+        let above = rows[cutoff - 1].trim();
+        if above.is_empty() || is_separator_line(above) || is_task_list_row(above) {
+            cutoff -= 1;
+        } else {
+            break;
         }
-        None => return None,
-    };
+    }
 
     Some(cutoff)
 }
@@ -877,7 +882,37 @@ mod tests {
 
     #[test]
     fn spinner_row_aider() {
+        // Aider's Knight Rider block spinner (░█) LEADS its row → still matched.
         assert!(is_spinner_row("░██░░░░░░░"));
+        assert!(is_spinner_row("█░  Waiting for model"));
+    }
+
+    #[test]
+    fn hud_progress_bar_not_generic_spinner() {
+        // A wiz/status-line HUD progress bar ticks every second but is not a
+        // working spinner — the regression that pinned Claude BUSY (#446-596f).
+        // The bar glyphs are mid-line (behind `[Opus] `), never leading.
+        assert!(!is_spinner_row("[Opus | Team] ██░░░░░░░░ 17% | repo"));
+        assert!(!is_spinner_row("  [Opus | Team] ░░░░░░░░░░ 0% | repo"));
+    }
+
+    #[test]
+    fn claude_welcome_banner_not_spinner() {
+        // Claude's ▐▛███▜▌ welcome banner art (boxed) does not lead with a
+        // spinner glyph, and the `·` in `context) · Claude Team` is mid-line.
+        assert!(!is_spinner_row("│   ▐▛███▜▌   │ What's new"));
+        assert!(!is_spinner_row("│  ▝▜█████▛▘  │ Forked subagents"));
+        assert!(!is_spinner_row(
+            "│ Opus 4.8 (1M context) · Claude Team · LS │"
+        ));
+    }
+
+    #[test]
+    fn footer_with_middle_dot_not_spinner() {
+        // The bypass footer carries a `·` separator mid-line — not a spinner.
+        assert!(!is_spinner_row(
+            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+        ));
     }
 
     #[test]

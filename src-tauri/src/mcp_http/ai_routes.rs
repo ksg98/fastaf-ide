@@ -69,6 +69,31 @@ pub(super) struct RunTriageRequest {
 }
 
 #[cfg(feature = "desktop")]
+#[derive(Deserialize)]
+pub(super) struct RunPrReviewRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    #[serde(rename = "prNumber")]
+    pub pr_number: i64,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Deserialize)]
+pub(super) struct RunImprovementScanRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub focus: crate::improvement_scan::ImprovementFocus,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Deserialize)]
+pub(super) struct CreateIssueFromProposalRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub proposal: crate::improvement_scan::ImprovementProposal,
+}
+
+#[cfg(feature = "desktop")]
 pub(super) async fn run_diff_triage_http(
     State(state): State<Arc<AppState>>,
     Json(b): Json<RunTriageRequest>,
@@ -78,6 +103,35 @@ pub(super) async fn run_diff_triage_http(
         None => return err_500("App handle not initialized"),
     };
     json_result(crate::diff_triage::run_diff_triage(app, b.repo_path, b.refresh).await)
+}
+
+#[cfg(feature = "desktop")]
+pub(super) async fn run_pr_review_http(
+    State(state): State<Arc<AppState>>,
+    Json(b): Json<RunPrReviewRequest>,
+) -> Response {
+    json_result(crate::diff_triage::run_pr_review_impl(b.repo_path, b.pr_number, &state).await)
+}
+
+#[cfg(feature = "desktop")]
+pub(super) async fn run_improvement_scan_http(
+    State(state): State<Arc<AppState>>,
+    Json(b): Json<RunImprovementScanRequest>,
+) -> Response {
+    json_result(
+        crate::improvement_scan::run_improvement_scan_impl(b.repo_path, b.focus, &state).await,
+    )
+}
+
+#[cfg(feature = "desktop")]
+pub(super) async fn create_issue_from_proposal_http(
+    State(state): State<Arc<AppState>>,
+    Json(b): Json<CreateIssueFromProposalRequest>,
+) -> Response {
+    json_result(
+        crate::improvement_scan::create_issue_from_proposal_impl(&b.repo_path, &b.proposal, &state)
+            .await,
+    )
 }
 
 // ── Agent loop control + knowledge + scheduler (story 068 RPC slice) ───

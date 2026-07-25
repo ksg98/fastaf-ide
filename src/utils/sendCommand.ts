@@ -56,18 +56,51 @@ export function clearShellFamilyCache(sessionId: string): void {
  *  @param text         Command text to inject (without trailing newline).
  *  @param agentType    Detected agent in the PTY (null = plain shell).
  *  @param shellFamily  Classification of the session's underlying shell.
+ *  @param submit       When false, the text is typed but the trailing Enter is
+ *                      withheld so the user reviews and executes it manually.
+ *                      Used for suggestion chips carrying shell metacharacters
+ *                      (spoofable via OSC 7770 from untrusted output). Default true.
  */
 export async function sendCommand(
 	writeFn: (data: string) => Promise<void>,
 	text: string,
 	agentType?: string | null,
 	shellFamily?: ShellFamily,
+	submit = true,
 ): Promise<void> {
 	const skipPrefix = !agentType && isWindowsNative(shellFamily);
 	const prefix = skipPrefix ? "" : "\x15";
 	const payload = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
 	await writeFn(prefix + payload);
-	await writeFn("\r");
+	if (submit) await writeFn("\r");
+}
+
+/** Shell metacharacters that enable command chaining, substitution, redirection,
+ *  or embedded newlines (Enter). A suggestion chip (OSC 7770 `suggest=`) can be
+ *  emitted by ANY terminal output, including an untrusted file or log the user
+ *  merely displayed. When a chip's text contains one of these, the caller should
+ *  withhold auto-Enter (`sendCommand(..., submit=false)`) so a click can never
+ *  silently execute a chained/redirected command — the user reviews it first.
+ *  Plain-prose suggestions ("Run tests", "Fix the bug") contain none of these
+ *  and keep the one-click behaviour. This is content-based, NOT a provenance
+ *  gate, so legitimate shell-integration suggestions still work. */
+const SHELL_METACHARACTERS = /[;&|`$<>\n\r]/;
+
+export function containsShellMetacharacters(text: string): boolean {
+	return SHELL_METACHARACTERS.test(text);
+}
+
+/** Decide whether a clicked suggestion chip (OSC 7770 `suggest=`) should
+ *  auto-submit (send the trailing Enter) or just type the text for review.
+ *
+ *  The shell-injection guard only applies to SHELLS: in a shell, newlines and
+ *  metacharacters (`;&|`, `<>`, `$\``) chain/redirect commands, so an untrusted
+ *  chip must not silently execute. For an AGENT (codex, claude, …) a chip is
+ *  plain prompt text — nothing is dangerous, and a multi-line prompt MUST submit
+ *  (withholding Enter leaves it dangling; Codex then treats a manual Enter as a
+ *  newline, not submit). So: agent → always submit; shell → gate on metachars. */
+export function shouldAutoSubmitSuggestion(agentType: string | null | undefined, text: string): boolean {
+	return agentType ? true : !containsShellMetacharacters(text);
 }
 
 /** Send a single raw character/escape sequence to a PTY running a TUI dialog

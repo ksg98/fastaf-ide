@@ -2,7 +2,9 @@ import { createStore } from "solid-js/store";
 import { setLocale } from "../i18n";
 import { invoke } from "../invoke";
 import type { IssueFilterMode } from "../types";
+import { runSerializedConfigWrite, updateAppConfig } from "../utils/updateAppConfig";
 import { appLogger } from "./appLogger";
+import { toastsStore } from "./toasts";
 
 // Legacy storage keys for one-time migration
 const LEGACY_KEYS = {
@@ -53,6 +55,7 @@ interface RustAppConfig {
 	intent_tab_title: boolean;
 	suggest_followups: boolean;
 	copy_on_select: boolean;
+	osc52_clipboard: boolean;
 	show_last_prompt: boolean;
 	bell_style: string;
 	global_hotkey: string | null;
@@ -367,6 +370,7 @@ interface SettingsStoreState {
 	intentTabTitle: boolean;
 	suggestFollowups: boolean;
 	copyOnSelect: boolean;
+	osc52Clipboard: boolean;
 	showLastPrompt: boolean;
 	bellStyle: "none" | "visual" | "sound" | "both";
 	globalHotkey: string | null;
@@ -426,6 +430,7 @@ function createSettingsStore() {
 		intentTabTitle: true,
 		suggestFollowups: true,
 		copyOnSelect: true,
+		osc52Clipboard: true,
 		showLastPrompt: true,
 		bellStyle: "visual",
 		globalHotkey: null,
@@ -456,80 +461,111 @@ function createSettingsStore() {
 		terminalScrollSensitivity: 70,
 	});
 
-	// Shadow copy of the last loaded config — preserves fields not tracked in SolidJS store
-	// (e.g. session_token_duration_secs, mcp_server_enabled). Updated on hydrate.
+	// Cache of the last loaded config, refreshed on hydrate and each persist.
+	// Only read by loadFontFromConfig() now — the save path no longer builds
+	// on top of this snapshot (it does a fresh load-modify-save instead).
 	let baseConfig: RustAppConfig | null = null;
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+	// Write lock: save() serializes the ENTIRE state, so a save before a
+	// successful hydrate would overwrite config.json with defaults, wiping the
+	// user's settings (observed in the field: full config reset to defaults).
+	// No successful hydrate, no persist.
+	let hydrated = false;
 
-	/** Build a full RustAppConfig from current store state + base config fields */
-	function buildConfig(): RustAppConfig {
-		return {
-			...(baseConfig ?? ({} as RustAppConfig)),
-			shell: state.shell,
-			font_family: state.font,
-			font_size: state.defaultFontSize,
-			font_weight: state.fontWeight,
-			theme: state.theme,
-			ide: state.ide,
-			default_font_size: state.defaultFontSize,
-			confirm_before_quit: state.confirmBeforeQuit,
-			confirm_before_closing_tab: state.confirmBeforeClosingTab,
-			max_tab_name_length: state.maxTabNameLength,
-			split_tab_mode: state.splitTabMode,
-			tab_ordering_mode: state.tabOrderingMode,
-			tab_cycling_all_types: state.tabCyclingAllTypes,
-			tab_tree_enabled: state.tabTreeEnabled,
-			auto_show_pr_popover: state.autoShowPrPopover,
-			prevent_sleep_when_busy: state.preventSleepWhenBusy,
-			auto_update_enabled: state.autoUpdateEnabled,
-			auto_update_plugins_enabled: state.autoUpdatePluginsEnabled,
-			language: state.language,
-			update_channel: state.updateChannel,
-			disabled_agents: [...state.disabledAgents],
-			intent_tab_title: state.intentTabTitle,
-			suggest_followups: state.suggestFollowups,
-			copy_on_select: state.copyOnSelect,
-			show_last_prompt: state.showLastPrompt,
-			bell_style: state.bellStyle,
-			global_hotkey: state.globalHotkey,
-			issue_filter: state.issueFilter,
-			pr_hide_drafts: state.prHideDrafts,
-			pr_hide_conflicting: state.prHideConflicting,
-			pr_hide_ci_failing: state.prHideCiFailing,
-			experimental_features_enabled: state.experimentalFeaturesEnabled,
-			ai_chat_enabled: state.aiChatEnabled,
-			ai_triage_enabled: state.aiTriageEnabled,
-			ai_watchers_enabled: state.aiWatchersEnabled,
-			scrollback_reflow: state.scrollbackReflow,
-			cursor_style: state.cursorStyle,
-			terminal_renderer: state.terminalRenderer,
-			show_block_timestamps: state.showBlockTimestamps,
-			show_scrollbar_marks: state.showScrollbarMarks,
-			block_folding_enabled: state.blockFoldingEnabled,
-			index_strategy: state.indexStrategy,
-			standby_timeout_minutes: state.standbyTimeoutMinutes,
-			custom_launchers: [...state.customLaunchers],
-			inline_blame_enabled: state.inlineBlameEnabled,
-			file_tree_colors_enabled: state.fileTreeColorsEnabled,
-			open_files_to_side: state.openFilesToSide,
-			hide_docked_file_tabs: state.hideDockedFileTabs,
-			multiview_enabled: state.multiviewEnabled,
-			terminal_drag_selects: state.terminalDragSelects,
-			import_tools_enabled: state.importToolsEnabled,
-			terminal_scroll_sensitivity: state.terminalScrollSensitivity,
-			services: baseConfig?.services ?? { auth: { session_token_duration_secs: 86400 } },
-			mcp_server_enabled: baseConfig?.mcp_server_enabled ?? true,
-		};
+	/** Overwrite the settings-store-owned fields on a freshly-loaded config.
+	 *  Fields owned by OTHER surfaces are deliberately left as loaded:
+	 *   - `services.*`        — ServicesTab (its own load-modify-save)
+	 *   - `mcp_server_enabled` — ServicesTab
+	 *   - `global_hotkey`      — the `set_global_hotkey` command
+	 *  This store must never write them from its own (possibly stale) snapshot,
+	 *  or a general-settings save clobbers a concurrent writer's change — the
+	 *  "web server disabled / hotkey lost on restart" bug. Mirrors the
+	 *  load-modify-save pattern ServicesTab already uses. */
+	function applyOwnedFields(config: RustAppConfig): RustAppConfig {
+		config.shell = state.shell;
+		config.font_family = state.font;
+		config.font_size = state.defaultFontSize;
+		config.font_weight = state.fontWeight;
+		config.theme = state.theme;
+		config.ide = state.ide;
+		config.default_font_size = state.defaultFontSize;
+		config.confirm_before_quit = state.confirmBeforeQuit;
+		config.confirm_before_closing_tab = state.confirmBeforeClosingTab;
+		config.max_tab_name_length = state.maxTabNameLength;
+		config.split_tab_mode = state.splitTabMode;
+		config.tab_ordering_mode = state.tabOrderingMode;
+		config.tab_cycling_all_types = state.tabCyclingAllTypes;
+		config.tab_tree_enabled = state.tabTreeEnabled;
+		config.auto_show_pr_popover = state.autoShowPrPopover;
+		config.prevent_sleep_when_busy = state.preventSleepWhenBusy;
+		config.auto_update_enabled = state.autoUpdateEnabled;
+		config.auto_update_plugins_enabled = state.autoUpdatePluginsEnabled;
+		config.language = state.language;
+		config.update_channel = state.updateChannel;
+		config.disabled_agents = [...state.disabledAgents];
+		config.intent_tab_title = state.intentTabTitle;
+		config.suggest_followups = state.suggestFollowups;
+		config.copy_on_select = state.copyOnSelect;
+		config.osc52_clipboard = state.osc52Clipboard;
+		config.show_last_prompt = state.showLastPrompt;
+		config.bell_style = state.bellStyle;
+		config.issue_filter = state.issueFilter;
+		config.pr_hide_drafts = state.prHideDrafts;
+		config.pr_hide_conflicting = state.prHideConflicting;
+		config.pr_hide_ci_failing = state.prHideCiFailing;
+		config.experimental_features_enabled = state.experimentalFeaturesEnabled;
+		config.ai_chat_enabled = state.aiChatEnabled;
+		config.ai_triage_enabled = state.aiTriageEnabled;
+		config.ai_watchers_enabled = state.aiWatchersEnabled;
+		config.scrollback_reflow = state.scrollbackReflow;
+		config.cursor_style = state.cursorStyle;
+		config.terminal_renderer = state.terminalRenderer;
+		config.show_block_timestamps = state.showBlockTimestamps;
+		config.show_scrollbar_marks = state.showScrollbarMarks;
+		config.block_folding_enabled = state.blockFoldingEnabled;
+		config.index_strategy = state.indexStrategy;
+		config.standby_timeout_minutes = state.standbyTimeoutMinutes;
+		config.custom_launchers = [...state.customLaunchers];
+		config.inline_blame_enabled = state.inlineBlameEnabled;
+		config.file_tree_colors_enabled = state.fileTreeColorsEnabled;
+		config.open_files_to_side = state.openFilesToSide;
+		config.hide_docked_file_tabs = state.hideDockedFileTabs;
+		config.multiview_enabled = state.multiviewEnabled;
+		config.terminal_drag_selects = state.terminalDragSelects;
+		config.import_tools_enabled = state.importToolsEnabled;
+		config.terminal_scroll_sensitivity = state.terminalScrollSensitivity;
+		return config;
 	}
 
-	/** Debounced save — coalesces rapid setting changes into a single IPC call */
+	/** Load the current on-disk config, apply this store's owned fields, and
+	 *  persist. Load-modify-save guarantees fields written by other surfaces
+	 *  (services, global_hotkey, …) survive — never overwritten from a stale
+	 *  in-memory snapshot. If the fresh load fails we skip the save entirely
+	 *  rather than risk writing a partial config. */
+	async function persist(): Promise<void> {
+		try {
+			const config = await updateAppConfig<RustAppConfig>((fresh) => {
+				applyOwnedFields(fresh);
+			});
+			baseConfig = config; // keep the cache (loadFontFromConfig) current
+		} catch (err) {
+			appLogger.error("config", "Failed to save config", err);
+		}
+	}
+
+	/** Debounced save — coalesces rapid setting changes into a single persist */
 	function save(): void {
+		if (!hydrated) {
+			appLogger.error(
+				"config",
+				"Refusing to persist settings: store not hydrated — would clobber config.json with defaults",
+			);
+			return;
+		}
 		if (saveTimer) clearTimeout(saveTimer);
 		saveTimer = setTimeout(() => {
 			saveTimer = null;
-			invoke("save_config", { config: buildConfig() }).catch((err: unknown) =>
-				appLogger.error("config", "Failed to save config", err),
-			);
+			void persist();
 		}, SAVE_DEBOUNCE_MS);
 	}
 
@@ -541,9 +577,9 @@ function createSettingsStore() {
 				const legacyIde = localStorage.getItem(LEGACY_KEYS.IDE);
 				if (legacyIde) {
 					try {
-						const config = await invoke<RustAppConfig>("load_config");
-						config.ide = legacyIde;
-						await invoke("save_config", { config });
+						await updateAppConfig<RustAppConfig>((config) => {
+							config.ide = legacyIde;
+						});
 					} catch {
 						/* ignore migration failure */
 					}
@@ -579,6 +615,7 @@ function createSettingsStore() {
 				setState("disabledAgents", config.disabled_agents ?? []);
 				setState("intentTabTitle", config.intent_tab_title ?? true);
 				setState("copyOnSelect", config.copy_on_select ?? true);
+				setState("osc52Clipboard", config.osc52_clipboard ?? true);
 				setState("showLastPrompt", config.show_last_prompt ?? false);
 				setState("bellStyle", (config.bell_style || "visual") as SettingsStoreState["bellStyle"]);
 				setState("suggestFollowups", config.suggest_followups ?? true);
@@ -612,8 +649,14 @@ function createSettingsStore() {
 				setState("terminalDragSelects", config.terminal_drag_selects ?? true);
 				setState("importToolsEnabled", config.import_tools_enabled ?? true);
 				setState("terminalScrollSensitivity", config.terminal_scroll_sensitivity ?? 70);
+				hydrated = true;
 			} catch (err) {
-				appLogger.error("config", "Failed to hydrate settings", err);
+				appLogger.error("config", "Failed to hydrate settings — persistence disabled for this session", err);
+				toastsStore.add(
+					"Settings failed to load",
+					"Running on defaults; changes will NOT be saved. Check logs and restart.",
+					"error",
+				);
 			}
 		},
 
@@ -778,6 +821,12 @@ function createSettingsStore() {
 			save();
 		},
 
+		/** Enable/disable honoring OSC 52 clipboard-write sequences from terminal output */
+		setOsc52Clipboard(enabled: boolean): void {
+			setState("osc52Clipboard", enabled);
+			save();
+		},
+
 		setShowLastPrompt(enabled: boolean): void {
 			setState("showLastPrompt", enabled);
 			save();
@@ -905,7 +954,7 @@ function createSettingsStore() {
 			const prevValue = state.globalHotkey;
 			setState("globalHotkey", combo);
 			try {
-				await invoke("set_global_hotkey", { combo });
+				await runSerializedConfigWrite(() => invoke("set_global_hotkey", { combo }));
 			} catch (err) {
 				appLogger.error("config", "Failed to set global hotkey", err);
 				setState("globalHotkey", prevValue);

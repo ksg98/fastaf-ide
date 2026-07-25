@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+#
+# pre-push — enforce the GitHub-issue closing-keyword rule (AGENTS.md "Commits").
+#
+# Blocks a push to the default branch when a pushed commit references an OPEN
+# issue with a bare `#N` and no closing keyword (fix/close/resolve). A bare
+# `#N` only LINKS the issue — it does not auto-close it — so a fix pushed that
+# way leaves the issue open (exactly what bit us on #100-#104).
+#
+# Skips silently when it cannot verify (gh missing / unauthenticated / offline)
+# — a network hiccup must never block a push. Reference-only commits that
+# legitimately use a bare `#N` bypass with `git push --no-verify` or
+# `TUIC_SKIP_ISSUE_CHECK=1 git push`.
+set -euo pipefail
+
+[ "${TUIC_SKIP_ISSUE_CHECK:-}" = "1" ] && exit 0
+
+remote_name="${1:-origin}"
+
+# Only enforce on the default branch — that's where closing keywords take effect
+# on push (this repo pushes directly to main).
+default_branch="$(git symbolic-ref --quiet --short "refs/remotes/${remote_name}/HEAD" 2>/dev/null | sed "s|^${remote_name}/||")"
+default_branch="${default_branch:-main}"
+
+# gh is required to know an issue's state. No gh / no auth → cannot verify → allow.
+command -v gh >/dev/null 2>&1 || exit 0
+gh auth status >/dev/null 2>&1 || exit 0
+
+# Closing keywords GitHub recognises, immediately preceding the #N.
+close_kw='([Cc]los(e|es|ed)|[Ff]ix(es|ed)?|[Rr]esolv(e|es|ed))'
+
+# bash 3.2 (macOS default) has no associative arrays — memoise gh lookups in a
+# plain string of " N=STATE" tokens.
+issue_state_cache=" "
+offenders=()                     # "sha #N subject" lines to report
+
+issue_is_open() {
+  local n="$1" state
+  case "$issue_state_cache" in
+    *" $n="*) state="${issue_state_cache##* $n=}"; state="${state%% *}" ;;
+    *)
+      if state="$(gh issue view "$n" --json state -q .state 2>/dev/null)"; then
+        :
+      else
+        state="UNKNOWN"          # not an issue / no access / offline → don't block
+      fi
+      issue_state_cache="$issue_state_cache$n=$state " ;;
+  esac
+  [ "$state" = "OPEN" ]
+}
+
+check_range() {
+  local range="$1" sha
+  # No commits in range → nothing to do.
+  git rev-list "$range" >/dev/null 2>&1 || return 0
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    local msg subject
+    msg="$(git log -1 --format=%B "$sha")"
+    subject="$(git log -1 --format=%s "$sha")"
+
+    # Referenced issue numbers (bare or keyworded).
+    local referenced closed n
+    referenced="$(grep -oE '#[0-9]+' <<<"$msg" | tr -d '#' | sort -u || true)"
+    [ -n "$referenced" ] || continue
+
+    # Numbers already covered by a closing keyword.
+    closed="$(grep -oiE "${close_kw}[: ]+#[0-9]+" <<<"$msg" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true)"
+
+    for n in $referenced; do
+      grep -qx "$n" <<<"$closed" && continue          # has a closing keyword
+      issue_is_open "$n" || continue                   # only flag OPEN issues
+      offenders+=("${sha:0:9} #$n — ${subject}")
+    done
+  done < <(git rev-list "$range")
+}
+
+# stdin: <local-ref> <local-sha> <remote-ref> <remote-sha>
+zero="0000000000000000000000000000000000000000"
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue               # branch deletion
+  [ "$remote_ref" = "refs/heads/${default_branch}" ] || continue
+  if [ "$remote_sha" = "$zero" ]; then
+    check_range "$local_sha --not --remotes=${remote_name}"
+  else
+    check_range "${remote_sha}..${local_sha}"
+  fi
+done
+
+[ "${#offenders[@]}" -eq 0 ] && exit 0
+
+# Dedupe and report.
+printf '\n\033[1;31m✗ pre-push blocked:\033[0m open issue(s) referenced without a closing keyword\n\n' >&2
+printf '%s\n' "${offenders[@]}" | sort -u | sed 's/^/  /' >&2
+cat >&2 <<'EOF'
+
+A bare `#N` only links the issue — GitHub will NOT auto-close it on push.
+
+  • If the commit FIXES the issue:  git commit --amend  (add `Closes #N`), then re-push.
+  • If it is reference-only:         git push --no-verify   (or TUIC_SKIP_ISSUE_CHECK=1 git push)
+
+See AGENTS.md → "Commits".
+EOF
+exit 1

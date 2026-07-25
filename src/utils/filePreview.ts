@@ -38,13 +38,6 @@ const PREVIEW_EXTS = new Set([
 	"m4a",
 ]);
 
-const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "tiff", "tif"]);
-
-/** Whether a file path has an image extension suitable for OSC 1337 inline display. */
-export function isImageFile(filePath: string): boolean {
-	return IMAGE_EXTS.has(extOf(filePath));
-}
-
 /** Extract lowercase extension from a file path (without the dot). */
 function extOf(filePath: string): string {
 	const dot = filePath.lastIndexOf(".");

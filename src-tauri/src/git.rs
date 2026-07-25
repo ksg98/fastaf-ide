@@ -7,7 +7,7 @@ use std::sync::Arc;
 #[cfg(feature = "desktop")]
 use tauri::State;
 
-use crate::git_cli::git_cmd;
+use crate::git_cli::{finish_failed_git_operation_after_abort, git_cmd};
 use crate::git_reads::git_reads;
 use crate::state::{AppState, GitCache};
 
@@ -359,7 +359,7 @@ pub(crate) async fn get_remote_url(path: String) -> Result<Option<String>, Strin
 }
 
 /// Validate that a branch name is a legal git branch name.
-fn validate_branch_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_branch_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Branch name cannot be empty".to_string());
     }
@@ -386,7 +386,7 @@ pub(crate) fn rename_branch_impl(path: &str, old_name: &str, new_name: &str) -> 
 
     // Execute git branch -m oldname newname
     match git_cmd(&repo_path)
-        .args(["branch", "-m", old_name, new_name])
+        .args(["branch", "-m", "--", old_name, new_name])
         .run()
     {
         Ok(_) => Ok(()),
@@ -529,21 +529,20 @@ pub(crate) fn update_from_base_impl(
 
     // Apply strategy
     match strategy {
-        "rebase" => {
-            match git_cmd(&repo_path).args(["rebase", &base]).run() {
-                Ok(_) => Ok(format!("Rebased {branch_name} onto {base}")),
-                Err(crate::git_cli::GitError::NonZeroExit { stderr, .. }) => {
-                    // Abort the failed rebase
-                    let _ = git_cmd(&repo_path).args(["rebase", "--abort"]).run();
-                    state.invalidate_repo_caches(path);
-                    Err(format!("Rebase failed (aborted): {stderr}"))
-                }
-                Err(e) => {
-                    let _ = git_cmd(&repo_path).args(["rebase", "--abort"]).run();
-                    Err(format!("Rebase error: {e}"))
-                }
+        "rebase" => match git_cmd(&repo_path).args(["rebase", &base]).run() {
+            Ok(_) => Ok(format!("Rebased {branch_name} onto {base}")),
+            Err(crate::git_cli::GitError::NonZeroExit { stderr, .. }) => {
+                let message = finish_failed_git_operation_after_abort(
+                    &repo_path,
+                    "rebase",
+                    "Rebase failed",
+                    stderr,
+                );
+                state.invalidate_repo_caches(path);
+                Err(message)
             }
-        }
+            Err(e) => Err(format!("Rebase error: {e}")),
+        },
         "merge" => {
             match git_cmd(&repo_path)
                 .args(["merge", &base, "--no-edit"])
@@ -551,14 +550,16 @@ pub(crate) fn update_from_base_impl(
             {
                 Ok(_) => Ok(format!("Merged {base} into {branch_name}")),
                 Err(crate::git_cli::GitError::NonZeroExit { stderr, .. }) => {
-                    let _ = git_cmd(&repo_path).args(["merge", "--abort"]).run();
+                    let message = finish_failed_git_operation_after_abort(
+                        &repo_path,
+                        "merge",
+                        "Merge failed",
+                        stderr,
+                    );
                     state.invalidate_repo_caches(path);
-                    Err(format!("Merge failed (aborted): {stderr}"))
+                    Err(message)
                 }
-                Err(e) => {
-                    let _ = git_cmd(&repo_path).args(["merge", "--abort"]).run();
-                    Err(format!("Merge error: {e}"))
-                }
+                Err(e) => Err(format!("Merge error: {e}")),
             }
         }
         _ => Err(format!(
@@ -622,7 +623,7 @@ pub(crate) fn delete_branch_impl(
     }
 
     let flag = if force { "-D" } else { "-d" };
-    match git_cmd(&repo_path).args(["branch", flag, name]).run() {
+    match git_cmd(&repo_path).args(["branch", flag, "--", name]).run() {
         Ok(_) => Ok(DeleteBranchResult {
             deleted: true,
             branch: name.to_string(),
@@ -1866,11 +1867,15 @@ pub(crate) fn merged_branch_set(path: &Path) -> std::collections::HashSet<String
 /// ahead/behind backend. Shared by the CLI and gix adapters for byte parity.
 pub(crate) fn apply_base_ahead_behind_and_sort(path: &Path, branches: &mut [BranchDetail]) {
     let path_str = path.to_string_lossy();
+    // One `git config --get-regexp` for all branch bases, not one subprocess
+    // per local branch.
+    let bases = crate::worktree::get_branch_bases(&path_str);
     for branch in branches.iter_mut() {
         if branch.is_remote {
             continue;
         }
-        if let Some(base) = crate::worktree::get_branch_base(&path_str, &branch.name) {
+        if let Some(base) = bases.get(&branch.name) {
+            let base = base.clone();
             // left=base, right=branch, so (left-not-right, right-not-left) =
             // (base_behind, base_ahead).
             if let Ok((behind, ahead)) = git_reads().ahead_behind(path, &base, &branch.name) {
@@ -2307,6 +2312,9 @@ pub(crate) struct WorkingTreeStatus {
     pub staged: Vec<StatusEntry>,
     pub unstaged: Vec<StatusEntry>,
     pub untracked: Vec<String>,
+    /// Unmerged (conflicted) files from `u` porcelain-v2 records. `status` holds
+    /// the two-char conflict code (e.g. "UU", "AA", "DD").
+    pub conflicted: Vec<StatusEntry>,
 }
 
 /// Parse porcelain v2 output into a `WorkingTreeStatus`.
@@ -2319,6 +2327,7 @@ pub(crate) fn parse_porcelain_v2(output: &str) -> WorkingTreeStatus {
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
     let mut untracked = Vec::new();
+    let mut conflicted = Vec::new();
 
     for line in output.lines() {
         if let Some(rest) = line.strip_prefix("# branch.head ") {
@@ -2348,8 +2357,10 @@ pub(crate) fn parse_porcelain_v2(output: &str) -> WorkingTreeStatus {
             parse_rename_entry(rest, &mut staged, &mut unstaged);
         } else if let Some(rest) = line.strip_prefix("? ") {
             untracked.push(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix("u ") {
+            // Unmerged entry: u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+            parse_unmerged_entry(rest, &mut conflicted);
         }
-        // We ignore "u " (unmerged) entries for now — they are conflict markers
     }
 
     WorkingTreeStatus {
@@ -2361,6 +2372,7 @@ pub(crate) fn parse_porcelain_v2(output: &str) -> WorkingTreeStatus {
         staged,
         unstaged,
         untracked,
+        conflicted,
     }
 }
 
@@ -2454,6 +2466,22 @@ fn parse_rename_entry(rest: &str, staged: &mut Vec<StatusEntry>, unstaged: &mut 
             deletions: 0,
         });
     }
+}
+
+/// Parse an unmerged/conflicted (type `u`) porcelain v2 entry.
+fn parse_unmerged_entry(rest: &str, conflicted: &mut Vec<StatusEntry>) {
+    // Fields: XY sub m1 m2 m3 mW h1 h2 h3 path (10 space-separated fields)
+    let fields: Vec<&str> = rest.splitn(10, ' ').collect();
+    if fields.len() < 10 {
+        return;
+    }
+    conflicted.push(StatusEntry {
+        path: fields[9].to_string(),
+        status: fields[0].to_string(),
+        original_path: None,
+        additions: 0,
+        deletions: 0,
+    });
 }
 
 /// Parse `git diff --numstat` output into a path→(additions, deletions) map.
@@ -3958,6 +3986,21 @@ mod tests {
         assert!(status.staged.is_empty());
         assert!(status.unstaged.is_empty());
         assert!(status.untracked.is_empty());
+        assert!(status.conflicted.is_empty());
+    }
+
+    #[test]
+    fn parse_porcelain_v2_unmerged_conflict() {
+        // Type u entry: both-modified conflict during a merge.
+        // Format: u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+        let output = "u UU N... 100644 100644 100644 100644 abc123 def456 789abc src/conflict.rs\n";
+        let status = parse_porcelain_v2(output);
+        assert_eq!(status.conflicted.len(), 1);
+        assert_eq!(status.conflicted[0].path, "src/conflict.rs");
+        assert_eq!(status.conflicted[0].status, "UU");
+        // Conflicted files must not leak into staged/unstaged.
+        assert!(status.staged.is_empty());
+        assert!(status.unstaged.is_empty());
     }
 
     #[test]

@@ -80,14 +80,18 @@ export function createTabManager<T extends BaseTab>(storeName: string = "unknown
 			return `${prefix}-${state.counter}`;
 		},
 
+		/** Remove a tab. Sets activeId to null when removing the active tab — the caller
+		 *  is responsible for selecting a visibility-aware replacement (same contract as
+		 *  terminalsStore.remove). The store can't filter by branch/repo scope here, so
+		 *  auto-promoting an arbitrary remaining tab could activate one hidden from the
+		 *  tab bar — a ghost full-screen panel with no visible tab. */
 		remove(id: string): void {
 			setState(
 				produce((s) => {
 					delete s.tabs[id];
 					s._order = s._order.filter((oid) => oid !== id);
 					if (s.activeId === id) {
-						const remaining = Object.keys(s.tabs);
-						s.activeId = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+						s.activeId = null;
 					}
 				}),
 			);

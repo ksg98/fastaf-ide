@@ -236,6 +236,80 @@ pub(crate) fn git_cmd(cwd: &Path) -> GitCmd {
     }
 }
 
+fn finish_failed_operation_after_abort_result(
+    operation: &str,
+    failure_summary: &str,
+    original_error: &str,
+    abort_result: Result<(), GitError>,
+) -> String {
+    match abort_result {
+        Ok(()) => format!("{failure_summary} (aborted): {original_error}"),
+        Err(abort_error) => {
+            tracing::error!(
+                source = "git_cli",
+                operation = %operation,
+                original_error = %original_error,
+                abort_error = %abort_error,
+                "git {operation} --abort failed after failed {operation}"
+            );
+            format!(
+                "{failure_summary}; repo left in a conflicted state, run git {operation} --abort manually: {abort_error}; original error: {original_error}"
+            )
+        }
+    }
+}
+
+/// Abort a failed merge/rebase and describe the final state.
+///
+/// Returns a message that claims `(aborted)` only when the abort command
+/// succeeds. If abort fails, the message tells the user the repository may still
+/// be conflicted and includes the manual recovery command.
+pub(crate) fn finish_failed_git_operation_after_abort(
+    repo_path: &Path,
+    operation: &str,
+    failure_summary: &str,
+    original_error: impl fmt::Display,
+) -> String {
+    let original_error = original_error.to_string();
+    let abort_result = git_cmd(repo_path)
+        .args([operation, "--abort"])
+        .run()
+        .map(|_| ());
+    finish_failed_operation_after_abort_result(
+        operation,
+        failure_summary,
+        &original_error,
+        abort_result,
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn parse_conflicted_files_porcelain(status: &str) -> Vec<String> {
+    status
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let code = &line[..2];
+            let conflicted = matches!(code, "DD" | "AU" | "UD" | "UA" | "DU" | "AA" | "UU");
+            conflicted.then(|| line[3..].trim().to_string())
+        })
+        .filter(|path| !path.is_empty())
+        .collect()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn build_conflict_assist_prompt(pr_number: i64, base: &str, files: &[String]) -> String {
+    let mut prompt = format!(
+        "Resolve the merge conflicts for PR #{pr_number} after rebasing onto {base}. Do not push and do not merge. Edit only the conflicted files, run relevant checks, and stop for human review.\n\nConflicted files:"
+    );
+    for file in files {
+        prompt.push_str(&format!("\n- {file}"));
+    }
+    prompt
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -265,6 +339,62 @@ mod tests {
             .output()
             .expect("git config name");
         (dir, path)
+    }
+
+    #[test]
+    fn parse_conflicted_files_porcelain_extracts_unmerged_paths() {
+        let status = "\
+UU src/lib.rs
+AA src/new.rs
+ M src/clean.rs
+?? notes.txt
+DU src/deleted.rs
+";
+        assert_eq!(
+            parse_conflicted_files_porcelain(status),
+            vec!["src/lib.rs", "src/new.rs", "src/deleted.rs"]
+        );
+    }
+
+    #[test]
+    fn build_conflict_assist_prompt_lists_files_and_gates_push() {
+        let files = vec!["src/lib.rs".to_string(), "src/db.rs".to_string()];
+        let prompt = build_conflict_assist_prompt(42, "main", &files);
+        assert!(prompt.contains("PR #42"));
+        assert!(prompt.contains("rebasing onto main"));
+        assert!(prompt.contains("Do not push and do not merge"));
+        assert!(prompt.contains("- src/lib.rs"));
+        assert!(prompt.contains("- src/db.rs"));
+    }
+
+    #[test]
+    fn finish_failed_operation_claims_aborted_only_when_abort_succeeds() {
+        let msg = finish_failed_operation_after_abort_result(
+            "rebase",
+            "Rebase failed",
+            "conflicts",
+            Ok(()),
+        );
+
+        assert_eq!(msg, "Rebase failed (aborted): conflicts");
+    }
+
+    #[test]
+    fn finish_failed_operation_surfaces_abort_failure() {
+        let msg = finish_failed_operation_after_abort_result(
+            "merge",
+            "Merge failed",
+            "conflicts",
+            Err(GitError::NonZeroExit {
+                code: Some(128),
+                stderr: "fatal: There is no merge to abort".to_string(),
+            }),
+        );
+
+        assert!(!msg.contains("(aborted)"));
+        assert!(msg.contains("repo left in a conflicted state"));
+        assert!(msg.contains("run git merge --abort manually"));
+        assert!(msg.contains("original error: conflicts"));
     }
 
     #[test]

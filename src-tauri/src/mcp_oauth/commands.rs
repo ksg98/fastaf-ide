@@ -39,6 +39,10 @@ pub(crate) struct StartOAuthResponse {
 /// browser redirects to `http://127.0.0.1:{port}/oauth/callback` after the
 /// user grants consent. The callback server completes the token exchange and
 /// resumes the upstream connection automatically.
+// DEFERRED (2026-07-06) — no HTTP/browser parity: start binds a loopback callback
+// server and opens the OS browser, so the redirect can't return to a remote/PWA
+// client. Both start/cancel are in transport.ts INTENTIONALLY_UNMAPPED until the
+// browser-mode OAuth redirect flow gets a proper UX design.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub(crate) async fn start_mcp_upstream_oauth(

@@ -1,12 +1,15 @@
-import { type Component, createEffect, For, type JSX, Show } from "solid-js";
+import { type Component, createEffect, createMemo, For, type JSX, Show } from "solid-js";
 import { t } from "../../i18n";
 import { appLogger } from "../../stores/appLogger";
 import { githubStore } from "../../stores/github";
+import { flattenReviewFindings, postableFindings, prReviewStore, type ReviewFinding } from "../../stores/prReview";
 import { repositoriesStore } from "../../stores/repositories";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { getCiClass, getCiIcon } from "../../utils/ciDisplay";
+import { handleOpenUrl } from "../../utils/openUrl";
 import { relativeTime } from "../../utils/time";
+import { SeverityIcon } from "../shared/SeverityIcon";
 import { CiRing } from "../ui/CiRing";
 import s from "./PrDetailPopover.module.css";
 
@@ -86,6 +89,12 @@ const CiAutoHealToggle: Component<{ repoPath: string; branch: string }> = (props
 export interface PrDetailContentProps {
 	repoPath: string;
 	branch: string;
+	/** Shown only when the PR merge state is conflicting — rebases the PR head
+	 *  branch onto its base in a worktree and opens an agent to resolve conflicts. */
+	onConflictAssist?: (prNumber: number) => void;
+	/** Push the (rebased/resolved) conflict worktree branch to origin. Shown when a
+	 *  local worktree exists for this branch. Gated behind a confirm() by the caller. */
+	onPushBranch?: (worktreePath: string) => void;
 	/** Extra content rendered after CI checks (e.g. action buttons) */
 	children?: JSX.Element;
 }
@@ -96,6 +105,43 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 	const prData = () => githubStore.getBranchPrData(props.repoPath, props.branch);
 	const checkSummary = () => githubStore.getCheckSummary(props.repoPath, props.branch);
 	const checkDetails = () => githubStore.getCheckDetails(props.repoPath, props.branch);
+
+	// AI-review state lives in prReviewStore keyed by repo+PR, not in local
+	// signals — so an in-flight review survives the popover being closed and
+	// reopening shows its running/done/error state instead of resetting to "Run".
+	const reviewEntry = () => {
+		const pr = prData();
+		return pr ? prReviewStore.get(props.repoPath, pr.number) : undefined;
+	};
+	const review = () => reviewEntry()?.result ?? null;
+	const reviewLoading = () => reviewEntry()?.status === "running";
+	const reviewPosting = () => reviewEntry()?.posting ?? false;
+	const reviewError = () => reviewEntry()?.error ?? null;
+	const selectedFindingIds = () => reviewEntry()?.selectedIds ?? [];
+
+	const reviewFindings = createMemo<ReviewFinding[]>(() => flattenReviewFindings(review()?.files ?? []));
+
+	const selectedFindings = createMemo(() => postableFindings(reviewFindings(), new Set(selectedFindingIds())));
+
+	function runAiReview() {
+		const pr = prData();
+		if (!pr) return;
+		void prReviewStore.run(props.repoPath, pr.number);
+	}
+
+	function toggleFinding(id: string) {
+		const pr = prData();
+		if (!pr) return;
+		prReviewStore.toggleFinding(props.repoPath, pr.number, id);
+	}
+
+	function postSelectedFindings() {
+		const pr = prData();
+		const findings = selectedFindings();
+		if (!pr || findings.length === 0 || reviewPosting()) return;
+		if (!window.confirm(t("prDetail.postReviewConfirm", "Post selected AI review findings to GitHub?"))) return;
+		void prReviewStore.post(props.repoPath, pr.number, findings);
+	}
 
 	// Lazy-load CI check details when this content mounts.
 	// Deferred via queueMicrotask so the popover renders instantly with cached
@@ -136,6 +182,20 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 		if (!label) return null;
 		return { label: label.label, cssClass: label.css_class };
 	};
+
+	const isConflicting = () => mergeState()?.cssClass === "conflicting";
+
+	/** Local worktree path for this PR's head branch, if one exists (e.g. after
+	 *  conflict-assist created it). Drives the Push button's visibility. */
+	const conflictWorktreePath = () =>
+		repositoriesStore.state.repositories[props.repoPath]?.branches[props.branch]?.worktreePath ?? null;
+
+	function handlePush() {
+		const wt = conflictWorktreePath();
+		if (!wt) return;
+		if (!window.confirm(t("github.pushConflictConfirm", "Push the rebased/resolved branch to origin?"))) return;
+		props.onPushBranch?.(wt);
+	}
 
 	return (
 		<Show
@@ -247,20 +307,124 @@ export const PrDetailContent: Component<PrDetailContentProps> = (props) => {
 						<CiAutoHealToggle repoPath={props.repoPath} branch={props.branch} />
 					</Show>
 
+					{/* Conflict resolution assist — only when the PR merge state is conflicting */}
+					<Show when={isConflicting() && (props.onConflictAssist || (props.onPushBranch && conflictWorktreePath()))}>
+						<div class={s.actions}>
+							<Show when={props.onConflictAssist}>
+								<button
+									class={s.viewDiffBtn}
+									type="button"
+									onClick={() => props.onConflictAssist?.(pr().number)}
+									title={t(
+										"prDetail.resolveConflictsHint",
+										"Rebase the PR branch and open an agent to resolve conflicts",
+									)}
+								>
+									{t("prDetail.resolveConflicts", "Resolve conflicts")}
+								</button>
+							</Show>
+							<Show when={props.onPushBranch && conflictWorktreePath()}>
+								<button
+									class={s.viewDiffBtn}
+									type="button"
+									onClick={handlePush}
+									title={t("prDetail.pushConflictHint", "Push the rebased/resolved branch to origin")}
+								>
+									{t("prDetail.push", "Push")}
+								</button>
+							</Show>
+						</div>
+					</Show>
+
 					{/* Check list */}
 					<Show when={checkDetails().length > 0}>
 						<div class={s.checks}>
 							<For each={checkDetails()}>
-								{(check) => (
-									<div class={s.checkItem}>
-										<span class={cx(s.checkIcon, CI_CLASSES[getCiClass(check.state)])}>{getCiIcon(check.state)}</span>
-										<span class={s.checkName}>{check.context}</span>
-										<span class={cx(s.checkStatus, CI_CLASSES[getCiClass(check.state)])}>{check.state}</span>
-									</div>
-								)}
+								{(check) => {
+									// Only rows with a real details URL are interactive — an empty url keeps
+									// the row inert (no dead cursor-pointer / hover), per story 096-2ac0.
+									const open = check.html_url ? () => handleOpenUrl(check.html_url) : undefined;
+									return (
+										<div
+											class={cx(s.checkItem, open && s.clickable)}
+											role={open ? "button" : undefined}
+											tabIndex={open ? 0 : undefined}
+											title={open ? check.html_url : undefined}
+											onClick={open}
+											onKeyDown={open ? onClickKeyDown(open) : undefined}
+										>
+											<span class={cx(s.checkIcon, CI_CLASSES[getCiClass(check.state)])}>{getCiIcon(check.state)}</span>
+											<span class={s.checkName}>{check.context}</span>
+											<span class={cx(s.checkStatus, CI_CLASSES[getCiClass(check.state)])}>{check.state}</span>
+										</div>
+									);
+								}}
 							</For>
 						</div>
 					</Show>
+
+					<div class={s.aiReview}>
+						<div class={s.aiReviewHeader}>
+							<span class={s.aiReviewTitle}>{t("prDetail.aiReview", "AI Review")}</span>
+							<button class={s.aiReviewBtn} type="button" disabled={reviewLoading()} onClick={runAiReview}>
+								{reviewLoading() ? t("prDetail.reviewing", "Reviewing") : t("prDetail.runReview", "Run")}
+							</button>
+						</div>
+						<Show when={reviewError()}>{(err) => <div class={s.aiReviewError}>{err()}</div>}</Show>
+						<Show when={review()}>
+							{/* Proof-of-work line: without it a clean review is indistinguishable
+							    from a review that silently did nothing. */}
+							{(r) => (
+								<div class={s.aiReviewMeta}>
+									<Show when={r().summary}>{(sum) => <div class={s.aiReviewSummary}>{sum()}</div>}</Show>
+									<div>
+										{r().files.length === 1
+											? t("prDetail.reviewedOneFile", "1 file reviewed")
+											: `${r().files.length} ${t("prDetail.reviewedFiles", "files reviewed")}`}
+										{" · "}
+										{r().llm_model ?? t("prDetail.heuristicsOnly", "heuristics only")}
+									</div>
+								</div>
+							)}
+						</Show>
+						<Show when={review()}>
+							<Show
+								when={reviewFindings().length > 0}
+								fallback={<div class={s.aiReviewEmpty}>{t("prDetail.noFindings", "No findings")}</div>}
+							>
+								<div class={s.findingsList}>
+									<For each={reviewFindings()}>
+										{(finding) => (
+											<label class={s.findingItem}>
+												<input
+													type="checkbox"
+													checked={selectedFindingIds().includes(finding.id)}
+													disabled={finding.line == null}
+													onChange={() => toggleFinding(finding.id)}
+												/>
+												<SeverityIcon severity={finding.severity} />
+												<span class={s.findingBody}>
+													<span class={s.findingPath}>
+														{finding.path}
+														<Show when={finding.line}>:{finding.line}</Show>
+													</span>
+													<span class={s.findingMessage}>{finding.message}</span>
+												</span>
+											</label>
+										)}
+									</For>
+								</div>
+								<button
+									class={s.postReviewBtn}
+									type="button"
+									disabled={selectedFindings().length === 0 || reviewPosting()}
+									onClick={postSelectedFindings}
+								>
+									{reviewPosting() ? t("prDetail.posting", "Posting") : t("prDetail.postReview", "Post review")}
+								</button>
+							</Show>
+						</Show>
+					</div>
 
 					{/* Extra content (action buttons, smart prompts, open link) */}
 					{props.children}

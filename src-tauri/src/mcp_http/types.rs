@@ -94,11 +94,58 @@ pub(super) struct PrDiffQuery {
 }
 
 #[derive(Deserialize)]
+pub(super) struct ChangelogQuery {
+    pub path: String,
+    #[serde(default, rename = "sinceTag")]
+    pub since_tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ConflictAssistRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    #[serde(rename = "prNumber")]
+    pub pr_number: i64,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ApprovePrRequest {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
     #[serde(rename = "prNumber")]
     pub pr_number: i64,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CreatePrRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub title: String,
+    pub body: String,
+    pub base: String,
+    pub head: String,
+    #[serde(default)]
+    pub draft: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CreateIssueRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct PostPrReviewRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    #[serde(rename = "prNumber")]
+    pub pr_number: i64,
+    pub body: String,
+    pub event: Option<String>,
+    #[serde(default)]
+    pub comments: Vec<crate::github::PrReviewInlineComment>,
 }
 
 #[derive(Deserialize)]
@@ -262,6 +309,13 @@ pub(super) struct FsDirCreateRequest {
 }
 
 #[derive(Deserialize)]
+pub(super) struct FsFileCreateRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub file: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct FsPathRequest {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
@@ -419,6 +473,14 @@ fn default_issue_filter() -> String {
 
 #[derive(Deserialize)]
 pub(super) struct IssueActionRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    #[serde(rename = "issueNumber")]
+    pub issue_number: i64,
+}
+
+#[derive(Deserialize)]
+pub(super) struct IssueDetailQuery {
     #[serde(rename = "repoPath")]
     pub repo_path: String,
     #[serde(rename = "issueNumber")]
@@ -641,6 +703,10 @@ pub(super) struct RunGitCommandRequest {
 pub(super) struct StartPollingRequest {
     pub paths: Vec<String>,
     pub issue_filter: String,
+    /// Mirrors the `pr_hide_drafts` arg of the `github_start_polling` Tauri
+    /// command so the HTTP route reaches parity. Optional for older clients.
+    #[serde(default)]
+    pub pr_hide_drafts: bool,
 }
 
 #[derive(Deserialize)]

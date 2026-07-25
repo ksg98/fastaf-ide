@@ -20,7 +20,13 @@ REST API served by the Axum HTTP server when MCP server is enabled. All Tauri co
 GET /sessions
 ```
 
-Returns array of active session info (ID, cwd, worktree path, branch).
+Returns array of active session info (ID, cwd, worktree path, branch, and
+nested state). For detected agents, `state.agent_state` distinguishes PTY
+silence (`idle`) from explicit protocol completion (`completed`); the latter
+requires a parsed `suggest: [ ... ]` marker. Other values are `starting`,
+`working`, and `awaiting_input`. `state.background_work` is true when meaningful
+non-helper descendants keep autonomous work alive despite an input-ready
+terminal (`state.shell_state == "idle"`).
 
 ### Create Session
 
@@ -212,7 +218,7 @@ Broadcasts server-side events to all browser/mobile clients. Supports optional `
 
 | Event | Payload | Description |
 |-------|---------|-------------|
-| `session-created` | `{session_id, cwd}` | New session started |
+| `session-created` | `{session_id, cwd, agent_type, display_name}` | New session started; `display_name` is the optional stable assigned name |
 | `session-closed` | `{session_id}` | Session ended |
 | `repo-changed` | `{repo_path}` | Git repository state changed |
 | `head-changed` | `{repo_path, branch}` | Git HEAD changed (branch switch) |
@@ -525,6 +531,22 @@ GET /repo/pr-diff?path=/path/to/repo
 
 Returns diff for the current branch's open PR.
 
+### AI Review / Changelog / Conflict Assist
+
+```
+POST /ai/review/pr           { repoPath, prNumber }        -> PrReviewResult
+GET  /repo/merged-prs?path=&sinceTag=                      -> MergedPr[]
+GET  /repo/changelog?path=&sinceTag=                       -> { markdown, json }
+POST /repo/conflict-assist   { repoPath, prNumber }        -> ConflictAssistResult
+```
+
+`/ai/review/pr` runs the multi-turn review engine (Main slot) over a PR diff and
+returns line-level findings. `/repo/changelog` summarizes merged PRs (Headless
+slot) into markdown + a structured JSON breakdown; `sinceTag` filters to PRs
+merged at/after that tag's date. `/repo/conflict-assist` creates a worktree on
+the PR head, rebases onto the base, and reports `status` (`clean`/`conflicts`)
+with the conflicted-file list and an agent prompt — it never pushes or merges.
+
 ### Remote URL
 
 ```
@@ -746,6 +768,11 @@ PUT /config
 
 Load/save `AppConfig`.
 
+`GET /config` redacts remote-access secrets (`services.auth.password_hash`,
+`services.auth.session_token`, `services.relay.token`, and
+`services.push.vapid_private_key`). Secret presence is exposed only through
+`session_token_exists`, `token_exists`, and `vapid_private_key_exists`.
+
 ### Config / themes / notes / misc parity (story 066)
 
 Browser/PWA parity for assorted stateless commands. Loopback router only.
@@ -775,6 +802,25 @@ Intentionally NOT mapped (no frontend `invoke()` caller — YAGNI): `load_app_co
 `detect_claude_binary`, `mdkb_code_find`. Skipped as integration/stateful (separate
 follow-up): `set_ansi_colors` (PTY ring-buffer state), the `mdkb_*` daemon commands,
 `install_agent_mcp`/`remove_agent_mcp` (config-file writes, also no caller).
+
+### Provider keyring + slot/ollama checks (story 072)
+
+Browser/PWA parity for provider API-key storage (the OS keyring is proxied through
+the server so remote clients never touch it directly) plus slot/Ollama connectivity
+checks. Loopback router only; mutating routes carry the `require_local_or_auth` guard.
+
+```
+GET    /config/provider-key/exists?providerId=<id>   -> bool
+POST   /config/provider-key    { providerId, key }   -> { ok }    [guarded]
+DELETE /config/provider-key    { providerId }        -> { ok }    [guarded]
+POST   /config/slot-test       { slot }              -> string    (connection test result)
+POST   /config/ollama-models   { providerId }        -> string[]  (discovered model ids)
+```
+
+The OAuth upstream flow (`start_mcp_upstream_oauth` / `cancel_mcp_upstream_oauth`) is
+**not** mapped: `start` binds a loopback callback server and opens the OS browser, so
+the redirect can't return to a remote/PWA client. Desktop drives it over IPC; browser
+clients get a clean host-only error until the redirect UX is redesigned.
 
 ### Hash Password
 
@@ -1063,6 +1109,8 @@ GET  /ai/knowledge/session?sessionId=                   -> SessionDetail | null
 GET  /ai/scheduler/config                               -> SchedulerConfig
 PUT  /ai/scheduler/config      (SchedulerConfig)        -> { ok }
 POST /ai/triage/run            { repoPath, refresh? }   -> TriageResult   (desktop only)
+POST /ai/improvements/scan     { repoPath, focus }      -> ImprovementScanResult (desktop only)
+POST /repo/create-issue-from-proposal { repoPath, proposal } -> CreatedIssue (desktop only)
 GET (WS) /ai/conversation/{session_id}/stream
 ```
 
@@ -1085,6 +1133,12 @@ via `/ai/conversation/cancel`.
 `run_diff_triage`; progress frames stream over the global `/events` SSE bus as
 `triage-progress` (low-frequency, safe on the bus). Desktop-only — the triage LLM
 pipeline needs the desktop providers, so the remote daemon does not serve it.
+
+**Improvement proposals** (`POST /ai/improvements/scan`) run a one-shot Headless-slot
+LLM pass over deterministic local repo context (working-tree status + recent commits)
+and emit `proposals-ready` on the same GitHub Ops event shape. The scan never creates
+GitHub issues. A user action calls `POST /repo/create-issue-from-proposal`, which
+wraps the existing `create_issue_impl` path and returns `{ number, url, title }`.
 
 ## Agent Endpoints
 
@@ -1162,7 +1216,40 @@ GET /api/plugins/:plugin_id/data/*path
 
 Reads a plugin's stored data file. Returns `application/json` if content starts with `{` or `[`, otherwise `text/plain`. Returns 404 if the file doesn't exist. Goes through the same auth middleware as all other routes.
 
-**Note:** Write and delete operations are only available via Tauri commands (`write_plugin_data`, `delete_plugin_data`), not as HTTP endpoints. Data is sandboxed to `~/.config/tuicommander/plugins/{plugin_id}/data/`.
+**Note:** `write_plugin_data` maps to `POST /api/plugins/:plugin_id/data/*path`; `delete_plugin_data` has no HTTP route (no frontend caller). Data is sandboxed to `~/.config/tuicommander/plugins/{plugin_id}/data/`.
+
+### Plugin RPC (host capabilities, story 071)
+
+Browser/PWA parity for the plugin host RPC surface. Every route is `:plugin_id`-scoped
+and reuses the same per-plugin sandboxing as the Tauri commands (`plugin_fs.rs` path
+jail, `plugin_http.rs` allowed-URL check, `plugin_exec.rs` binary whitelist).
+
+```
+GET  /api/plugins/:plugin_id/fs/read?path=<p>                     -> string        (plugin_read_file)
+GET  /api/plugins/:plugin_id/fs/read-base64?path=<p>              -> string        (plugin_read_file_base64)
+GET  /api/plugins/:plugin_id/fs/tail?path=<p>&maxBytes=<n>        -> string        (plugin_read_file_tail)
+GET  /api/plugins/:plugin_id/fs/list?path=<p>&pattern=&sortBy=    -> string[]      (plugin_list_directory)
+POST /api/plugins/:plugin_id/fs/write    { path, content }        -> { ok }        (plugin_write_file)
+POST /api/plugins/:plugin_id/fs/rename   { from, to }             -> { ok }        (plugin_rename_path)
+POST /api/plugins/:plugin_id/build-artifacts/scan   { repoPaths, forceRefresh? } -> BuildArtifact[]
+POST /api/plugins/:plugin_id/build-artifacts/delete { path, repoPaths } -> { ok }
+POST /api/plugins/:plugin_id/exec        { binary, args, cwd? }   -> string        (plugin_exec_cli)
+POST /api/plugins/:plugin_id/http        { url, method?, headers?, body?, allowedUrls } -> HttpResponse
+GET  /api/plugins/:plugin_id/pty/output?sessionId=<id>&maxLines=  -> string        (plugin_read_session_output)
+POST /api/plugins/:plugin_id/register    { capabilities }         -> { ok }
+POST /api/plugins/:plugin_id/unregister                           -> { ok }
+GET  /api/plugins/:plugin_id/readme                               -> string | null
+```
+
+Build-artifact scans normalize the root set, share an in-flight scan across callers,
+and reuse completed results for 30 seconds. Set `forceRefresh: true` to bypass a
+completed cached result; a scan already running for the same roots remains shared.
+
+Intentionally **not** mapped (native/host-only, stay Tauri-only): `plugin_watch_path` /
+`plugin_unwatch` (change events need AppHandle/WS delivery), `plugin_read_credential`
+(OS keychain), and user-plugin install/uninstall (`install_plugin_from_*`,
+`uninstall_plugin` — local-FS install + AppHandle emit). `delete_plugin_data` is unmapped
+for lack of a frontend caller (YAGNI).
 
 ## Worktree Endpoints
 
@@ -1182,6 +1269,9 @@ Content-Type: application/json
 
 { "base_repo": "/path", "branch_name": "feature-x" }
 ```
+
+`base_repo` must be an absolute, normalized path. The route rejects invalid paths
+before invoking git, matching MCP `repo action=worktree_create` validation.
 
 ### Worktrees Base Directory
 
@@ -1220,6 +1310,7 @@ Content-Type: application/json
 ```
 
 Finalizes a merged worktree branch. `action` must be `"archive"` (moves to archive directory) or `"delete"` (removes worktree and branch).
+For `action: "delete"`, the response includes `branch_delete_warning` when the worktree was removed but safe branch deletion failed, for example because the branch has unmerged commits.
 
 ### Remove Worktree
 
@@ -1230,6 +1321,9 @@ DELETE /worktrees/:branch?repoPath=/path&deleteBranch=true
 Query parameters:
 - `repoPath` (required) -- base repository path
 - `deleteBranch` (optional, default `true`) -- when `true`, also deletes the local git branch
+- `force` (optional, default `false`) -- when `true`, uses forced worktree removal and forced branch deletion
+
+Returns `{ "ok": true, "branch_delete_warning": null }` on full success. When `deleteBranch=true` and `git branch -d` refuses to delete the branch after the worktree is removed, the request still succeeds with `branch_delete_warning` set so clients can report the partial outcome.
 
 ## Push Notification Endpoints
 
@@ -1279,12 +1373,8 @@ The following commands are accessible only via the Tauri `invoke()` bridge in th
 | `get_claude_usage_timeline` | `claude_usage.rs` | Get hourly token usage timeline from session transcripts |
 | `get_claude_session_stats` | `claude_usage.rs` | Scan session transcripts for aggregated token/session stats |
 | `get_claude_project_list` | `claude_usage.rs` | List Claude project slugs with session counts |
-| `plugin_read_file` | `plugin_fs.rs` | Read file as UTF-8 (within $HOME, 10 MB limit) |
-| `plugin_read_file_tail` | `plugin_fs.rs` | Read last N bytes of file, skip partial first line |
-| `plugin_list_directory` | `plugin_fs.rs` | List filenames in directory (optional glob filter) |
-| `plugin_watch_path` | `plugin_fs.rs` | Start watching path for changes |
+| `plugin_watch_path` | `plugin_fs.rs` | Start watching path for changes (change events need AppHandle/WS) |
 | `plugin_unwatch` | `plugin_fs.rs` | Stop watching a path |
-| `plugin_http_fetch` | `plugin_http.rs` | Make HTTP request (validated against allowed_urls) |
 | `plugin_read_credential` | `plugin_credentials.rs` | Read credential from system store |
 | `fetch_plugin_registry` | `registry.rs` | Fetch remote plugin registry index |
 | `install_plugin_from_zip` | `plugins.rs` | Install plugin from local ZIP file |

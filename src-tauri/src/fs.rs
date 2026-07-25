@@ -1105,6 +1105,45 @@ pub fn fs_read_file(repo_path: String, file: String) -> Result<String, String> {
     crate::read_file_impl(repo_path, file)
 }
 
+/// Atomically write `data` to `target` via temp-file + rename, PRESERVING the
+/// target's existing permissions when it already exists (these are arbitrary
+/// user files — never force a restrictive mode). A crash mid-write leaves the
+/// original file intact instead of truncating it (#117-a503).
+///
+/// The temp file is created in the target's own directory (same filesystem, so
+/// the rename is atomic) with a unique per-call name, so concurrent writers to
+/// the same target never collide on the temp path.
+pub(crate) fn atomic_write(target: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| "Target path has no parent directory".to_string())?;
+    let base = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("tuic");
+    let temp = dir.join(format!(".{base}.tmp.{}", uuid::Uuid::new_v4()));
+
+    std::fs::write(&temp, data).map_err(|e| format!("Failed to write temp file: {e}"))?;
+
+    // Preserve the original file's permissions if it already exists — do NOT
+    // impose a restrictive mode on files the user owns and edits.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(target)
+        && let Err(e) = std::fs::set_permissions(&temp, meta.permissions())
+    {
+        tracing::warn!(
+            path = %target.display(),
+            error = %e,
+            "atomic_write: failed to preserve file permissions"
+        );
+    }
+
+    std::fs::rename(&temp, target).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("Failed to commit file: {e}")
+    })
+}
+
 /// Write content to a file within a repository. Overwrites if it exists.
 /// Used by editor saves — creates parent directories as needed so saving to a
 /// not-yet-existing nested path can't fail.
@@ -1123,7 +1162,7 @@ pub fn write_file(repo_path: String, file: String, content: String) -> Result<()
             .map_err(|e| format!("Failed to create parent directory: {e}"))?;
     }
 
-    std::fs::write(&target, &content).map_err(|e| format!("Failed to write file: {e}"))
+    atomic_write(&target, content.as_bytes()).map_err(|e| format!("Failed to write file: {e}"))
 }
 
 /// Verify that creating `relative` under `repo_path` stays inside the repo, even
@@ -3069,5 +3108,49 @@ mod tests {
 
         assert!(result.matches.is_empty());
         assert!(!result.truncated);
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_temp() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("note.md");
+        fs::write(&target, "original").unwrap();
+
+        atomic_write(&target, b"updated content").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "updated content");
+        // No temp files left behind in the directory.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "temp leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn atomic_write_creates_new_file() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("new.txt");
+        atomic_write(&target, b"hello").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("script.sh");
+        fs::write(&target, "#!/bin/sh\necho old").unwrap();
+        // User marks the file executable (0755) — a common, legitimate mode we
+        // must NOT clobber to a restrictive 0600 on save.
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+
+        atomic_write(&target, b"#!/bin/sh\necho new").unwrap();
+
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "atomic_write must preserve existing file mode");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "#!/bin/sh\necho new");
     }
 }

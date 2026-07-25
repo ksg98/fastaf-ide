@@ -11,16 +11,11 @@
 use std::path::{Path, PathBuf};
 
 /// A filesystem jail rooted at a session's repo root (or CWD fallback).
-// Fields/methods become live when the filesystem tools (read_file,
-// write_file, etc.) land in the next story. Keep the struct API in place so
-// Step 2 can wire it up without churning this module.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FileSandbox {
     root: PathBuf,
 }
 
-#[allow(dead_code)]
 impl FileSandbox {
     /// Build a sandbox. `root` must exist and be a directory — it is
     /// canonicalized so later comparisons use the same resolved form.

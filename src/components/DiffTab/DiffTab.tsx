@@ -16,7 +16,7 @@ import type { SearchOptions } from "../shared/DomSearchEngine";
 import { DomSearchEngine } from "../shared/DomSearchEngine";
 import { DomSearchOverview } from "../shared/DomSearchOverview";
 import { SearchBar } from "../shared/SearchBar";
-import { DiffViewer } from "../ui";
+import { DiffViewer } from "../ui/DiffViewer";
 import { BranchDiffScrollView } from "./BranchDiffScrollView";
 import s from "./DiffTab.module.css";
 import { buildPartialPatch, extractHunks, extractSelectedLines } from "./diffPatch";

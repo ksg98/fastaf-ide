@@ -1,4 +1,4 @@
-import { type Component, createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { type Component, createEffect, createSignal, lazy, onCleanup, onMount, Show, Suspense } from "solid-js";
 import { detectAgentForTerminal } from "../../hooks/useAgentPolling";
 import { browserCreatedSessions } from "../../hooks/useAppInit";
 import { usePty } from "../../hooks/usePty";
@@ -10,23 +10,27 @@ import { multiviewStore } from "../../stores/multiview";
 import { notificationsStore } from "../../stores/notifications";
 import { paneLayoutStore } from "../../stores/paneLayout";
 import { rateLimitStore } from "../../stores/ratelimit";
-import { FONT_FAMILIES, settingsStore } from "../../stores/settings";
+import { settingsStore } from "../../stores/settings";
 import { type AwaitingInputType, isShellState, terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
 import { isTauri, subscribePty, type Unsubscribe } from "../../transport";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
 import { isPerfDebug } from "../../utils/perfDebug";
-import { ComposePanel } from "../ComposePanel";
 import { getAwaitingInputSound } from "./awaitingInputSound";
 import CanvasTerminal, { type CanvasTerminalRef } from "./CanvasTerminal";
-import { snapLineHeight } from "./canvasTerminalUtils";
+import { gridDimsForBox, snapLineHeight } from "./canvasTerminalUtils";
 import { getSharedMetrics } from "./glyphCache";
 import { shouldApplyIntentTitle } from "./intentTitle";
 import { LastPromptBar } from "./LastPromptBar";
 import s from "./Terminal.module.css";
 import { TerminalSearch } from "./TerminalSearch";
 import { isTerminalVisible } from "./terminalVisibility";
+
+const ComposePanel = lazy(() =>
+	import("../ComposePanel/ComposePanel").then((module) => ({ default: module.ComposePanel })),
+);
 
 /** Trim trailing whitespace from each line of a terminal selection. */
 export function trimSelection(text: string): string {
@@ -127,16 +131,22 @@ export function cleanOscTitle(title: string): string {
 	return cleaned;
 }
 
-/** Get initial terminal dimensions from container size + font metrics. */
-function calcGridSize(container: HTMLElement): { rows: number; cols: number } {
-	const fontSize = settingsStore.state.defaultFontSize;
-	const fontFamily = FONT_FAMILIES[settingsStore.state.font] || FONT_FAMILIES["JetBrains Mono"];
+/** Get initial terminal dimensions from container size + font metrics.
+ *
+ *  Mirrors CanvasTerminal's remeasure EXACTLY — shared `gridDimsForBox` formula
+ *  (gutter + scrollbar subtracted) and the per-terminal font-size override — so
+ *  the reconnect-path resize lands on the same dims the canvas will compute and
+ *  the backend no-ops it instead of firing a spurious SIGWINCH (each SIGWINCH
+ *  makes Ink TUIs clear+reprint their full frame into scrollback). */
+function calcGridSize(container: HTMLElement, terminalId: string): { rows: number; cols: number } {
+	const fontSize = terminalsStore.state.terminals[terminalId]?.fontSize ?? settingsStore.state.defaultFontSize;
+	const fontFamily = settingsStore.getFontFamily();
 	const fontWeight = settingsStore.state.fontWeight;
 	const dpr = window.devicePixelRatio || 1;
 	const m = getSharedMetrics(fontSize, fontFamily, dpr, snapLineHeight(fontSize), fontWeight);
-	const cols = Math.max(2, Math.floor(container.clientWidth / m.cellWidth));
-	const rows = Math.max(2, Math.floor(container.clientHeight / m.cellHeight));
-	return { rows, cols };
+	const rect = container.getBoundingClientRect();
+	const d = gridDimsForBox(rect.width, rect.height, m.cellWidth, m.cellHeight);
+	return { rows: Math.max(2, d.rows), cols: Math.max(2, d.cols) };
 }
 
 export const Terminal: Component<TerminalProps> = (props) => {
@@ -652,9 +662,16 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				}
 			});
 
-			// Listen for OSC 52 clipboard store from Rust (native renderer)
+			// Listen for OSC 52 clipboard store from Rust (native renderer).
+			// OSC 52 is honored from anywhere in the byte stream, so a displayed file/log
+			// can overwrite the clipboard. Surface a non-blocking notice on every write and
+			// let the user disable OSC 52 entirely via settings. (Gated here, off the
+			// per-byte parse hot path — this fires once per actual OSC 52 sequence.)
 			unlistenClipboardStore = await listen<string>(`pty-clipboard-store-${targetSessionId}`, (event) => {
+				if (!settingsStore.state.osc52Clipboard) return;
 				writeClipboard(event.payload).catch(() => {});
+				const name = terminalsStore.get(props.id)?.name || "terminal";
+				toastsStore.add("Clipboard updated", `by ${name}`, "info");
 			});
 			if (disposed) {
 				unlistenClipboardStore();
@@ -714,7 +731,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			);
 		}
 
-		const grid = calcGridSize(containerRef);
+		const grid = calcGridSize(containerRef, props.id);
 
 		try {
 			let reconnected = false;
@@ -1205,32 +1222,36 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					Compose {keyFor("toggle-compose-panel")}
 				</div>
 			</Show>
-			<ComposePanel
-				isOpen={composeOpen}
-				initialText={pendingComposeText}
-				onTextChange={setPendingComposeText}
-				onClose={() => {
-					setComposeOpen(false);
-					canvasTerminalRef()?.focus();
-				}}
-				onSend={async (text) => {
-					if (sessionId) {
-						try {
-							const term = terminalsStore.get(props.id);
-							await pty.sendCommand(sessionId, text, term?.agentType);
-							setPendingComposeText("");
+			<Show when={composeOpen()}>
+				<Suspense>
+					<ComposePanel
+						isOpen={composeOpen}
+						initialText={pendingComposeText}
+						onTextChange={setPendingComposeText}
+						onClose={() => {
 							setComposeOpen(false);
 							canvasTerminalRef()?.focus();
-						} catch (err) {
-							appLogger.error("terminal", "ComposePanel send failed", { sessionId, error: err });
-						}
-					} else {
-						setPendingComposeText("");
-						setComposeOpen(false);
-						canvasTerminalRef()?.focus();
-					}
-				}}
-			/>
+						}}
+						onSend={async (text) => {
+							if (sessionId) {
+								try {
+									const term = terminalsStore.get(props.id);
+									await pty.sendCommand(sessionId, text, term?.agentType);
+									setPendingComposeText("");
+									setComposeOpen(false);
+									canvasTerminalRef()?.focus();
+								} catch (err) {
+									appLogger.error("terminal", "ComposePanel send failed", { sessionId, error: err });
+								}
+							} else {
+								setPendingComposeText("");
+								setComposeOpen(false);
+								canvasTerminalRef()?.focus();
+							}
+						}}
+					/>
+				</Suspense>
+			</Show>
 		</div>
 	);
 };

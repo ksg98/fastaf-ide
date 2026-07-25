@@ -336,6 +336,7 @@ pub(super) async fn spawn_agent_session(
     };
 
     let mut cmd = CommandBuilder::new(&binary_path);
+    crate::pty::sanitize_pty_parent_env(&mut cmd);
 
     if let Some(ref args) = body.args {
         for arg in args {
@@ -453,6 +454,7 @@ pub(super) async fn spawn_agent_session(
             session_id: session_id.clone(),
             cwd: body.cwd.clone(),
             agent_type: body.agent_type.clone(),
+            display_name: None,
         });
 
     #[cfg(feature = "desktop")]
@@ -466,6 +468,7 @@ pub(super) async fn spawn_agent_session(
             serde_json::json!({
                 "session_id": session_id,
                 "cwd": body.cwd,
+                "display_name": null,
             }),
         );
     }

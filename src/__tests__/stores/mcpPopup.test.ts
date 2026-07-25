@@ -194,6 +194,28 @@ describe("mcpPopupStore", () => {
 			});
 		});
 
+		it("reports live refresh without falsely requiring every client to restart", async () => {
+			await testInScopeAsync(async () => {
+				mockInvoke.mockImplementation((cmd: string) => {
+					if (cmd === "load_mcp_upstreams") return Promise.resolve(MOCK_CONFIG);
+					if (cmd === "get_mcp_upstream_status") return Promise.resolve(MOCK_STATUS);
+					if (cmd === "save_mcp_upstreams") return Promise.resolve(undefined);
+					return Promise.resolve(undefined);
+				});
+
+				const { toastsStore } = await import("../../stores/toasts");
+				await store.loadConfig();
+				await store.toggleServer("alpha");
+
+				const toast = toastsStore.toasts[toastsStore.toasts.length - 1]!;
+				expect(toast.title).toBe("MCP servers changed");
+				expect(toast.message).toContain("Compatible clients refresh automatically");
+				expect(toast.message).not.toContain("until restarted");
+				expect(toast.level).toBe("info");
+				toastsStore.remove(toast.id);
+			});
+		});
+
 		it("optimistically updates local state", async () => {
 			await testInScopeAsync(async () => {
 				// Make save_mcp_upstreams hang so we can check intermediate state

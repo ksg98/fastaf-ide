@@ -13,6 +13,8 @@ FastAF has an Obsidian-style plugin system. Plugins can watch terminal output, p
 
 An "Update available" badge appears when a newer version exists in the registry.
 
+Registry plugins include file viewers such as **DOCX Preview**, which opens Word `.docx`/`.dotx` files from the File Browser as an HTML preview tab.
+
 ### From a ZIP File
 
 1. Open **Settings** → **Plugins** → **Installed**

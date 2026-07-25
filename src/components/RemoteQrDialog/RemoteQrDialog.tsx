@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
 import { type Component, createEffect, createResource, createSignal, For, onCleanup, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
+import { registerModal } from "../../stores/modalStack";
 import { rpc } from "../../transport";
 import { writeClipboard } from "../../utils/clipboard";
 import d from "../shared/dialog.module.css";
@@ -66,15 +67,9 @@ export const RemoteQrDialog: Component<{ onClose: () => void }> = (props) => {
 			});
 	});
 
-	const handleKey = (e: KeyboardEvent) => {
-		if (e.key === "Escape") {
-			e.preventDefault();
-			e.stopPropagation();
-			props.onClose();
-		}
-	};
-	document.addEventListener("keydown", handleKey, true);
-	onCleanup(() => document.removeEventListener("keydown", handleKey, true));
+	// Escape-to-close is handled centrally (stores/modalStack): registering routes
+	// Escape to props.onClose AND stops it reaching the terminal underneath.
+	registerModal(props.onClose);
 
 	const copyUrl = async () => {
 		const url = connectUrl();

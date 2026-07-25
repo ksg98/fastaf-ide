@@ -506,6 +506,40 @@ describe("Sidebar", () => {
 			expect(removeBtns.length).toBe(0);
 		});
 
+		it("main checkout on a non-main-named branch has no remove button (worktreePath === repoPath)", () => {
+			// Regression: the main working tree cannot be `git worktree remove`d. `isMain`
+			// is name-based (main/master/develop), so a main checkout sitting on a
+			// differently-named branch (e.g. POC-00001-merge-blades) has isMain=false. The
+			// button guard must fall back to worktreePath !== repoPath — not isMain — or the
+			// × wrongly appears on the main checkout when worktrees exist.
+			setRepos({
+				"/repo1": makeRepo({
+					branches: {
+						"POC-00001-merge-blades": {
+							name: "POC-00001-merge-blades",
+							isMain: false,
+							worktreePath: "/repo1",
+							terminals: [],
+							additions: 0,
+							deletions: 0,
+						},
+						"feature/x": {
+							name: "feature/x",
+							isMain: false,
+							worktreePath: "/wt/x",
+							terminals: [],
+							additions: 0,
+							deletions: 0,
+						},
+					},
+				}),
+			});
+			const { container } = render(() => <Sidebar {...defaultProps({ onRemoveBranch: vi.fn() })} />);
+			const removeBtns = container.querySelectorAll(".branchRemoveBtn");
+			// Only the linked worktree (feature/x) gets a × — the main checkout does not.
+			expect(removeBtns.length).toBe(1);
+		});
+
 		it("double-click main branch name calls onAddTerminal instead of rename", () => {
 			const onAddTerminal = vi.fn();
 			const onRenameBranch = vi.fn();

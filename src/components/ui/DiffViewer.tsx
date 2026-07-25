@@ -2,6 +2,7 @@ import { DiffFile } from "@git-diff-view/core";
 import { DiffModeEnum, DiffView } from "@git-diff-view/solid";
 import { type Component, createEffect, createMemo, createSignal, on, Show } from "solid-js";
 import "@git-diff-view/solid/styles/diff-view.css";
+import { appLogger } from "../../stores/appLogger";
 import type { DiffViewMode } from "../../stores/ui";
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,15 @@ export const DiffViewer: Component<DiffViewerProps> = (props) => {
 	// Build a DiffFile instance from the raw unified diff string.
 	// DiffFile.createInstance expects hunks as an array of diff strings.
 	const [diffFile, setDiffFile] = createSignal<DiffFile | undefined>(undefined);
+	// The @git-diff-view parser THROWS on diffs it can't parse (e.g. combined
+	// "@@@ ... @@@" merge-conflict diffs). Catch it here so one bad diff renders
+	// an inline message instead of escaping to the top-level ErrorBoundary and
+	// crashing the whole app.
+	// DEFERRED (2026-07-13) — conflicted/unmerged files produce combined diffs
+	// that only fall back to "Unable to render". Rendering them meaningfully
+	// needs get_file_diff to emit a 2-way diff (or a dedicated conflict view);
+	// out of scope for the crash fix.
+	const [parseError, setParseError] = createSignal(false);
 
 	createEffect(
 		on(
@@ -115,24 +125,32 @@ export const DiffViewer: Component<DiffViewerProps> = (props) => {
 			(diff) => {
 				if (!diff.trim()) {
 					setDiffFile(undefined);
+					setParseError(false);
 					return;
 				}
-				const fileName = extractFileName(diff);
-				const df = DiffFile.createInstance({
-					oldFile: { fileName },
-					newFile: { fileName },
-					hunks: [diff],
-				});
-				df.init();
-				// Build BOTH modes up front — do not "optimize" this to the active mode
-				// only. DiffView merely branches on `diffViewMode` and reads pre-built
-				// line data; an unbuilt mode renders blank when the user toggles
-				// split↔unified. Both builders are idempotent and the build pass is the
-				// cheap half (init() does the parse+highlight). See @git-diff-view
-				// solid/dist/...mjs InternalDiffView. (perf pass 2026-06-07)
-				df.buildSplitDiffLines();
-				df.buildUnifiedDiffLines();
-				setDiffFile(df);
+				try {
+					const fileName = extractFileName(diff);
+					const df = DiffFile.createInstance({
+						oldFile: { fileName },
+						newFile: { fileName },
+						hunks: [diff],
+					});
+					df.init();
+					// Build BOTH modes up front — do not "optimize" this to the active mode
+					// only. DiffView merely branches on `diffViewMode` and reads pre-built
+					// line data; an unbuilt mode renders blank when the user toggles
+					// split↔unified. Both builders are idempotent and the build pass is the
+					// cheap half (init() does the parse+highlight). See @git-diff-view
+					// solid/dist/...mjs InternalDiffView. (perf pass 2026-06-07)
+					df.buildSplitDiffLines();
+					df.buildUnifiedDiffLines();
+					setDiffFile(df);
+					setParseError(false);
+				} catch (err) {
+					appLogger.error("git", "Failed to parse diff for rendering", err);
+					setDiffFile(undefined);
+					setParseError(true);
+				}
 			},
 		),
 	);
@@ -140,8 +158,12 @@ export const DiffViewer: Component<DiffViewerProps> = (props) => {
 	return (
 		<div id="diff-content" ref={(el) => props.contentRef?.(el)}>
 			<Show
-				when={!isEmpty() && diffFile()}
-				fallback={<div class="diff-empty">{props.emptyMessage || "No changes"}</div>}
+				when={!isEmpty() && !parseError() && diffFile()}
+				fallback={
+					<div class="diff-empty">
+						{parseError() ? "Unable to render this diff" : props.emptyMessage || "No changes"}
+					</div>
+				}
 			>
 				<DiffView
 					diffFile={diffFile()}

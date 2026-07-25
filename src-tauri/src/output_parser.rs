@@ -186,6 +186,11 @@ pub struct OutputParser {
     api_error_patterns: &'static [ApiErrorPattern],
     /// Dedup: last emitted suggest items to suppress re-emission on scroll.
     last_suggest_items: Option<Vec<String>>,
+    /// Input-turn epoch whose real working evidence reopened suggest dedup.
+    /// A submission alone is insufficient because the previous suggest row can
+    /// repaint while it is still visible; fresh work proves a new response has
+    /// actually started and may legitimately end with identical suggestions.
+    suggest_working_turn_epoch: Option<u64>,
     /// Dedup: last emitted api-error matched text to suppress re-emission
     /// when the same error remains visible in the terminal buffer.
     last_api_error_match: Option<String>,
@@ -228,6 +233,7 @@ impl OutputParser {
             rate_limit_patterns: &RATE_LIMIT_PATTERNS,
             api_error_patterns: &API_ERROR_PATTERNS,
             last_suggest_items: None,
+            suggest_working_turn_epoch: None,
             last_api_error_match: None,
             session_conflict_fired: false,
         }
@@ -404,10 +410,10 @@ impl OutputParser {
         if let Some(evt) = parse_intent(&joined, agent_active) {
             events.push(evt);
         }
-        // Suggest follow-up actions: `suggest: [ A | B | C ]` on a single row.
-        // The token is fully self-contained (bounded by `[ … ]`), so there is no
-        // cross-chunk reassembly — dedup against the last emission to avoid
-        // re-firing while the same suggest stays on screen.
+        // Suggest follow-up actions: `suggest: [ A | B | C ]` on one bounded
+        // logical line. The token is fully self-contained (bounded by `[ … ]`),
+        // so there is no parser-owned cross-chunk buffer — dedup against the last
+        // emission to avoid re-firing while the same suggest stays on screen.
         if let Some((evt, _canonical)) = parse_suggest_with_line(&joined, agent_active)
             && let ParsedEvent::Suggest { ref items } = evt
             && self.last_suggest_items.as_ref() != Some(items)
@@ -436,6 +442,22 @@ impl OutputParser {
         }
 
         events
+    }
+
+    /// Whether the existing suggest grammar accepts a complete token.
+    /// This deliberately does not touch emission deduplication state.
+    pub(crate) fn is_complete_suggest(&self, text: &str, agent_active: bool) -> bool {
+        parse_suggest_with_line(text, agent_active).is_some()
+    }
+
+    /// Reopen suggest emission once for a turn that has produced real working
+    /// evidence. Keeping this separate from user submission prevents a stale
+    /// previous-turn row repaint from recreating completed chips.
+    pub(crate) fn begin_suggest_working_turn(&mut self, turn_epoch: u64) {
+        if self.suggest_working_turn_epoch != Some(turn_epoch) {
+            self.suggest_working_turn_epoch = Some(turn_epoch);
+            self.last_suggest_items = None;
+        }
     }
 
     fn parse_rate_limit(&self, text: &str) -> Option<ParsedEvent> {
@@ -1281,6 +1303,41 @@ fn parse_plan_file(clean: &str) -> Option<ParsedEvent> {
 }
 
 /// Regex matching any CSI escape sequence (SGR colors, cursor movement, erase,
+/// Bullet glyphs an agent may prefix the first line of an assistant message
+/// with, before a column-0 protocol token (`intent:` / `suggest:`). Ink-hosted
+/// agents (Claude Code) decorate with ● U+25CF / ⏺ U+23FA; Codex uses
+/// • U+2022 / ◦ U+25E6. Single source of truth for the four token anchors below
+/// — they MUST stay in sync, and they drifted once: the Codex bullet was known
+/// to the spinner detector (`CODEX_BULLET_RE`) but not to these token regexes,
+/// so a Codex-emitted `• intent:` / `• suggest:` (first message line) never
+/// parsed. Char-class body only (no surrounding `[ ]`) so callers write `[{…}]`.
+const AGENT_LINE_BULLETS: &str = r"\x{25CF}\x{23FA}\x{2022}\x{25E6}";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StructuredTokenAnchor {
+    Intent,
+    Suggest,
+}
+
+/// Identify a structured token at the start of a logical terminal line.
+/// Keep this shared with the parser grammar so grid filtering accepts exactly
+/// the same optional agent bullets as the authoritative token regexes.
+pub(crate) fn structured_token_anchor(clean: &str) -> Option<StructuredTokenAnchor> {
+    lazy_static::lazy_static! {
+        static ref STRUCTURED_TOKEN_ANCHOR_RE: regex::Regex = regex::Regex::new(&format!(
+            r"^[\t ]*(?:[{b}][\t ]+)?(intent|suggest):",
+            b = AGENT_LINE_BULLETS
+        ))
+        .unwrap();
+    }
+    let captures = STRUCTURED_TOKEN_ANCHOR_RE.captures(clean)?;
+    match captures.get(1)?.as_str() {
+        "intent" => Some(StructuredTokenAnchor::Intent),
+        "suggest" => Some(StructuredTokenAnchor::Suggest),
+        _ => None,
+    }
+}
+
 /// Detect agent-declared intent tokens: `intent: <text>` or `intent: <text> (<title>)`
 /// at column 0. Only parsed when an agent is active — prevents false positives from
 /// prose like "The intent: of this code".
@@ -1290,15 +1347,19 @@ fn parse_intent(clean: &str, agent_active: bool) -> Option<ParsedEvent> {
     }
     lazy_static::lazy_static! {
         // Plain prefix: `intent:` at line start, with optional leading
-        // horizontal whitespace and/or an Ink bullet glyph (● U+25CF /
-        // ⏺ U+23FA). Ink-hosted agents (Claude Code) decorate the first
-        // line of an assistant message with `● ` and indent every
+        // horizontal whitespace and/or a leading bullet glyph (see
+        // AGENT_LINE_BULLETS). Ink-hosted agents (Claude Code) decorate the
+        // first line of an assistant message with `● ` and indent every
         // continuation line by the bullet width, so plain-prefix tokens
-        // emitted after the first line arrive as `  intent: ...`. The
-        // leading whitespace must be horizontal only — any non-whitespace
-        // character before the keyword is rejected.
-        static ref INTENT_PLAIN_RE: regex::Regex =
-            regex::Regex::new(r"(?m)^[\t ]*(?:[\x{25CF}\x{23FA}][\t ]+)?intent:[\t ]+(.+)$").unwrap();
+        // emitted after the first line arrive as `  intent: ...`; Codex
+        // decorates the first line with `• ` instead. The leading whitespace
+        // must be horizontal only — any non-whitespace character before the
+        // keyword (other than an allowed bullet) is rejected.
+        static ref INTENT_PLAIN_RE: regex::Regex = regex::Regex::new(&format!(
+            r"(?m)^[\t ]*(?:[{b}][\t ]+)?intent:[\t ]+(.+)$",
+            b = AGENT_LINE_BULLETS
+        ))
+        .unwrap();
         // Separate regex to split out the optional (title) suffix from the captured text
         static ref TITLE_RE: regex::Regex =
             regex::Regex::new(r"^(.*?)\(([^)]+)\)\s*$").unwrap();
@@ -1342,7 +1403,7 @@ fn build_intent_event(raw_match: Option<String>, title_re: &regex::Regex) -> Opt
 
 lazy_static::lazy_static! {
     /// Bracketed suggest token, anchored at column 0 (optional leading
-    /// whitespace and an Ink bullet glyph ● U+25CF / ⏺ U+23FA). Two constraints
+    /// whitespace and a bullet glyph — see AGENT_LINE_BULLETS). Two constraints
     /// make a false capture impossible:
     ///   1. the capture excludes `\r`/`\n`, so it matches a single logical row,
     ///   2. the content contains NO nested `[`/`]`.
@@ -1352,25 +1413,24 @@ lazy_static::lazy_static! {
     /// this regex runs. A mermaid edge (`EP["…"] -->|x|`) or markdown table
     /// still fails to match — it lacks the column-0 `suggest: [` anchor or
     /// carries a nested `[`. Capture group 1 is the item list.
-    static ref SUGGEST_RE: regex::Regex = regex::Regex::new(
-        r"(?m)^[\t ]*(?:[\x{25CF}\x{23FA}][\t ]+)?suggest:[\t ]*\[([^\[\]\r\n]*)\]"
-    ).unwrap();
+    static ref SUGGEST_RE: regex::Regex = regex::Regex::new(&format!(
+        r"(?m)^[\t ]*(?:[{b}][\t ]+)?suggest:[\t ]*\[([^\[\]\r\n]*)\]",
+        b = AGENT_LINE_BULLETS
+    ))
+    .unwrap();
 }
 
 /// Detect suggested follow-up actions: `suggest: [ A | B | C ]` at column 0.
-/// The whole token lives on one row and its bracketed content holds no nested
-/// brackets, so stray pipes/brackets in surrounding output (mermaid, markdown
-/// tables, prose) can never be captured. Inner items are pipe-separated, 2–4
-/// per the TUIC protocol. Only parsed when an agent is active.
+/// The whole token lives on one bounded logical line and its bracketed content
+/// holds no nested brackets, so stray pipes/brackets in surrounding output
+/// (mermaid, markdown tables, prose) can never be captured. Inner items are
+/// pipe-separated, 2–4 per the TUIC protocol. Only parsed when an agent is active.
 #[cfg(test)]
 fn parse_suggest(clean: &str, agent_active: bool) -> Option<ParsedEvent> {
     parse_suggest_with_line(clean, agent_active).map(|(evt, _)| evt)
 }
 
-/// Like [`parse_suggest`] but also returns the canonical `suggest: …` line that
-/// started the match. The caller can persist this line across chunks so a
-/// later PTY chunk that only carries a wrapped continuation (e.g. a naked
-/// last-item tail word) can be re-joined and re-parsed into complete items.
+/// Like [`parse_suggest`] but also returns the canonical `suggest: …` line.
 fn parse_suggest_with_line(clean: &str, agent_active: bool) -> Option<(ParsedEvent, String)> {
     if !agent_active {
         return None;
@@ -1408,8 +1468,7 @@ fn parse_suggest_with_line(clean: &str, agent_active: bool) -> Option<(ParsedEve
         return None;
     }
 
-    // Canonical, normalized form. The caller persists it so a spinner-tick chunk
-    // that re-renders the row can re-parse and re-dedup the same event.
+    // Canonical, normalized form for callers that need the matched token text.
     let canonical_line = format!("suggest: [ {} ]", items.join(" | "));
     Some((ParsedEvent::Suggest { items }, canonical_line))
 }
@@ -1433,9 +1492,10 @@ fn dewrap_suggest_content(text: &str) -> std::borrow::Cow<'_, str> {
         // Matches a `suggest:` prefix line (with optional whitespace/bullet)
         // that ends with only whitespace before the newline — no item content.
         // Capture group 1: everything up to (but not including) trailing space+\n.
-        static ref SUGGEST_TRAILING_RE: regex::Regex = regex::Regex::new(
-            r"(?m)^([\t ]*(?:[\x{25CF}\x{23FA}][\t ]+)?suggest:[\t ]+)[ \t]*\n"
-        )
+        static ref SUGGEST_TRAILING_RE: regex::Regex = regex::Regex::new(&format!(
+            r"(?m)^([\t ]*(?:[{b}][\t ]+)?suggest:[\t ]+)[ \t]*\n",
+            b = AGENT_LINE_BULLETS
+        ))
         .unwrap();
     }
     if !SUGGEST_TRAILING_RE.is_match(text) {
@@ -1472,9 +1532,10 @@ fn dewrap_suggest_brackets(text: &str) -> std::borrow::Cow<'_, str> {
     }
     lazy_static::lazy_static! {
         // Column-0 `suggest:` anchor up to and including the opening `[`.
-        static ref SUGGEST_OPEN_RE: regex::Regex = regex::Regex::new(
-            r"(?m)^[\t ]*(?:[\x{25CF}\x{23FA}][\t ]+)?suggest:[\t ]*\["
-        )
+        static ref SUGGEST_OPEN_RE: regex::Regex = regex::Regex::new(&format!(
+            r"(?m)^[\t ]*(?:[{b}][\t ]+)?suggest:[\t ]*\[",
+            b = AGENT_LINE_BULLETS
+        ))
         .unwrap();
         // A newline plus the horizontal whitespace surrounding it.
         static ref WRAP_WS_RE: regex::Regex = regex::Regex::new(r"[\t ]*\n[\t ]*").unwrap();
@@ -3678,6 +3739,53 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         assert_eq!(
             get_intent(&events),
             Some("fixing the layout bug".to_string())
+        );
+    }
+
+    #[test]
+    fn test_intent_plain_prefix_with_codex_bullet() {
+        // Codex decorates the first line of an assistant message with `• `
+        // (U+2022), so an intent emitted as the opening line arrives bulleted.
+        // Regression: this glyph was excluded from the token anchor, so Codex
+        // intent capture silently never fired.
+        let mut parser = OutputParser::new();
+        let events = parser.parse("\u{2022} intent: avvio watcher upstream (Upstream Watcher)");
+        assert_eq!(
+            get_intent(&events),
+            Some("avvio watcher upstream".to_string())
+        );
+        assert_eq!(
+            get_intent_title(&events),
+            Some("Upstream Watcher".to_string())
+        );
+    }
+
+    #[test]
+    fn test_intent_plain_prefix_with_codex_hollow_bullet() {
+        // Codex alternates • (U+2022) with ◦ (U+25E6) as a blink; both anchor.
+        let mut parser = OutputParser::new();
+        let events = parser.parse("\u{25E6} intent: ricostruisco il modello");
+        assert_eq!(
+            get_intent(&events),
+            Some("ricostruisco il modello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_suggest_plain_prefix_with_codex_bullet() {
+        let mut parser = OutputParser::new();
+        let events = parser.parse("\u{2022} suggest: [ Rebuild | Retry | Abort ]");
+        let items = events.iter().find_map(|e| match e {
+            ParsedEvent::Suggest { items } => Some(items.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            items,
+            Some(vec![
+                "Rebuild".to_string(),
+                "Retry".to_string(),
+                "Abort".to_string()
+            ])
         );
     }
 

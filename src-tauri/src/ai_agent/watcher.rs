@@ -284,31 +284,39 @@ pub(crate) fn update_rule(
     max_fires: Option<u32>,
     cooldown_secs: Option<u32>,
 ) -> Result<(), String> {
-    let rule = config
+    let idx = config
         .rules
-        .iter_mut()
-        .find(|r| r.id == id)
+        .iter()
+        .position(|r| r.id == id)
         .ok_or_else(|| format!("Rule '{}' not found", id))?;
+
+    // Validate before mutating: build a candidate from the live rule, apply the
+    // changes to the candidate, validate it, and only then commit. The trigger
+    // loop reads the live rule concurrently, so a rejected update must leave it
+    // untouched — never mutate-then-validate.
+    let mut candidate = config.rules[idx].clone();
     if let Some(n) = name {
-        rule.name = n;
+        candidate.name = n;
     }
     if let Some(t) = trigger {
-        rule.trigger = t;
+        candidate.trigger = t;
     }
     if let Some(i) = instructions {
-        rule.instructions = Some(i);
+        candidate.instructions = Some(i);
     }
     // prompt_id/repo_path are full-replace: the editor always sends the complete
     // desired state, so None means "clear" (not "leave unchanged").
-    rule.prompt_id = prompt_id;
-    rule.repo_path = repo_path;
+    candidate.prompt_id = prompt_id;
+    candidate.repo_path = repo_path;
     if let Some(m) = max_fires {
-        rule.max_fires = m;
+        candidate.max_fires = m;
     }
     if let Some(c) = cooldown_secs {
-        rule.cooldown_secs = c;
+        candidate.cooldown_secs = c;
     }
-    validate_rule(rule)?;
+    validate_rule(&candidate)?;
+
+    config.rules[idx] = candidate;
     save_config(config)
 }
 
@@ -2004,18 +2012,65 @@ mod tests {
     }
 
     #[test]
-    fn update_rejects_empty_instructions() {
-        let instructions = "";
-        assert!(
-            instructions.trim().is_empty(),
-            "Empty instructions should be rejected"
+    fn update_rejects_empty_instructions_leaves_rule_unchanged() {
+        let mut config = WatcherConfig::default();
+        let mut r = make_rule(Some("s1"), "original instructions");
+        r.id = "r1".into();
+        r.name = "Original".into();
+        config.rules.push(r);
+
+        // Clearing instructions (with no prompt_id) makes the candidate invalid.
+        // A valid name change is bundled in to prove the update is atomic — nothing
+        // commits on rejection.
+        let err = update_rule(
+            &mut config,
+            "r1",
+            Some("Renamed".into()),
+            None,
+            Some(String::new()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("instructions"), "got: {err}");
+
+        // The live rule the trigger loop reads must be untouched, including the
+        // valid name change.
+        assert_eq!(config.rules[0].name, "Original");
+        assert_eq!(
+            config.rules[0].instructions.as_deref(),
+            Some("original instructions")
         );
     }
 
     #[test]
-    fn update_rejects_zero_max_fires() {
-        let max_fires: u32 = 0;
-        assert_eq!(max_fires, 0, "Zero max_fires should be rejected");
+    fn update_rejects_zero_max_fires_leaves_rule_unchanged() {
+        let mut config = WatcherConfig::default();
+        let mut r = make_rule(Some("s1"), "watch");
+        r.id = "r1".into();
+        r.name = "Original".into();
+        r.max_fires = 50;
+        config.rules.push(r);
+
+        let err = update_rule(
+            &mut config,
+            "r1",
+            Some("Renamed".into()),
+            None,
+            None,
+            None,
+            None,
+            Some(0),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("max_fires"), "got: {err}");
+
+        // No field committed on a rejected update.
+        assert_eq!(config.rules[0].name, "Original");
+        assert_eq!(config.rules[0].max_fires, 50);
     }
 
     // ── Trigger evaluation tests ────────────────────────────────

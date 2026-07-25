@@ -26,6 +26,17 @@
   top: calc(var(--toolbar-height, 38px) + 4px);
 }
 
+/* Only the check list absorbs overflow; every other row keeps its intrinsic
+   height. Without this, a tall PR (many CI checks) makes flexbox shrink every
+   row proportionally — clipping the repo/title text at the top edge. */
+.popover > * {
+  flex-shrink: 0;
+}
+
+.popover > .checks {
+  flex-shrink: 1;
+}
+
 .repo {
   /* top padding clears the popover's radius-xl (8px) rounded corner so the
      owner/repo line isn't clipped against the top edge */
@@ -299,11 +310,16 @@
   gap: 10px;
   padding: 6px 10px;
   border-radius: var(--radius-sm);
-  cursor: pointer;
   transition: background 0.1s;
 }
 
-.checkItem:hover {
+/* Only rows carrying a details URL are interactive (story 096-2ac0) — the base
+ * row stays inert so URL-less checks don't show a dead cursor-pointer/hover. */
+.checkItem.clickable {
+  cursor: pointer;
+}
+
+.checkItem.clickable:hover {
   background: var(--bg-highlight);
 }
 
@@ -345,6 +361,131 @@
 .checkStatus.pending {
   background: rgba(224, 175, 104, 0.2);
   color: var(--warning);
+}
+
+.aiReview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.aiReviewHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.aiReviewTitle {
+  font-size: var(--font-sm);
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+
+.aiReviewBtn,
+.postReviewBtn {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.aiReviewBtn:hover,
+.postReviewBtn:hover {
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.aiReviewBtn:disabled,
+.postReviewBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.aiReviewError {
+  color: var(--error);
+  font-size: var(--font-xs);
+  overflow-wrap: anywhere;
+}
+
+.aiReviewEmpty {
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+}
+
+.aiReviewMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--fg-secondary);
+  font-size: var(--font-xs);
+}
+
+.aiReviewSummary {
+  overflow-wrap: anywhere;
+}
+
+.findingsList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.findingItem {
+  display: grid;
+  grid-template-columns: 16px 16px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  font-size: var(--font-xs);
+  color: var(--fg-secondary);
+}
+
+.findingItem input {
+  margin: 1px 0 0;
+}
+
+.findingIcon {
+  width: 14px;
+  height: 14px;
+  margin-top: 1px;
+}
+
+.findingBug {
+  color: var(--error);
+}
+
+.findingRisk {
+  color: var(--warning);
+}
+
+.findingNit {
+  color: var(--fg-muted);
+}
+
+.findingBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.findingPath {
+  color: var(--fg-muted);
+  font-family: var(--font-ui);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.findingMessage {
+  color: var(--fg-secondary);
+  overflow-wrap: anywhere;
 }
 
 /* Footer action buttons — aligned to the GitHub PR panel's `.ghActionBtn` language:

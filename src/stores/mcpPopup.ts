@@ -82,8 +82,15 @@ function createMcpPopupStore() {
 
 		try {
 			await invoke("save_mcp_upstreams", { config: { servers: updated } });
-			// CC doesn't handle tools/list_changed (anthropics/claude-code#4118)
-			toastsStore.add("MCP servers changed", "Active AI sessions won't see this change until restarted.", "warn");
+			// TUIC advertises tools.listChanged and the bridge forwards the standard
+			// notification. MCP does not expose whether a particular client version
+			// actually applies it, so report what TUIC knows without falsely requiring
+			// every Claude/Codex session to restart.
+			toastsStore.add(
+				"MCP servers changed",
+				"Connected AI sessions were notified. Compatible clients refresh automatically; others may need to reconnect.",
+				"info",
+			);
 		} catch (err) {
 			appLogger.error("mcp", `Toggle failed for ${name}`, err);
 			// Rollback optimistic update

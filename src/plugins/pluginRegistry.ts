@@ -22,7 +22,9 @@ import { dashboardRegistry } from "./dashboardRegistry";
 import { fileIconRegistry } from "./fileIconRegistry";
 import { filePreviewRegistry } from "./filePreviewRegistry";
 import { markdownProviderRegistry } from "./markdownProviderRegistry";
+import { guardPluginAsyncCallback, guardPluginCallback, guardPluginPredicate } from "./pluginCallbackGuard";
 import type {
+	ActivityItem,
 	ArtifactEntry,
 	Disposable,
 	FileIconProvider,
@@ -142,7 +144,6 @@ function createPluginRegistry() {
 		pluginId: string,
 		disposables: Disposable[],
 		capabilities: ReadonlySet<string> | null = null,
-		allowedUrls: readonly string[] = [],
 	): PluginHost {
 		function track(d: Disposable): Disposable {
 			// Wrap in idempotent guard: plugins may manually dispose() and then the
@@ -160,6 +161,13 @@ function createPluginRegistry() {
 		}
 
 		const logger = pluginStore.getLogger(pluginId);
+		const wrapActivityItemCallbacks = <T extends Partial<ActivityItem>>(item: T): T => {
+			const wrapped = { ...item };
+			if (wrapped.onClick) {
+				wrapped.onClick = guardPluginCallback(pluginId, "activity item onClick", wrapped.onClick);
+			}
+			return wrapped;
+		};
 
 		return {
 			// -- Tier 0: Logging --
@@ -207,7 +215,7 @@ function createPluginRegistry() {
 
 			registerFileIconProvider(provider: FileIconProvider): Disposable {
 				requireCapability(pluginId, capabilities, "ui:file-icons");
-				return track(fileIconRegistry.register(provider));
+				return track(fileIconRegistry.register(provider, pluginId));
 			},
 
 			registerFilePreview(options) {
@@ -217,7 +225,7 @@ function createPluginRegistry() {
 
 			addItem(item) {
 				if (item.icon) item.icon = sanitizeSvgIcon(item.icon);
-				activityStore.addItem(item);
+				activityStore.addItem(wrapActivityItemCallbacks(item));
 			},
 
 			removeItem(id) {
@@ -226,7 +234,7 @@ function createPluginRegistry() {
 
 			updateItem(id, updates) {
 				if (updates.icon) updates.icon = sanitizeSvgIcon(updates.icon);
-				activityStore.updateItem(id, updates);
+				activityStore.updateItem(id, wrapActivityItemCallbacks(updates));
 			},
 
 			// -- Tier 2: Read-only app state --
@@ -362,8 +370,9 @@ function createPluginRegistry() {
 					...action,
 					action: (ctx) => {
 						if (!plugins.has(pluginId)) return;
-						action.action(ctx);
+						guardPluginCallback(pluginId, "terminal action", action.action)(ctx);
 					},
+					disabled: guardPluginPredicate(pluginId, "terminal action disabled", action.disabled, true),
 				};
 				return track(contextMenuActionsStore.registerAction(pluginId, guardedAction));
 			},
@@ -374,8 +383,9 @@ function createPluginRegistry() {
 					...action,
 					action: (ctx) => {
 						if (!plugins.has(pluginId)) return;
-						action.action(ctx);
+						guardPluginCallback(pluginId, "context menu action", action.action)(ctx);
 					},
+					disabled: guardPluginPredicate(pluginId, "context menu action disabled", action.disabled, true),
 				};
 				return track(contextMenuActionsStore.registerContextAction(pluginId, guarded));
 			},
@@ -425,7 +435,7 @@ function createPluginRegistry() {
 						pluginId,
 						label: options.label ?? "Dashboard",
 						icon: options.icon,
-						open: options.open,
+						open: guardPluginAsyncCallback(pluginId, "dashboard open", options.open),
 					}),
 				);
 			},
@@ -438,7 +448,7 @@ function createPluginRegistry() {
 					pluginId,
 					defaultKey: options.defaultShortcut,
 				});
-				pluginCommandHandlers.set(actionName, options.run);
+				pluginCommandHandlers.set(actionName, guardPluginAsyncCallback(pluginId, "command run", options.run));
 				return track({
 					dispose() {
 						keybindingsStore.unregisterDynamicAction(actionName);
@@ -478,6 +488,11 @@ function createPluginRegistry() {
 				return invoke<string>("plugin_read_file", { path: absolutePath, pluginId });
 			},
 
+			async readFileBase64(absolutePath: string): Promise<string> {
+				requireCapability(pluginId, capabilities, "fs:read");
+				return invoke<string>("plugin_read_file_base64", { path: absolutePath, pluginId });
+			},
+
 			async readFileTail(absolutePath: string, maxBytes: number): Promise<string> {
 				requireCapability(pluginId, capabilities, "fs:read");
 				return invoke<string>("plugin_read_file_tail", { path: absolutePath, maxBytes, pluginId });
@@ -503,9 +518,13 @@ function createPluginRegistry() {
 				await invoke("plugin_rename_path", { from, to, pluginId });
 			},
 
-			async scanBuildArtifacts(repoPaths: string[]): Promise<ArtifactEntry[]> {
+			async scanBuildArtifacts(repoPaths: string[], options?: { forceRefresh?: boolean }): Promise<ArtifactEntry[]> {
 				requireCapability(pluginId, capabilities, "fs:scan");
-				return invoke<ArtifactEntry[]>("scan_build_artifacts", { repoPaths, pluginId });
+				return invoke<ArtifactEntry[]>("scan_build_artifacts", {
+					repoPaths,
+					pluginId,
+					forceRefresh: options?.forceRefresh ?? false,
+				});
 			},
 
 			async deleteBuildArtifact(path: string, repoPaths: string[]): Promise<void> {
@@ -557,7 +576,7 @@ function createPluginRegistry() {
 					icon: options.icon ? sanitizeSvgIcon(options.icon) : undefined,
 					priority: options.priority ?? 0,
 					ttlMs: options.ttlMs ?? 60_000,
-					onClick: options.onClick,
+					onClick: options.onClick ? guardPluginCallback(pluginId, "ticker onClick", options.onClick) : undefined,
 				});
 			},
 
@@ -642,7 +661,6 @@ function createPluginRegistry() {
 					method: options?.method ?? null,
 					headers: options?.headers ?? null,
 					body: options?.body ?? null,
-					allowedUrls: [...allowedUrls],
 					pluginId,
 				});
 			},
@@ -691,12 +709,7 @@ function createPluginRegistry() {
 	 * @param agentTypes - Optional list of agent types this plugin targets.
 	 *   Empty or omit for universal plugins.
 	 */
-	async function register(
-		plugin: TuiPlugin,
-		capabilities?: string[],
-		allowedUrls?: string[],
-		agentTypes?: string[],
-	): Promise<void> {
+	async function register(plugin: TuiPlugin, capabilities?: string[], agentTypes?: string[]): Promise<void> {
 		// Replace existing registration for same id
 		if (plugins.has(plugin.id)) {
 			unregister(plugin.id);
@@ -704,7 +717,7 @@ function createPluginRegistry() {
 
 		const disposables: Disposable[] = [];
 		const capSet = capabilities ? new Set(capabilities) : null;
-		const host = buildHost(plugin.id, disposables, capSet, allowedUrls ?? []);
+		const host = buildHost(plugin.id, disposables, capSet);
 
 		const pluginLogger = pluginStore.getLogger(plugin.id);
 
@@ -733,7 +746,9 @@ function createPluginRegistry() {
 			pluginLogger.error(`onload failed: ${msg}`, err);
 			pluginStore.updatePlugin(plugin.id, { loaded: false, error: msg });
 			if (capabilities) {
-				invoke("unregister_loaded_plugin", { pluginId: plugin.id }).catch(() => {});
+				invoke("unregister_loaded_plugin", { pluginId: plugin.id }).catch((e) =>
+					appLogger.debug("plugin", `unregister_loaded_plugin cleanup failed for "${plugin.id}": ${e}`),
+				);
 			}
 			for (const d of disposables) {
 				try {
@@ -777,7 +792,9 @@ function createPluginRegistry() {
 		}
 		entry.disposable.dispose();
 		statusBarTicker.removeAllForPlugin(id);
-		invoke("unregister_loaded_plugin", { pluginId: id }).catch(() => {});
+		invoke("unregister_loaded_plugin", { pluginId: id }).catch((e) =>
+			appLogger.debug("plugin", `unregister_loaded_plugin cleanup failed for "${id}": ${e}`),
+		);
 		pluginStore.updatePlugin(id, { loaded: false });
 	}
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeTerminal, testInScope } from "../helpers/store";
 
 describe("terminalsStore", () => {
@@ -8,6 +8,10 @@ describe("terminalsStore", () => {
 		vi.resetModules();
 		localStorage.clear();
 		store = (await import("../../stores/terminals")).terminalsStore;
+	});
+
+	afterEach(() => {
+		store._testCancelPendingTimers();
 	});
 
 	describe("add()", () => {
@@ -413,9 +417,12 @@ describe("terminalsStore", () => {
 		it("update({ sessionId: null }) removes reverse map entry", () => {
 			testInScope(() => {
 				const id = store.add(makeTerminal({ name: "T1", sessionId: "sess-bye" }));
+				store.update(id, { agentState: "working", backgroundWork: true });
 				expect(store.getTerminalForSession("sess-bye")).toBe(id);
 				store.update(id, { sessionId: null });
 				expect(store.getTerminalForSession("sess-bye")).toBeNull();
+				expect(store.get(id)?.agentState).toBeNull();
+				expect(store.get(id)?.backgroundWork).toBe(false);
 			});
 		});
 

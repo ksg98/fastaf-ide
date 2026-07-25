@@ -41,13 +41,16 @@ describe("diffTabsStore", () => {
 	});
 
 	describe("remove()", () => {
-		it("removes a tab and selects another", () => {
+		it("removes the active tab without promoting another (caller selects the replacement)", () => {
 			testInScope(() => {
 				const id1 = store.add("/repo", "a.ts", "M");
 				const id2 = store.add("/repo", "b.ts", "A");
 				store.remove(id2);
 				expect(store.get(id2)).toBeUndefined();
-				expect(store.state.activeId).toBe(id1);
+				expect(store.get(id1)).toBeDefined();
+				// No auto-promotion: id1 could be scoped to another branch/repo —
+				// visibility-aware selection happens in useTerminalLifecycle.
+				expect(store.state.activeId).toBeNull();
 			});
 		});
 

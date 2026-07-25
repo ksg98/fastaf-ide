@@ -10,7 +10,7 @@ import { currentBranchKey, repositoriesStore } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
 import { tabOrderingStore } from "../stores/tabOrdering";
 import { terminalsStore } from "../stores/terminals";
-import { writeClipboard } from "../utils/clipboard";
+import { readClipboard, writeClipboard } from "../utils/clipboard";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { assignTabToActiveGroup } from "../utils/paneTabAssign";
 import { filterValidTerminals } from "../utils/terminalFilter";
@@ -278,43 +278,43 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 			return;
 		}
 		const ids = filterValidTerminals(repositoriesStore.getActiveTerminals(), terminalsStore.getIds());
-		for (const id of ids) {
-			if (id !== keepId) {
-				await closeTerminal(id, true);
+		const results = await Promise.allSettled(ids.filter((id) => id !== keepId).map((id) => closeTerminal(id, true)));
+		for (const result of results) {
+			if (result.status === "rejected") {
+				appLogger.warn("terminal", "closeOtherTabs: failed to close terminal", result.reason);
 			}
 		}
 		handleTerminalSelect(keepId);
 	};
 
 	const closeTabsToRight = async (afterId: string) => {
-		if (afterId.startsWith("diff-")) {
-			const ids = diffTabsStore.getIds();
+		const store = afterId.startsWith("diff-")
+			? diffTabsStore
+			: afterId.startsWith("md-")
+				? mdTabsStore
+				: afterId.startsWith("edit-")
+					? editorTabsStore
+					: null;
+		if (store) {
+			const ids = store.getIds();
 			const idx = ids.indexOf(afterId);
-			for (const id of ids.slice(idx + 1)) {
-				diffTabsStore.remove(id);
+			const toRemove = ids.slice(idx + 1);
+			const activeId = store.state.activeId;
+			const wasActiveRemoved = activeId !== null && toRemove.includes(activeId);
+			for (const id of toRemove) {
+				store.remove(id);
 			}
-			return;
-		}
-		if (afterId.startsWith("md-")) {
-			const ids = mdTabsStore.getIds();
-			const idx = ids.indexOf(afterId);
-			for (const id of ids.slice(idx + 1)) {
-				mdTabsStore.remove(id);
-			}
-			return;
-		}
-		if (afterId.startsWith("edit-")) {
-			const ids = editorTabsStore.getIds();
-			const idx = ids.indexOf(afterId);
-			for (const id of ids.slice(idx + 1)) {
-				editorTabsStore.remove(id);
-			}
+			// remove() nulls activeId when it closes the active tab — keep the anchor tab focused
+			if (wasActiveRemoved) handleTerminalSelect(afterId);
 			return;
 		}
 		const ids = filterValidTerminals(repositoriesStore.getActiveTerminals(), terminalsStore.getIds());
 		const idx = ids.indexOf(afterId);
-		for (const id of ids.slice(idx + 1)) {
-			await closeTerminal(id, true);
+		const results = await Promise.allSettled(ids.slice(idx + 1).map((id) => closeTerminal(id, true)));
+		for (const result of results) {
+			if (result.status === "rejected") {
+				appLogger.warn("terminal", "closeTabsToRight: failed to close terminal", result.reason);
+			}
 		}
 	};
 
@@ -435,7 +435,7 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 
 	const pasteToTerminal = async () => {
 		try {
-			const text = await navigator.clipboard.readText();
+			const text = await readClipboard();
 			const active = terminalsStore.getActive();
 			if (active?.ref && text) {
 				active.ref.paste(text);

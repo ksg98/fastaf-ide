@@ -1,3 +1,4 @@
+import { guardPluginCallback } from "./pluginCallbackGuard";
 import type { Disposable } from "./types";
 
 interface FilePreviewHandler {
@@ -16,8 +17,9 @@ function createFilePreviewRegistry() {
 
 	function register(pluginId: string, extensions: string[], handler: FilePreviewHandler["onOpen"]): Disposable {
 		const normalized = extensions.map((e) => e.toLowerCase());
+		const guarded = guardPluginCallback(pluginId, "file preview onOpen", handler);
 		for (const ext of normalized) {
-			registry.set(ext, { pluginId, onOpen: handler });
+			registry.set(ext, { pluginId, onOpen: guarded });
 		}
 		return {
 			dispose() {

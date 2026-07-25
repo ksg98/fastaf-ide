@@ -309,8 +309,7 @@ impl OAuthFlowManager {
 
     /// Spawn a background task that periodically removes expired pending
     /// flows. The task runs for the lifetime of the returned `Arc`; drop all
-    /// outer references to stop it.
-    #[allow(dead_code)] // wired in by state.rs at app startup
+    /// outer references to stop it. Wired in by `spawn_background_tasks`.
     pub(crate) fn spawn_cleanup_task(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {

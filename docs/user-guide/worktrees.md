@@ -77,7 +77,7 @@ Right-click a worktree branch → **Merge & Archive** to:
    - **Delete**: Removes the worktree and branch entirely
    - **Ask**: Merge succeeds, then you choose what to do
 
-The merge uses `--no-edit` for a clean fast-forward or merge commit. If conflicts are detected, the merge is aborted and the worktree is left intact.
+The merge uses `--no-edit` for a clean fast-forward or merge commit. If conflicts are detected, FastAF attempts `git merge --abort` and leaves the worktree intact. If that abort fails, the error message tells you the repository may still be conflicted and includes the manual abort command.
 
 When using **Ask** mode, the cleanup dialog detects uncommitted changes and auto-stashes them during the branch switch. An "Unstash after switch" checkbox lets you restore changes on the target branch.
 
@@ -106,6 +106,7 @@ Removing a worktree:
 1. Closes all terminals associated with that branch
 2. Runs `git worktree remove` to clean up
 3. Removes the branch entry from the sidebar
+4. If branch deletion was requested but `git branch -d` keeps the branch because it is not safely merged, shows a status message that the worktree was removed and the branch was kept
 
 ## Worktree Manager Panel
 

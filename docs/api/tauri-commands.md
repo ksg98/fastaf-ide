@@ -16,7 +16,7 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `can_spawn_session` | -- | `bool` | Check session limit |
 | `get_orchestrator_stats` | -- | `OrchestratorStats` | Active/max/available |
 | `get_session_metrics` | -- | `JSON` | Spawn/fail/byte counts |
-| `list_active_sessions` | -- | `Vec<ActiveSessionInfo>` | List all sessions |
+| `list_active_sessions` | -- | `Vec<ActiveSessionInfo>` | List all sessions with the same optional lifecycle `state` (`shell_state`, `agent_state`, `background_work`) returned by `GET /sessions` |
 | `list_worktrees` | -- | `Vec<JSON>` | List managed worktrees |
 | `update_session_cwd` | `session_id, cwd` | `()` | Update session working directory (from OSC 7) |
 | `get_session_foreground_process` | `session_id` | `JSON` | Get foreground process info |
@@ -57,6 +57,7 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `run_git_command` | `path, args` | `GitCommandResult` | Run arbitrary git command (success, stdout, stderr, exit_code) |
 | `get_git_panel_context` | `path` | `GitPanelContext` | Rich context for Git Panel (branch, ahead/behind, staged/changed/stash counts, last commit, rebase/cherry-pick state). Cached 5s TTL. |
 | `get_working_tree_status` | `path` | `WorkingTreeStatus` | Full porcelain v2 status: branch, upstream, ahead/behind, stash count, staged/unstaged entries, untracked files |
+| `update_from_base` | `path, branch_name, strategy?` | `String` | Fetch configured base ref and rebase or merge the branch onto it. Conflict cleanup reports `(aborted)` only after abort succeeds; abort failure includes manual recovery guidance. |
 | `git_stage_files` | `path, files` | `()` | Stage files (`git add`). Path-traversal validated |
 | `git_unstage_files` | `path, files` | `()` | Unstage files (`git restore --staged`). Path-traversal validated |
 | `git_discard_files` | `path, files` | `()` | Discard working tree changes (`git restore`). Destructive. Path-traversal validated |
@@ -103,7 +104,13 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `merge_pr_via_github` | `repo_path, pr_number, merge_method` | `String` | Merge PR via GitHub API |
 | `get_all_pr_statuses` | `path` | `Vec<BranchPrStatus>` | Batch PR status for all branches (includes merged) |
 | `get_pr_diff` | `repo_path, pr_number` | `String` | Get PR diff content |
-| `fetch_ci_failure_logs` | `repo_path, run_id` | `String` | Fetch failure logs from a GitHub Actions run for CI auto-heal |
+| `run_pr_review` | `repo_path, pr_number` | `PrReviewResult` | AI review of a PR diff (multi-turn engine, Main slot) → line-level findings |
+| `get_merged_prs` | `repo_path, since_tag?` | `Vec<MergedPr>` | Merged PRs via GraphQL, optionally since a tag's date (AI changelog source) |
+| `generate_changelog` | `repo_path, since_tag?` | `{markdown, json}` | AI changelog from merged PRs (headless slot, one-shot) |
+| `start_conflict_assist` | `repo_path, pr_number` | `ConflictAssistResult` | Worktree on PR head + rebase onto base; reports clean/conflicts + agent prompt (push gated, never auto-merge) |
+| `run_improvement_scan` | `repo_path, focus` | `ImprovementScanResult` | One-shot Headless-slot scan of local repo context for improvement proposals (`focus`: `refactor`, `testing`, `perf`); emits `proposals-ready` |
+| `create_issue_from_proposal` | `repo_path, proposal` | `CreatedIssue` | Human-gated issue creation from an improvement proposal |
+| `fetch_ci_failure_logs` | `repo_path, branch` | `String` | Fetch failed-job logs for the branch's latest GitHub Actions head, including partially completed workflow runs |
 | `check_github_circuit` | `path` | `CircuitState` | Check GitHub API circuit breaker state |
 
 ## Worktree Management (`worktree.rs`)
@@ -111,7 +118,7 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
 | `create_worktree` | `base_repo, branch_name` | `JSON` | Create git worktree |
-| `remove_worktree` | `repo_path, branch_name, delete_branch?` | `()` | Remove worktree; `delete_branch` (default true) controls whether the local branch is also deleted. Archive script resolved from config (not IPC). |
+| `remove_worktree` | `repo_path, branch_name, delete_branch?, force?` | `{ branch_delete_warning?: string }` | Remove worktree; `delete_branch` (default true) controls whether the local branch is also deleted. If safe branch deletion fails after the worktree is removed, returns `branch_delete_warning` so the UI can report that the branch was kept. Archive script resolved from config (not IPC). |
 | `delete_local_branch` | `repo_path, branch_name` | `()` | Delete a local branch (and its worktree if linked). Refuses to delete the default branch. Uses safe `git branch -d` |
 | `check_worktree_dirty` | `repo_path, branch_name` | `bool` | Check if a branch's worktree has uncommitted changes. Returns false if no worktree exists |
 | `get_worktree_paths` | `repo_path` | `HashMap<String,String>` | Worktree paths for repo |
@@ -122,8 +129,8 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `detect_orphan_worktrees` | `repo_path` | `Vec<String>` | Detect worktrees in detached HEAD state (branch deleted) |
 | `remove_orphan_worktree` | `repo_path, worktree_path` | `()` | Remove an orphan worktree by filesystem path (validated against repo) |
 | `switch_branch` | `repo_path, branch_name` | `()` | Switch main worktree to a different branch (with dirty-state and process checks) |
-| `merge_and_archive_worktree` | `repo_path, branch_name` | `MergeResult` | Merge worktree branch into base and archive |
-| `finalize_merged_worktree` | `repo_path, branch_name` | `()` | Clean up worktree after merge (delete branch + worktree) |
+| `merge_and_archive_worktree` | `repo_path, branch_name` | `MergeResult` | Merge worktree branch into base and archive. If conflict cleanup abort fails, the error reports the repo may still be conflicted and includes the manual abort command. |
+| `finalize_merged_worktree` | `repo_path, branch_name, action` | `MergeResult` | Clean up worktree after merge. Delete action may include `branch_delete_warning` if the worktree was removed but safe branch deletion kept the branch. |
 | `list_base_ref_options` | `repo_path` | `Vec<String>` | List valid base refs for worktree creation |
 | `run_setup_script` | `repo_path, worktree_path` | `()` | Run post-creation setup script in new worktree |
 | `generate_clone_branch_name_cmd` | `base_name, existing_names` | `String` | Generate hybrid branch name for clone worktree |
@@ -385,7 +392,7 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 | `start_dictation` | -- | `()` | Start recording |
 | `stop_dictation_and_transcribe` | -- | `TranscribeResponse` | Stop + transcribe. Returns `{text, skip_reason?, duration_s}` |
 | `inject_text` | `text` | `String` | Apply corrections |
-| `get_dictation_status` | -- | `DictationStatus` | Model/recording status |
+| `get_dictation_status` | -- | `DictationStatus` | Model/recording status plus normalized `audio_level` (0–1) |
 | `get_model_info` | -- | `Vec<ModelInfo>` | Available models |
 | `download_whisper_model` | `model_name` | `String` | Download model |
 | `delete_whisper_model` | `model_name` | `String` | Delete model |
@@ -438,6 +445,7 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
 | `plugin_read_file` | `path, plugin_id` | `String` | Read file as UTF-8 (within $HOME, 10 MB limit) |
+| `plugin_read_file_base64` | `path, plugin_id` | `String` | Read file bytes as base64 (within $HOME, 10 MB limit) |
 | `plugin_read_file_tail` | `path, max_bytes, plugin_id` | `String` | Read last N bytes of file, skip partial first line |
 | `plugin_list_directory` | `path, pattern?, plugin_id` | `Vec<String>` | List filenames in directory (optional glob filter) |
 | `plugin_watch_path` | `path, plugin_id, recursive?, debounce_ms?` | `String` (watch ID) | Start watching path for changes |

@@ -17,8 +17,10 @@ export const ToastContainer: Component = () => {
 						onKeyDown={onClickKeyDown(() => toastsStore.remove(toast.id))}
 					>
 						<span class={styles.level} data-level={toast.level} />
-						<span class={styles.title}>{toast.title}</span>
-						{toast.message && <span class={styles.message}>{toast.message}</span>}
+						<span class={styles.body}>
+							<span class={styles.title}>{toast.title}</span>
+							{toast.message && <span class={styles.message}>{toast.message}</span>}
+						</span>
 						<Show when={toast.action}>
 							<button
 								class={styles.action}

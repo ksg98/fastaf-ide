@@ -58,6 +58,13 @@ export interface ClaudeUsageTab extends BaseTab {
 	title: string;
 }
 
+/** Native GitHub Ops Dashboard tab (repo-scoped) */
+export interface GithubOpsTab extends BaseTab {
+	type: "github-ops";
+	title: string;
+	repoPath: string;
+}
+
 /** PR diff tab (renders a full PR diff in the main panel) */
 export interface PrDiffTab extends BaseTab {
 	type: "pr-diff";
@@ -91,6 +98,7 @@ export type MdTabData =
 	| VirtualTab
 	| PluginPanelTab
 	| ClaudeUsageTab
+	| GithubOpsTab
 	| PrDiffTab
 	| HtmlPreviewTab
 	| CommandOverviewTab;
@@ -329,6 +337,29 @@ function createMdTabsStore() {
 			return tabId;
 		},
 
+		/** Add the GitHub Ops Dashboard tab (singleton per repo — reuses existing if open) */
+		addGithubOps(repoPath: string): string {
+			const existing = Object.values(base.state.tabs).find(
+				(tab) => tab.type === "github-ops" && (tab as GithubOpsTab).repoPath === repoPath,
+			) as GithubOpsTab | undefined;
+			if (existing) {
+				base.setActive(existing.id);
+
+				return existing.id;
+			}
+
+			const id = base._nextId("md");
+			const tabId = base._addTab({
+				type: "github-ops",
+				id,
+				title: "GitHub Ops",
+				repoPath,
+				pinned: true,
+			} as GithubOpsTab);
+
+			return tabId;
+		},
+
 		/** Add the Command Overview panel tab (singleton — reuses existing if open) */
 		addCommandOverview(): string {
 			const existing = Object.values(base.state.tabs).find((tab) => tab.type === "command-overview") as
@@ -343,7 +374,6 @@ function createMdTabsStore() {
 			return base._addTab({ type: "command-overview", id, title: "Commands", pinned: true } as CommandOverviewTab);
 		},
 
-		/** Add the AI Triage panel tab (singleton per repo — reuses existing if open) */
 		/** Add a PR diff tab (or reuse existing for same repo+prNumber, updating diff content) */
 		addPrDiff(repoPath: string, prNumber: number, prTitle: string, diff: string): string {
 			const existing = Object.values(base.state.tabs).find(

@@ -1,7 +1,7 @@
 # FastAF Specification
 
-**Version:** 1.5.1
-**Last Updated:** 2026-05-04
+**Version:** 1.6.3
+**Last Updated:** 2026-07-11
 
 ## Overview
 
@@ -24,7 +24,7 @@ FastAF is a multi-agent terminal orchestrator designed to manage multiple AI cod
 | Frontend | SolidJS | Reactive UI with fine-grained reactivity |
 | Terminal | alacritty_terminal | Native VT engine with canvas rendering |
 | Backend | Rust + Tauri | Native PTY management, file system access |
-| Build | Vite | Fast HMR development, optimized production builds (bundle splitting via manualChunks) |
+| Build | Vite | Fast HMR development, optimized production builds with automatic code splitting and deferred loading |
 
 ### Backend Execution Model
 
@@ -37,6 +37,18 @@ All Tauri commands that perform I/O (git subprocesses, network, bcrypt) are `asy
 - Compile-time optimizations
 - Smaller bundle size than React/Vue
 - Familiar JSX syntax
+
+### Frontend Refactoring Workstream
+
+The SolidJS frontend is being refactored incrementally to improve module ownership,
+test isolation, and deferred loading without changing the framework or product
+behavior. The measured architecture map, dependency constraints, sequencing, and
+validation contract are maintained in
+[`docs/frontend/solid-refactoring-plan.md`](docs/frontend/solid-refactoring-plan.md).
+
+The work preserves browser/Tauri transport parity and keeps terminal frame and
+paint scheduling imperative. Structural changes must remain independently tested
+and revertible; line-count reduction alone is not a goal.
 
 ### Component Architecture
 
@@ -242,7 +254,12 @@ Features:
 
 ## Persistence
 
-All stores persist to localStorage:
+Repository state is persisted by the Rust backend in `repositories.json`.
+Release builds use the platform config directory; debug builds use a one-time
+production-seeded `~/.tuicommander-dev/repositories.json` to avoid collisions
+with an installed app. No other backend config path is changed by this rule.
+
+Some frontend-only stores persist to localStorage:
 
 | Key | Store | Content |
 |-----|-------|---------|
@@ -276,7 +293,7 @@ All stores persist to localStorage:
 - [x] Ideas panel (formerly Notes) with send-to-terminal and delete actions
 - [x] Terminal session persistence across app restarts
 - [x] GitHub GraphQL API (replaces gh CLI for PR/CI data)
-- [x] Multi-account GitHub: multiple github.com logins + GitHub Enterprise Server (PAT), per-repo account bindings with ambiguity chooser, isolated per-account polling/rate-limits/circuit-breaker (see FEATURES.md 8.13)
+- [x] Multi-account GitHub: multiple github.com logins + GitHub Enterprise Server (PAT), per-repo account bindings with ambiguity chooser, isolated per-account polling/rate-limits/circuit-breaker (see FEATURES.md 8.14)
 - [x] Auto-update via tauri-plugin-updater with progress badge
 - [x] Prevent system sleep while agents are working (keepawake)
 - [x] Usage limit detection for Claude Code (weekly/session) with status bar badge
@@ -304,6 +321,7 @@ All stores persist to localStorage:
 - [x] Claude Usage Dashboard (native SolidJS component with API polling, session analytics, usage timeline)
 - [x] ConfirmDialog component (in-app dark-themed replacement for native OS dialogs)
 - [x] Status bar unified agent badge with priority cascade (rate limit > usage API > PTY usage > name)
+- [x] Movement-based PTY agent activity detection ("text above the input area moves = active") with explicit-hook precedence, prompt-based Ready screens, Codex presence-based Working policy, interrupt confirmation, and confirmed-idle safety gates
 - [x] PR lifecycle filtering (CLOSED hidden, MERGED hidden after 5min user activity)
 - [x] Notes/Ideas: mark as used, badge count in status bar
 - [x] Notes/Ideas: image paste support (Ctrl+V), thumbnails, send absolute paths to terminal
@@ -316,6 +334,7 @@ All stores persist to localStorage:
 - [x] `ai_terminal_*` MCP tools — external agent surface (Claude Code, Cursor) driving FastAF terminals with user-confirmation gates
 - [x] ChoicePrompt parser variant — numbered confirmation menu detection with destructive-label flagging, PWA overlay, `sendPtyKey()` helper
 - [x] MCP OAuth 2.1 — RFC 9728 + RFC 8414 PKCE flow for upstream MCP servers, `tuic://oauth-callback` deep link, shared `TokenManager` with thundering-herd-safe refresh
+- [x] GitHub Ops dashboard — live review/conflict/autofix/changelog state plus Headless-slot improvement proposals with explicit issue creation
 
 ### Completed (Voice Dictation)
 - [x] Local Whisper inference via whisper-rs (Metal GPU acceleration)

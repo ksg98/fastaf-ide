@@ -20,6 +20,53 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 static TUIC_SESSION_ENV: LazyLock<Option<String>> =
     LazyLock::new(|| std::env::var("TUIC_SESSION").ok().filter(|s| !s.is_empty()));
 
+const MCP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MCP_WAIT_DEFAULT_MS: u64 = 60_000;
+const MCP_WAIT_MAX_MS: u64 = 300_000;
+/// Bounded transport overhead beyond the server-side wait. This covers HTTP
+/// framing and scheduler latency without turning unrelated calls into long
+/// hangs; the requested wait itself remains authoritative.
+const MCP_WAIT_RESPONSE_MARGIN_MS: u64 = 5_000;
+
+fn wait_timeout_ms(request: &Value) -> Option<u64> {
+    let name = request.pointer("/params/name").and_then(Value::as_str)?;
+    let outer_arguments = request.pointer("/params/arguments")?;
+    let arguments = if name == "call_tool" {
+        let tool = outer_arguments.get("tool_name").and_then(Value::as_str)?;
+        if !matches!(tool, "agent" | "session") {
+            return None;
+        }
+        outer_arguments.get("arguments")?
+    } else {
+        if !matches!(name, "agent" | "session") {
+            return None;
+        }
+        outer_arguments
+    };
+    if arguments.get("action").and_then(Value::as_str) != Some("wait") {
+        return None;
+    }
+    Some(
+        arguments
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|timeout| *timeout > 0)
+            .unwrap_or(MCP_WAIT_DEFAULT_MS)
+            .min(MCP_WAIT_MAX_MS),
+    )
+}
+
+fn response_timeout(body: &str) -> std::time::Duration {
+    let Ok(request) = serde_json::from_str::<Value>(body) else {
+        return MCP_RESPONSE_TIMEOUT;
+    };
+    wait_timeout_ms(&request)
+        .map(|timeout| {
+            std::time::Duration::from_millis(timeout.saturating_add(MCP_WAIT_RESPONSE_MARGIN_MS))
+        })
+        .unwrap_or(MCP_RESPONSE_TIMEOUT)
+}
+
 // ---------------------------------------------------------------------------
 // Platform-specific IPC connection
 // ---------------------------------------------------------------------------
@@ -245,23 +292,15 @@ async fn post_mcp(
         .await
         .map_err(|e| format!("write body: {e}"))?;
 
-    // Read the response first, then shutdown.  Calling shutdown() before read
-    // signals EOF to the server, which may drop the connection before responding.
-    let mut buf = Vec::new();
-    // Read until Connection: close triggers server-side EOF.
-    // Timeout prevents indefinite hang if the server accepts but never responds.
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        stream.read_to_end(&mut buf),
-    )
-    .await
-    .map_err(|_| "read: timed out after 10s".to_string())?
-    .map_err(|e| format!("read: {e}"))?;
-    let raw = String::from_utf8_lossy(&buf);
-
-    // Split headers from body
+    // Do not wait for EOF: hyper may keep an accepted IPC connection alive even
+    // when the request says `Connection: close`. Read exactly Content-Length and
+    // drop our stream immediately, otherwise a keep-alive connection leaves an
+    // accepted mcp.sock FD behind in TUIC. Wait calls derive this transport
+    // deadline from their requested server timeout plus a bounded margin.
     let (header_section, response_body) =
-        raw.split_once("\r\n\r\n").ok_or("invalid HTTP response")?;
+        tokio::time::timeout(response_timeout(body), read_http_response(&mut stream))
+            .await
+            .map_err(|_| "read: response timed out".to_string())??;
 
     // Extract mcp-session-id from response headers
     let sid = header_section.lines().find_map(|line| {
@@ -273,7 +312,46 @@ async fn post_mcp(
         }
     });
 
-    Ok((response_body.to_string(), sid))
+    Ok((response_body, sid))
+}
+
+async fn read_http_response<R>(reader: &mut R) -> Result<(String, String), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = reader
+            .read(&mut chunk)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            return Err("read: response ended before the declared body length".to_string());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+
+        let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            continue;
+        };
+        let body_start = header_end + 4;
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        });
+        let Some(content_length) = content_length else {
+            return Err("read: HTTP response missing Content-Length".to_string());
+        };
+        if buf.len() < body_start + content_length {
+            continue;
+        }
+        let body =
+            String::from_utf8_lossy(&buf[body_start..body_start + content_length]).to_string();
+        return Ok((headers, body));
+    }
 }
 
 /// Establish an MCP session with the TUIC server.
@@ -308,7 +386,8 @@ async fn sse_listener(session_id: String) {
     };
 
     let request = format!(
-        "GET /mcp HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nmcp-session-id: {session_id}\r\n\r\n"
+        "GET /mcp HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nmcp-session-id: {session_id}\r\n{}\r\n",
+        tuic_session_header_line(TUIC_SESSION_ENV.as_deref())
     );
     if stream.write_all(request.as_bytes()).await.is_err() {
         return;
@@ -384,7 +463,7 @@ fn emit_offline_response(method: &str, id: &Value) {
         "tools/call" => emit(&serde_json::json!({
             "jsonrpc": "2.0", "id": id,
             "result": {
-                "content": [{ "type": "text", "text": "FastAF is not running. Start it to use MCP tools." }],
+                "content": [{ "type": "text", "text": "FastAF MCP is unavailable. The app may still be running; enable its MCP server and retry." }],
                 "isError": true
             }
         })),
@@ -414,13 +493,16 @@ async fn main() {
     });
 
     // Try initial connection
-    if let Ok((sid, _)) = server_initialize().await {
-        eprintln!("tuic-bridge: connected to TUIC");
-        *state.session_id.lock().unwrap() = Some(sid);
-        state.connected.store(true, Ordering::Release);
-        start_sse_listener(&state);
-    } else {
-        eprintln!("tuic-bridge: TUIC not running, will retry in background");
+    match server_initialize().await {
+        Ok((sid, _)) => {
+            eprintln!("tuic-bridge: connected to TUIC");
+            *state.session_id.lock().unwrap() = Some(sid);
+            state.connected.store(true, Ordering::Release);
+            start_sse_listener(&state);
+        }
+        Err(error) => {
+            eprintln!("tuic-bridge: MCP endpoint unavailable, will retry in background: {error}");
+        }
     }
 
     // Background reconnection loop. Hysteresis: disconnect only after N consecutive
@@ -436,7 +518,7 @@ async fn main() {
                 let sid = bg_state.session_id.lock().unwrap().clone();
                 let health = post_mcp(
                     &serde_json::to_string(
-                        &serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/list"}),
+                        &serde_json::json!({"jsonrpc":"2.0","id":0,"method":"ping"}),
                     )
                     .unwrap(),
                     sid.as_deref(),
@@ -586,10 +668,17 @@ async fn main() {
                         }
                         Err(e) => {
                             eprintln!("tuic-bridge: proxy error: {e}");
-                            state.connected.store(false, Ordering::Release);
-                            *state.session_id.lock().unwrap() = None;
-                            // Fall through to offline response
-                            emit_offline_response(method, &id);
+                            // A single request timeout is not proof that TUIC stopped.
+                            // Preserve the MCP session/identity; the health loop applies
+                            // the three-failure hysteresis and owns disconnect decisions.
+                            emit(&serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": {
+                                    "code": -32000,
+                                    "message": format!("FastAF IPC request failed: {e}")
+                                }
+                            }));
                         }
                     }
                 } else {
@@ -602,7 +691,8 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::tuic_session_header_line;
+    use super::{read_http_response, response_timeout, tuic_session_header_line};
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn header_emitted_when_session_present() {
@@ -616,5 +706,46 @@ mod tests {
     fn header_absent_without_session() {
         assert_eq!(tuic_session_header_line(None), "");
         assert_eq!(tuic_session_header_line(Some("")), "");
+    }
+
+    #[test]
+    fn mcp_delivery_regression_wait_response_timeout_tracks_requested_server_deadline() {
+        let ordinary =
+            r#"{"method":"tools/call","params":{"name":"session","arguments":{"action":"list"}}}"#;
+        let direct_wait =
+            r#"{"method":"tools/call","params":{"name":"agent","arguments":{"action":"wait"}}}"#;
+        let collapsed_wait = r#"{"method":"tools/call","params":{"name":"call_tool","arguments":{"tool_name":"session","arguments":{"action":"wait","timeout_ms":120000}}}}"#;
+        let capped_wait = r#"{"method":"tools/call","params":{"name":"agent","arguments":{"action":"wait","timeout_ms":999999}}}"#;
+        let short_wait = r#"{"method":"tools/call","params":{"name":"session","arguments":{"action":"wait","timeout_ms":1}}}"#;
+        assert_eq!(response_timeout(ordinary).as_secs(), 10);
+        assert_eq!(response_timeout(direct_wait).as_secs(), 65);
+        assert_eq!(response_timeout(collapsed_wait).as_secs(), 125);
+        assert_eq!(response_timeout(capped_wait).as_secs(), 305);
+        assert_eq!(response_timeout(short_wait).as_millis(), 5_001);
+    }
+
+    #[tokio::test]
+    async fn successful_action_ack_finishes_without_waiting_for_eof() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let response_body = r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nmcp-session-id: sid\r\n\r\n{response_body}",
+            response_body.len()
+        );
+        let writer = tokio::spawn(async move {
+            server.write_all(response.as_bytes()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        let (headers, body) = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            read_http_response(&mut client),
+        )
+        .await
+        .expect("reader must not wait for the still-open server side")
+        .unwrap();
+        assert!(headers.contains("mcp-session-id: sid"));
+        assert_eq!(body, response_body);
+        writer.abort();
     }
 }

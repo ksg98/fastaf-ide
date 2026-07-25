@@ -207,7 +207,7 @@ describe("useSplitPanes", () => {
 			expect(paneLayoutStore.getAllGroupIds().length).toBe(1);
 		});
 
-		it("destroys terminals in the closed group", () => {
+		it("destroys terminals in the closed group when no pane is empty", () => {
 			const id1 = terminalsStore.add({
 				sessionId: null,
 				fontSize: 14,
@@ -218,14 +218,50 @@ describe("useSplitPanes", () => {
 			terminalsStore.setActive(id1);
 
 			splitPanes.handleSplit("vertical");
-			const allGroups = paneLayoutStore.getAllGroupIds();
+			const [g0, g1] = paneLayoutStore.getAllGroupIds();
 
-			// Switch to first group (has terminal) and close it
-			paneLayoutStore.setActiveGroup(allGroups[0]);
+			// Fill the second pane so neither pane is empty — now closing the active
+			// pane must destroy its terminal (no empty pane to cancel instead).
+			const id2 = terminalsStore.add({
+				sessionId: null,
+				fontSize: 14,
+				name: "T2",
+				cwd: null,
+				awaitingInput: null,
+			});
+			paneLayoutStore.addTab(g1, { id: id2, type: "terminal" });
+
+			paneLayoutStore.setActiveGroup(g0);
 			splitPanes.closeActivePane();
 
-			// Terminal should be removed
 			expect(terminalsStore.get(id1)).toBeUndefined();
+			expect(terminalsStore.get(id2)).toBeDefined();
+		});
+
+		it("cancels a still-empty split pane instead of destroying the active terminal", () => {
+			// Reported bug: after splitting, the new pane is empty and the active-group
+			// pointer drifts back to the terminal's group. Close must cancel the empty
+			// split, not kill the terminal.
+			const id1 = terminalsStore.add({
+				sessionId: null,
+				fontSize: 14,
+				name: "T1",
+				cwd: null,
+				awaitingInput: null,
+			});
+			terminalsStore.setActive(id1);
+
+			splitPanes.handleSplit("vertical");
+			const [g0] = paneLayoutStore.getAllGroupIds();
+
+			// Simulate the focus drift: active group points at the terminal's pane.
+			paneLayoutStore.setActiveGroup(g0);
+			splitPanes.closeActivePane();
+
+			// Split cancelled, terminal preserved.
+			expect(paneLayoutStore.isSplit()).toBe(false);
+			expect(paneLayoutStore.getAllGroupIds().length).toBe(1);
+			expect(terminalsStore.get(id1)).toBeDefined();
 		});
 	});
 

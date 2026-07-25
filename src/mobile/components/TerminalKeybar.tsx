@@ -1,5 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
+import { toastsStore } from "../../stores/toasts";
 import { rpc } from "../../transport";
 import { retryWrite } from "../utils/retryWrite";
 import styles from "./TerminalKeybar.module.css";
@@ -72,6 +73,7 @@ export function TerminalKeybar(props: TerminalKeybarProps) {
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appLogger.error("network", `Key send failed after retries: ${msg}`);
+			toastsStore.add("Send failed", `Could not send key: ${msg}`, "error", true);
 		} finally {
 			setSending(false);
 		}

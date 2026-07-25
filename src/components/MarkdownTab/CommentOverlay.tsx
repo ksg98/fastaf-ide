@@ -9,14 +9,16 @@
  */
 import { type Component, createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { Portal } from "solid-js/web";
-import { generateTweakCommentId, type TweakComment } from "../../utils/tweakComments";
+import { generateTweakCommentId, normalizeForMatch, type TweakComment } from "../../utils/tweakComments";
 import s from "./MarkdownTab.module.css";
 
 export interface CommentOverlayProps {
 	/** The rendered markdown container — used to scope selection and click events. */
 	contentRef: HTMLDivElement;
-	/** Called with the new or updated comment when the user saves. */
-	onSave: (comment: TweakComment) => void;
+	/** Called with the new or updated comment when the user saves. `occurrenceIndex`
+	 *  is the 0-based ordinal of the selected text among identical rendered
+	 *  occurrences, used to anchor the correct instance in the source. */
+	onSave: (comment: TweakComment, occurrenceIndex: number) => void;
 	/** Called with the comment id when the user deletes a comment. */
 	onDelete: (id: string) => void;
 }
@@ -47,6 +49,9 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 	// The selected text captured at "add comment" button time.
 	// We must snapshot it immediately because the selection may clear on click.
 	let pendingSelection = "";
+	// 0-based ordinal of the selection among identical rendered occurrences,
+	// captured alongside the text so the correct source instance is anchored.
+	let pendingOccurrence = 0;
 
 	// ── Selection detection ──
 	//
@@ -76,6 +81,15 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 
 		// Single-block only: skip selections that cross block boundaries.
 		if (crossesBlockBoundary(range, props.contentRef)) {
+			setBtnPos(null);
+			return;
+		}
+
+		// Overlapping an existing highlight would nest one comment inside another,
+		// which the source format cannot represent (the inner one gets swallowed on
+		// reparse and silently vanishes). Suppress the button — the user should
+		// click the highlight to edit it, or select plain text instead.
+		if (rangeIntersectsHighlight(range, props.contentRef)) {
 			setBtnPos(null);
 			return;
 		}
@@ -181,8 +195,12 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 		const firstRect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
 		const lastRect = rects.length > 0 ? rects[rects.length - 1] : firstRect;
 
-		// Snapshot the selection text before clearing it.
+		// Snapshot the selection text + its occurrence ordinal before clearing.
+		// The ordinal = how many identical (normalized) occurrences of the selected
+		// text appear in the rendered content BEFORE this selection's start. This
+		// disambiguates repeated text so the correct source instance is anchored.
 		pendingSelection = text;
+		pendingOccurrence = occurrenceOrdinal(props.contentRef, range, text);
 		setBtnPos(null);
 		setDraft("");
 		setPopover({
@@ -200,21 +218,28 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 		if (state.mode === "new") {
 			const highlighted = pendingSelection;
 			if (!highlighted || !draft().trim()) return;
-			props.onSave({
-				id: generateTweakCommentId(),
-				highlighted,
-				comment: draft().trim(),
-				createdAt: new Date().toISOString(),
-			});
+			props.onSave(
+				{
+					id: generateTweakCommentId(),
+					highlighted,
+					comment: draft().trim(),
+					createdAt: new Date().toISOString(),
+				},
+				pendingOccurrence,
+			);
 		} else {
 			// Edit existing — preserve original createdAt, update only the comment text.
+			// Occurrence ordinal is irrelevant for edits (matched by id).
 			if (!state.existingId || !state.existingHighlighted) return;
-			props.onSave({
-				id: state.existingId,
-				highlighted: state.existingHighlighted,
-				comment: draft().trim(),
-				createdAt: state.existingCreatedAt ?? new Date().toISOString(),
-			});
+			props.onSave(
+				{
+					id: state.existingId,
+					highlighted: state.existingHighlighted,
+					comment: draft().trim(),
+					createdAt: state.existingCreatedAt ?? new Date().toISOString(),
+				},
+				0,
+			);
 		}
 		closePopover();
 	};
@@ -230,6 +255,7 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 		setPopover(null);
 		setDraft("");
 		pendingSelection = "";
+		pendingOccurrence = 0;
 	};
 
 	const handlePopoverKeyDown = (e: KeyboardEvent) => {
@@ -341,6 +367,37 @@ export const CommentOverlay: Component<CommentOverlayProps> = (props) => {
 // ── Helpers ──
 
 const BLOCK_TAGS = new Set(["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "BLOCKQUOTE", "PRE", "TD", "TH"]);
+
+/**
+ * 0-based ordinal of `selectionText` among identical rendered occurrences: the
+ * count of normalized occurrences appearing in `root`'s text BEFORE the start of
+ * `range`. Mirrors `findSourceMatch`'s normalization so the ordinal lines up with
+ * the source-side occurrence the comment must anchor to.
+ */
+function occurrenceOrdinal(root: HTMLElement, range: Range, selectionText: string): number {
+	const needle = normalizeForMatch(selectionText);
+	if (!needle) return 0;
+	const pre = document.createRange();
+	pre.setStart(root, 0);
+	pre.setEnd(range.startContainer, range.startOffset);
+	const before = normalizeForMatch(pre.toString());
+	let count = 0;
+	let idx = before.indexOf(needle);
+	while (idx !== -1) {
+		count++;
+		idx = before.indexOf(needle, idx + 1);
+	}
+	return count;
+}
+
+/** Returns true if the selection range intersects any existing highlight span. */
+function rangeIntersectsHighlight(range: Range, root: HTMLElement): boolean {
+	const highlights = root.querySelectorAll(".tweak-highlight");
+	for (const el of highlights) {
+		if (range.intersectsNode(el)) return true;
+	}
+	return false;
+}
 
 /** Returns true if the range starts and ends in different block-level elements. */
 function crossesBlockBoundary(range: Range, root: HTMLElement): boolean {

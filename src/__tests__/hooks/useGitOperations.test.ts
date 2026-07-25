@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useGitOperations } from "../../hooks/useGitOperations";
+import { buildAgentSeed, useGitOperations } from "../../hooks/useGitOperations";
+import * as platform from "../../platform";
 import { githubStore } from "../../stores/github";
 import { paneLayoutStore, resetGroupCounter } from "../../stores/paneLayout";
 import { repoSettingsStore } from "../../stores/repoSettings";
@@ -21,6 +22,48 @@ function resetStores() {
 		repoSettingsStore.remove(s.path);
 	}
 }
+
+describe("buildAgentSeed", () => {
+	let isWindowsSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		// Installed fresh per test and fully restored in afterEach so the mock
+		// cannot leak into later describes (e.g. handleConflictAssist's POSIX
+		// quoting assertions) — a plain mockReset() left the spy installed.
+		isWindowsSpy = vi.spyOn(platform, "isWindows").mockReturnValue(false);
+	});
+
+	afterEach(() => {
+		isWindowsSpy.mockRestore();
+	});
+
+	it("wraps the prompt as a POSIX single-quoted argument to the launch command", () => {
+		isWindowsSpy.mockReturnValue(false);
+		const seed = buildAgentSeed("fix the bug");
+		expect(seed.initCommand).toBe(`${seed.launchCommand} 'fix the bug'`);
+		expect(seed.agentType).toBe("claude");
+	});
+
+	it("escapes single quotes in the prompt as '\\''", () => {
+		isWindowsSpy.mockReturnValue(false);
+		const seed = buildAgentSeed("hello 'world'");
+		// Each ' becomes '\'' — close quote, escaped quote, reopen quote.
+		expect(seed.initCommand).toBe(`${seed.launchCommand} 'hello '\\''world'\\'''`);
+	});
+
+	it("keeps launchCommand bare (no embedded prompt) so it can be reused for resume", () => {
+		isWindowsSpy.mockReturnValue(false);
+		const seed = buildAgentSeed("multi\nline prompt");
+		expect(seed.initCommand.startsWith(`${seed.launchCommand} `)).toBe(true);
+		expect(seed.launchCommand).not.toContain("multi");
+	});
+
+	it("wraps the prompt as a Windows double-quoted argument on cmd.exe", () => {
+		isWindowsSpy.mockReturnValue(true);
+		const seed = buildAgentSeed("fix the bug");
+		expect(seed.initCommand).toBe(`${seed.launchCommand} "fix the bug"`);
+	});
+});
 
 describe("useGitOperations", () => {
 	const mockRepo = {
@@ -618,6 +661,24 @@ describe("useGitOperations", () => {
 			expect(repositoriesStore.get("/repo")?.branches["feature"]).toBeUndefined();
 		});
 
+		it("surfaces partial branch-delete warning after removing worktree", async () => {
+			mockRepo.removeWorktree.mockResolvedValueOnce({
+				branch_delete_warning: "git branch -d refused because branch is not fully merged",
+			});
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "feature", { worktreePath: "/repo/wt" });
+			repoSettingsStore.getOrCreate("/repo", "Repo");
+			repoSettingsStore.setLabel("/repo", "feature", "Feature label");
+
+			await gitOps.handleRemoveBranch("/repo", "feature");
+
+			expect(repositoriesStore.get("/repo")?.branches["feature"]).toBeUndefined();
+			expect(repoSettingsStore.get("/repo")?.branchLabels["feature"]).toBe("Feature label");
+			expect(mockSetStatusInfo).toHaveBeenCalledWith(
+				"Removed feature worktree; branch was kept: git branch -d refused because branch is not fully merged",
+			);
+		});
+
 		it("passes deleteBranch=false when repo setting overrides default", async () => {
 			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
 			repositoriesStore.setBranch("/repo", "feature", { worktreePath: "/repo/wt" });
@@ -1007,6 +1068,82 @@ describe("useGitOperations", () => {
 		});
 	});
 
+	describe("handleConflictAssist", () => {
+		// vi.clearAllMocks() (beforeEach) clears call history but NOT implementations,
+		// so restore mockInvoke to its default here to avoid leaking into later tests.
+		afterEach(() => {
+			mockInvoke.mockReset();
+			mockInvoke.mockResolvedValue(undefined);
+		});
+
+		function mockConflictAssist(result: {
+			status: "clean" | "conflicts";
+			worktree_path: string;
+			branch: string;
+			base: string;
+			conflicted_files: string[];
+			prompt: string;
+		}) {
+			mockInvoke.mockImplementation((cmd: string) =>
+				cmd === "start_conflict_assist" ? Promise.resolve(result) : Promise.resolve(undefined),
+			);
+		}
+
+		it("reports a clean rebase and does not register a worktree", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			mockConflictAssist({
+				status: "clean",
+				worktree_path: "/repo/.worktrees/feature",
+				branch: "feature",
+				base: "main",
+				conflicted_files: [],
+				prompt: "",
+			});
+
+			await gitOps.handleConflictAssist("/repo", 42);
+
+			expect(mockInvoke).toHaveBeenCalledWith("start_conflict_assist", { repoPath: "/repo", prNumber: 42 });
+			expect(mockSetStatusInfo).toHaveBeenCalledWith("PR #42 rebased cleanly onto main");
+			expect(repositoriesStore.get("/repo")?.branches["feature"]).toBeUndefined();
+		});
+
+		it("registers the existing worktree and seeds an agent with the resolution prompt on conflicts", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			mockConflictAssist({
+				status: "conflicts",
+				worktree_path: "/repo/.worktrees/feature",
+				branch: "feature",
+				base: "main",
+				conflicted_files: ["a.ts"],
+				prompt: "Resolve the conflicts in a.ts",
+			});
+
+			await gitOps.handleConflictAssist("/repo", 7);
+
+			const branch = repositoriesStore.get("/repo")?.branches["feature"];
+			expect(branch?.worktreePath).toBe("/repo/.worktrees/feature");
+			const termId = branch?.terminals[0];
+			const term = termId ? terminalsStore.get(termId) : undefined;
+			expect(term?.agentType).toBe("claude");
+			expect(term?.pendingInitCommand).toContain("'Resolve the conflicts in a.ts'");
+			// createWorktree is NOT called — the backend already created the worktree.
+			expect(mockRepo.createWorktree).not.toHaveBeenCalled();
+		});
+
+		it("surfaces backend errors via status info without throwing", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			mockInvoke.mockImplementation((cmd: string) =>
+				cmd === "start_conflict_assist" ? Promise.reject(new Error("no PR head")) : Promise.resolve(undefined),
+			);
+
+			await gitOps.handleConflictAssist("/repo", 9);
+
+			expect(mockSetStatusInfo).toHaveBeenCalledWith(expect.stringContaining("Failed to resolve conflicts for PR #9"));
+			// Lock released — a second call is not blocked.
+			expect(gitOps.creatingWorktreeRepos().has("/repo")).toBe(false);
+		});
+	});
+
 	describe("refreshAllBranchStats", () => {
 		/** Helper: mock both Phase 1 (structure) and Phase 2 (diff stats) from a single summary object */
 		function mockSummary(summary: {
@@ -1040,6 +1177,62 @@ describe("useGitOperations", () => {
 			const branch = repositoriesStore.get("/repo")?.branches["main"];
 			expect(branch?.additions).toBe(5);
 			expect(branch?.deletions).toBe(3);
+		});
+
+		it("git init: carries shell-branch terminals into the new git branch instead of orphaning them", async () => {
+			// Repro: a clean shell-only repo with two open terminals; `git init` used to
+			// remove the shell branch and create an empty git branch, orphaning the
+			// terminals so they vanished from the view until a later branch-select.
+			const t1 = terminalsStore.add(makeTerminal({ name: "t1" }));
+			const t2 = terminalsStore.add(makeTerminal({ name: "t2" }));
+			repositoriesStore.add({ path: "/shell-repo", displayName: "Shell", isGitRepo: false });
+			repositoriesStore.setBranch("/shell-repo", "shell", {
+				worktreePath: "/shell-repo",
+				isMain: true,
+				isShell: true,
+			});
+			repositoriesStore.addTerminalToBranch("/shell-repo", "shell", t1);
+			repositoriesStore.addTerminalToBranch("/shell-repo", "shell", t2);
+			repositoriesStore.setBranch("/shell-repo", "shell", { lastActiveTerminal: t2 });
+			repositoriesStore.setActiveBranch("/shell-repo", "shell");
+
+			mockRepo.getInfo.mockResolvedValue({
+				path: "/shell-repo",
+				name: "shell-repo",
+				initials: "SR",
+				branch: "main",
+				status: "clean",
+				is_git_repo: true,
+			});
+
+			await gitOps.refreshAllBranchStats("/shell-repo");
+
+			const repo = repositoriesStore.get("/shell-repo");
+			expect(repo?.isGitRepo).toBe(true);
+			expect(repo?.activeBranch).toBe("main");
+			expect(repo?.branches["shell"]).toBeUndefined();
+			// Both terminals carried over (not orphaned) + last-active preserved.
+			expect(repo?.branches["main"]?.terminals).toEqual([t1, t2]);
+			expect(repo?.branches["main"]?.lastActiveTerminal).toBe(t2);
+		});
+
+		it("scopes to a single repo when a path is given — other repos untouched", async () => {
+			repositoriesStore.add({ path: "/repo-a", displayName: "A" });
+			repositoriesStore.setBranch("/repo-a", "main", { worktreePath: "/repo-a" });
+			repositoriesStore.add({ path: "/repo-b", displayName: "B" });
+			repositoriesStore.setBranch("/repo-b", "main", { worktreePath: "/repo-b" });
+			mockSummary({
+				worktree_paths: { main: "/repo-a" },
+				merged_branches: [],
+				diff_stats: { "/repo-a": { additions: 7, deletions: 2 } },
+				last_commit_ts: {},
+			});
+
+			await gitOps.refreshAllBranchStats("/repo-a");
+
+			// Only the scoped repo's structure was fetched — no fan-out to /repo-b.
+			expect(mockRepo.getRepoStructure).toHaveBeenCalledTimes(1);
+			expect(mockRepo.getRepoStructure).toHaveBeenCalledWith("/repo-a");
 		});
 
 		it("prunes branches not in worktree paths", async () => {

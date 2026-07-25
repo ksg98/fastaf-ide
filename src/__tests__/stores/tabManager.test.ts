@@ -52,13 +52,27 @@ describe("createTabManager", () => {
 			});
 		});
 
-		it("falls back to last remaining tab when active tab is removed", () => {
+		it("sets activeId to null when active tab is removed (caller selects the replacement)", () => {
 			testInScope(() => {
 				mgr._addTab(makeTab("t1"));
 				mgr._addTab(makeTab("t2"));
 				expect(mgr.state.activeId).toBe("t2");
 				mgr.remove("t2");
-				expect(mgr.state.activeId).toBe("t1");
+				// No auto-promotion: the store can't check branch/repo visibility, so
+				// promoting a remaining tab could activate one hidden from the tab bar
+				// (ghost full-screen panel). Same contract as terminalsStore.remove.
+				expect(mgr.state.activeId).toBeNull();
+			});
+		});
+
+		it("does not promote a branch-scoped tab hidden from the current branch", () => {
+			testInScope(() => {
+				mgr._addTab(makeTab("hidden", { branchKey: "/other-repo|main" }));
+				mgr._addTab(makeTab("visible", { branchKey: "/repo|main" }));
+				expect(mgr.state.activeId).toBe("visible");
+				mgr.remove("visible");
+				expect(mgr.state.activeId).toBeNull();
+				expect(mgr.getVisibleIds("/repo|main")).toEqual([]);
 			});
 		});
 

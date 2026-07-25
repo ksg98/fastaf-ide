@@ -42,6 +42,11 @@ pub(super) async fn get_config(
         {
             o.remove("vapid_private_key");
         }
+        if let Some(relay) = services.pointer_mut("/relay")
+            && let Some(o) = relay.as_object_mut()
+        {
+            o.remove("token");
+        }
     }
     Json(json).into_response()
 }
@@ -59,9 +64,7 @@ pub(super) async fn put_config(
     let mut config = config;
     {
         let current = state.config.read();
-        config.services.auth.session_token = current.services.auth.session_token.clone();
-        config.services.push.vapid_private_key = current.services.push.vapid_private_key.clone();
-        config.services.push.vapid_public_key = current.services.push.vapid_public_key.clone();
+        crate::config::preserve_redacted_app_config_secrets(&mut config, &current);
     }
     match crate::config::save_app_config(config.clone()) {
         Ok(()) => {
@@ -91,11 +94,18 @@ pub(super) async fn hash_password_http(
     if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
         return resp;
     }
-    match bcrypt::hash(&req.password, 12) {
-        Ok(hash) => (StatusCode::OK, Json(serde_json::json!({"hash": hash}))),
-        Err(e) => (
+    // bcrypt at cost 12 is CPU-heavy (~300ms) — run it off the async runtime.
+    let password = req.password;
+    let hash_result = tokio::task::spawn_blocking(move || bcrypt::hash(&password, 12)).await;
+    match hash_result {
+        Ok(Ok(hash)) => (StatusCode::OK, Json(serde_json::json!({"hash": hash}))),
+        Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to hash: {e}")})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Hash task failed: {e}")})),
         ),
     }
 }
@@ -112,6 +122,7 @@ pub(super) async fn rotate_session_token(
     *state.session_token.write() = new_token.clone();
     let mut cfg = state.config.read().clone();
     cfg.services.auth.session_token = new_token;
+    cfg.services.auth.session_token_exists = true;
     if let Err(e) = crate::config::save_app_config(cfg) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -560,6 +571,8 @@ pub(super) async fn put_remote_connection(
     if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
         return resp.into_response();
     }
+    // Validate up front so a malformed request gets a precise 400 (the shared
+    // upsert helper re-validates as its canonical gate — that path stays a 500).
     if let Err(e) = connection.validate() {
         return (
             StatusCode::BAD_REQUEST,
@@ -568,27 +581,11 @@ pub(super) async fn put_remote_connection(
             .into_response();
     }
     let _guard = state.connections_lock.lock().await;
-    let mut connections =
-        match crate::remote_connection::RemoteConnectionStore::load(&state.data_dir) {
-            Ok(c) => c,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": e.to_string()})),
-                )
-                    .into_response();
-            }
-        };
-    if let Some(pos) = connections.iter().position(|c| c.id == connection.id) {
-        connections[pos] = connection;
-    } else {
-        connections.push(connection);
-    }
-    match crate::remote_connection::RemoteConnectionStore::save(&state.data_dir, &connections) {
+    match crate::remote_connection::upsert_remote_connection(&state.data_dir, connection) {
         Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(serde_json::json!({"error": e})),
         )
             .into_response(),
     }

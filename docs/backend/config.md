@@ -28,6 +28,11 @@ pub fn save_json_config<T: Serialize>(filename: &str, config: &T) -> Result<(), 
 
 **Type:** `AppConfig`
 
+Frontend surfaces that update this full-document configuration use the shared
+`updateAppConfig()` queue. It serializes each fresh load → owned-field mutation
+→ save sequence so simultaneous General, Services, and plugin changes cannot
+overwrite one another with stale snapshots.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `shell` | `Option<String>` | `None` | Shell override (platform default if None) |
@@ -40,9 +45,17 @@ pub fn save_json_config<T: Serialize>(filename: &str, config: &T) -> Result<(), 
 | `mcp_port` | `u16` | `9876` | Fixed port for MCP server (0 = OS-assigned) |
 | `collapse_tools` | `bool` | `false` | Replace the full MCP tool list with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`) — see [`mcp-http.md`](mcp-http.md#lazy-tool-discovery-collapse_tools) |
 | `services` | `ServicesConfig` | `{}` | Nested remote-access config: `server`, `auth`, `tls`, `relay`, `push` (replaces the former flat `remote_access_*`/`push_enabled`/`relay_enabled` fields) |
+
+Remote-access secrets under `services` are not persisted in plaintext
+`config.json`: `auth.session_token`, `relay.token`, and
+`push.vapid_private_key` live in the OS keyring-backed credential vault. The
+JSON file keeps only the non-secret settings plus `session_token_exists`,
+`token_exists`, and `vapid_private_key_exists` booleans for UI state.
+
 | `confirm_before_quit` | `bool` | `true` | Show quit confirmation |
 | `confirm_before_closing_tab` | `bool` | `true` | Show tab close confirmation |
 | `copy_on_select` | `bool` | `true` | Auto-copy terminal selection to clipboard |
+| `osc52_clipboard` | `bool` | `true` | Honor OSC 52 clipboard-write sequences from terminal output (a notice shows on each write; disable to ignore them) |
 | `bell_style` | `String` | `"visual"` | Terminal bell: "none", "visual", "sound", "both" |
 | `disabled_agents` | `Vec<String>` | `[]` | Agent IDs hidden from the Add menu |
 | `global_hotkey` | `Option<String>` | `null` | OS-level window toggle hotkey combo |
@@ -174,6 +187,13 @@ Default values applied to new repositories when no per-repo override exists.
 ### Repositories (`repositories.json`)
 
 **Type:** `serde_json::Value` (flexible JSON, shape defined by frontend)
+
+Release builds store this file in the normal platform config directory. Debug
+builds use `~/.tuicommander-dev/repositories.json` so a concurrently running
+development frontend cannot overwrite the installed app's repository list. On
+the first debug run only, the production file is copied atomically as a seed;
+an existing development file always wins. This repository-specific isolation
+does not change any other config path.
 
 **Commands:** `load_repositories()`, `save_repositories(config)`
 

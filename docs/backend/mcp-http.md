@@ -13,6 +13,8 @@ The server has two independent listeners:
 
 The `mcp_server_enabled` config flag controls whether the `/mcp` protocol route is active (MCP tool discovery and invocation), not whether the server itself starts. The HTTP API endpoints (sessions, git, config, etc.) are always available on the IPC listener.
 
+The local IPC listener is independent from the **Remote Access** TCP toggle. Turning remote access on or off only starts or stops the authenticated TCP listener; it does not disable `mcp.sock` or the local MCP route. Lifecycle logs state whether a transition affects TCP or the always-on IPC listener.
+
 Configuration via Settings > Services, or `config.json`:
 
 ```json
@@ -78,6 +80,13 @@ The socket at `<config_dir>/mcp.sock` is managed with two safety layers to survi
 | `GET` | `/repo/github-status?path=` | Get GitHub status |
 | `GET` | `/repo/pr-statuses?path=` | Get batch PR statuses |
 | `GET` | `/repo/ci-checks?path=` | Get CI check details |
+| `POST` | `/ai/review/pr` | AI review of a PR diff → line-level findings (Main slot) |
+| `POST` | `/repo/create-pr` | Create a PR (gh wrapper, UI-gated) |
+| `POST` | `/repo/create-issue` | Create an issue (gh wrapper, UI-gated) |
+| `POST` | `/repo/post-pr-review` | Post a PR review with inline comments |
+| `GET` | `/repo/merged-prs?path=&sinceTag=` | Merged PRs via GraphQL (changelog source) |
+| `GET` | `/repo/changelog?path=&sinceTag=` | AI changelog `{markdown, json}` (Headless slot) |
+| `POST` | `/repo/conflict-assist` | Worktree + rebase; reports clean/conflicts + agent prompt |
 
 ### Configuration
 
@@ -86,6 +95,11 @@ The socket at `<config_dir>/mcp.sock` is managed with two safety layers to survi
 | `GET` | `/config` | Get app config |
 | `PUT` | `/config` | Save app config |
 | `POST` | `/auth/hash-password` | Hash password for remote access |
+
+`GET /config` and MCP `config action=get` redact remote-access secrets:
+`services.auth.password_hash`, `services.auth.session_token`,
+`services.relay.token`, and `services.push.vapid_private_key`. The config shape
+exposes only the corresponding `*_exists` booleans for secret presence.
 
 ### Agents
 
@@ -123,7 +137,7 @@ Client ──WebSocket──> /sessions/{session_id}/stream
 
 When sessions are created or closed (via HTTP, MCP, or PTY exit), the server broadcasts events through the SSE event bus:
 
-- **`session-created`** — Emitted when a new PTY session is created (both local and MCP-spawned). Carries `session_id` and `cwd`. Frontend uses this to auto-add terminal tabs for remotely spawned agents.
+- **`session-created`** — Emitted when a new PTY session is created (both local and MCP-spawned). Carries `session_id`, `cwd`, `agent_type`, and the optional stable `display_name`. Frontend uses this to auto-add terminal tabs for remotely spawned agents and treats a supplied display name as custom so transient OSC/intent titles cannot replace it.
 - **`term-alias-assigned`** — Emitted when a session receives its human-friendly alias. Carries `session_id` and `alias`. Frontend uses this to update tab tooltips.
 - **`session-closed`** — Emitted when a session exits. Carries `session_id`. Frontend uses this for cleanup.
 
@@ -140,6 +154,10 @@ Client ──DELETE─> /mcp  (end session, pass Mcp-Session-Id header)
 ```
 
 The `GET /mcp` SSE stream emits `notifications/tools/list_changed` whenever the available tool set changes (e.g., native tools are enabled/disabled via config, or upstream MCP servers connect/disconnect). The bridge sidecar subscribes to this stream and forwards the notification to the AI agent.
+
+The bridge uses the standard MCP `ping` request for its three-second liveness check. This keeps health traffic constant-size as terminal count grows; it does not rebuild or serialize the complete tool catalog. If IPC is reachable but `/mcp` is unavailable, the bridge reports that the MCP endpoint is unavailable instead of incorrectly claiming the desktop process is not running.
+
+On reconnect, a peer may reclaim its stable TUIC identity after the prior MCP protocol session has no live SSE subscriber and has missed the bridge activity grace period. The takeover retires the old forward and reverse routing entries atomically. A currently subscribed or recently active owner cannot be replaced.
 
 ### Lazy Tool Discovery (`collapse_tools`)
 
@@ -158,6 +176,7 @@ Rationale: a cold tool list of 100+ tools costs ~35k tokens in every agent turn;
 The BM25 index lives in `AppState::tool_search_index` (`parking_lot::RwLock<ToolSearchIndex>`, backed by `src-tauri/src/tool_search.rs`). A background task subscribes to the `mcp_tools_changed` broadcast and rebuilds the index whenever the tool set changes (upstream connect/disconnect, `disabled_native_tools` edit, `collapse_tools` toggle).
 
 The MCP instructions string returned by `initialize` (`build_mcp_instructions`) swaps to a "lazy discovery" guide when `collapse_tools: true` so agents know to call `search_tools` first rather than looking for a flat tool table.
+The TUIC connection acknowledgment in those instructions is emitted exactly once per MCP connection or reconnect, never once per conversational turn. TUIC protocol context remains in initialize instructions and native core-tool descriptions only; upstream tool descriptions are preserved instead of receiving a repeated TUIC preamble.
 
 ### MCP Native Tools
 
@@ -174,6 +193,17 @@ Seven native tools, organized by domain. Two (`config`, `debug`) are hidden by d
 | `debug` | agent_detection, logs, sessions, invoke_js | Disabled |
 
 The `disabled_native_tools` config key accepts an array of tool names to hide from `tools/list`. Default: `["config", "debug"]`.
+
+Native responses omit optional values when they are unavailable. In particular,
+`session action=output` includes `exit_code` only after an exit status is known, and
+blocking wait timeouts return only the condition state without a repeated follow-up hint.
+Native tool values are wrapped as compact JSON text in the MCP `content` envelope.
+A proxied upstream value that is already a valid MCP `CallToolResult` object (an object
+with a `content` array) instead becomes the JSON-RPC result directly, preserving its
+`content`, `isError`, `structuredContent`, and any extension fields without mutation.
+This applies both to direct `{upstream}__{tool}` calls and to the collapsed `call_tool`
+meta-path. A malformed upstream value falls back to the native compact JSON text
+envelope so the response remains protocol-valid and inspectable.
 
 #### `ui` tool — `tab` URL schemes
 
@@ -244,7 +274,19 @@ registerDebugSnapshot("storeName", () => ({ /* fields to expose */ }));
 
 ### MCP Tool: `session` Output
 
-The `session` tool's `action=output` strips ANSI escape codes by default, returning clean text suitable for AI consumption. Pass `format="raw"` to preserve escape sequences (e.g. for terminal rendering). The `action=list` response includes process details per session: `child_pid`, `foreground_pgid`, and `foreground_process`.
+The `session` tool's `action=output` strips ANSI escape codes by default, returning clean text suitable for AI consumption. Pass `format="raw"` to preserve escape sequences (e.g. for terminal rendering). For managed peers, task results travel through `agent action=send`; raw session output is only the anomaly fallback when a child failed to send its result. The `action=list` response includes process details per session: `child_pid`, `foreground_pgid`, `foreground_process`, `shell_state`, `agent_state`, `background_work`, and `is_caller`. `is_caller=true` identifies the managed PTY that owns the current MCP connection so an orchestrator does not close itself. Optional values such as alias, display name, cwd, worktree data, process identity, and agent state are omitted when absent rather than serialized as `null`; `status` follows the same omission rule.
+
+`Global overview: session action=list` — one call; no per-session `status` fan-out.
+
+`shell_state` is PTY activity (`busy` or `idle`); it is not task completion.
+For detected agents, `agent_state` is `starting`, `working`, `awaiting_input`,
+`idle`, or `completed`. `background_work=true` keeps `agent_state=working` while
+a meaningful agent descendant is alive even when `shell_state=idle` and the
+composer is ready; persistent integration helpers are excluded. Completion
+requires the explicit end-of-task
+`suggest: [ ... ]` protocol marker. A quiet ready prompt without that marker
+remains `idle`. Spawned-agent lifecycle mail uses `completed` for the same
+marker and reserves `idle` for an unclassified ready state.
 
 | Param | Default | Description |
 |-------|---------|-------------|
@@ -252,9 +294,22 @@ The `session` tool's `action=output` strips ANSI escape codes by default, return
 | `format` | (text) | `"raw"` preserves ANSI escape codes |
 | `since_cursor` | (none) | Cursor from a previous response — returns only new scrollback lines since this position |
 
+`session action=input` and HTTP `POST /sessions/:id/write` share the same PTY
+bookkeeping: each write stamps `last_input_ms` and feeds the `InputLineBuffer`
+so slash-mode tracking stays identical for MCP and remote web clients. When a
+combined text + Enter request targets a prefill-only agent such as Codex or
+OpenCode, MCP uses the canonical agent-submit sequence (Ctrl-U, bracketed paste
+for multiline text, a flushed scheduling gap, then CR). Other text/key pairs,
+including Claude's established input path, retain raw pair semantics.
+
 **Delta reads:** The non-raw output path returns a `cursor` field (monotonic scrollback position). Pass `since_cursor` on subsequent calls to receive only new lines since that position, avoiding full re-reads. The `total_written` field is kept alongside `cursor` for backwards compatibility. When `since_cursor` is provided, screen rows are excluded — only scrollback log lines are returned.
 
 ### MCP Tool: `repo` — Worktree Create (Claude Code Agent Hint)
+
+MCP `repo action=worktree_create` uses the same creation path as HTTP
+`POST /worktrees`, including `base_repo` validation, stale-worktree recovery,
+cache invalidation, `worktree-created` SSE/Tauri events, and setup-script result
+reporting.
 
 When the MCP client identifies as Claude Code (detected via `clientInfo.name` at initialize time), the `repo action=worktree_create` response includes an additional `cc_agent_hint` field:
 
@@ -273,9 +328,18 @@ This works around Claude Code's inability to change its working directory mid-se
 
 Non-Claude Code MCP clients do not receive this field.
 
+### MCP Tool: `repo` — Worktree Remove
+
+MCP `repo action=worktree_remove` returns `{ "ok": true }` on full success. When `delete_branch=true` and safe branch deletion fails after the worktree is removed, the action still succeeds with `branch_delete_warning` populated so clients can report that the worktree was removed but the branch was kept.
+
 ## Upstream MCP Proxy
 
 FastAF can proxy upstream MCP servers (stdio or HTTP) and aggregate their tools into its own `tools/list` response. Configuration lives in `mcp-servers.json`.
+
+The desktop boot thread owns the always-on Unix-socket/named-pipe listener and
+its one-time background tasks for the lifetime of the process. A configuration
+save may stop and replace the TCP listener, but the boot runtime remains parked
+after that shutdown so dropping it cannot silently kill local bridge IPC.
 
 ### Stdio transport
 
@@ -362,33 +426,125 @@ OAuth callbacks arrive exclusively through the OS-level `tuic://` deep link — 
 ## Inter-Agent Messaging
 
 The `agent` tool's messaging actions (`register`, `list_peers`, `send`, `inbox`) enable coordination between multiple AI agents connected to FastAF.
+There is no separate `swarm` action; orchestration composes the `agent` and `session` primitives.
+
+For `agent action=spawn`, `prompt` is always delivered. Caller-supplied `args`
+that contain `{prompt}` remain authoritative and receive direct substitution.
+Flags-only `args` keep their order; normal CLIs receive the prompt as the final
+positional argument, while prefill-only interactive TUIs receive it through the
+deferred PTY-injection path after their ready prompt appears.
+Configured run-config argv retains its established authoritative behavior:
+`{prompt}` is substituted where authored, otherwise the prompt is appended as
+the final positional argument rather than converted to deferred PTY delivery.
+Structured `model` is composed with `args`; direct Codex commands include the approval-bypass default. Outside authoritative run-config argv, direct executable identity also selects Codex prompt deferral and parser state, even when `agent_type` is omitted or disagrees. That bypass-default step leaves canonical Codex wrapper run-config argv untouched and adds `launch_warning` because TUIC cannot validate the wrapper's internal Codex flags. Structured parameters retain their established composition independently, including appending a caller-supplied `model`.
+
+`name` optionally assigns a non-empty peer and PTY display name at spawn time.
+The parent-assigned name is stored before prompt delivery, returned in the spawn
+response, exposed as `name` by `agent action=list_peers` and as `display_name`
+by `session action=list`, and preserved when the child later auto-binds its MCP
+connection. This avoids making identity depend on the child successfully
+executing a registration instruction in its initial prompt.
+The session list's `alias` remains a separate repo-derived short address and is
+not replaced by the display name.
+
+Every managed child is registered server-side and receives an inbox immediately,
+even when the caller has no bound peer identity. A registered parent additionally
+creates the bidirectional relationship: the child prompt receives its parent ID
+and send instruction, while the spawn response returns `communication_ready`,
+`send_to`, and `parent_session_id`. An unregistered caller receives
+`communication_ready=false` plus a warning instead of a false two-way guarantee.
+The spawn still records the caller's MCP session as a pending parent: a later
+`register` call links existing children to the stable parent UUID and migrates
+any lifecycle notifications emitted before registration.
+
+Deferred initial prompts use a one-shot internal watchdog. Successful PTY
+submission removes the marker silently. A prompt still pending after 30 seconds
+emits one `prompt_delivery_failed` message to the parent; there is no success
+event, delivery polling, or public delivery-state machine.
+
+PTY wake-up injection is allowed only when the recipient is idle, its composer
+buffer is empty, and no confident question or approval is active. Busy agents
+and recipients with partially typed input keep the message queued. Clearing or
+submitting the composer rechecks the queue; an active `agent wait` wakes from the
+inbox instead of requiring terminal injection or client polling.
+
+The final injection decision atomically claims `idle -> busy`, closing the race
+between observing a ready screen and writing to the PTY. Idle is published before
+the queued-message flush, and each idle transition submits at most one queued
+message; remaining messages wait for later turns. This keeps backend state and UI
+events ordered and prevents lifecycle reports from overwriting an active composer.
+
+The stdio bridge reads each IPC HTTP response through its declared
+`Content-Length` rather than waiting for connection EOF. A single transport error
+does not discard the current MCP identity; subsequent authenticated calls refresh
+the session-to-terminal binding. Ordinary calls keep a ten-second read deadline;
+direct and collapsed wait calls derive it from the clamped requested timeout plus
+a five-second transport margin.
+
+Focused `ui action=tab` requests using `tuic://open` or `tuic://edit` switch to
+the registered repository that owns an absolute target path before activating
+the native file tab. This keeps repo-scoped tabs visible in the tab bar instead
+of rendering their content under an unrelated active repository. Background
+requests (`focus=false`) do not change repository context.
 
 ### Protocol
 
 0. **Auto-identity** *(no call needed)*: `tuic-bridge` inherits `$TUIC_SESSION` from the agent
    PTY and sends it as the `x-tuic-session` header on the initialize `POST /mcp`. The server
    validates the UUID and binds the MCP session to that tuic session (`apply_initialize_identity`
-   → shared `bind_peer_identity`), auto-registering the peer. `agent action=register` becomes an
-   optional rename. Last-writer-wins across a bridge reconnect (fresh MCP session id); an
-   existing peer's display name is preserved.
-1. **Register** *(optional)*: sets a friendly name/project on the already-bound identity.
+   → the shared locked live-owner policy), auto-registering the peer. `agent action=register`
+   becomes an optional rename. The same MCP session may refresh its binding, and a fresh session
+   may reclaim a stale owner; a subscribed or recently active owner rejects takeover. An existing
+   peer's display name is preserved. The bridge's eager initialize and the downstream client's
+   proxied initialize reuse the same existing `mcp-session-id`; this prevents the bridge's own live
+   SSE stream from being mistaken for a competing identity owner. External bridges without
+   `$TUIC_SESSION` are not auto-bound at initialize.
+1. **Register**: optional rename/project update for an auto-bound peer. A headerless external
+   caller may omit `tuic_session`; the server generates an MCP-scoped UUID that remains stable for
+   that connection and does not create a PTY. Supplying an explicit UUID preserves identity across
+   reconnects and retains the live-owner takeover guard.
 2. **Discover**: `agent action=list_peers` returns all registered peers (filterable by project).
 3. **Send**: `agent action=send to=<tuic_session> message="..."` buffers to the recipient's inbox.
+   `accepted=true` and `buffered_in_inbox=true` acknowledge success;
+   `delivered_via_channel` describes only the optional SSE path, while
+   `delivery_path` distinguishes SSE, terminal-or-queued, waiter, and inbox-only delivery. When the recipient is a
+   real managed PTY, `recipient_state` contains only its current `shell_state` and `agent_state`;
+   external generated peers omit `recipient_state`.
 4. **Receive** — three layers, most-immediate first:
-   - **Channel push**: real-time `notifications/claude/channel` when the recipient holds an SSE stream (CC + channels flag).
-   - **PTY injection**: for any idle agent without a live channel, the message is *typed into its terminal* (framed single line; split write, Ink-safe) so it acts on its next turn without polling. A busy recipient's message is queued and flushed on its next BUSY→IDLE transition. Oversized (>2 KB) bodies inject a pointer to `agent action=inbox` instead.
+   - **Channel push**: real-time `notifications/claude/channel` only when a managed Claude Code recipient already has a working turn and holds an SSE stream (CC + channels flag). A managed non-Claude agent, or an idle/completed Claude composer, uses PTY delivery even if its MCP bridge has an SSE stream.
+   - **PTY injection**: for any idle or completed managed agent, the message is *typed into its terminal* (framed single line; split write, Ink-safe) so it submits a real next turn without polling. A busy recipient without active Claude channel support gets the message on its next BUSY→IDLE transition. Oversized (>2 KB) bodies inject a pointer to `agent action=inbox` instead.
    - **Inbox poll**: `agent action=inbox since=<ms>` — always the authoritative store.
 5. **Wait** *(prefer over polling)*: `agent action=wait since=<ms>` blocks until new mail;
-   `session action=wait session_id=<id> until=idle|exited` blocks on a peer's lifecycle. Server-side
-   100 ms poll, default 5 s / cap 8 s (kept under the bridge's 10 s read timeout). Returns
-   `{met, timed_out}`; re-call on `timed_out`.
+   `session action=wait session_id=<id> until=idle|exited` blocks on a peer's lifecycle. The default
+   is 60 seconds and the server cap is 300000 ms. Agent-wait success preserves
+   `{met,timed_out,new_messages}` and directly includes every retained fresh message (up to the
+   100-message inbox capacity) plus `next_since`, in chronological order. Per-recipient logical
+   unix-millisecond cursors make equal-clock-millisecond bursts safe. Wait never consumes the
+   authoritative inbox; actual FIFO eviction is still reported by `missed_count` on inbox reads.
+   Both wait actions subscribe before their initial state check and then sleep on inbox or
+   per-session lifecycle events; they do not run an internal polling loop.
 
-Spawned peers additionally auto-post a `state_change` (`idle` / `exited`) to the parent's inbox
-**and** wake the parent's terminal, so an orchestrator never polls for child lifecycle.
+Low-risk response compaction also omits an absent peer `project` from `list_peers` and an absent
+`parent_session_id` from standalone spawn responses. Proxied upstream tool payloads are unchanged.
+
+Blocking waits and terminal wake-up use a per-recipient delivery lease. Each
+message is atomically assigned to exactly one wake-up owner: an active waiter,
+or SSE/PTY delivery. The deadline path performs its final inbox check while
+releasing the lease, and cancellation hands unobserved waiter-owned messages
+back to terminal delivery. This removes both duplicate inbox+terminal turns and
+the missed-wake race at the wait timeout boundary; inbox visibility itself is
+unchanged and remains backward compatible.
+
+Spawned peers additionally auto-post a `state_change` (`idle` / `completed` / `exited`) to the
+parent's inbox and wake the parent's terminal. These notifications carry state only, never task
+output. Each child must send its result or blocker with `agent action=send`; `session action=output`
+is reserved for diagnosing the anomaly where that result message never arrived.
 
 ### Channel Push Delivery
 
-When a recipient has an active SSE stream (`GET /mcp`), messages are pushed as `notifications/claude/channel` JSON-RPC notifications:
+When an already working Claude Code recipient has an active SSE stream (`GET /mcp`), messages are pushed into that turn as `notifications/claude/channel` JSON-RPC notifications. Idle or completed managed recipients use PTY submission instead:
+
+A channel notification is transport delivery into an existing turn, not proof that the recipient submitted a new one. It does not mutate the recipient's task epoch or lifecycle. Managed Codex and other non-Claude agents never receive this extension; an idle or completed Claude composer also takes the PTY split-write payload plus Enter path so delivery owns a real submitted turn.
 
 ```json
 {
@@ -414,6 +570,7 @@ This requires the client to be launched with `--dangerously-load-development-cha
 When remote access is enabled:
 - Basic Auth with username/password
 - Password stored as bcrypt hash in config
+- Session token, relay token, and VAPID private key stored in the OS keyring-backed credential vault
 - Applied to all endpoints
 
 When MCP-only (localhost):
@@ -442,6 +599,16 @@ invoke("get_repo_info", { path }) → GET /repo/info?path=...
 ```
 
 PTY output in browser mode uses WebSocket instead of Tauri events.
+
+### GitHub Ops AI Routes
+
+Desktop/browser mode exposes the GitHub Ops AI helpers over HTTP; the remote
+daemon does not serve them because they depend on desktop provider credentials.
+
+| Endpoint | Body | Response | Notes |
+|----------|------|----------|-------|
+| `POST /ai/improvements/scan` | `{ repoPath, focus }` | `ImprovementScanResult` | One-shot Headless-slot LLM scan over local repo context (`focus`: `refactor`, `testing`, `perf`). Dual-emits `proposals-ready` to the window and `/events` SSE. |
+| `POST /repo/create-issue-from-proposal` | `{ repoPath, proposal }` | `CreatedIssue` | Explicit user-gated issue creation from one proposal; scan itself never creates issues. |
 
 ## Mobile Transport
 

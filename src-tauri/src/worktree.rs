@@ -1,4 +1,4 @@
-use crate::git_cli::git_cmd;
+use crate::git_cli::{finish_failed_git_operation_after_abort, git_cmd};
 use crate::state::{AppState, WorktreeInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -222,6 +222,9 @@ pub(crate) fn create_worktree_internal(
         args.push(branch.clone());
     }
 
+    // End-of-options guard: the branch/start-point below is attacker-influenced
+    // (e.g. a PR head_ref), so `--` forces git to treat it as a ref, not an option.
+    args.push("--".into());
     args.push(wt_path_str);
 
     if let Some(ref branch) = config.branch
@@ -259,6 +262,7 @@ pub(crate) fn create_worktree_internal(
                         "worktree",
                         "add",
                         "--quiet",
+                        "--",
                         &worktree_path.to_string_lossy(),
                         branch.as_str(),
                     ];
@@ -696,6 +700,12 @@ pub(crate) async fn create_worktree(
 
                 let emit_repo_changed = || {
                     state_arc.invalidate_repo_caches(&config_bg.base_repo);
+                    // Dual-emit: bus (SSE/PWA/remote) + Tauri window (desktop).
+                    let _ = state_arc
+                        .event_bus
+                        .send(crate::state::AppEvent::RepoChanged {
+                            repo_path: config_bg.base_repo.clone(),
+                        });
                     // Clone the handle out of the lock so we don't hold the read
                     // guard across the (potentially blocking) emit call.
                     let handle = state_arc.app_handle.read().clone();
@@ -711,6 +721,15 @@ pub(crate) async fn create_worktree(
                 };
 
                 let emit_creation_failed = |reason: String| {
+                    // Dual-emit: bus (SSE/PWA/remote) + Tauri window (desktop).
+                    let _ =
+                        state_arc
+                            .event_bus
+                            .send(crate::state::AppEvent::WorktreeCreateFailed {
+                                repo_path: config_bg.base_repo.clone(),
+                                branch: branch_for_err.clone(),
+                                reason: reason.clone(),
+                            });
                     let handle = state_arc.app_handle.read().clone();
                     if let Some(handle) = handle {
                         use tauri::Emitter as _;
@@ -803,14 +822,20 @@ pub(crate) fn get_worktrees_dir(
 ///
 /// When `delete_branch` is true, also deletes the local branch after removing
 /// the worktree directory. When false, the branch is preserved.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct RemoveWorktreeOutcome {
+    pub(crate) branch_delete_warning: Option<String>,
+}
+
 pub(crate) fn remove_worktree_by_branch(
     repo_path: &str,
     branch_name: &str,
     delete_branch: bool,
     archive_script: Option<&str>,
     force: bool,
-) -> Result<(), String> {
+) -> Result<RemoveWorktreeOutcome, String> {
     let base_repo = PathBuf::from(repo_path);
+    let mut branch_delete_warning = None;
 
     tracing::info!(
         source = "worktree",
@@ -878,17 +903,23 @@ pub(crate) fn remove_worktree_by_branch(
                 flag = %flag,
                 "git branch delete: OK"
             ),
-            Err(e) => tracing::warn!(
-                source = "worktree",
-                branch = %branch_name,
-                flag = %flag,
-                "git branch delete failed (branch ref preserved): {e}"
-            ),
+            Err(e) => {
+                let warning = format!("git branch {flag} {branch_name} failed: {e}");
+                tracing::warn!(
+                    source = "worktree",
+                    branch = %branch_name,
+                    flag = %flag,
+                    "git branch delete failed (branch ref preserved): {e}"
+                );
+                branch_delete_warning = Some(warning);
+            }
         }
     }
 
     tracing::info!(source = "worktree", branch = %branch_name, "remove_worktree_by_branch: done");
-    Ok(())
+    Ok(RemoveWorktreeOutcome {
+        branch_delete_warning,
+    })
 }
 
 /// Remove a git worktree by branch name (Tauri command with cache invalidation)
@@ -902,7 +933,7 @@ pub(crate) async fn remove_worktree(
     branch_name: String,
     delete_branch: Option<bool>,
     force: Option<bool>,
-) -> Result<(), String> {
+) -> Result<RemoveWorktreeOutcome, String> {
     let delete_branch = delete_branch.unwrap_or(true);
     let force = force.unwrap_or(false);
     tracing::info!(
@@ -929,11 +960,13 @@ pub(crate) async fn remove_worktree(
     .map_err(|e| format!("Task panic: {e}"))?;
 
     match result {
-        Ok(()) => {
+        Ok(outcome) => {
             tracing::info!(source = "worktree", branch = %branch_name, "remove_worktree command: SUCCESS — invalidating caches");
-            crate::config::remove_branch_label(&repo_path, &branch_name);
+            if outcome.branch_delete_warning.is_none() {
+                crate::config::remove_branch_label(&repo_path, &branch_name);
+            }
             state.invalidate_repo_caches(&repo_path);
-            Ok(())
+            Ok(outcome)
         }
         Err(e) => {
             tracing::error!(source = "worktree", branch = %branch_name, "remove_worktree command: FAILED — {e}");
@@ -1278,10 +1311,24 @@ pub(crate) fn get_remote_default_branch(repo_path: &str) -> Result<String, Strin
     Ok("main".to_string())
 }
 
-/// Fetch a remote ref if the ref name looks like a remote tracking branch (e.g. "origin/main").
+/// Fetch a remote ref if the ref name is a remote tracking branch (e.g. "origin/main").
 /// Local refs are a no-op. Returns Ok(()) on success or if the ref is local.
 pub(crate) fn fetch_if_remote(repo_path: &str, ref_name: &str) -> Result<(), String> {
-    // Remote refs contain a "/" and start with a remote name (e.g. "origin/branch")
+    // A "/" alone does NOT mean remote — local branches routinely contain slashes
+    // (e.g. "POC-0001/merge-radar", "feature/foo"). Only fetch when the ref actually
+    // resolves as a remote-tracking ref under refs/remotes/.
+    let is_remote_ref = git_cmd(Path::new(repo_path))
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{ref_name}"),
+        ])
+        .run_silent()
+        .is_some();
+    if !is_remote_ref {
+        return Ok(());
+    }
     if let Some(slash_pos) = ref_name.find('/') {
         let remote = &ref_name[..slash_pos];
         let branch = &ref_name[slash_pos + 1..];
@@ -1319,6 +1366,41 @@ pub(crate) fn get_branch_base(repo_path: &str, branch_name: &str) -> Option<Stri
         .run_silent()
         .map(|out| out.stdout.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Read every branch's stored base ref in a single git subprocess.
+///
+/// Returns a map of branch name -> base ref, parsed from the
+/// `branch.<name>.tuicommander-base` config entries. Empty when none are set
+/// or the lookup fails. Replaces N sequential per-branch `git config` calls in
+/// `apply_base_ahead_behind_and_sort`.
+pub(crate) fn get_branch_bases(repo_path: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Some(out) = git_cmd(Path::new(repo_path))
+        .args(["config", "--get-regexp", r"^branch\..*\.tuicommander-base$"])
+        .run_silent()
+    else {
+        return map;
+    };
+    for line in out.stdout.lines() {
+        // Each line: `branch.<name>.tuicommander-base <base-ref>`. The key and
+        // value are whitespace-separated; the branch name is the middle of the
+        // key (may contain dots, so anchor on both prefix and suffix).
+        let Some((key, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if let Some(name) = key
+            .strip_prefix("branch.")
+            .and_then(|k| k.strip_suffix(".tuicommander-base"))
+        {
+            map.insert(name.to_string(), value.to_string());
+        }
+    }
+    map
 }
 
 /// A base ref option with metadata for grouped dropdown display.
@@ -1438,6 +1520,11 @@ pub(crate) fn switch_branch_impl(
     stash: bool,
 ) -> Result<SwitchBranchResult, String> {
     let base_repo = PathBuf::from(&repo_path);
+
+    // `git checkout <ref>` has no end-of-options `--` form that keeps <ref> a
+    // branch (post-`--` args become pathspecs), so validate instead — a name
+    // beginning with `-` would otherwise be parsed as an option.
+    crate::git::validate_branch_name(&branch_name)?;
 
     // Read current branch before switching
     let previous_branch = crate::git::read_branch_from_head(&base_repo).unwrap_or_default();
@@ -1611,9 +1698,12 @@ pub(crate) fn merge_and_archive_worktree_impl(
         .args(["merge", &branch_name, "--no-edit"])
         .run()
     {
-        // Abort the merge to leave a clean state
-        let _ = git_cmd(&base_repo).args(["merge", "--abort"]).run();
-        return Err(format!("Merge failed (conflicts?): {e}"));
+        return Err(finish_failed_git_operation_after_abort(
+            &base_repo,
+            "merge",
+            "Merge failed",
+            e,
+        ));
     }
 
     // 3. Handle the worktree based on after_merge setting
@@ -1672,6 +1762,27 @@ pub(crate) fn merge_and_archive_worktree(
 ///
 /// If `archive_script` is provided (non-empty), it runs in the worktree directory
 /// before archiving. A non-zero exit code aborts the operation.
+/// Pick a non-colliding archive destination under `archive_dir` for `sanitized`.
+///
+/// Returns `archive_dir/sanitized` when free, otherwise the first free
+/// `sanitized-2`, `sanitized-3`, … so archiving the same branch twice never
+/// clobbers a prior archive. Single-user local tool: a find-first-free-suffix
+/// loop is fine, no TOCTOU hardening needed.
+fn free_archive_dest(archive_dir: &Path, sanitized: &str) -> PathBuf {
+    let base = archive_dir.join(sanitized);
+    if !base.exists() {
+        return base;
+    }
+    let mut counter = 2;
+    loop {
+        let candidate = archive_dir.join(format!("{sanitized}-{counter}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
 pub(crate) fn archive_worktree(
     base_repo: &Path,
     branch_name: &str,
@@ -1695,7 +1806,7 @@ pub(crate) fn archive_worktree(
     let parent_dir = wt_path.parent().ok_or("Worktree has no parent directory")?;
     let archive_dir = parent_dir.join("__archived");
     let sanitized = sanitize_name(branch_name);
-    let archive_dest = archive_dir.join(&sanitized);
+    let mut archive_dest = archive_dir.join(&sanitized);
 
     // Create archive directory
     std::fs::create_dir_all(&archive_dir)
@@ -1715,10 +1826,9 @@ pub(crate) fn archive_worktree(
 
     // Move the directory if it still exists (worktree remove may have deleted it)
     if wt_path.exists() {
-        if archive_dest.exists() {
-            std::fs::remove_dir_all(&archive_dest)
-                .map_err(|e| format!("Failed to clean existing archive: {e}"))?;
-        }
+        // Archive is the non-destructive alternative to delete — never clobber a
+        // prior archive for the same branch name; land on the next free suffix.
+        archive_dest = free_archive_dest(&archive_dir, &sanitized);
         std::fs::rename(&wt_path, &archive_dest)
             .map_err(|e| format!("Failed to move worktree to archive: {e}"))?;
     }
@@ -1884,6 +1994,40 @@ mod tests {
 
         let worktree = result.unwrap();
         assert_eq!(worktree.branch, Some("feature/new-feature".to_string()));
+    }
+
+    /// Regression (story 120-797d): a branch/ref beginning with `-` — e.g. an
+    /// attacker-chosen PR head_ref like `--upload-pack=...` — must reach
+    /// `git worktree add` as DATA, never be parsed as a git OPTION. The `--`
+    /// end-of-options guard turns an injection attempt into a plain
+    /// "invalid reference" failure instead of "unknown option".
+    #[test]
+    fn test_create_worktree_dash_ref_treated_as_data() {
+        let repo = setup_test_repo();
+        let worktrees_dir = repo.path().join("worktrees");
+
+        let config = WorktreeConfig {
+            task_name: "dash-ref-task".to_string(),
+            base_repo: repo.path().to_string_lossy().to_string(),
+            // Checkout of an existing ref (create_branch = false) whose name looks
+            // like a git option — the classic argument-injection payload.
+            branch: Some("--upload-pack=touch /tmp/pwned".to_string()),
+            create_branch: false,
+        };
+
+        let result = create_worktree_internal(&worktrees_dir, &config, None);
+        let err = result.expect_err("worktree add on a nonexistent dash-ref must fail");
+
+        // Without `--`, git parses it as an option ("unknown option"/"unknown switch").
+        // With the guard, git resolves it as a ref and fails "invalid reference".
+        assert!(
+            !err.contains("unknown option") && !err.contains("unknown switch"),
+            "dash-prefixed ref was parsed as a git OPTION, not data: {err}"
+        );
+        assert!(
+            err.contains("invalid reference"),
+            "expected git to reject the ref as data (invalid reference), got: {err}"
+        );
     }
 
     #[test]
@@ -2281,16 +2425,17 @@ mod tests {
             .unwrap();
 
         // Safe remove (force=false): worktree gone, branch survives
-        let res = remove_worktree_by_branch(
+        let outcome = remove_worktree_by_branch(
             repo.path().to_str().unwrap(),
             "feat-unmerged",
             true,
             None,
             false,
-        );
+        )
+        .expect("remove should succeed even if -d refuses");
         assert!(
-            res.is_ok(),
-            "remove should succeed even if -d refuses: {res:?}"
+            outcome.branch_delete_warning.is_some(),
+            "safe branch delete refusal must be surfaced to the caller"
         );
         assert!(!wt.path.exists(), "worktree dir should be removed");
 
@@ -2335,7 +2480,11 @@ mod tests {
             None,
             true,
         );
-        assert!(res.is_ok(), "force remove should succeed: {res:?}");
+        let outcome = res.expect("force remove should succeed");
+        assert!(
+            outcome.branch_delete_warning.is_none(),
+            "force branch delete should not report a partial warning"
+        );
 
         let branches = git_cmd(repo.path())
             .args(["branch", "--list", "feat-force"])
@@ -2988,6 +3137,46 @@ branch refs/heads/feat
     }
 
     #[test]
+    fn free_archive_dest_avoids_clobbering_prior_archives() {
+        // The anti-clobber guarantee for archive_worktree: archiving the same
+        // branch name again must land on a fresh suffix, never overwrite. Tested
+        // directly on the pure destination-picker because whether the worktree
+        // dir survives `git worktree remove --force` (and thus reaches the rename)
+        // is git-version/OS dependent — see archive_worktree_moves_directory.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let archive_dir = tmp.path().join("__archived");
+        fs::create_dir_all(&archive_dir).expect("mkdir archive");
+
+        // No prior archive → base name.
+        assert_eq!(
+            free_archive_dest(&archive_dir, "dup-branch"),
+            archive_dir.join("dup-branch")
+        );
+
+        // Prior archive at base name → first free suffix, base left untouched.
+        let base = archive_dir.join("dup-branch");
+        fs::create_dir_all(&base).expect("mkdir base");
+        fs::write(base.join("marker.txt"), "first").expect("write marker");
+        assert_eq!(
+            free_archive_dest(&archive_dir, "dup-branch"),
+            archive_dir.join("dup-branch-2")
+        );
+
+        // Base and -2 taken → skips to -3.
+        fs::create_dir_all(archive_dir.join("dup-branch-2")).expect("mkdir -2");
+        assert_eq!(
+            free_archive_dest(&archive_dir, "dup-branch"),
+            archive_dir.join("dup-branch-3")
+        );
+
+        // Original archive contents are never removed by the picker.
+        assert_eq!(
+            fs::read_to_string(base.join("marker.txt")).expect("read marker"),
+            "first"
+        );
+    }
+
+    #[test]
     fn test_set_and_get_branch_base() {
         let repo = setup_test_repo();
         let path = repo.path().to_string_lossy().to_string();
@@ -3012,6 +3201,35 @@ branch refs/heads/feat
     }
 
     #[test]
+    fn test_get_branch_bases_batches_all_entries() {
+        let repo = setup_test_repo();
+        let path = repo.path().to_string_lossy().to_string();
+
+        // No bases set yet -> empty map.
+        assert!(get_branch_bases(&path).is_empty());
+
+        // Set bases for several branches (names include a dot and a slash to
+        // exercise the prefix/suffix anchoring of the key parser).
+        set_branch_base(&path, "main", "develop").unwrap();
+        set_branch_base(&path, "feature.x", "main").unwrap();
+        set_branch_base(&path, "team/feat", "origin/main").unwrap();
+
+        let bases = get_branch_bases(&path);
+        assert_eq!(bases.len(), 3, "expected all 3 bases, got: {bases:?}");
+        assert_eq!(bases.get("main").map(String::as_str), Some("develop"));
+        assert_eq!(bases.get("feature.x").map(String::as_str), Some("main"));
+        assert_eq!(
+            bases.get("team/feat").map(String::as_str),
+            Some("origin/main")
+        );
+
+        // Batch result matches the per-branch reader byte-for-byte.
+        for (name, base) in &bases {
+            assert_eq!(get_branch_base(&path, name).as_ref(), Some(base));
+        }
+    }
+
+    #[test]
     fn test_fetch_remote_ref_for_local_is_noop() {
         let repo = setup_test_repo();
         let path = repo.path().to_string_lossy().to_string();
@@ -3019,6 +3237,27 @@ branch refs/heads/feat
         // A local ref like "main" should not trigger a fetch (no-op)
         let result = fetch_if_remote(&path, "main");
         assert!(result.is_ok(), "local ref should not fail: {:?}", result);
+    }
+
+    #[test]
+    fn test_fetch_local_branch_with_slash_is_noop() {
+        let repo = setup_test_repo();
+        let path = repo.path().to_string_lossy().to_string();
+
+        // A local branch name can legitimately contain a slash (e.g. Jira-style
+        // "POC-0001/merge-radar"). It must NOT be mistaken for a remote ref and
+        // fetched — otherwise git treats "POC-0001" as a remote and fails.
+        git_cmd(repo.path())
+            .args(["branch", "POC-0001/merge-radar"])
+            .run()
+            .expect("Failed to create slashed local branch");
+
+        let result = fetch_if_remote(&path, "POC-0001/merge-radar");
+        assert!(
+            result.is_ok(),
+            "slashed local branch should be a no-op, not a failed fetch: {:?}",
+            result
+        );
     }
 
     /// Get the current branch name in a test repo (could be main or master)

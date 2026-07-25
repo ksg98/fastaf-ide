@@ -5,6 +5,7 @@ import { appLogger } from "../../stores/appLogger";
 import { isDiffStatus } from "../../stores/diffTabs";
 import { promptLibraryStore } from "../../stores/promptLibrary";
 import { repositoriesStore } from "../../stores/repositories";
+import { toastsStore } from "../../stores/toasts";
 import { cx, globToRegex } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { joinPath } from "../../utils/pathUtils";
@@ -229,6 +230,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			await invoke("git_stage_files", { path: props.repoPath, files: [filePath] });
 		} catch (err) {
 			appLogger.error("git", `Failed to stage ${filePath}`, err);
+			toastsStore.add("Stage failed", `Could not stage "${filePath}": ${String(err)}`, "error", true);
 		}
 	}
 
@@ -238,6 +240,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			await invoke("git_unstage_files", { path: props.repoPath, files: [filePath] });
 		} catch (err) {
 			appLogger.error("git", `Failed to unstage ${filePath}`, err);
+			toastsStore.add("Unstage failed", `Could not unstage "${filePath}": ${String(err)}`, "error", true);
 		}
 	}
 
@@ -252,6 +255,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			repositoriesStore.bumpRevision(props.repoPath);
 		} catch (err) {
 			appLogger.error("git", `Failed to discard ${filePath}`, err);
+			toastsStore.add("Discard failed", `Could not discard "${filePath}": ${String(err)}`, "error", true);
 		}
 	}
 
@@ -263,6 +267,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			await invoke("git_stage_files", { path: props.repoPath, files });
 		} catch (err) {
 			appLogger.error("git", "Failed to stage all files", err);
+			toastsStore.add("Stage failed", `Could not stage all files: ${String(err)}`, "error", true);
 		}
 	}
 
@@ -274,6 +279,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			await invoke("git_unstage_files", { path: props.repoPath, files });
 		} catch (err) {
 			appLogger.error("git", "Failed to unstage all files", err);
+			toastsStore.add("Unstage failed", `Could not unstage all files: ${String(err)}`, "error", true);
 		}
 	}
 
@@ -289,6 +295,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			repositoriesStore.bumpRevision(props.repoPath); // see discardFile (#1378-ce1c)
 		} catch (err) {
 			appLogger.error("git", "Failed to discard all files", err);
+			toastsStore.add("Discard failed", `Could not discard all files: ${String(err)}`, "error", true);
 		}
 	}
 
@@ -351,6 +358,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			setSelectedKeys(new Set<string>());
 		} catch (err) {
 			appLogger.error("git", "Failed to stage selected files", err);
+			toastsStore.add("Stage failed", `Could not stage selected files: ${String(err)}`, "error", true);
 		}
 	}
 
@@ -363,6 +371,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			setSelectedKeys(new Set<string>());
 		} catch (err) {
 			appLogger.error("git", "Failed to unstage selected files", err);
+			toastsStore.add("Unstage failed", `Could not unstage selected files: ${String(err)}`, "error", true);
 		}
 	}
 
@@ -379,6 +388,7 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 			repositoriesStore.bumpRevision(props.repoPath); // see discardFile (#1378-ce1c)
 		} catch (err) {
 			appLogger.error("git", "Failed to discard selected files", err);
+			toastsStore.add("Discard failed", `Could not discard selected files: ${String(err)}`, "error", true);
 		}
 	}
 

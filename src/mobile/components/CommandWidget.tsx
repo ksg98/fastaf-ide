@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
+import { toastsStore } from "../../stores/toasts";
 import { rpc } from "../../transport";
 import { sendCommand } from "../../utils/sendCommand";
 import type { AgentCommand } from "../config/agentCommands";
@@ -17,7 +18,6 @@ export function CommandWidget(props: CommandWidgetProps) {
 	const commandSet = () => getAgentCommands(props.agentType);
 
 	async function send(text: string) {
-		props.onDismiss();
 		try {
 			// Route through the canonical sendCommand helper: it handles the
 			// agent-specific Ctrl-U prefix, the split Enter (Ink raw mode), and
@@ -28,9 +28,13 @@ export function CommandWidget(props: CommandWidgetProps) {
 				text,
 				props.agentType,
 			);
+			// Dismiss only once the command reached the PTY; on failure keep the
+			// sheet open so the user can retry.
+			props.onDismiss();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appLogger.error("network", `Command send failed after retries: ${msg}`);
+			toastsStore.add("Send failed", `Could not send command: ${msg}`, "error", true);
 		}
 	}
 
@@ -43,12 +47,13 @@ export function CommandWidget(props: CommandWidgetProps) {
 	async function sendPermissionToggle() {
 		const seq = commandSet().permissionToggleSeq;
 		if (!seq) return;
-		props.onDismiss();
 		try {
 			await retryWrite(() => rpc("write_pty", { sessionId: props.sessionId, data: seq }));
+			props.onDismiss();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appLogger.error("network", `Permission toggle failed after retries: ${msg}`);
+			toastsStore.add("Send failed", `Permission toggle failed: ${msg}`, "error", true);
 		}
 	}
 

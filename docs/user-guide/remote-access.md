@@ -36,6 +36,10 @@ The browser client provides the same UI as the desktop app:
 ## Security
 
 - **Authentication** — Basic Auth with bcrypt-hashed passwords
+- **Secret storage** — Session tokens, relay bearer tokens, and push VAPID
+  private keys are stored in the OS keyring-backed credential vault; config
+  files and `/config` responses expose only non-secret settings and existence
+  flags
 - **Local network only** — The server binds to your machine's IP; it's not exposed to the internet unless you configure port forwarding (don't do this without a VPN)
 - **CORS** — When remote access is enabled, any origin is allowed (necessary for browser access from different IPs)
 

@@ -155,30 +155,30 @@ impl RegexSafetyChecker {
     fn compile() -> Self {
         let needs_approval = vec![
             // rm with -r and -f in any order, including split flags like `rm -r -f`
-            (regex::Regex::new(r"\brm\s+(?:-\w*r\w*\s+)*(?:-\w*f|-\w*r)\b.*-\w*[rf]|\brm\s+-\w*rf|\brm\s+-\w*fr").unwrap(), "recursive force delete"),
+            (regex::Regex::new(r"(?i)\brm\s+(?:-\w*r\w*\s+)*(?:-\w*f|-\w*r)\b.*-\w*[rf]|\brm\s+-\w*rf|\brm\s+-\w*fr").unwrap(), "recursive force delete"),
             // rm -r without -f is also dangerous
-            (regex::Regex::new(r"\brm\s+(?:.*\s)?-\w*r").unwrap(), "recursive delete"),
+            (regex::Regex::new(r"(?i)\brm\s+(?:.*\s)?-\w*r").unwrap(), "recursive delete"),
             // git push --force anywhere in args
-            (regex::Regex::new(r"\bgit\s+push\b.*(?:--force\b|-f\b)").unwrap(), "force push"),
-            (regex::Regex::new(r"\bgit\s+reset\s+--hard\b").unwrap(), "hard reset"),
-            (regex::Regex::new(r"\bgit\s+clean\b.*-\w*[fd]").unwrap(), "git clean removes untracked files"),
+            (regex::Regex::new(r"(?i)\bgit\s+push\b.*(?:--force\b|-f\b)").unwrap(), "force push"),
+            (regex::Regex::new(r"(?i)\bgit\s+reset\s+--hard\b").unwrap(), "hard reset"),
+            (regex::Regex::new(r"(?i)\bgit\s+clean\b.*-\w*[fd]").unwrap(), "git clean removes untracked files"),
             (regex::Regex::new(r"(?i)\bdrop\s+(table|database|schema|index)\b").unwrap(), "SQL DROP statement"),
             (regex::Regex::new(r"(?i)\btruncate\s+table\b").unwrap(), "SQL TRUNCATE"),
-            (regex::Regex::new(r">\s*/dev/").unwrap(), "write to /dev/"),
+            (regex::Regex::new(r"(?i)>\s*/dev/").unwrap(), "write to /dev/"),
             (regex::Regex::new(r"(?i)\bmkfs\b").unwrap(), "filesystem format"),
             (regex::Regex::new(r"(?i)\bdd\s+.*of=/dev/").unwrap(), "dd to device"),
-            (regex::Regex::new(r"\bchmod\s+777\b").unwrap(), "world-writable permissions"),
-            (regex::Regex::new(r"\bchown\s+-R\b").unwrap(), "recursive ownership change"),
+            (regex::Regex::new(r"(?i)\bchmod\s+777\b").unwrap(), "world-writable permissions"),
+            (regex::Regex::new(r"(?i)\bchown\s+-R\b").unwrap(), "recursive ownership change"),
             // sudo — elevated privileges need human confirmation
-            (regex::Regex::new(r"(?:^|\s)\s*sudo\b").unwrap(), "sudo: elevated privileges"),
+            (regex::Regex::new(r"(?i)(?:^|\s)\s*sudo\b").unwrap(), "sudo: elevated privileges"),
             // reading SSH keys sends private key material to the LLM API
-            (regex::Regex::new(r"\bcat\s+.*\.ssh/").unwrap(), "reading SSH key (content sent to LLM API)"),
+            (regex::Regex::new(r"(?i)\bcat\s+.*\.ssh/").unwrap(), "reading SSH key (content sent to LLM API)"),
         ];
 
         let blocked = vec![
             // /etc/shadow is unreadable without sudo anyway; no legitimate agent use
             (
-                regex::Regex::new(r"\bcat\s+.*(?:/etc/shadow)").unwrap(),
+                regex::Regex::new(r"(?i)\bcat\s+.*(?:/etc/shadow)").unwrap(),
                 "reading /etc/shadow",
             ),
         ];
@@ -280,6 +280,53 @@ impl RegexSafetyChecker {
         }
 
         SafetyVerdict::Allow
+    }
+}
+
+/// Detect whether a path points at a well-known secret-bearing file.
+///
+/// Used ONLY by the optional, off-by-default "warn before reading known secret
+/// files" setting. Reads are NEVER blocked or gated by this — it is a pure
+/// classification helper that returns a short label for the log line, or `None`
+/// when the path is not a known secret file. Matching is case-insensitive so a
+/// macOS case-insensitive filesystem cannot bypass it.
+pub fn secret_file_kind(path: &str) -> Option<&'static str> {
+    use std::path::Path;
+
+    let p = Path::new(path);
+    let file_name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let components: Vec<String> = p
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .map(|s| s.to_lowercase())
+        .collect();
+    let has_component = |name: &str| components.iter().any(|c| c == name);
+    let path_lower = path.to_lowercase();
+
+    if file_name.starts_with(".env") {
+        Some(".env file")
+    } else if file_name == ".netrc" || file_name == "_netrc" {
+        Some(".netrc credentials")
+    } else if file_name == ".npmrc" {
+        Some(".npmrc credentials")
+    } else if file_name == ".pgpass" {
+        Some(".pgpass credentials")
+    } else if has_component(".ssh") {
+        Some(".ssh key material")
+    } else if has_component(".docker") && file_name == "config.json" {
+        Some("Docker auth config")
+    } else if has_component(".kube") && file_name == "config" {
+        Some("kubeconfig credentials")
+    } else if path_lower.contains("credential") {
+        Some("credentials file")
+    } else if path_lower.contains("secret") {
+        Some("secrets file")
+    } else {
+        None
     }
 }
 
@@ -962,5 +1009,126 @@ mod tests {
     fn write_dotdot_nested_blocked() {
         let v = checker().evaluate_file_write("src/../../../etc/passwd");
         assert!(matches!(v, SafetyVerdict::Block { .. }));
+    }
+
+    // ── Case-insensitivity (macOS case-insensitive FS bypass) ────
+    //
+    // On macOS's default case-insensitive filesystem, `RM`, `Sudo`, `CAT`
+    // invoke the same binaries as their lowercase forms but must NOT skip the
+    // approval gate. Every needs_approval/blocked pattern is `(?i)`.
+
+    #[test]
+    fn uppercase_rm_rf_needs_approval() {
+        let v = checker().evaluate("RM -RF ~");
+        assert!(matches!(v, SafetyVerdict::NeedsApproval { .. }));
+    }
+
+    #[test]
+    fn mixed_case_sudo_needs_approval() {
+        let v = checker().evaluate("Sudo rm -rf /");
+        assert!(matches!(v, SafetyVerdict::NeedsApproval { .. }));
+    }
+
+    #[test]
+    fn uppercase_cat_ssh_needs_approval() {
+        let v = checker().evaluate("CAT ~/.ssh/id_rsa");
+        assert!(matches!(v, SafetyVerdict::NeedsApproval { .. }));
+    }
+
+    #[test]
+    fn mixed_case_chmod_777_needs_approval() {
+        let v = checker().evaluate("Chmod 777 /tmp/dir");
+        assert!(matches!(v, SafetyVerdict::NeedsApproval { .. }));
+    }
+
+    #[test]
+    fn uppercase_cat_etc_shadow_blocked() {
+        let v = checker().evaluate("CAT /etc/shadow");
+        assert!(matches!(v, SafetyVerdict::Block { .. }));
+    }
+
+    // ── secret_file_kind (optional read-warn classifier) ─────────
+
+    #[test]
+    fn secret_kind_env_files() {
+        assert_eq!(secret_file_kind(".env"), Some(".env file"));
+        assert_eq!(
+            secret_file_kind("config/.env.production"),
+            Some(".env file")
+        );
+    }
+
+    #[test]
+    fn secret_kind_netrc() {
+        assert_eq!(secret_file_kind(".netrc"), Some(".netrc credentials"));
+        assert_eq!(
+            secret_file_kind("/home/dev/.netrc"),
+            Some(".netrc credentials")
+        );
+        assert_eq!(secret_file_kind("_netrc"), Some(".netrc credentials"));
+    }
+
+    #[test]
+    fn secret_kind_npmrc() {
+        assert_eq!(secret_file_kind(".npmrc"), Some(".npmrc credentials"));
+    }
+
+    #[test]
+    fn secret_kind_pgpass() {
+        assert_eq!(secret_file_kind(".pgpass"), Some(".pgpass credentials"));
+    }
+
+    #[test]
+    fn secret_kind_ssh_dir() {
+        assert_eq!(
+            secret_file_kind("/home/dev/.ssh/id_rsa"),
+            Some(".ssh key material")
+        );
+    }
+
+    #[test]
+    fn secret_kind_docker_config() {
+        assert_eq!(
+            secret_file_kind("/home/dev/.docker/config.json"),
+            Some("Docker auth config")
+        );
+        // A generic config.json outside .docker is not flagged.
+        assert_eq!(secret_file_kind("app/config.json"), None);
+    }
+
+    #[test]
+    fn secret_kind_kube_config() {
+        assert_eq!(
+            secret_file_kind("/home/dev/.kube/config"),
+            Some("kubeconfig credentials")
+        );
+    }
+
+    #[test]
+    fn secret_kind_credentials_and_secrets() {
+        assert_eq!(
+            secret_file_kind("aws/credentials"),
+            Some("credentials file")
+        );
+        assert_eq!(
+            secret_file_kind("deploy/secrets.yaml"),
+            Some("secrets file")
+        );
+    }
+
+    #[test]
+    fn secret_kind_case_insensitive() {
+        assert_eq!(
+            secret_file_kind("/HOME/DEV/.SSH/ID_RSA"),
+            Some(".ssh key material")
+        );
+        assert_eq!(secret_file_kind(".NETRC"), Some(".netrc credentials"));
+    }
+
+    #[test]
+    fn secret_kind_normal_files_none() {
+        assert_eq!(secret_file_kind("src/main.rs"), None);
+        assert_eq!(secret_file_kind("Cargo.toml"), None);
+        assert_eq!(secret_file_kind("README.md"), None);
     }
 }

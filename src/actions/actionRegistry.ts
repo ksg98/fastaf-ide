@@ -115,10 +115,7 @@ export function getActionEntries(handlers: ShortcutHandlers): ActionEntry[] {
 
 	const handlerMap: Partial<Record<ActionName, () => void>> = {
 		"new-terminal": handlers.createNewTerminal,
-		"close-terminal": () => {
-			const activeId = handlers.terminalIds()[0]; // simplified - close active
-			if (activeId) handlers.closeTerminal(activeId);
-		},
+		"close-terminal": handlers.closeActiveTabOrPane,
 		"reopen-closed-tab": handlers.reopenClosedTab,
 		"clear-terminal": handlers.clearTerminal,
 		"refresh-terminal": handlers.refreshTerminal,

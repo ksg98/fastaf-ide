@@ -51,6 +51,12 @@ export const TIPS: Tip[] = [
 		shortcut: `${mod}+E`,
 	},
 	{
+		feature: "Plugin File Previews",
+		description:
+			"Install preview plugins from Settings > Plugins > Browse to open formats like DOCX directly from the File Browser.",
+		shortcut: null,
+	},
+	{
 		feature: "File Content Search",
 		description:
 			"Press C in the file browser search bar to switch to content search — searches inside files with regex, case-sensitive, and whole-word options.",
@@ -265,6 +271,12 @@ export const TIPS: Tip[] = [
 		feature: "GitHub Login",
 		description:
 			"Sign in to GitHub from Settings > GitHub for automatic PR and CI monitoring. No need to manage tokens manually.",
+		shortcut: null,
+	},
+	{
+		feature: "GitHub Ops Proposals",
+		description:
+			"Open the GitHub Ops dashboard to scan a repo for refactor, testing, or performance proposals, then create issues only for the ones you approve.",
 		shortcut: null,
 	},
 	{

@@ -1,4 +1,15 @@
-import { type Component, createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	For,
+	lazy,
+	onCleanup,
+	onMount,
+	Show,
+	Suspense,
+} from "solid-js";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import { type ConversationMeta, conversationStore, type ToolCallEntry } from "../../stores/conversationStore";
@@ -8,11 +19,20 @@ import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
 import { getShellFamily, sendCommand } from "../../utils/sendCommand";
 import p from "../shared/panel.module.css";
-import { ContentRenderer } from "../ui/ContentRenderer";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
 import s from "./AIChatPanel.module.css";
 import { SessionKnowledgeBar } from "./SessionKnowledgeBar";
+
+const ContentRenderer = lazy(() =>
+	import("../ui/ContentRenderer").then((module) => ({ default: module.ContentRenderer })),
+);
+
+const MarkdownContent: Component<{ content: string }> = (props) => (
+	<Suspense>
+		<ContentRenderer content={props.content} />
+	</Suspense>
+);
 
 const isPanelMode = () => new URLSearchParams(window.location.search).get("mode") === "panel";
 
@@ -720,7 +740,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 											requestAnimationFrame(() => enhanceCodeBlocks(el, ac.signal));
 										}}
 									>
-										<ContentRenderer content={msg.content} />
+										<MarkdownContent content={msg.content} />
 									</div>
 								}
 							>
@@ -735,7 +755,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 						<details class={s.reasoningDisclosure} open={conversationStore.isThinking()}>
 							<summary class={s.reasoningSummary}>Thinking</summary>
 							<div class={s.reasoningBody}>
-								<ContentRenderer content={conversationStore.reasoningChunks()} />
+								<MarkdownContent content={conversationStore.reasoningChunks()} />
 							</div>
 						</details>
 					</Show>
@@ -744,7 +764,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					<Show when={conversationStore.isStreaming() && conversationStore.streamingText()}>
 						{(text) => (
 							<div class={s.assistantMsg}>
-								<ContentRenderer content={text()} />
+								<MarkdownContent content={text()} />
 							</div>
 						)}
 					</Show>
@@ -757,7 +777,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					{/* Agent text output */}
 					<Show when={conversationStore.textChunks()}>
 						<div class={s.assistantMsg}>
-							<ContentRenderer content={conversationStore.textChunks()!} />
+							<MarkdownContent content={conversationStore.textChunks()!} />
 						</div>
 					</Show>
 				</Show>

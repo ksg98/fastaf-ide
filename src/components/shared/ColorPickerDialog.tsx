@@ -1,6 +1,8 @@
-import { type Component, createEffect, onCleanup, Show } from "solid-js";
+import { type Component, createEffect, Show } from "solid-js";
 import { t } from "../../i18n";
+import { registerModal } from "../../stores/modalStack";
 import { ColorSwatchPicker } from "./ColorSwatchPicker";
+import { DEFAULT_COLOR_PRESETS } from "./colorPresets";
 import d from "./dialog.module.css";
 
 export interface ColorPickerDialogProps {
@@ -15,15 +17,9 @@ export const ColorPickerDialog: Component<ColorPickerDialogProps> = (props) => {
 	createEffect(() => {
 		if (!props.visible) return;
 
-		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				props.onClose();
-			}
-		};
-
-		document.addEventListener("keydown", handleKeydown);
-		onCleanup(() => document.removeEventListener("keydown", handleKeydown));
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to props.onClose AND stops it reaching the terminal underneath.
+		registerModal(props.onClose);
 	});
 
 	const handleChange = (color: string) => {
@@ -39,7 +35,7 @@ export const ColorPickerDialog: Component<ColorPickerDialogProps> = (props) => {
 						<h4>{props.title}</h4>
 					</div>
 					<div class={d.body}>
-						<ColorSwatchPicker color={props.currentColor} onChange={handleChange} />
+						<ColorSwatchPicker color={props.currentColor} presets={DEFAULT_COLOR_PRESETS} onChange={handleChange} />
 					</div>
 					<div class={d.actions}>
 						<button class={d.cancelBtn} onClick={props.onClose}>

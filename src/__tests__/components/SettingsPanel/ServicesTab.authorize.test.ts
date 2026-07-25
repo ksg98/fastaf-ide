@@ -1,5 +1,45 @@
-import { describe, expect, it } from "vitest";
-import { shouldShowAuthorize } from "../../../components/SettingsPanel/tabs/ServicesTab";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	authFromUpstreamForm,
+	shouldShowAuthorize,
+	startAuthorizeFlow,
+} from "../../../components/SettingsPanel/tabs/ServicesTab";
+import { mockInvoke } from "../../mocks/tauri";
+
+describe("startAuthorizeFlow", () => {
+	beforeEach(() => {
+		mockInvoke.mockReset();
+		vi.mocked(openUrl).mockClear();
+	});
+
+	it("opens the authorization URL only after the in-app confirmation resolves true", async () => {
+		mockInvoke.mockResolvedValueOnce({
+			authorization_url: "https://auth.example.com/oauth?state=nonce",
+			state: "nonce",
+		});
+		const confirmAuthorization = vi.fn().mockResolvedValue(true);
+
+		await startAuthorizeFlow("example", confirmAuthorization);
+
+		expect(confirmAuthorization).toHaveBeenCalledWith("https://auth.example.com", "example");
+		expect(openUrl).toHaveBeenCalledWith("https://auth.example.com/oauth?state=nonce");
+	});
+
+	it("cancels the pending backend flow when confirmation is declined", async () => {
+		mockInvoke
+			.mockResolvedValueOnce({
+				authorization_url: "https://auth.example.com/oauth?state=nonce",
+				state: "nonce",
+			})
+			.mockResolvedValueOnce(undefined);
+
+		await startAuthorizeFlow("example", vi.fn().mockResolvedValue(false));
+
+		expect(mockInvoke).toHaveBeenLastCalledWith("cancel_mcp_upstream_oauth", { name: "example" });
+		expect(openUrl).not.toHaveBeenCalled();
+	});
+});
 
 describe("shouldShowAuthorize", () => {
 	it("shows button when auth type is oauth2 (explicit config)", () => {
@@ -48,5 +88,27 @@ describe("shouldShowAuthorize", () => {
 
 	it("hides button for a disabled upstream mid-authentication", () => {
 		expect(shouldShowAuthorize("oauth2", "authenticating", false)).toBe(false);
+	});
+});
+
+describe("authFromUpstreamForm", () => {
+	const form = {
+		transportType: "http" as const,
+		authMethod: "oauth2" as const,
+		oauthClientId: "",
+		oauthClientSecret: "",
+		oauthScopes: "",
+	};
+
+	it("clears a previous Bearer block when OAuth uses DCR", () => {
+		expect(authFromUpstreamForm(form, { type: "bearer", token: "old" })).toBeUndefined();
+	});
+
+	it("persists explicit OAuth configuration", () => {
+		expect(authFromUpstreamForm({ ...form, oauthClientId: "client", oauthScopes: "read write" })).toEqual({
+			type: "oauth2",
+			client_id: "client",
+			scopes: ["read", "write"],
+		});
 	});
 });

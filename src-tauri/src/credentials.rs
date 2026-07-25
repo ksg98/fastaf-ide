@@ -59,10 +59,10 @@ fn circuit_record_failure() {
     cb.last_failure = Some(Instant::now());
 }
 
-const KEYRING_SERVICE: &str = "tuicommander";
+pub(crate) const KEYRING_SERVICE: &str = "tuicommander";
 const KEYRING_USER: &str = "vault";
 
-const LEGACY_ENTRIES: &[(&str, &str)] = &[
+pub(crate) const LEGACY_ENTRIES: &[(&str, &str)] = &[
     ("tuicommander-ai-chat", "api-key"),
     ("tuicommander-llm-api", "api-key"),
     ("tuicommander-github", "oauth-token"),
@@ -77,6 +77,9 @@ pub(crate) enum Credential<'a> {
     AiChatApiKey,
     LlmApiKey,
     GithubOauthToken,
+    RemoteSessionToken,
+    RelayToken,
+    PushVapidPrivateKey,
     /// Per-account GitHub token (PAT) keyed by stable account id. The github.com
     /// default account keeps using `GithubOauthToken` instead — this slot is for
     /// additional accounts (GitHub Enterprise Server) only.
@@ -95,6 +98,9 @@ impl Credential<'_> {
             Self::AiChatApiKey => "ai-chat/api-key".into(),
             Self::LlmApiKey => "llm-api/api-key".into(),
             Self::GithubOauthToken => "github/oauth-token".into(),
+            Self::RemoteSessionToken => "remote/session-token".into(),
+            Self::RelayToken => "remote/relay-token".into(),
+            Self::PushVapidPrivateKey => "remote/push-vapid-private-key".into(),
             Self::GithubToken(id) => format!("github/account/{id}/token"),
             Self::McpUpstream(name) => format!("mcp/{name}"),
             Self::Provider(id) => format!("provider/{id}"),
@@ -109,7 +115,10 @@ impl Credential<'_> {
             Self::LlmApiKey => Some(("tuicommander-llm-api", "api-key")),
             Self::GithubOauthToken => Some(("tuicommander-github", "oauth-token")),
             Self::McpUpstream(name) => Some(("tuicommander-mcp", name)),
-            Self::GithubToken(_)
+            Self::RemoteSessionToken
+            | Self::RelayToken
+            | Self::PushVapidPrivateKey
+            | Self::GithubToken(_)
             | Self::Provider(_)
             | Self::DictationRewriteApiKey
             | Self::DictationSttApiKey(_) => None,
@@ -196,8 +205,10 @@ fn load(guard: &mut VaultGuard<'_>) -> Result<(), String> {
     };
 
     // Always sweep legacy entries — handles stragglers when vault was created
-    // before all legacy keys were migrated.
-    let mut migrated = false;
+    // before all legacy keys were migrated. Persist the merged vault BEFORE
+    // deleting any legacy copy, so a persist failure (locked keychain, circuit
+    // breaker open) can never lose a secret from both locations (#116-1cb4).
+    let mut to_delete: Vec<(&str, &str)> = Vec::new();
     for &(service, user) in LEGACY_ENTRIES {
         if let Ok(Some(value)) = read_keyring_entry(service, user) {
             let cred = match (service, user) {
@@ -207,15 +218,15 @@ fn load(guard: &mut VaultGuard<'_>) -> Result<(), String> {
                 _ => unreachable!(),
             };
             vault.entry(cred.vault_key()).or_insert(value);
-            delete_keyring_entry(service, user);
-            migrated = true;
+            to_delete.push((service, user));
         }
     }
-    if migrated || vault.is_empty() {
-        // Persist if we migrated anything, or create empty vault so next load
-        // skips the legacy sweep entirely (entries already deleted).
-        if !vault.is_empty() {
-            persist(&vault)?;
+    if !to_delete.is_empty() {
+        // vault is necessarily non-empty here (we or_insert'd for each swept
+        // entry). Persist first; only then remove the legacy copies.
+        persist(&vault)?;
+        for (service, user) in &to_delete {
+            delete_keyring_entry(service, user);
         }
     }
     **guard = Some(vault);
@@ -394,6 +405,13 @@ mod dev_store {
 // Test mock keyring
 // ---------------------------------------------------------------------------
 
+/// Test-only fault injection: when set, the mock keyring rejects `set_password`
+/// (simulating a locked keychain on write) while reads still succeed. Used to
+/// prove the legacy sweep never deletes a legacy entry before the merged vault
+/// is durably persisted (#116-1cb4).
+#[cfg(test)]
+static MOCK_FAIL_WRITES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(test)]
 fn ensure_mock_keyring() {
     use keyring::{
@@ -417,6 +435,9 @@ fn ensure_mock_keyring() {
 
     impl CredentialApi for InMemCredential {
         fn set_password(&self, password: &str) -> keyring::Result<()> {
+            if MOCK_FAIL_WRITES.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(Error::Invalid("mock".into(), "forced write failure".into()));
+            }
             store()
                 .lock()
                 .unwrap()
@@ -492,6 +513,9 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_vault() {
+        // Install the mock BEFORE any Entry::new — otherwise this delete hits
+        // the user's real OS keychain (load() installs the mock too late).
+        ensure_mock_keyring();
         *lock() = None;
         if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
             let _ = entry.delete_credential();
@@ -666,6 +690,37 @@ mod tests {
             legacy.get_password(),
             Err(keyring::Error::NoEntry)
         ));
+    }
+
+    #[test]
+    fn legacy_sweep_persist_failure_keeps_legacy_entries() {
+        use std::sync::atomic::Ordering;
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_circuit_breaker();
+        reset_vault();
+
+        // Plant two legacy entries the sweep would migrate.
+        let legacy_chat = keyring::Entry::new("tuicommander-ai-chat", "api-key").unwrap();
+        legacy_chat.set_password("legacy-chat").unwrap();
+        let legacy_llm = keyring::Entry::new("tuicommander-llm-api", "api-key").unwrap();
+        legacy_llm.set_password("legacy-llm").unwrap();
+
+        // Force the vault persist() to fail — simulates a locked keychain /
+        // circuit breaker opening between reading the legacy entries and writing
+        // the merged vault.
+        MOCK_FAIL_WRITES.store(true, Ordering::SeqCst);
+        simulate_restart();
+        let result = get(Credential::AiChatApiKey);
+        MOCK_FAIL_WRITES.store(false, Ordering::SeqCst);
+
+        // The persist failure must propagate…
+        assert!(result.is_err(), "expected persist failure to propagate");
+        // …and NO legacy entry may have been deleted: both copies survive, so the
+        // secret is never lost from both locations.
+        assert_eq!(legacy_chat.get_password().unwrap(), "legacy-chat");
+        assert_eq!(legacy_llm.get_password().unwrap(), "legacy-llm");
+
+        reset_circuit_breaker();
     }
 
     #[test]

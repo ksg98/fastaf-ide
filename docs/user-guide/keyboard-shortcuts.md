@@ -295,6 +295,7 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | `toggle-tunnels` | — | SSH Tunnels panel |
 | `process-manager` | — | Process Manager |
 | `open-generators` | — | Open generators |
+| `show-remote-qr` | — | QR for Remote Mobile Connection |
 | `block-fold-toggle` | `Cmd+Shift+.` | Toggle block fold |
 | `block-prev` | `Cmd+Shift+Up` | Previous command block |
 | `block-next` | `Cmd+Shift+Down` | Next command block |

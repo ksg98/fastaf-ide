@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { fireEvent, render } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import { ContentRenderer, stripEventHandlers } from "../../components/ui/ContentRenderer";

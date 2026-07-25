@@ -272,24 +272,34 @@ export const PrDetailPopover: Component<PrDetailPopoverProps> = (props) => {
 		}
 	};
 
+	// Flip to top-anchor when the bottom-anchored popover would overflow the
+	// viewport top (clipping the repo/title header). Monotonic: only ever flips
+	// to top, never back — avoids oscillation.
+	const evaluateAnchor = () => {
+		if (props.anchor || !popoverEl) return;
+		if (popoverEl.getBoundingClientRect().top < 0) setFlippedTop(true);
+	};
+
 	onMount(() => {
 		document.addEventListener("keydown", handleKeyDown);
 		if (!props.anchor) {
-			requestAnimationFrame(() => {
-				if (!popoverEl) return;
-				const rect = popoverEl.getBoundingClientRect();
-				if (rect.top < 0) {
-					setFlippedTop(true);
-				}
-			});
+			requestAnimationFrame(evaluateAnchor);
+			// CI check details and the AI-review section load/expand async after
+			// mount, growing the popover; a one-shot mount measurement misses that
+			// growth and lets the bottom-anchored top slide above the viewport.
+			// Re-run the flip check whenever the popover resizes.
+			resizeObs = new ResizeObserver(evaluateAnchor);
+			resizeObs.observe(popoverEl!);
 		}
 	});
 
 	onCleanup(() => {
 		document.removeEventListener("keydown", handleKeyDown);
+		resizeObs?.disconnect();
 	});
 
 	let popoverEl: HTMLDivElement | undefined;
+	let resizeObs: ResizeObserver | undefined;
 	const [flippedTop, setFlippedTop] = createSignal(false);
 
 	const shouldAnchorTop = () => props.anchor === "top" || (!props.anchor && flippedTop());

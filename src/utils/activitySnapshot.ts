@@ -2,6 +2,49 @@ import { globalWorkspaceStore } from "../stores/globalWorkspace";
 import { rateLimitStore } from "../stores/ratelimit";
 import { terminalsStore } from "../stores/terminals";
 
+export type EffectiveActivityState =
+	| "rate_limited"
+	| "error"
+	| "awaiting_input"
+	| "working"
+	| "completed"
+	| "idle"
+	| "unknown";
+
+/** Resolve the dashboard state from task lifecycle and PTY activity.
+ *
+ * Task lifecycle is authoritative when it says a turn is active or complete:
+ * an input-ready PTY may legitimately be idle while an agent-owned descendant
+ * keeps working. Shell activity remains the fallback when lifecycle is idle or
+ * unavailable. */
+export function effectiveActivityState(
+	shellState: string | null,
+	awaitingInput: string | null,
+	isRateLimited: boolean,
+	agentState: string | null,
+	backgroundWork: boolean,
+): EffectiveActivityState {
+	if (isRateLimited) return "rate_limited";
+	if (awaitingInput === "error") return "error";
+	if (awaitingInput || agentState === "awaiting_input") return "awaiting_input";
+	// A ready composer is available work from the dashboard's point of view.
+	// Codex may intentionally leave a long-lived background terminal (for
+	// example a dev server) running after the turn has completed; that process
+	// remains tracked by the backend but must not keep this row latched Working.
+	if (shellState === "idle" && backgroundWork) return "idle";
+	if (agentState === "starting" || agentState === "working" || backgroundWork) return "working";
+	if (agentState === "completed") return "completed";
+	if (shellState === "busy") return "working";
+	if (agentState === "idle") return "idle";
+	if (shellState === "idle") return "idle";
+	return "unknown";
+}
+
+/** True only for states that should receive working row styling and ordering. */
+export function isActivityWorking(state: EffectiveActivityState): boolean {
+	return state === "rate_limited" || state === "awaiting_input" || state === "working";
+}
+
 /** Extract project name (last path segment) from cwd */
 export function projectName(cwd: string | null): string | null {
 	if (!cwd) return null;
@@ -18,12 +61,16 @@ export function terminalStatusLabel(
 	awaitingInput: string | null,
 	isRateLimited: boolean,
 	classNames: { rateLimited: string; error: string; waiting: string; working: string; idle: string },
+	agentState: string | null = null,
+	backgroundWork = false,
 ): { label: string; className: string } {
-	if (isRateLimited) return { label: "Rate limited", className: classNames.rateLimited };
-	if (awaitingInput === "error") return { label: "Error", className: classNames.error };
-	if (awaitingInput) return { label: "Waiting for input", className: classNames.waiting };
-	if (shellState === "busy") return { label: "Working", className: classNames.working };
-	if (shellState === "idle") return { label: "Idle", className: classNames.idle };
+	const state = effectiveActivityState(shellState, awaitingInput, isRateLimited, agentState, backgroundWork);
+	if (state === "rate_limited") return { label: "Rate limited", className: classNames.rateLimited };
+	if (state === "error") return { label: "Error", className: classNames.error };
+	if (state === "awaiting_input") return { label: "Waiting for input", className: classNames.waiting };
+	if (state === "working") return { label: "Working", className: classNames.working };
+	if (state === "completed") return { label: "Completed", className: classNames.idle };
+	if (state === "idle") return { label: "Idle", className: classNames.idle };
 	return { label: "—", className: classNames.idle };
 }
 
@@ -63,6 +110,8 @@ export interface ActivityTerminalRow {
 	idleSince: number | null;
 	isActive: boolean;
 	isRateLimited: boolean;
+	agentState: string | null;
+	backgroundWork: boolean;
 	isBusy: boolean; // Debounced busy (2s hold) — calmer than raw shellState for badge/ordering
 	isPromoted: boolean;
 }
@@ -98,13 +147,20 @@ export function buildActivitySnapshot(): ActivitySnapshot {
 			idleSince: t?.idleSince ?? null,
 			isActive: terminalsStore.state.activeId === id,
 			isRateLimited,
+			agentState: t?.agentState ?? null,
+			backgroundWork: t?.backgroundWork ?? false,
 			isBusy: terminalsStore.isBusy(id),
 			isPromoted: globalWorkspaceStore.isPromoted(id),
 		});
 	}
 	const isWorking = (id: string): boolean => {
 		const r = rowById.get(id);
-		return !!r && (r.isRateLimited || !!r.awaitingInput || r.isBusy);
+		return (
+			!!r &&
+			isActivityWorking(
+				effectiveActivityState(r.shellState, r.awaitingInput, r.isRateLimited, r.agentState, r.backgroundWork),
+			)
+		);
 	};
 	const order = reconcileActivityOrder(snapshotSpine, ids, isWorking);
 	return { terminals: order.map((id) => rowById.get(id)).filter((r): r is ActivityTerminalRow => !!r) };

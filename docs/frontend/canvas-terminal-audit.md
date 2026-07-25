@@ -1,7 +1,7 @@
 # CanvasTerminal Feature Audit
 
-**Last updated:** 2026-05-03
-**Branch:** feat/alacritty-terminal-migration
+**Last updated:** 2026-07-21
+**Branch:** refactor/solid-architecture
 
 CanvasTerminal is the sole terminal renderer. xterm.js has been fully removed. The renderer is powered by `alacritty_terminal` (Rust) sending binary grid frames over a Tauri Channel.
 
@@ -30,7 +30,16 @@ Terminal.tsx (outer shell)
         +-- IntersectionObserver flow control (skip paint when hidden)
         +-- Plugin raw output forwarding (pluginRegistry.processRawOutput)
         +-- OSC 7 CWD + OSC 133 shell integration
+        +-- Imperative controllers (no reactive frame-path state)
+              +-- selection + search
+              +-- cancellable link verification + caches
+              +-- smooth-scroll position + styled-row cache
+              +-- keyboard/IME/mouse listener lifecycle
 ```
+
+Frame decode, row reconciliation, scheduling, and paint remain colocated in
+`CanvasTerminal`. The extracted controllers own independent state and cleanup;
+they do not add Solid signals, effects, or store writes to the render hot path.
 
 Key insight: Terminal.tsx handles parsed events, session lifecycle, banners, and compose panel. CanvasTerminal is purely a renderer + input handler with no session logic.
 

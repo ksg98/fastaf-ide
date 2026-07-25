@@ -51,6 +51,7 @@ function createMockHandlers(): ShortcutHandlers {
 		scrollPageDown: vi.fn(),
 		toggleZoomPane: vi.fn(),
 		toggleFocusMode: vi.fn(),
+		closeActiveTabOrPane: vi.fn(),
 		togglePromptLibrary: vi.fn(),
 		toggleDiffScroll: vi.fn(),
 		toggleGlobalWorkspace: vi.fn(),
@@ -156,6 +157,20 @@ describe("actionRegistry", () => {
 				execute: vi.fn(),
 			};
 			expect(entry.id).toBe("switch-repo:/some/path");
+		});
+
+		it("close-terminal delegates to the shared close-tab-or-pane handler", () => {
+			// The split-aware decision (active pane vs active terminal, cancel an
+			// empty split pane) lives in closeActiveTabOrPane so every entry point
+			// — keyboard, palette, native menu — behaves identically.
+			const handlers = createMockHandlers();
+
+			const entry = getActionEntries(handlers).find((e) => e.id === "close-terminal");
+			expect(entry).toBeDefined();
+			entry?.execute();
+
+			expect(handlers.closeActiveTabOrPane).toHaveBeenCalled();
+			expect(handlers.closeTerminal).not.toHaveBeenCalled();
 		});
 
 		it("execute calls the corresponding handler", () => {

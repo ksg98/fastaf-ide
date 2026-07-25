@@ -4,13 +4,13 @@ use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
 use super::types::{
-    CiChecksQuery, CiFailureLogsQuery, GithubAddAccountRequest, GithubBindRepoRequest,
-    GithubPollLoginRequest, GithubRemoveAccountRequest, GithubRepoPathBody, GithubResolveRepoQuery,
-    GithubResolveReposRequest, GithubSetHideDraftsRequest, IssueActionRequest, IssuesQuery,
-    PathQuery, PollRepoRequest, PrDiffQuery, SetVisibilityRequest, StartPollingRequest,
-    UpdatePathsRequest,
+    ChangelogQuery, CiChecksQuery, CiFailureLogsQuery, GithubAddAccountRequest,
+    GithubBindRepoRequest, GithubPollLoginRequest, GithubRemoveAccountRequest, GithubRepoPathBody,
+    GithubResolveRepoQuery, GithubResolveReposRequest, GithubSetHideDraftsRequest,
+    IssueActionRequest, IssuesQuery, PathQuery, PollRepoRequest, PrDiffQuery, SetVisibilityRequest,
+    StartPollingRequest, UpdatePathsRequest,
 };
-use super::{err_500, json_result, validate_repo_path};
+use super::{err_500, json_result, upstream_json_result, validate_repo_path};
 use crate::github_poller::PollerCmd;
 use crate::state::AppState;
 
@@ -75,14 +75,64 @@ pub(super) async fn repo_approve_pr(
     }
     let path = body.repo_path;
     let pr = body.pr_number;
-    match crate::github::approve_pr_impl(&path, pr, &state).await {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => (
-            axum::http::StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+    upstream_json_result(
+        crate::github::approve_pr_impl(&path, pr, &state)
+            .await
+            .map(|()| serde_json::json!({"ok": true})),
+    )
+}
+
+pub(super) async fn repo_create_pr(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<super::types::CreatePrRequest>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&body.repo_path) {
+        return e.into_response();
     }
+    upstream_json_result(
+        crate::github::create_pr_impl(
+            &body.repo_path,
+            &body.title,
+            &body.body,
+            &body.base,
+            &body.head,
+            body.draft,
+            &state,
+        )
+        .await,
+    )
+}
+
+pub(super) async fn repo_create_issue(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<super::types::CreateIssueRequest>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&body.repo_path) {
+        return e.into_response();
+    }
+    upstream_json_result(
+        crate::github::create_issue_impl(&body.repo_path, &body.title, &body.body, &state).await,
+    )
+}
+
+pub(super) async fn repo_post_pr_review(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<super::types::PostPrReviewRequest>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&body.repo_path) {
+        return e.into_response();
+    }
+    upstream_json_result(
+        crate::github::post_pr_review_impl(
+            &body.repo_path,
+            body.pr_number,
+            &body.body,
+            body.event.as_deref(),
+            &body.comments,
+            &state,
+        )
+        .await,
+    )
 }
 
 pub(super) async fn repo_pr_diff(
@@ -98,6 +148,43 @@ pub(super) async fn repo_pr_diff(
         Ok(diff) => diff.into_response(),
         Err(e) => (axum::http::StatusCode::BAD_GATEWAY, e).into_response(),
     }
+}
+
+pub(super) async fn repo_merged_prs(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ChangelogQuery>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&q.path) {
+        return e.into_response();
+    }
+    upstream_json_result(
+        crate::github::get_merged_prs_impl(&q.path, q.since_tag.as_deref(), &state).await,
+    )
+}
+
+pub(super) async fn repo_generate_changelog(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ChangelogQuery>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&q.path) {
+        return e.into_response();
+    }
+    upstream_json_result(
+        crate::changelog::generate_changelog_impl(&q.path, q.since_tag.as_deref(), &state).await,
+    )
+}
+
+pub(super) async fn repo_conflict_assist(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<super::types::ConflictAssistRequest>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&body.repo_path) {
+        return e.into_response();
+    }
+    upstream_json_result(
+        crate::conflict_assist::start_conflict_assist_impl(body.repo_path, body.pr_number, &state)
+            .await,
+    )
 }
 
 pub(super) async fn repo_issues(
@@ -118,6 +205,16 @@ pub(super) async fn repo_issues(
     }
 }
 
+pub(super) async fn repo_issue_detail(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<super::types::IssueDetailQuery>,
+) -> Response {
+    if let Err(e) = validate_repo_path(&q.repo_path) {
+        return e.into_response();
+    }
+    json_result(crate::github::get_issue_detail_impl(&q.repo_path, q.issue_number, &state).await)
+}
+
 pub(super) async fn repo_close_issue(
     State(state): State<Arc<AppState>>,
     Json(body): Json<IssueActionRequest>,
@@ -125,14 +222,11 @@ pub(super) async fn repo_close_issue(
     if let Err(e) = validate_repo_path(&body.repo_path) {
         return e.into_response();
     }
-    match crate::github::close_issue_impl(&body.repo_path, body.issue_number, &state).await {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => (
-            axum::http::StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
+    upstream_json_result(
+        crate::github::close_issue_impl(&body.repo_path, body.issue_number, &state)
+            .await
+            .map(|()| serde_json::json!({"ok": true})),
+    )
 }
 
 pub(super) async fn repo_reopen_issue(
@@ -142,14 +236,11 @@ pub(super) async fn repo_reopen_issue(
     if let Err(e) = validate_repo_path(&body.repo_path) {
         return e.into_response();
     }
-    match crate::github::reopen_issue_impl(&body.repo_path, body.issue_number, &state).await {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => (
-            axum::http::StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-    }
+    upstream_json_result(
+        crate::github::reopen_issue_impl(&body.repo_path, body.issue_number, &state)
+            .await
+            .map(|()| serde_json::json!({"ok": true})),
+    )
 }
 
 // --- GitHub poller HTTP handlers ---
@@ -158,12 +249,33 @@ pub(super) async fn poller_start(
     State(state): State<Arc<AppState>>,
     Json(body): Json<StartPollingRequest>,
 ) -> Response {
-    let guard = state.github_poller.lock();
-    if let Some(poller) = guard.as_ref() {
-        let _ = poller.cmd_tx.try_send(PollerCmd::UpdatePaths(body.paths));
-        let _ = poller
-            .cmd_tx
-            .try_send(PollerCmd::SetIssueFilter(body.issue_filter));
+    let StartPollingRequest {
+        paths,
+        issue_filter,
+        pr_hide_drafts,
+    } = body;
+    // Desktop: cold-start the poller (or reconfigure a running one) via the same
+    // helper the Tauri `github_start_polling` command uses — this is the parity
+    // fix: the old route no-op'd when no poller was running, so a browser/PWA
+    // client could never start polling.
+    #[cfg(feature = "desktop")]
+    if let Some(app) = state.app_handle.read().clone() {
+        crate::github_poller::ensure_polling(&state, app, paths, issue_filter, pr_hide_drafts);
+        return Json(serde_json::json!({"ok": true})).into_response();
+    }
+    // No AppHandle (or non-desktop build): can't spawn a poller, but still push
+    // config + resync to one that is already running.
+    #[cfg(not(feature = "desktop"))]
+    {
+        if let Some(poller) = state.github_poller.lock().as_ref() {
+            crate::github_poller::send_poller_config(
+                poller,
+                paths,
+                issue_filter,
+                pr_hide_drafts,
+                true,
+            );
+        }
     }
     Json(serde_json::json!({"ok": true})).into_response()
 }

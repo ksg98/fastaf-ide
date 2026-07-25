@@ -15,6 +15,7 @@ import { openFileAction } from "../../utils/filePreview";
 import { isAbsolutePath, joinPath, pathDirname } from "../../utils/pathUtils";
 import {
 	insertTweakComment,
+	OverlappingCommentError,
 	removeTweakComment,
 	type TweakComment,
 	toggleCheckbox,
@@ -26,7 +27,7 @@ import { DomSearchEngine } from "../shared/DomSearchEngine";
 import { DomSearchOverview } from "../shared/DomSearchOverview";
 import e from "../shared/editor-header.module.css";
 import { SearchBar } from "../shared/SearchBar";
-import { ContentRenderer } from "../ui";
+import { ContentRenderer } from "../ui/ContentRenderer";
 import { CommentOverlay } from "./CommentOverlay";
 import s from "./MarkdownTab.module.css";
 
@@ -38,6 +39,13 @@ export interface MarkdownTabProps {
 /** Public handle exposed via ref for external callers (e.g. App.tsx keybinding) */
 export interface MarkdownTabHandle {
 	openSearch: () => void;
+}
+
+/** True when the read failed because the file no longer exists on disk. Absolute
+ *  paths go through `read_external_file`, which throws (rather than returning "")
+ *  for a deleted file — an expected, non-warn-worthy state for a stale tab. */
+function isMissingFileError(msg: string): boolean {
+	return msg.includes("No such file") || msg.includes("os error 2");
 }
 
 export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
@@ -130,7 +138,12 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 					setContent(fileContent);
 				} catch (err) {
 					const msg = err instanceof Error ? err.message : String(err);
-					appLogger.error("app", "readFileContent failed", { repoPath, filePath, fsRoot, error: msg });
+					// A deleted file is expected for a stale tab and this effect re-runs on
+					// every repo-revision bump, so an ERROR log here spams. Match the
+					// focus-reload effect below: silent for missing files, log anything else.
+					if (!isMissingFileError(msg)) {
+						appLogger.error("app", "readFileContent failed", { repoPath, filePath, fsRoot, error: msg });
+					}
 					setError(msg);
 					setContent("");
 				} finally {
@@ -202,7 +215,7 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 				if (cancelled) return;
 				const msg = err instanceof Error ? err.message : String(err);
 				// Silently ignore expected errors (file deleted); log anything else.
-				if (!msg.includes("No such file") && !msg.includes("os error 2")) {
+				if (!isMissingFileError(msg)) {
 					appLogger.warn("app", "focus-reload readFileContent failed", { repoPath, filePath, error: msg });
 				}
 			}
@@ -290,25 +303,36 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 		}
 	};
 
-	const handleTweakSave = async (comment: TweakComment) => {
+	const handleTweakSave = async (comment: TweakComment, occurrenceIndex: number) => {
 		const current = content();
 		// If the id already exists in the source, it's an edit; otherwise it's a new insert.
 		const isExisting = current.includes(`<!--tweak:begin:${comment.id}-->`);
 		try {
 			const updated = isExisting
 				? updateTweakComment(current, comment.id, comment.comment)
-				: insertTweakComment(current, comment);
+				: insertTweakComment(current, comment, occurrenceIndex);
 			await writeTweakedSource(updated);
 		} catch (err) {
 			appLogger.error("app", `handleTweakSave failed: ${err instanceof Error ? err.message : String(err)}`);
-			toastsStore.add(
-				t("markdownTab.commentAnchorFailed", "Couldn't add comment"),
-				t(
-					"markdownTab.commentAnchorFailedMsg",
-					"The selected text couldn't be located in the file source. Try selecting within a single formatted span.",
-				),
-				"error",
-			);
+			if (err instanceof OverlappingCommentError) {
+				toastsStore.add(
+					t("markdownTab.commentOverlap", "Couldn't add comment"),
+					t(
+						"markdownTab.commentOverlapMsg",
+						"That text already has a comment. Click the highlight to edit it, or select different text.",
+					),
+					"error",
+				);
+			} else {
+				toastsStore.add(
+					t("markdownTab.commentAnchorFailed", "Couldn't add comment"),
+					t(
+						"markdownTab.commentAnchorFailedMsg",
+						"The selected text couldn't be located in the file source. Try selecting within a single formatted span.",
+					),
+					"error",
+				);
+			}
 		}
 	};
 
@@ -453,8 +477,8 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 				{(el) => (
 					<CommentOverlay
 						contentRef={el}
-						onSave={(c) => {
-							void handleTweakSave(c);
+						onSave={(c, occ) => {
+							void handleTweakSave(c, occ);
 						}}
 						onDelete={(id) => {
 							void handleTweakDelete(id);

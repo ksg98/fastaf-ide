@@ -10,6 +10,14 @@ use tauri::Emitter;
 use super::types::*;
 use super::{err_500, json_result, validate_repo_path};
 
+pub(super) struct CreatedWorktree {
+    pub worktree: crate::state::WorktreeInfo,
+    pub path: String,
+    pub branch: String,
+    pub setup_script: Option<serde_json::Value>,
+    pub setup_script_error: Option<serde_json::Value>,
+}
+
 pub(super) async fn list_worktrees_http(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let worktrees: Vec<serde_json::Value> = state
         .sessions
@@ -63,12 +71,47 @@ pub(super) async fn create_worktree_http(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateWorktreeRequest>,
 ) -> impl IntoResponse {
+    let created = match create_worktree_shared(
+        &state,
+        body.base_repo.clone(),
+        body.branch_name.clone(),
+        body.base_ref.clone(),
+    )
+    .await
+    {
+        Ok(created) => created,
+        Err(response) => return response,
+    };
+
+    let mut response = serde_json::json!({
+        "name": created.worktree.name,
+        "path": &created.path,
+        "branch": created.worktree.branch,
+        "base_repo": created.worktree.base_repo.to_string_lossy(),
+    });
+    if let Some(setup_script) = created.setup_script {
+        response["setup_script"] = setup_script;
+    }
+    if let Some(setup_script_error) = created.setup_script_error {
+        response["setup_script_error"] = setup_script_error;
+    }
+
+    (StatusCode::CREATED, Json(response))
+}
+
+pub(super) async fn create_worktree_shared(
+    state: &Arc<AppState>,
+    base_repo: String,
+    branch_name: String,
+    base_ref: Option<String>,
+) -> Result<CreatedWorktree, (StatusCode, Json<serde_json::Value>)> {
+    validate_repo_path(&base_repo)?;
     // Model provides only branch_name and optionally base_ref (start point).
     // Storage path and strategy come entirely from user config via resolve_worktree_dir_for_repo.
     let config = crate::worktree::WorktreeConfig {
-        task_name: body.branch_name.clone(),
-        base_repo: body.base_repo.clone(),
-        branch: Some(body.branch_name),
+        task_name: branch_name.clone(),
+        base_repo: base_repo.clone(),
+        branch: Some(branch_name),
         create_branch: true, // Always create a new branch — model must not control this
     };
     let worktrees_dir = crate::worktree::resolve_worktree_dir_for_repo(
@@ -78,7 +121,6 @@ pub(super) async fn create_worktree_http(
     // Use the stale-recovery wrapper so MCP clients heal automatically when an
     // orphaned worktree directory is sitting where the new one should land.
     // Off-loaded onto spawn_blocking because git worktree add can take seconds.
-    let base_ref = body.base_ref.clone();
     let config_bg = config.clone();
     let worktrees_dir_bg = worktrees_dir.clone();
     let result = match tokio::task::spawn_blocking(move || {
@@ -92,21 +134,21 @@ pub(super) async fn create_worktree_http(
     {
         Ok(r) => r,
         Err(e) => {
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": format!("task panic: {e}")})),
-            );
+            ));
         }
     };
     match result {
         Ok(wt) => {
-            state.invalidate_repo_caches(&body.base_repo);
+            state.invalidate_repo_caches(&base_repo);
             let wt_path = wt.path.to_string_lossy().to_string();
             let branch_name = wt.branch.clone().unwrap_or_default();
             let _ = state
                 .event_bus
                 .send(crate::state::AppEvent::WorktreeCreated {
-                    repo_path: body.base_repo.clone(),
+                    repo_path: base_repo.clone(),
                     branch: branch_name.clone(),
                     worktree_path: wt_path.clone(),
                 });
@@ -115,19 +157,15 @@ pub(super) async fn create_worktree_http(
                 let _ = handle.emit(
                     "worktree-created",
                     serde_json::json!({
-                        "repo_path": &body.base_repo,
+                        "repo_path": &base_repo,
                         "branch": &branch_name,
                         "worktree_path": &wt_path,
                     }),
                 );
             }
-            let mut response = serde_json::json!({
-                "name": wt.name,
-                "path": &wt_path,
-                "branch": wt.branch,
-                "base_repo": wt.base_repo.to_string_lossy(),
-            });
-            let repo_for_script = body.base_repo.clone();
+            let mut setup_script = None;
+            let mut setup_script_error = None;
+            let repo_for_script = base_repo.clone();
             let cwd_for_script = wt_path.clone();
             if let Some(script) = tokio::task::spawn_blocking(move || {
                 crate::config::resolve_effective_setup_script(&repo_for_script)
@@ -142,23 +180,28 @@ pub(super) async fn create_worktree_http(
                 .await
                 {
                     Ok(Ok(result)) => {
-                        response["setup_script"] = result;
+                        setup_script = Some(result);
                     }
                     Ok(Err(e)) => {
-                        response["setup_script_error"] = serde_json::json!(e);
+                        setup_script_error = Some(serde_json::json!(e));
                     }
                     Err(e) => {
-                        response["setup_script_error"] =
-                            serde_json::json!(format!("task panic: {e}"));
+                        setup_script_error = Some(serde_json::json!(format!("task panic: {e}")));
                     }
                 }
             }
-            (StatusCode::CREATED, Json(response))
+            Ok(CreatedWorktree {
+                worktree: wt,
+                path: wt_path,
+                branch: branch_name,
+                setup_script,
+                setup_script_error,
+            })
         }
-        Err(e) => (
+        Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
-        ),
+        )),
     }
 }
 
@@ -177,7 +220,14 @@ pub(super) async fn remove_worktree_http(
     })
     .await;
     match result {
-        Ok(Ok(())) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Ok(Ok(outcome)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "branch_delete_warning": outcome.branch_delete_warning,
+            })),
+        )
+            .into_response(),
         Ok(Err(e)) => err_500(&e),
         Err(e) => err_500(&format!("task panic: {e}")),
     }
@@ -330,9 +380,14 @@ pub(super) async fn finalize_merged_worktree_http(
                 None,
                 false,
             )
-            .map(
-                |_| serde_json::json!({"merged": true, "action": "deleted", "archive_path": null}),
-            ),
+            .map(|outcome| {
+                serde_json::json!({
+                    "merged": true,
+                    "action": "deleted",
+                    "archive_path": null,
+                    "branch_delete_warning": outcome.branch_delete_warning,
+                })
+            }),
             other => Err(format!(
                 "Unknown action '{other}': expected 'archive' or 'delete'"
             )),

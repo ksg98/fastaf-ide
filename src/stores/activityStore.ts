@@ -225,6 +225,12 @@ function createActivityStore() {
 		getLastItem,
 		flushSave,
 		clearAll,
+		_testCancelPendingSave(): void {
+			if (saveActivityTimer) {
+				clearTimeout(saveActivityTimer);
+				saveActivityTimer = null;
+			}
+		},
 	};
 }
 

@@ -491,6 +491,13 @@ describe("useTerminalLifecycle", () => {
 		});
 
 		it("selects sibling diff tab when closing one of multiple diff tabs", async () => {
+			// Repo context is required: diff tabs are repo-scoped, and sibling selection
+			// only considers tabs visible for the current branch key.
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+			repositoriesStore.setActive("/repo");
+			repositoriesStore.setActiveBranch("/repo", "main");
+
 			diffTabsStore.add("/repo", "a.ts", "M");
 			diffTabsStore.add("/repo", "b.ts", "A");
 			const ids = diffTabsStore.getIds();
@@ -501,6 +508,27 @@ describe("useTerminalLifecycle", () => {
 			expect(diffTabsStore.getIds().length).toBe(1);
 			// Should activate the remaining diff tab, not fall back to terminal
 			expect(diffTabsStore.state.activeId).toBe(ids[1]);
+		});
+
+		it("does not activate a branch-hidden md tab when closing the last visible one (ghost tab)", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+			repositoriesStore.setBranch("/repo", "feature", { worktreePath: "/repo" });
+			repositoriesStore.setActive("/repo");
+			repositoriesStore.setActiveBranch("/repo", "main");
+
+			const hiddenId = mdTabsStore.add("/repo", "CLAUDE.md"); // scoped to /repo|main
+
+			repositoriesStore.setActiveBranch("/repo", "feature");
+			const visibleId = mdTabsStore.add("/repo", "README.md"); // scoped to /repo|feature
+			lifecycle.handleTerminalSelect(visibleId);
+
+			await lifecycle.closeTerminal(visibleId);
+
+			// The main-scoped tab is absent from the tab bar on feature — activating it
+			// would render a full-screen panel with no visible tab to close it from.
+			expect(mdTabsStore.get(hiddenId)).toBeDefined();
+			expect(mdTabsStore.state.activeId).toBeNull();
 		});
 	});
 
@@ -765,6 +793,30 @@ describe("useTerminalLifecycle", () => {
 
 			expect(mdTabsStore.getIds().length).toBe(1);
 		});
+
+		it("reselects the anchor md tab when the active tab was to its right", async () => {
+			mdTabsStore.add("/repo", "a.md");
+			mdTabsStore.add("/repo", "b.md");
+			mdTabsStore.add("/repo", "c.md");
+			const ids = mdTabsStore.getIds();
+			lifecycle.handleTerminalSelect(ids[2]);
+
+			await lifecycle.closeTabsToRight(ids[0]);
+
+			expect(mdTabsStore.getIds()).toEqual([ids[0]]);
+			expect(mdTabsStore.state.activeId).toBe(ids[0]);
+		});
+
+		it("keeps the anchor md tab active when tabs to its right were not active", async () => {
+			mdTabsStore.add("/repo", "a.md");
+			mdTabsStore.add("/repo", "b.md");
+			const ids = mdTabsStore.getIds();
+			lifecycle.handleTerminalSelect(ids[0]);
+
+			await lifecycle.closeTabsToRight(ids[0]);
+
+			expect(mdTabsStore.state.activeId).toBe(ids[0]);
+		});
 	});
 
 	describe("copyFromTerminal", () => {
@@ -821,11 +873,10 @@ describe("useTerminalLifecycle", () => {
 
 		it("delegates to ref.paste(), not ref.write()", async () => {
 			const ref = makeRef();
-			Object.defineProperty(navigator, "clipboard", {
-				value: { readText: vi.fn().mockResolvedValue("pasted text"), writeText: vi.fn() },
-				writable: true,
-				configurable: true,
-			});
+			// In Tauri mode the read routes through the native clipboard-manager plugin
+			// (see utils/clipboard.ts) rather than navigator.clipboard.readText(), which on
+			// macOS Sequoia surfaces a floating "Paste" system pill over our context menu.
+			mockInvoke.mockResolvedValue("pasted text");
 
 			const id = terminalsStore.add(makeTerminal({ name: "T1" }));
 			terminalsStore.setActive(id);
@@ -833,17 +884,14 @@ describe("useTerminalLifecycle", () => {
 
 			await lifecycle.pasteToTerminal();
 
+			expect(mockInvoke).toHaveBeenCalledWith("plugin:clipboard-manager|read_text");
 			expect(ref.paste).toHaveBeenCalledWith("pasted text");
 			expect(ref.write).not.toHaveBeenCalled();
 		});
 
 		it("passes multi-line text to ref.paste() unchanged", async () => {
 			const ref = makeRef();
-			Object.defineProperty(navigator, "clipboard", {
-				value: { readText: vi.fn().mockResolvedValue("line1\nline2\nline3"), writeText: vi.fn() },
-				writable: true,
-				configurable: true,
-			});
+			mockInvoke.mockResolvedValue("line1\nline2\nline3");
 
 			const id = terminalsStore.add(makeTerminal({ name: "T1" }));
 			terminalsStore.setActive(id);

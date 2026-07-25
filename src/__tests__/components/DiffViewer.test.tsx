@@ -120,4 +120,22 @@ describe("DiffViewer component", () => {
 		const el = container.querySelector("#diff-content");
 		expect(el).not.toBeNull();
 	});
+
+	it("shows a fallback message instead of throwing on an unparseable diff", () => {
+		// Combined "@@@" merge-conflict diffs are rejected by @git-diff-view's
+		// parser with "Invalid hunk header format" — must not crash the app.
+		const combined = [
+			"diff --cc file.ts",
+			"index abc..def 100644",
+			"--- a/file.ts",
+			"+++ b/file.ts",
+			"@@@ -1,2 -1,2 +1,3 @@@",
+			"  context",
+			"++added",
+		].join("\n");
+		const { container } = render(() => <DiffViewer diff={combined} />);
+		const empty = container.querySelector(".diff-empty");
+		expect(empty).not.toBeNull();
+		expect(empty!.textContent).toBe("Unable to render this diff");
+	});
 });

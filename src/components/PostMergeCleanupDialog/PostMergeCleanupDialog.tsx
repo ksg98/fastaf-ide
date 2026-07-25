@@ -1,4 +1,5 @@
-import { type Component, createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { type Component, createSignal, For, Show } from "solid-js";
+import { registerModal } from "../../stores/modalStack";
 import d from "../shared/dialog.module.css";
 import s from "./PostMergeCleanupDialog.module.css";
 
@@ -105,16 +106,9 @@ export const PostMergeCleanupDialog: Component<PostMergeCleanupDialogProps> = (p
 		props.onExecute(steps(), { unstash: unstash() });
 	};
 
-	createEffect(() => {
-		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				props.onSkip();
-			}
-		};
-		document.addEventListener("keydown", handleKeydown);
-		onCleanup(() => document.removeEventListener("keydown", handleKeydown));
-	});
+	// Escape-to-close is handled centrally (stores/modalStack): registering routes
+	// Escape to props.onSkip AND stops it reaching the terminal underneath.
+	registerModal(props.onSkip);
 
 	return (
 		<div class={d.overlay} onClick={props.onSkip}>

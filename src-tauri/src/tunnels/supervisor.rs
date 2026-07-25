@@ -386,7 +386,6 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::SocketAddr;
-    use std::sync::atomic::AtomicU32;
     use tempfile::TempPath;
     use tokio::net::TcpListener;
 
@@ -432,6 +431,18 @@ mod tests {
         (cb, statuses)
     }
 
+    async fn wait_for_stopped(supervisor: &TunnelSupervisor) -> TunnelStatus {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut status = supervisor.status();
+        while !matches!(status, TunnelStatus::Stopped { .. })
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            status = supervisor.status();
+        }
+        status
+    }
+
     #[tokio::test]
     async fn spawn_clean_exit() {
         let script = fake_ssh_script("sleep 0.2; exit 0");
@@ -445,14 +456,7 @@ mod tests {
         // test load, so wait for the terminal state rather than reading status
         // once after a fixed sleep (which flaked as "expected Stopped, got
         // Connected").
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut final_status = sup.status();
-        while !matches!(final_status, TunnelStatus::Stopped { .. })
-            && tokio::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            final_status = sup.status();
-        }
+        let final_status = wait_for_stopped(&sup).await;
 
         let history = statuses.lock().clone();
         // Should see Starting, then either Connected or Stopped (process exits
@@ -477,7 +481,10 @@ mod tests {
         let mut sup =
             TunnelSupervisor::start_with_binary(test_profile(), script.to_path_buf(), cb).await;
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // The process exits immediately, but the stderr reader and status task
+        // can be delayed under parallel test load. Wait for the terminal state
+        // instead of sampling at the edge of a fixed timeout.
+        let final_status = wait_for_stopped(&sup).await;
 
         let history = statuses.lock().clone();
 
@@ -491,7 +498,6 @@ mod tests {
         );
 
         // Final status should be Stopped with AuthFailed reason.
-        let final_status = sup.status();
         match &final_status {
             TunnelStatus::Stopped { reason } => {
                 assert!(
@@ -508,9 +514,6 @@ mod tests {
     #[tokio::test]
     async fn network_error_retries() {
         // Script that prints "Connection refused" and exits — supervisor should retry.
-        let attempt_counter = Arc::new(AtomicU32::new(0));
-        let counter = Arc::clone(&attempt_counter);
-
         let script = fake_ssh_script(
             r#"echo "ssh: connect to host example.com port 22: Connection refused" >&2; exit 255"#,
         );
@@ -519,8 +522,20 @@ mod tests {
         let mut sup =
             TunnelSupervisor::start_with_binary(test_profile(), script.to_path_buf(), cb).await;
 
-        // Wait long enough for at least 2 retry attempts (first backoff ~1s, second ~2s).
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // The first two backoffs are roughly one and two seconds. Poll the
+        // observed transitions because the child process can start late under
+        // parallel test load.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while statuses
+            .lock()
+            .iter()
+            .filter(|status| matches!(status, TunnelStatus::Reconnecting { .. }))
+            .count()
+            < 2
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         let history = statuses.lock().clone();
 
@@ -553,7 +568,6 @@ mod tests {
         }
 
         sup.stop();
-        let _ = counter;
     }
 
     #[tokio::test]
@@ -574,10 +588,9 @@ mod tests {
         // Request shutdown.
         sup.stop();
 
-        // Should terminate within 6s (SIGTERM + 5s grace).
-        tokio::time::sleep(Duration::from_secs(6)).await;
-
-        let final_status = sup.status();
+        // The implementation has a five-second grace period before kill;
+        // allow scheduler delay around that boundary under parallel test load.
+        let final_status = wait_for_stopped(&sup).await;
         match &final_status {
             TunnelStatus::Stopped { reason } => {
                 assert!(

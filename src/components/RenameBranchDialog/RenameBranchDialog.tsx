@@ -1,5 +1,6 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { t } from "../../i18n";
+import { registerModal } from "../../stores/modalStack";
 import d from "../shared/dialog.module.css";
 
 export interface RenameBranchDialogProps {
@@ -75,11 +76,12 @@ export const RenameBranchDialog: Component<RenameBranchDialogProps> = (props) =>
 	createEffect(() => {
 		if (!props.visible) return;
 
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to props.onClose AND stops it reaching the terminal underneath.
+		registerModal(props.onClose);
+
 		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				props.onClose();
-			} else if (e.key === "Enter" && !isRenaming()) {
+			if (e.key === "Enter" && !isRenaming()) {
 				e.preventDefault();
 				handleRename();
 			}

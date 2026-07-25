@@ -3,16 +3,120 @@ import { AGENT_TYPES, AGENTS, type AgentType } from "../agents";
 import { invoke } from "../invoke";
 import { pluginRegistry } from "../plugins/pluginRegistry";
 import { appLogger } from "../stores/appLogger";
-import { terminalsStore } from "../stores/terminals";
+import { type AgentLifecycleState, type ShellState, terminalsStore } from "../stores/terminals";
+import { isTauri, rpc } from "../transport";
 
 /** Fallback polling interval — only catches cold starts and edge cases (ms) */
 const POLL_INTERVAL_MS = 30_000;
+/** Lifecycle is sampled separately from foreground-process detection. The
+ * backend refreshes meaningful descendant state at most once per second. */
+const LIFECYCLE_POLL_INTERVAL_MS = 1_000;
+const NATIVE_LIFECYCLE_TIMEOUT_MS = 5_000;
 
-/**
- * Number of consecutive null detections on shell-idle required before clearing a detected agent.
- * Prevents flickering when the shell briefly reports idle during agent subprocess transitions.
- */
-const NULL_THRESHOLD = 3;
+type SessionLifecycleResponse = {
+	session_id: string;
+	state?: { shell_state?: string; agent_state?: string; background_work?: boolean } | null;
+};
+
+let nextLifecycleRequest = 0;
+let lastAppliedLifecycleRequest = 0;
+let lifecycleSyncInFlight: Promise<void> | null = null;
+
+function toAgentLifecycleState(value: unknown): AgentLifecycleState {
+	return value === "starting" ||
+		value === "working" ||
+		value === "awaiting_input" ||
+		value === "idle" ||
+		value === "completed"
+		? value
+		: null;
+}
+
+function toShellState(value: unknown): ShellState | undefined {
+	return value === "busy" || value === "idle" ? value : undefined;
+}
+
+function listNativeSessionsWithTimeout(): Promise<SessionLifecycleResponse[]> {
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(
+			() => reject(new Error("Lifecycle session snapshot timed out")),
+			NATIVE_LIFECYCLE_TIMEOUT_MS,
+		);
+		Promise.resolve(invoke<SessionLifecycleResponse[]>("list_active_sessions")).then(
+			(sessions) => {
+				clearTimeout(timeout);
+				resolve(sessions);
+			},
+			(error) => {
+				clearTimeout(timeout);
+				reject(error);
+			},
+		);
+	});
+}
+
+/** Apply the backend's task lifecycle snapshot to its local terminal. The
+ * snapshot is intentionally separate from foreground-process detection: a
+ * ready composer can be shell-idle while a meaningful descendant still works. */
+export function syncAgentLifecycleStates(): Promise<void> {
+	if (lifecycleSyncInFlight) return lifecycleSyncInFlight;
+	lifecycleSyncInFlight = syncAgentLifecycleStatesOnce().finally(() => {
+		lifecycleSyncInFlight = null;
+	});
+	return lifecycleSyncInFlight;
+}
+
+async function syncAgentLifecycleStatesOnce(): Promise<void> {
+	const request = ++nextLifecycleRequest;
+	const requestedSessions = new Map<string, { sessionId: string; shellStateRevision: number }>();
+	for (const termId of terminalsStore.getIds()) {
+		const sessionId = terminalsStore.get(termId)?.sessionId;
+		const revision = terminalsStore.getShellStateRevision(termId);
+		if (sessionId && revision !== null) requestedSessions.set(termId, { sessionId, shellStateRevision: revision });
+	}
+	let sessions: SessionLifecycleResponse[];
+	try {
+		if (isTauri()) {
+			sessions = await listNativeSessionsWithTimeout();
+		} else {
+			sessions = await rpc<SessionLifecycleResponse[]>("list_active_sessions");
+		}
+	} catch (err) {
+		appLogger.debug("app", "[AgentLifecycle] session list failed", err);
+		return;
+	}
+	if (!Array.isArray(sessions)) return;
+	// A slow earlier poll must never overwrite a newer lifecycle conclusion.
+	if (request < lastAppliedLifecycleRequest) return;
+	lastAppliedLifecycleRequest = request;
+
+	const seenSessionIds = new Set(sessions.map((session) => session.session_id));
+	for (const [termId, requested] of requestedSessions) {
+		const current = terminalsStore.get(termId);
+		if (
+			!seenSessionIds.has(requested.sessionId) &&
+			current?.sessionId === requested.sessionId &&
+			terminalsStore.getShellStateRevision(termId) === requested.shellStateRevision
+		) {
+			terminalsStore.update(termId, { shellState: "exited", sessionId: null, agentState: null, backgroundWork: false });
+		}
+	}
+	for (const session of sessions) {
+		const termId = terminalsStore.getTerminalForSession(session.session_id);
+		if (!termId) continue;
+		const shellState = toShellState(session.state?.shell_state);
+		const requested = requestedSessions.get(termId);
+		const snapshotIsFresh =
+			requested?.sessionId === session.session_id &&
+			requested.shellStateRevision === terminalsStore.getShellStateRevision(termId);
+		if (!snapshotIsFresh) continue;
+		terminalsStore.update(termId, {
+			agentState: toAgentLifecycleState(session.state?.agent_state),
+			backgroundWork: session.state?.background_work === true,
+			...(shellState !== undefined ? { shellState } : {}),
+		});
+	}
+}
 
 /**
  * Detection trigger source — determines whether the call can clear an existing agentType.
@@ -30,9 +134,6 @@ function toAgentType(value: string | null): AgentType | null {
 	return (AGENT_TYPES as readonly string[]).includes(value) ? (value as AgentType) : null;
 }
 
-// Module-level state shared between pollAll and event-driven detection
-const nullStreak = new Map<string, number>();
-
 /**
  * Detect the foreground agent for a single terminal and update the store.
  * Called on shell-state transitions (event-driven) and by the fallback poll.
@@ -44,8 +145,6 @@ const nullStreak = new Map<string, number>();
 export async function detectAgentForTerminal(termId: string, source: DetectionSource = "poll"): Promise<void> {
 	const current = terminalsStore.get(termId);
 	if (!current) {
-		// Terminal removed — clean up module-level tracking state
-		nullStreak.delete(termId);
 		return;
 	}
 	if (!current.sessionId) return;
@@ -66,15 +165,10 @@ export async function detectAgentForTerminal(termId: string, source: DetectionSo
 	// Agent→null transition: only allowed from "idle" source (shell prompt returned).
 	// Poll and busy sources can only discover agents, never clear them — foreground
 	// process sampling is too flaky during subprocess transitions (git, node, etc.).
+	// An idle transition is definitive, though: waiting for further idle events leaves
+	// agentType stuck after an agent exits, because a normal shell emits just one.
 	if (prevAgentType !== null && agentType === null) {
 		if (source !== "idle") return; // Not a reliable clearing signal — skip
-		const streak = (nullStreak.get(termId) ?? 0) + 1;
-		nullStreak.set(termId, streak);
-		if (streak < NULL_THRESHOLD) return;
-	}
-
-	if (agentType !== null) {
-		nullStreak.delete(termId);
 	}
 
 	if (prevAgentType !== agentType) {
@@ -96,9 +190,6 @@ export async function detectAgentForTerminal(termId: string, source: DetectionSo
 		// Reset agent-specific state carried over from the previous agent.
 		if (prevAgentType !== null) {
 			terminalsStore.update(termId, { agentSessionId: null });
-			if (agentType === null) {
-				nullStreak.delete(termId);
-			}
 		}
 
 		// Notify start of new agent AFTER updating the store so filtered plugins
@@ -178,6 +269,12 @@ export function useAgentPolling(): void {
 
 		const pollAll = async () => {
 			const currentIds = terminalsStore.getIds();
+			// NOT parallelized (story 143-8bef): detectAgentForTerminal collects
+			// claimedIds from the OTHER terminals' already-stored agentSessionId to
+			// avoid two terminals claiming the same discovered session. That dedup
+			// only holds if each terminal's claim is persisted before the next is
+			// polled — Promise.allSettled would race and break it (see test
+			// "passes claimed_ids from other terminals to avoid duplicate assignment").
 			for (const id of currentIds) {
 				await detectAgentForTerminal(id);
 			}
@@ -186,7 +283,17 @@ export function useAgentPolling(): void {
 		const timer = setInterval(() => {
 			pollAll().catch((err) => appLogger.debug("app", "[AgentPoll] poll failed", err));
 		}, POLL_INTERVAL_MS);
+		// Lifecycle must converge quickly enough for the Activity Dashboard to
+		// avoid presenting an idle composer as a completed task. It is not used
+		// to discover agents, so the slower foreground-process poll remains intact.
+		void syncAgentLifecycleStates();
+		const lifecycleTimer = setInterval(() => {
+			void syncAgentLifecycleStates();
+		}, LIFECYCLE_POLL_INTERVAL_MS);
 
-		onCleanup(() => clearInterval(timer));
+		onCleanup(() => {
+			clearInterval(timer);
+			clearInterval(lifecycleTimer);
+		});
 	});
 }

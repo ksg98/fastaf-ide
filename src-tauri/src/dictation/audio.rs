@@ -3,6 +3,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Information about an available audio input device.
 #[derive(Debug, Clone, Serialize)]
@@ -41,6 +42,8 @@ pub fn list_input_devices() -> Vec<AudioDevice> {
 /// the cpal callback appends at the back.
 pub struct AudioCapture {
     buffer: Arc<Mutex<VecDeque<f32>>>,
+    /// Latest normalized microphone level. Atomic so the UI meter never blocks audio capture.
+    level: Arc<AtomicU32>,
     stream: Option<cpal::Stream>,
 }
 
@@ -71,6 +74,8 @@ impl AudioCapture {
         let channels = config.channels() as usize;
         let buffer = Arc::new(Mutex::new(VecDeque::new()));
         let buffer_clone = buffer.clone();
+        let level = Arc::new(AtomicU32::new(0));
+        let level_clone = level.clone();
 
         // Build a stream that collects f32 samples, converting to 16kHz mono.
         // Uses try_lock() to avoid blocking the real-time audio callback.
@@ -88,6 +93,7 @@ impl AudioCapture {
                                 sample_rate,
                                 channels,
                                 &buffer_clone,
+                                &level_clone,
                                 &mut mono_buf,
                                 &mut resample_buf,
                             );
@@ -113,6 +119,7 @@ impl AudioCapture {
                                 sample_rate,
                                 channels,
                                 &buffer_clone,
+                                &level_clone,
                                 &mut mono_buf,
                                 &mut resample_buf,
                             );
@@ -131,13 +138,14 @@ impl AudioCapture {
 
         Ok(Self {
             buffer,
+            level,
             stream: Some(stream),
         })
     }
 
     /// Stop capturing and return all collected audio as 16kHz mono f32 PCM.
     /// Consumes self (batch mode compatibility).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // genuinely unused: the only stop() caller (commands.rs) is StreamingSession::stop, not this batch-mode API
     pub fn stop(mut self) -> Vec<f32> {
         self.stream.take();
         self.buffer.lock().drain(..).collect()
@@ -174,6 +182,10 @@ impl AudioCapture {
     pub fn buffer_handle(&self) -> Arc<Mutex<VecDeque<f32>>> {
         self.buffer.clone()
     }
+
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
+    }
 }
 
 /// Process an audio chunk: convert to mono and resample to 16kHz.
@@ -188,6 +200,7 @@ fn process_audio_chunk(
     sample_rate: u32,
     channels: usize,
     buffer: &Arc<Mutex<VecDeque<f32>>>,
+    level: &Arc<AtomicU32>,
     mono_buf: &mut Vec<f32>,
     resample_buf: &mut Vec<f32>,
 ) {
@@ -197,6 +210,17 @@ fn process_audio_chunk(
         data.chunks(channels)
             .map(|frame| frame.iter().sum::<f32>() / channels as f32),
     );
+
+    // RMS responds to speech without the jitter of peak levels. Consumer mics
+    // commonly produce only 0.1–1% normalized RMS, so use a square-root curve
+    // to make ordinary speech visible in the compact preview meter.
+    let rms = if mono_buf.is_empty() {
+        0.0
+    } else {
+        (mono_buf.iter().map(|sample| sample * sample).sum::<f32>() / mono_buf.len() as f32).sqrt()
+    };
+    let meter_level = (rms * 20.0).sqrt().clamp(0.0, 1.0);
+    level.store(meter_level.to_bits(), Ordering::Relaxed);
 
     // Simple nearest-neighbor resampling to 16kHz
     let output = if sample_rate == 16000 {
@@ -243,6 +267,7 @@ mod tests {
         // Create a mock AudioCapture with no stream
         let capture = AudioCapture {
             buffer: buf,
+            level: Arc::new(AtomicU32::new(0)),
             stream: None,
         };
 
@@ -269,6 +294,7 @@ mod tests {
         }
         let capture = AudioCapture {
             buffer: buf,
+            level: Arc::new(AtomicU32::new(0)),
             stream: None,
         };
         let all = capture.drain_all();
@@ -285,6 +311,7 @@ mod tests {
         }
         let mut capture = AudioCapture {
             buffer: buf,
+            level: Arc::new(AtomicU32::new(0)),
             stream: None,
         };
         capture.stop_stream(); // no-op since stream is None
@@ -296,21 +323,40 @@ mod tests {
     #[test]
     fn test_process_audio_chunk_try_lock() {
         let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
         let mut mono_buf = Vec::new();
         let mut resample_buf = Vec::new();
         let data = vec![0.5f32; 16]; // 16 mono samples at 16kHz
-        process_audio_chunk(&data, 16000, 1, &buf, &mut mono_buf, &mut resample_buf);
+        process_audio_chunk(
+            &data,
+            16000,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
         assert_eq!(buf.lock().len(), 16);
+        assert!(f32::from_bits(level.load(Ordering::Relaxed)) > 0.9);
 
         // While lock is held, process_audio_chunk silently drops samples
         let guard = buf.lock();
-        process_audio_chunk(&data, 16000, 1, &buf, &mut mono_buf, &mut resample_buf);
+        process_audio_chunk(
+            &data,
+            16000,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
         assert_eq!(guard.len(), 16); // still 16, new samples dropped
     }
 
     #[test]
     fn test_process_audio_chunk_stereo_to_mono() {
         let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
         let mut mono_buf = Vec::new();
         let mut resample_buf = Vec::new();
 
@@ -324,6 +370,7 @@ mod tests {
             16000,
             2,
             &buf,
+            &level,
             &mut mono_buf,
             &mut resample_buf,
         );
@@ -340,12 +387,21 @@ mod tests {
     #[test]
     fn test_process_audio_chunk_resample_48k_to_16k() {
         let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
         let mut mono_buf = Vec::new();
         let mut resample_buf = Vec::new();
 
         // 480 mono samples at 48kHz = 10ms of audio → should produce ~160 samples at 16kHz
         let data = vec![0.25f32; 480];
-        process_audio_chunk(&data, 48000, 1, &buf, &mut mono_buf, &mut resample_buf);
+        process_audio_chunk(
+            &data,
+            48000,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
         let result: Vec<f32> = buf.lock().drain(..).collect();
 
         // 480 * (16000/48000) = 160
@@ -361,6 +417,7 @@ mod tests {
     #[test]
     fn test_process_audio_chunk_stereo_48k() {
         let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
         let mut mono_buf = Vec::new();
         let mut resample_buf = Vec::new();
 
@@ -371,6 +428,7 @@ mod tests {
             48000,
             2,
             &buf,
+            &level,
             &mut mono_buf,
             &mut resample_buf,
         );
@@ -387,15 +445,32 @@ mod tests {
     fn test_scratch_buffers_reused() {
         // Verify that scratch buffers are reused across calls (capacity grows once)
         let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
         let mut mono_buf: Vec<f32> = Vec::new();
         let mut resample_buf: Vec<f32> = Vec::new();
 
         let data = vec![0.5f32; 480];
-        process_audio_chunk(&data, 48000, 1, &buf, &mut mono_buf, &mut resample_buf);
+        process_audio_chunk(
+            &data,
+            48000,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
         let cap_after_first = mono_buf.capacity();
 
         buf.lock().clear();
-        process_audio_chunk(&data, 48000, 1, &buf, &mut mono_buf, &mut resample_buf);
+        process_audio_chunk(
+            &data,
+            48000,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
         let cap_after_second = mono_buf.capacity();
 
         // Capacity should not have changed — buffers are reused

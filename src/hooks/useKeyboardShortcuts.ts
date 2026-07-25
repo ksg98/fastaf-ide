@@ -76,6 +76,7 @@ export interface ShortcutHandlers {
 	toggleZoomPane: () => void;
 	toggleFocusMode: () => void;
 	closeActivePane?: () => void;
+	closeActiveTabOrPane: () => void;
 	togglePromptLibrary: () => void;
 	toggleDiffScroll: () => void;
 	toggleGlobalWorkspace: () => void;
@@ -205,12 +206,7 @@ function dispatchAction(action: ActionName, handlers: ShortcutHandlers): boolean
 			handlers.createNewTerminal();
 			return true;
 		case "close-terminal": {
-			if (paneLayoutStore.isSplit()) {
-				handlers.closeActivePane?.();
-			} else {
-				const activeId = terminalsStore.state.activeId;
-				if (activeId) handlers.closeTerminal(activeId);
-			}
+			handlers.closeActiveTabOrPane();
 			return true;
 		}
 		case "reopen-closed-tab":

@@ -1,6 +1,7 @@
 import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { invoke } from "../../invoke";
 import { branchSwitcherStore } from "../../stores/branchSwitcher";
+import { registerModal } from "../../stores/modalStack";
 import shared from "../shared/dialog.module.css";
 import s from "./BranchSwitcher.module.css";
 
@@ -88,6 +89,11 @@ export const BranchSwitcher: Component<BranchSwitcherProps> = (props) => {
 	createEffect(() => {
 		if (!isOpen()) return;
 
+		// Escape-to-close is handled centrally (stores/modalStack): registering routes
+		// Escape to close AND stops it reaching the terminal underneath. Arrow/Enter
+		// navigation is still handled by the local listener below.
+		registerModal(() => branchSwitcherStore.close());
+
 		const handleKeydown = (e: KeyboardEvent) => {
 			const items = filteredBranches();
 
@@ -108,11 +114,6 @@ export const BranchSwitcher: Component<BranchSwitcherProps> = (props) => {
 					if (items[selectedIndex()]) {
 						selectBranch(items[selectedIndex()]);
 					}
-					break;
-				case "Escape":
-					e.preventDefault();
-					e.stopPropagation();
-					branchSwitcherStore.close();
 					break;
 			}
 		};

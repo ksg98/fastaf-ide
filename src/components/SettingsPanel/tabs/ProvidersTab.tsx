@@ -1,4 +1,4 @@
-import { type Component, createMemo, createResource, createSignal, For, onMount, Show } from "solid-js";
+import { type Component, createMemo, createSignal, For, onMount, Show } from "solid-js";
 import { AGENT_TYPES, AGENTS, type AgentType } from "../../../agents";
 import { useAgentDetection } from "../../../hooks/useAgentDetection";
 import { invoke } from "../../../invoke";
@@ -243,21 +243,22 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 
 	const isOllama = () => props.provider.type === "ollama";
 
-	const [ollamaModels] = createResource(
-		() => (isOllama() ? props.provider.id : null),
-		async (providerId) => {
-			try {
-				const result = await invoke<{ available: boolean; models: { name: string; size: number }[] }>(
-					"check_ollama_models",
-					{ providerId },
-				);
-				return (result.models ?? []).map((m) => m.name);
-			} catch (e) {
-				appLogger.warn("settings", `Ollama model check failed: ${String(e)}`);
-				return [];
-			}
-		},
-	);
+	// Plain signal + onMount fetch, NOT createResource: a pending resource
+	// suspends the nearest ancestor Suspense — the App-level one wrapping the
+	// whole SettingsPanel — making the dialog flash on tab switch.
+	const [ollamaModels, setOllamaModels] = createSignal<string[]>([]);
+	onMount(async () => {
+		if (!isOllama()) return;
+		try {
+			const result = await invoke<{ available: boolean; models: { name: string; size: number }[] }>(
+				"check_ollama_models",
+				{ providerId: props.provider.id },
+			);
+			setOllamaModels((result.models ?? []).map((m) => m.name));
+		} catch (e) {
+			appLogger.warn("settings", `Ollama model check failed: ${String(e)}`);
+		}
+	});
 
 	async function saveKey() {
 		if (!keyInput().trim()) return;
@@ -333,8 +334,8 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 				</For>
 
 				{/* Ollama live discovery */}
-				<Show when={isOllama() && (ollamaModels()?.length ?? 0) > 0}>
-					<div class={s.hint}>Available: {ollamaModels()?.join(", ")}</div>
+				<Show when={isOllama() && ollamaModels().length > 0}>
+					<div class={s.hint}>Available: {ollamaModels().join(", ")}</div>
 				</Show>
 
 				<Show

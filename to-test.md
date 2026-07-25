@@ -48,6 +48,10 @@ Features to test when FastAF is more usable.
 - [HUMAN] Same four chords inside Claude Code's input box — line start/end jump and kill-to-start/end must work (readline control codes).
 - [HUMAN] Verify no regressions on nearby chords: Cmd+Up/Down still jumps between command blocks, Cmd+C still copies a selection, Cmd+Shift+Left/Right does nothing new (falls through), Option+Left/Right still word-jumps.
 
+## MCP OAuth in-app authorization confirmation (2026-07-22)
+
+- [ ] With an OAuth upstream in **Authorization required**, click **Authorize**: the in-app confirmation must appear above Settings immediately after OAuth preparation; underlying **Cancel** must not be clickable. **Continue** must open a valid browser flow, while dismissing the dialog must return the upstream to **Authorization required** without opening a browser.
+
 ## Clipboard "Copy Path" fix (2026-07-02, uncommitted)
 
 - [ ] **Copy Path / copy actions in all context menus** now route through the native clipboard-manager plugin (`writeClipboard`) instead of `navigator.clipboard.writeText` (rejected by WKWebView). Verify paste works after: RepoSection branch/worktree Copy Path, TabBar (diff/markdown/editor) Copy Path, FileBrowser Copy Path, CodeEditorTab, MarkdownPanel/Tab, StatusBar cwd, App "Copy Block Output", ErrorLogPanel, GeneratorsModal, AIChatPanel, GitHubPanel/Tab, ServicesTab, KnowledgeHistory, useSmartPrompts clipboard output.
@@ -633,7 +637,7 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [HUMAN] Click CI badge in status bar opens popover
 - [HUMAN] Popover shows individual check names and statuses
 - [HUMAN] Success/failure/pending icons correct
-- [ ] Click check item opens URL in browser _(NOTE: PrDetailContent.tsx:238-244 renders check items as plain divs with icon, name, status — no onClick handler. CI check items are NOT clickable. Feature tracked as story 096-2ac0.)_
+- [x] Click check item opens URL in browser _(story 096-2ac0: rows with a details URL (CheckRun.detailsUrl / StatusContext.targetUrl, already carried by get_ci_checks JSON) are clickable — role=button, opens via handleOpenUrl; URL-less rows stay inert. Verified live via web-UI parity: click → window.open("…/checks/1","_blank"); inert row no-op; hover uses --bg-highlight. PrDetailContent.tsx:253-272.)_
 - [HUMAN] Loading state shown while fetching
 
 ### Optimized GitHub Polling (062)
@@ -684,6 +688,7 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [HUMAN] Transcribed text injected into active terminal
 - [HUMAN] Mouse leave while recording stops recording
 - [HUMAN] Blue pulsing animation respects prefers-reduced-motion
+- [HUMAN] Dictation preview's ANSI-style microphone meter reacts to speech and returns to idle in silence _(verified: `audio.rs` computes a lock-free, speech-sensitive RMS level in the CPAL callback; `commands.rs` emits it at 20 Hz while recording; `DictationToast.tsx` renders 12 segments. `cargo test -p tuicommander dictation::audio::tests --lib` (8 passed) and `pnpm vitest run src/__tests__/components/DictationToast.test.tsx src/__tests__/stores/dictation.test.ts` (40 passed) pass. Real microphone input requires hardware.)_
 
 ### Push-to-Talk (Hotkey)
 - [HUMAN] Default hotkey F5 starts/stops recording
@@ -1423,6 +1428,7 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [VISUAL] Live (needs rebuild): search inside a diff tab → orange match ticks appear on the diff scrollbar and track scroll.
 - [VISUAL] Live (needs rebuild): editor scrollbar visually matches the terminal's (14px track, rounded inset thumb).
 - [VISUAL] Live (needs rebuild): open a file deep in a subtree → the file browser (tree view) auto-expands its parents and scrolls it into view, highlighted with the accent bar. Switching the active editor tab moves the highlight.
+- [VISUAL] Live (needs rebuild, story 443-ea2b): install/enable the `docx-preview` plugin, open a `.docx` from File Browser, and confirm it opens the Mammoth HTML preview panel with conversion notes/raw-text toggle; Edit opens the same file in CodeMirror. Requires backend restart because `host.readFileBase64()` is Rust-backed.
 - [ ] DEFERRED (story 041-cd15): HTML Preview search → shared SearchBar (in-iframe search needs a postMessage bridge); shared sidebar-filter component for Error Log / Knowledge History / Branch Switcher etc. ("consistency of a different kind" for narrow sidebars).
 - [VISUAL] Live (story 040-29e1): open a tracked file in the code editor → a dim italic annotation "Author · relative time · summary" appears at the end of the active line and follows the cursor (no flicker, no fetch per keystroke). Edit a line → it shows "You · Uncommitted changes". Toggle `settingsStore.setInlineBlameEnabled(false)` → annotation disappears. External (absolute-path) files show no annotation.
 
@@ -1449,6 +1455,7 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [HUMAN] Cmd+R web/preview reload: with a Preview tab (HTML/Markdown/image) open, press Cmd+R — the preview must reload its content. Confirm the shortcut does not fire when focus is inside the terminal.
 - [HUMAN] Dock-icon reopen (macOS): quit the app via Cmd+Q so it hides to the dock (or close the last window). Click the dock icon → the main window re-opens. Verify no duplicate windows appear.
 - [VISUAL] Context-menu shortcut chord: right-click a tab to open its context menu, then press the shortcut chord shown for one of the items (e.g. Cmd+W for "Close Tab"). The menu must close and the action must fire without a mouse click. Verify modifier-only keys (Cmd, Shift) do not close the menu prematurely.
+- [x] Context menus near the bottom/right viewport edge stay fully visible; oversized menus/submenus scroll instead of opening off-screen. _(verified: `src/components/ContextMenu/ContextMenu.tsx:58` clamps submenu position, `src/components/ContextMenu/ContextMenu.tsx:218` clamps the root menu, `src/components/ContextMenu/ContextMenu.module.css:9` makes oversized root menus scroll, `src/__tests__/components/ContextMenu.test.tsx:173` and `src/__tests__/components/ContextMenu.test.tsx:292` cover oversized menu/submenu; visual screenshot captured with Vite harness on 2026-07-10.)_
 
 ## Soft-keyboard lift: cursor-anchored (browser-desktop on iPad)
 
@@ -1486,3 +1493,57 @@ lo scrive ma non contiene nulla--> _(fixed + verified end-to-end: invoked save_r
 - [HUMAN] File browser right-click: "Copy Path" copies the raw absolute path; "Copy Relative Path" copies the repo-relative path.
 - [HUMAN] With a file tab active (editor/markdown/diff): Cmd+Alt+C copies its absolute path, Cmd+Shift+Alt+C its repo-relative path; no-op when a terminal tab is active.
 - [HUMAN] Settings → General → "Scroll sensitivity" (default 70%): terminal wheel scroll is noticeably slower than before; 200% is fast, 20% is slow. Does not affect wheel events forwarded to mouse-mode TUIs (discrete per-tick), scrollbar drag, or touch.
+## GitHub Ops Suite — review engine, changelog, conflict-assist (2026-07-06)
+
+_Rust backend changes — require a `make dev` rebuild to load (no hot-reload). Test against the
+worktree build's HTTP API on :9877 or the desktop app._
+
+- [VISUAL] PR AI review findings: open a PR detail popover → click "AI Review" → the multi-turn
+  engine (Main slot) should return line-level findings grouped by file with monochrome severity
+  icons (bug/risk/nit). Select findings → "Post review" is enabled only when a line-anchored finding
+  is selected → confirm dialog → posts inline comments to GitHub. (Backend: `run_pr_review`; needs a
+  configured Main provider slot + a real PR.)
+- [VISUAL] Working-tree triage now shows line-level findings under each file row in the AI Triage
+  panel (severity icon + clickable line + message), in addition to the relevance grouping.
+- [VISUAL] Changelog: GitHub panel header → document icon ("Changelog") → modal generates a changelog
+  from merged PRs (Headless slot) → renders markdown → Copy (clipboard) and Save (downloads
+  `CHANGELOG-ai.md`) both work. Empty range shows the "no merged PRs" message without an LLM call.
+- [VISUAL] Ops Dashboard proposals: open a GitHub Ops dashboard tab → the Proposals column shows
+  `refactor` / `testing` / `perf` scan buttons without wrapping/overlap; after a scan, proposal
+  cards show title, impact, summary, effort/labels, and a compact "Create issue" button. Requires
+  a configured Headless provider slot and a real repo. Automated screenshot was not possible in
+  this session because the browser plugin exposed no available browser instances.
+- [HUMAN] Changelog `sinceTag`: pass a tag → only PRs merged at/after that tag's commit date appear.
+  (Backend filters via `tag_committer_date` forced to UTC; verify cross-timezone correctness.)
+- [HUMAN] Conflict assist (backend only; no UI yet — drive via HTTP `POST /repo/conflict-assist`):
+  on a PR whose head cleanly rebases onto base → `status:"clean"`; on a conflicting PR →
+  `status:"conflicts"` with `conflicted_files` populated and a non-empty agent `prompt`. A fork-head
+  PR returns a clear "not supported" error. A worktree is created on the PR head under the repo's
+  worktree dir — clean it up after.
+
+## Ink banner duplication — amplificatori TUIC fixati (2026-07-06, frontend-only, attivo via HMR)
+
+- [VISUAL] Doppio-SIGWINCH riconnessione: apri una sessione Claude, switcha su un altro tab e torna indietro più volte — NON devono comparire nuove copie del banner/frame nello scrollback a ogni rientro (prima: 2 SIGWINCH con larghezze diverse per rientro → 2 clear+reprint Ink). Vale anche con terminale zoomato (fontSize per-terminale ora onorato nel calcolo di riconnessione).
+- [VISUAL] Reconcile max-wait: durante output continuo di un agente, eventuali righe stantie sul canvas devono auto-guarire entro ~1s (prima: mai, finché il burst non si fermava per 250ms). Osservare che non ci siano blocchi "congelati" che persistono per minuti durante il lavoro dell'agente.
+- NOTA: la duplicazione residua da frame-più-alto-del-viewport è comportamento di Claude Code/Ink (issue #106, da segnalare upstream) — ogni terminale la registra; verificare solo che la FREQUENZA cali drasticamente senza resize/switch.
+
+## Selection-drag rAF-coalesce (#9b13, 2026-07-09, frontend-only, active via HMR)
+
+- [VISUAL] Fast text-selection drag in a terminal: press-drag rapidly across many rows (and past the top/bottom edge to trigger autoscroll). The selection highlight must track the cursor smoothly with NO lag, tearing, or stuck highlight, and autoscroll-at-edge must still work. Behavior-neutral change (mousemove repaint now coalesced to 1/frame + canvas rect cached per drag) — verify no visual regression vs before. tsc clean, vitest 112/112.
+
+## AI Review proof-of-work meta line (2026-07-10, frontend-only, active via HMR)
+
+- [VISUAL] Open a PR detail popover and hit AI Review "Run": below the header you must now see the model's summary plus "N files reviewed · <model>" (or "· heuristics only" for boilerplate-only diffs), followed by the findings list or "No findings". Previously a clean review showed only a bare "No findings" with no evidence the review ran. Vitest 4/4 (PrDetailContent.test.tsx).
+
+## MCP upstream authentication recovery (2026-07-12)
+
+- [x] Bearer → OAuth with blank client ID persists DCR mode instead of retaining Bearer; changing methods clears the incompatible keychain credential and reconnects. The editor also exposes “Clear saved token”. _(verified: `ServicesTab.authorize.test.ts` covers DCR/explicit auth construction; `saveEdit` performs credential deletion + reconnect after a successful config save.)_
+
+## CI auto-heal with a partially completed workflow (2026-07-13)
+
+- [x] A failed job is selected and its log is downloadable while a sibling job leaves the workflow `in_progress`; failed log retrieval or PTY delivery leaves the attempt count unchanged. _(verified: GitHub CLI probe against `Lansweeper/wiz-agents` run `29193902748` returned failed job `86653322376` logs while sibling job `86653322370` was still running; Rust parser tests and `useCiHeal.hook.test.ts` cover job selection and attempt accounting.)_
+
+## Markdown preview: inline comments anchor + highlight correctly (2026-07-15)
+
+- [ ] [VISUAL] Commenting a word that repeats many times in the doc (e.g. "reason" ×18) highlights the ACTUAL selected occurrence, not the first one. _(root cause: `findSourceMatch` used first-occurrence `indexOf`; fixed with DOM occurrence-ordinal → Nth source occurrence. Logic verified in `tweakComments.test.ts` incl. real-file offsets; visual anchor position needs an eye.)_
+- [ ] [VISUAL] Selecting text overlapping an existing highlight hides the "Add comment" button; keyboard-selecting over one and saving shows "That text already has a comment" instead of silently nesting/vanishing. _(logic verified: overlap-rejection + OverlappingCommentError; DOM pre-filter `rangeIntersectsHighlight` needs a visual check.)_

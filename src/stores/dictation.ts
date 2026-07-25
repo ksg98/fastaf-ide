@@ -59,6 +59,7 @@ interface DictationStatus {
 	model_size_mb: number;
 	recording: boolean;
 	processing: boolean;
+	audio_level?: number;
 }
 
 /** Transcription response from Rust backend */
@@ -79,6 +80,10 @@ interface DownloadProgress {
 	downloaded: number;
 	total: number;
 	percent: number;
+}
+
+function normalizeAudioLevel(value: number | undefined): number {
+	return Number.isFinite(value) ? Math.max(0, Math.min(1, value as number)) : 0;
 }
 
 /** Supported languages for Whisper */
@@ -119,6 +124,8 @@ interface DictationStoreState {
 	autoSend: boolean;
 	capturingHotkey: boolean;
 	partialText: string;
+	/** Normalized live microphone level used by the dictation preview meter. */
+	audioLevel: number;
 	backendInfo: DictationBackend | null;
 	rewriteEnabled: boolean;
 	rewriteBaseUrl: string;
@@ -161,6 +168,7 @@ function createDictationStore() {
 		autoSend: false,
 		capturingHotkey: false,
 		partialText: "",
+		audioLevel: 0,
 		backendInfo: null,
 		rewriteEnabled: false,
 		rewriteBaseUrl: "",
@@ -190,6 +198,20 @@ function createDictationStore() {
 	listen<string>("dictation-partial", (event) => {
 		setState("partialText", event.payload);
 	});
+
+	let audioLevelTimer: ReturnType<typeof setInterval> | null = null;
+	const stopAudioLevelPolling = () => {
+		if (audioLevelTimer) clearInterval(audioLevelTimer);
+		audioLevelTimer = null;
+	};
+	const startAudioLevelPolling = () => {
+		stopAudioLevelPolling();
+		audioLevelTimer = setInterval(() => {
+			void invoke<DictationStatus>("get_dictation_status")
+				.then((status) => setState("audioLevel", normalizeAudioLevel(status.audio_level)))
+				.catch(() => stopAudioLevelPolling());
+		}, 75);
+	};
 
 	// Listen for backend info (gpu/cpu) after model load
 	listen<{ backend: DictationBackend }>("dictation-backend-info", (event) => {
@@ -437,6 +459,7 @@ function createDictationStore() {
 					modelSizeMb: status.model_size_mb,
 					recording: status.recording,
 					processing: status.processing,
+					audioLevel: normalizeAudioLevel(status.audio_level),
 				});
 			} catch (err) {
 				appLogger.error("dictation", "Failed to get dictation status", err);
@@ -520,6 +543,8 @@ function createDictationStore() {
 			try {
 				await invoke("start_dictation");
 				setState("recording", true);
+				setState("audioLevel", 0);
+				startAudioLevelPolling();
 			} catch (err) {
 				const errStr = String(err);
 				if (errStr.includes("microphone_denied")) {
@@ -546,15 +571,19 @@ function createDictationStore() {
 			if (!state.recording) return null;
 			// Optimistically clear recording so concurrent callers bail out above.
 			setState("recording", false);
+			setState("audioLevel", 0);
+			stopAudioLevelPolling();
 			try {
 				const response = await invoke<TranscribeResponse>("stop_dictation_and_transcribe");
 				setState("processing", false);
 				setState("partialText", "");
+				setState("audioLevel", 0);
 				return response;
 			} catch (err) {
 				appLogger.error("dictation", "Failed to stop recording", err);
 				setState("processing", false);
 				setState("partialText", "");
+				setState("audioLevel", 0);
 				return null;
 			}
 		},

@@ -6,8 +6,7 @@
  */
 
 import type { LogLine } from "./mobile/utils/logLine";
-import { appLogger, previewLogPayload } from "./stores/appLogger";
-import { remoteConnectionsStore } from "./stores/remoteConnections";
+import { getRemoteBaseUrl, previewLogPayload, transportLogger } from "./transportRuntime";
 
 // ---------------------------------------------------------------------------
 // MCP upstream config types (mirrors Rust structs in mcp_upstream_config.rs)
@@ -29,6 +28,7 @@ export type UpstreamAuth =
 	| {
 			type: "oauth2";
 			client_id: string;
+			client_secret?: string;
 			scopes?: string[];
 			authorization_endpoint?: string;
 			token_endpoint?: string;
@@ -77,6 +77,10 @@ function encodeArg(command: string, args: Record<string, unknown>, key: string):
 		throw new Error(`mapCommandToHttp(${command}): missing required argument "${key}"`);
 	}
 	return encodeURIComponent(String(val));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Args accessor + URL encoder, bound to a specific command invocation */
@@ -437,6 +441,8 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	// --- Config: app ---
 	load_config: { map: () => ({ method: "GET", path: "/config" }) },
 	save_config: { map: (args) => ({ method: "PUT", path: "/config", body: args.config }) },
+	load_app_config: { map: () => ({ method: "GET", path: "/config" }) },
+	save_app_config: { map: (args) => ({ method: "PUT", path: "/config", body: args.config }) },
 	hash_password: {
 		map: (args) => ({
 			method: "POST",
@@ -730,6 +736,53 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 			body: { repoPath: args.repoPath, issueNumber: args.issueNumber },
 		}),
 	},
+	get_issue_detail: {
+		map: (_args, p) => ({
+			method: "GET",
+			path: `/repo/issue-detail?repoPath=${p("repoPath")}&issueNumber=${p("issueNumber")}`,
+		}),
+	},
+	create_pr: {
+		map: (args) => ({
+			method: "POST",
+			path: "/repo/create-pr",
+			body: {
+				repoPath: args.repoPath,
+				title: args.title,
+				body: args.body,
+				base: args.base,
+				head: args.head,
+				draft: args.draft ?? false,
+			},
+		}),
+	},
+	create_issue: {
+		map: (args) => ({
+			method: "POST",
+			path: "/repo/create-issue",
+			body: { repoPath: args.repoPath, title: args.title, body: args.body },
+		}),
+	},
+	create_issue_from_proposal: {
+		map: (args) => ({
+			method: "POST",
+			path: "/repo/create-issue-from-proposal",
+			body: { repoPath: args.repoPath, proposal: args.proposal },
+		}),
+	},
+	post_pr_review: {
+		map: (args) => ({
+			method: "POST",
+			path: "/repo/post-pr-review",
+			body: {
+				repoPath: args.repoPath,
+				prNumber: args.prNumber,
+				body: args.body,
+				event: args.event,
+				comments: args.comments ?? [],
+			},
+		}),
+	},
 	get_github_viewer_login: {
 		map: () => ({ method: "GET", path: "/github/viewer-login" }),
 	},
@@ -756,6 +809,13 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 		map: () => ({ method: "POST", path: "/github/auth/start" }),
 	},
 	github_poll_login: {
+		map: (args) => ({
+			method: "POST",
+			path: "/github/auth/poll",
+			body: { deviceCode: args.deviceCode },
+		}),
+	},
+	github_poll_add_account: {
 		map: (args) => ({
 			method: "POST",
 			path: "/github/auth/poll",
@@ -1054,11 +1114,29 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 			body: { repoPath: args.repoPath, refresh: args.refresh },
 		}),
 	},
+	run_pr_review: {
+		map: (args) => ({
+			method: "POST",
+			path: "/ai/review/pr",
+			body: { repoPath: args.repoPath, prNumber: args.prNumber },
+		}),
+	},
+	run_improvement_scan: {
+		map: (args) => ({
+			method: "POST",
+			path: "/ai/improvements/scan",
+			body: { repoPath: args.repoPath, focus: args.focus },
+		}),
+	},
 	github_start_polling: {
 		map: (args) => ({
 			method: "POST",
 			path: "/repo/github-poller/start",
-			body: { paths: args.paths, issueFilter: args.issueFilter },
+			body: {
+				paths: args.paths,
+				issueFilter: args.issueFilter,
+				prHideDrafts: args.prHideDrafts,
+			},
 		}),
 	},
 	github_stop_polling: {
@@ -1309,6 +1387,29 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 			path: `/repo/pr-diff?path=${p("repoPath")}&pr=${args.prNumber}`,
 		}),
 	},
+	get_merged_prs: {
+		map: (args, p) => ({
+			method: "GET",
+			path:
+				`/repo/merged-prs?path=${p("repoPath")}` +
+				(args.sinceTag ? `&sinceTag=${encodeURIComponent(String(args.sinceTag))}` : ""),
+		}),
+	},
+	generate_changelog: {
+		map: (args, p) => ({
+			method: "GET",
+			path:
+				`/repo/changelog?path=${p("repoPath")}` +
+				(args.sinceTag ? `&sinceTag=${encodeURIComponent(String(args.sinceTag))}` : ""),
+		}),
+	},
+	start_conflict_assist: {
+		map: (args) => ({
+			method: "POST",
+			path: "/repo/conflict-assist",
+			body: { repoPath: args.repoPath, prNumber: args.prNumber },
+		}),
+	},
 	approve_pr: {
 		map: (args) => ({
 			method: "POST",
@@ -1399,6 +1500,34 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	detect_agent_binary: {
 		map: (_args, p) => ({ method: "GET", path: `/agents/detect?binary=${p("binary")}` }),
 	},
+	detect_claude_binary: {
+		map: () => ({
+			method: "GET",
+			path: "/agents/detect?binary=claude",
+			transform: (data) => {
+				const path = isRecord(data) ? data.path : undefined;
+				if (typeof path !== "string" || path.length === 0) {
+					throw new Error("Claude binary not found. Install with: npm install -g @anthropic-ai/claude-code");
+				}
+				return path;
+			},
+		}),
+	},
+	spawn_agent: {
+		map: (args) => {
+			const ptyConfig = isRecord(args.pty_config) ? args.pty_config : {};
+			const agentConfig = isRecord(args.agent_config) ? args.agent_config : {};
+			return {
+				method: "POST",
+				path: "/sessions/agent",
+				body: { ...ptyConfig, ...agentConfig },
+				transform: (data) => {
+					if (isRecord(data) && typeof data.session_id === "string") return data.session_id;
+					throw new Error("spawn_agent HTTP response missing session_id");
+				},
+			};
+		},
+	},
 	detect_installed_ides: { map: () => ({ method: "GET", path: "/agents/ides" }) },
 
 	// --- Watchers ---
@@ -1453,6 +1582,13 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 			method: "POST",
 			path: "/fs/write",
 			body: { repoPath: args.repoPath, file: args.file, content: args.content },
+		}),
+	},
+	create_file: {
+		map: (args) => ({
+			method: "POST",
+			path: "/fs/create",
+			body: { repoPath: args.repoPath, file: args.file },
 		}),
 	},
 	create_directory: {
@@ -1607,6 +1743,12 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 			path: `/api/plugins/${p("pluginId")}/fs/read?path=${p("path")}`,
 		}),
 	},
+	plugin_read_file_base64: {
+		map: (_args, p) => ({
+			method: "GET",
+			path: `/api/plugins/${p("pluginId")}/fs/read-base64?path=${p("path")}`,
+		}),
+	},
 	plugin_read_file_tail: {
 		map: (_args, p) => ({
 			method: "GET",
@@ -1639,7 +1781,10 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 		map: (args, p) => ({
 			method: "POST",
 			path: `/api/plugins/${p("pluginId")}/build-artifacts/scan`,
-			body: { repoPaths: args.repoPaths },
+			body: {
+				repoPaths: args.repoPaths,
+				...(args.forceRefresh ? { forceRefresh: true } : {}),
+			},
 		}),
 	},
 	delete_build_artifact: {
@@ -1665,7 +1810,6 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 				method: args.method,
 				headers: args.headers,
 				body: args.body,
-				allowedUrls: args.allowedUrls,
 			},
 		}),
 	},
@@ -1745,6 +1889,9 @@ export const INTENTIONALLY_UNMAPPED: ReadonlySet<string> = new Set<string>([
 	// clean host-only error. cancel pairs with start, so it's host-only too.
 	"start_mcp_upstream_oauth",
 	"cancel_mcp_upstream_oauth",
+	// Import wizard — scans the local machine's Claude Code / Codex / Cursor /
+	// superset state directories, so the sidebar entry is desktop-gated.
+	"discover_importable_projects",
 	// CLI install/management — mutates the host PATH / shell integration.
 	"install_cli",
 	"uninstall_cli",
@@ -1762,6 +1909,45 @@ export const INTENTIONALLY_UNMAPPED: ReadonlySet<string> = new Set<string>([
 	"unsubscribe_terminal_grid",
 	"ack_terminal_frame",
 	"terminal_exit_alt_screen",
+	"read_vt_log",
+	"terminal_get_block_rows",
+	// Desktop-only terminal/session diagnostics or local visual state with no
+	// faithful HTTP contract yet.
+	"debug_agent_detection",
+	"set_ansi_colors",
+	"update_session_cwd",
+	// AI high-frequency streams are bridged by dedicated WebSockets:
+	// /ai/conversation/{session_id}/stream and /ai/chat/{chat_id}/stream.
+	"start_conversation",
+	"chat_subscribe",
+	"chat_unsubscribe",
+	// Agent loop/suggestion state has partial HTTP control today, but these IPC
+	// reads do not yet have byte-identical HTTP response routes.
+	"agent_loop_status",
+	"get_ai_suggestions_enabled",
+	// GitHub issues: Tauri command is multi-repo; current HTTP route is single-repo
+	// (/repo/issues), so mapping here would silently change the contract.
+	"get_all_issues",
+	// mdkb editor helpers are tied to the desktop-managed daemon/AppState and have
+	// no HTTP routes yet.
+	"mdkb_outline",
+	"mdkb_goto_definition",
+	"mdkb_references",
+	"mdkb_code_find",
+	"mdkb_status",
+	// Agent MCP installation mutates local agent config files and is desktop
+	// settings-only until a guarded HTTP surface exists.
+	"get_agent_mcp_status",
+	"install_agent_mcp",
+	"remove_agent_mcp",
+	"get_agent_config_path",
+	"get_mcp_bridge_info",
+	// Shell-safe prompt processing needs a dedicated HTTP route; mapping it to
+	// /prompt/process would lose shell quoting and be a security regression.
+	"process_prompt_content_shell_safe",
+	// Notes image directory is a local filesystem implementation detail; browser
+	// clients use note asset APIs rather than reading this directory path.
+	"get_note_images_dir",
 	// Plugin filesystem watch — event delivery to plugins needs AppHandle/WS — out of scope.
 	"plugin_watch_path",
 	"plugin_unwatch",
@@ -1875,7 +2061,7 @@ async function rpcImpl<T>(command: string, args: Record<string, unknown>, connec
 	}
 
 	const mapping = mapCommandToHttp(command, args);
-	const baseUrl = connectionId ? remoteConnectionsStore.getBaseUrl(connectionId) : undefined;
+	const baseUrl = connectionId ? getRemoteBaseUrl(connectionId) : undefined;
 	if (connectionId && !baseUrl) {
 		throw new Error(`Remote connection ${connectionId} not connected`);
 	}
@@ -2116,7 +2302,7 @@ export async function subscribePty(
 			activeWs = ws;
 
 			ws.onopen = () => {
-				appLogger.debug("network", `WebSocket connected: ${sessionId}`);
+				transportLogger().debug("network", `WebSocket connected: ${sessionId}`);
 				// Re-wire onclose for live session
 				ws.onclose = (evt: CloseEvent) => {
 					if (disposed) return;
@@ -2125,7 +2311,7 @@ export async function subscribePty(
 						onExit();
 						return;
 					}
-					appLogger.debug("network", `WebSocket closed abnormally (code ${evt.code}), will reconnect`);
+					transportLogger().debug("network", `WebSocket closed abnormally (code ${evt.code}), will reconnect`);
 					scheduleReconnect();
 				};
 				resolve();
@@ -2151,13 +2337,13 @@ export async function subscribePty(
 	const scheduleReconnect = () => {
 		if (disposed) return;
 		if (retryCount >= MAX_RETRIES) {
-			appLogger.warn("network", `WebSocket reconnect failed after ${MAX_RETRIES} attempts: ${sessionId}`);
+			transportLogger().warn("network", `WebSocket reconnect failed after ${MAX_RETRIES} attempts: ${sessionId}`);
 			onExit();
 			return;
 		}
 		const delay = Math.min(BASE_DELAY_MS * 2 ** retryCount, MAX_DELAY_MS);
 		retryCount++;
-		appLogger.debug("network", `WebSocket reconnecting in ${delay}ms (attempt ${retryCount}/${MAX_RETRIES})`);
+		transportLogger().debug("network", `WebSocket reconnecting in ${delay}ms (attempt ${retryCount}/${MAX_RETRIES})`);
 		opts.onReconnecting?.(retryCount, MAX_RETRIES);
 		reconnectTimer = setTimeout(async () => {
 			if (disposed) return;
@@ -2216,7 +2402,7 @@ export async function subscribeEvents(
 				const payload = JSON.parse(event.data);
 				handler(payload);
 			} catch {
-				appLogger.warn("network", `Failed to parse SSE event "${eventType}"`, {
+				transportLogger().warn("network", `Failed to parse SSE event "${eventType}"`, {
 					eventData: previewLogPayload(event.data),
 				});
 			}
@@ -2224,11 +2410,11 @@ export async function subscribeEvents(
 	}
 
 	es.addEventListener("lagged", ((event: MessageEvent) => {
-		appLogger.warn("network", "SSE lagged", { eventData: previewLogPayload(event.data) });
+		transportLogger().warn("network", "SSE lagged", { eventData: previewLogPayload(event.data) });
 	}) as EventListener);
 
 	es.onerror = () => {
-		appLogger.debug("network", "SSE connection error — will auto-reconnect");
+		transportLogger().debug("network", "SSE connection error — will auto-reconnect");
 	};
 
 	return () => es.close();

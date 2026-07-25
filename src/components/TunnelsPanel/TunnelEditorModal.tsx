@@ -2,6 +2,7 @@ import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { type Component, createSignal, For, onMount, Show } from "solid-js";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
+import { registerModal } from "../../stores/modalStack";
 import type { ForwardSpec, ProfileOptions, TunnelProfile } from "../../stores/tunnels";
 import { tunnelsStore } from "../../stores/tunnels";
 import s from "../SettingsPanel/Settings.module.css";
@@ -82,6 +83,9 @@ export function convertForwardType(
 
 export const TunnelEditorModal: Component<TunnelEditorModalProps> = (props) => {
 	const isEdit = () => !!props.profile;
+	// Escape-to-close handled centrally (stores/modalStack): closes this modal and
+	// keeps Escape from reaching the terminal underneath.
+	registerModal(props.onClose);
 
 	const [name, setName] = createSignal(props.profile?.name ?? "");
 	const [host, setHost] = createSignal(props.profile?.host ?? "");

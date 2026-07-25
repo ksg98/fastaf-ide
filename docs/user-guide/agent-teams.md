@@ -90,12 +90,13 @@ Agent Teams is an experimental Claude Code feature. Current limitations:
 ## Inter-Agent Messaging
 
 FastAF includes a built-in messaging system that lets agents in different terminal tabs communicate directly. This works alongside (and independently from) Claude Code's native Agent Teams messaging.
+There is no separate `swarm` action: callers compose the `agent` and `session` primitives documented below.
 
 ### How It Works
 
 Every PTY session gets a stable `TUIC_SESSION` UUID injected as an environment variable. Agents use this as their identity to register, discover peers, and exchange messages through FastAF's MCP `messaging` tool.
 
-When both sender and recipient are connected via SSE (the default for Claude Code agents), messages are **pushed in real-time** as MCP channel notifications (`notifications/claude/channel`). They also land in a buffered inbox as a fallback.
+When a channel-enabled Claude Code recipient is connected via SSE and already working, messages are **pushed in real-time** into that turn as MCP channel notifications (`notifications/claude/channel`). Idle or completed managed agents use terminal submission to start a real next turn; managed non-Claude agents do the same even when their MCP bridge has an SSE stream. Every message also lands in a buffered inbox as a fallback.
 
 ### What Gets Injected Automatically
 
@@ -112,12 +113,18 @@ FastAF injects these into every Claude Code PTY session — no manual configurat
 > **Identity is automatic.** The bridge asserts your `$TUIC_SESSION` at connect
 > (`x-tuic-session` header → server auto-bind), so an agent spawned inside FastAF
 > is already a registered peer. `agent action=register` is only needed to set a friendly
-> name/project, or from a standalone session where the env-var route is unavailable.
+> name/project, or from a standalone/external session where the env-var route is unavailable.
+> External MCP clients do not need a plain-shell identity tab: call `agent action=register`
+> without `tuic_session` to receive an MCP-scoped UUID, or supply an explicit UUID when the same
+> identity must be reclaimed after reconnect.
 
 > **Prefer blocking waits over polling.** `agent action=wait since=<ms>` returns as soon
 > as new mail arrives; `session action=wait session_id=<id> until=idle|exited` blocks on a
-> peer's lifecycle. Both cap at 8 s and return `{met, timed_out}` — on `timed_out` just call
-> again. Incoming messages are also **typed into an idle peer's terminal**, so a waiting
+> peer's lifecycle. Both default to 60 seconds, cap at 300000 ms, and return
+> `{met, timed_out}`. They are event-driven end to end; the bridge deadline follows the
+> requested wait instead of its ordinary ten-second timeout. A successful agent wait also returns every retained fresh message (up to the
+> 100-message inbox capacity) and a per-recipient logical `next_since` cursor, so the normal path
+> needs no separate inbox call. Incoming messages are also **typed into an idle peer's terminal**, so a waiting
 > orchestrator is woken by its children without any poll loop.
 
 1. **Register** *(optional — sets name/project)* — the agent reads its `$TUIC_SESSION`:
@@ -136,11 +143,25 @@ FastAF injects these into every Claude Code PTY session — no manual configurat
    agent action=send to="<recipient-tuic-session>" message="PR review done, 3 issues found"
    ```
 
-4. **Check inbox** — Read buffered messages (useful if channel push was missed):
+4. **Wait for and receive messages** — one blocking call returns the message bodies:
+   ```
+   agent action=wait since=1712000000000
+   ```
+   Pass the returned `next_since` to the next wait.
+
+5. **Check inbox directly** — useful after a reported FIFO eviction or if channel push was missed:
    ```
    agent action=inbox
    agent action=inbox limit=10 since=1712000000000
    ```
+
+`agent action=send` also returns `recipient_state` with the recipient's `shell_state` and
+`agent_state` when the recipient is a managed PTY. External generated peers omit this field.
+
+Automatic lifecycle notifications contain state only (`idle`, `completed`, or `exited`). They do
+not contain the worker's result. Every worker reports completed output or a real blocker with
+`agent action=send`; use `session action=output` only to investigate the anomaly where a child did
+not send that report.
 
 ### Channel Push vs Inbox
 
@@ -153,14 +174,9 @@ Messages are always buffered in the inbox regardless of whether channel push suc
 
 ### Using Messaging from a Standalone Claude Code Session
 
-If you run Claude Code outside FastAF but still want to use TUIC messaging, you need to:
+If you run Claude Code outside FastAF but still want to use TUIC messaging:
 
-1. **Set `TUIC_SESSION`** — export a stable UUID:
-   ```bash
-   export TUIC_SESSION=$(uuidgen)
-   ```
-
-2. **Connect to TUIC's MCP server** — the MCP channel is a Unix socket (Windows: named
+1. **Connect to TUIC's MCP server** — the MCP channel is a Unix socket (Windows: named
    pipe), reached through the `tuic-bridge` stdio adapter, **not** a TCP port. FastAF
    auto-installs this entry into each supported agent's config; to add it by hand:
    ```json
@@ -174,16 +190,20 @@ If you run Claude Code outside FastAF but still want to use TUIC messaging, you 
    }
    ```
    The bridge finds the socket via `TUIC_SOCKET` → `mcp.sock` → any `mcp-*.sock` in the
-   config dir. It reads `$TUIC_SESSION` from its environment and forwards it as the
-   `x-tuic-session` header, so identity binds automatically on connect.
+   config dir.
+
+2. **Register identity** — omit the UUID for a generated identity scoped to this MCP connection:
+   ```text
+   agent action=register name="external-reviewer" project="/path/to/repo"
+   ```
+   Pass `tuic_session="<stable-uuid>"` instead when a future reconnect must reclaim the same identity.
+   Registration never creates a PTY.
 
 3. **Enable channel push** *(optional, for real-time delivery)*:
    ```bash
    claude --dangerously-load-development-channels server:tuicommander
    ```
 
-4. **(Optional) register a name** — identity auto-binds from `$TUIC_SESSION`; call
-   `agent action=register` only to set a display name/project.
 
 ### Messaging vs Claude Code Native SendMessage
 

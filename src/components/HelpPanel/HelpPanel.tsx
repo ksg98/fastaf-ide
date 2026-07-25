@@ -1,5 +1,6 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { t } from "../../i18n";
+import { registerModal } from "../../stores/modalStack";
 import { writeClipboard } from "../../utils/clipboard";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { KeyboardShortcutsTab } from "../SettingsPanel/tabs/KeyboardShortcutsTab";
@@ -39,25 +40,23 @@ export const HelpPanel: Component<HelpPanelProps> = (props) => {
 	};
 	onCleanup(() => clearTimeout(copiedResetTimer));
 
-	// Close on Escape, reset view on close
+	// Close on Escape, reset view on close. Escape routing is centralized
+	// (stores/modalStack) so it also stops the key reaching the terminal underneath;
+	// the guarded close preserves the sub-view back-navigation (Escape steps a
+	// shortcuts/legend view back to main before closing from main).
 	createEffect(() => {
 		if (!props.visible) {
 			setView("main");
 			return;
 		}
 
-		const handleKeydown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				if (view() !== "main") {
-					setView("main");
-				} else {
-					props.onClose();
-				}
+		registerModal(() => {
+			if (view() !== "main") {
+				setView("main");
+			} else {
+				props.onClose();
 			}
-		};
-
-		document.addEventListener("keydown", handleKeydown);
-		onCleanup(() => document.removeEventListener("keydown", handleKeydown));
+		});
 	});
 
 	const subViewTitle = () => {
