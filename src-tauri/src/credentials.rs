@@ -86,8 +86,6 @@ pub(crate) enum Credential<'a> {
     GithubToken(&'a str),
     McpUpstream(&'a str),
     Provider(&'a str),
-    /// Optional API key for the dictation AI-rewrite endpoint.
-    DictationRewriteApiKey,
     /// Per-provider API key for cloud speech-to-text (e.g. "groq", "openai").
     DictationSttApiKey(&'a str),
 }
@@ -104,7 +102,6 @@ impl Credential<'_> {
             Self::GithubToken(id) => format!("github/account/{id}/token"),
             Self::McpUpstream(name) => format!("mcp/{name}"),
             Self::Provider(id) => format!("provider/{id}"),
-            Self::DictationRewriteApiKey => "dictation/rewrite-api-key".into(),
             Self::DictationSttApiKey(provider) => format!("dictation/stt-api-key/{provider}"),
         }
     }
@@ -120,7 +117,6 @@ impl Credential<'_> {
             | Self::PushVapidPrivateKey
             | Self::GithubToken(_)
             | Self::Provider(_)
-            | Self::DictationRewriteApiKey
             | Self::DictationSttApiKey(_) => None,
         }
     }
@@ -536,10 +532,6 @@ mod tests {
         );
         assert_eq!(Credential::McpUpstream("foo").vault_key(), "mcp/foo");
         assert_eq!(Credential::Provider("my-id").vault_key(), "provider/my-id");
-        assert_eq!(
-            Credential::DictationRewriteApiKey.vault_key(),
-            "dictation/rewrite-api-key"
-        );
         assert_eq!(
             Credential::DictationSttApiKey("groq").vault_key(),
             "dictation/stt-api-key/groq"

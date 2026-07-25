@@ -13,8 +13,7 @@ interface DictationConfig {
 	long_press_ms: number;
 	auto_send: boolean;
 	rewrite_enabled: boolean;
-	rewrite_base_url: string;
-	rewrite_model: string;
+	rewrite_model_id: string;
 	rewrite_effort: string | null;
 	rewrite_system_prompt: string;
 	stt_provider: string;
@@ -28,14 +27,6 @@ export const DEFAULT_REWRITE_SYSTEM_PROMPT =
 	"assistant. Fix transcription errors, remove filler words and false starts, and preserve " +
 	"the original intent and all technical details. Output only the rewritten text with no " +
 	"preamble or explanation.";
-
-/** Model advertised by the rewrite endpoint's /models route (from Rust backend) */
-export interface RewriteModelInfo {
-	id: string;
-	supports_reasoning: boolean;
-	effort_options: string[] | null;
-	default_effort: string | null;
-}
 
 /** GPU/CPU backend reported by whisper after model load. */
 export type DictationBackend = "cpu" | "gpu";
@@ -128,14 +119,9 @@ interface DictationStoreState {
 	audioLevel: number;
 	backendInfo: DictationBackend | null;
 	rewriteEnabled: boolean;
-	rewriteBaseUrl: string;
-	rewriteModel: string;
+	rewriteModelId: string;
 	rewriteEffort: string | null;
 	rewriteSystemPrompt: string;
-	rewriteModels: RewriteModelInfo[];
-	fetchingRewriteModels: boolean;
-	rewriteModelsError: string | null;
-	rewriteKeyExists: boolean;
 	rewriting: boolean;
 	sttProvider: string;
 	sttModelGroq: string;
@@ -171,14 +157,9 @@ function createDictationStore() {
 		audioLevel: 0,
 		backendInfo: null,
 		rewriteEnabled: false,
-		rewriteBaseUrl: "",
-		rewriteModel: "",
+		rewriteModelId: "",
 		rewriteEffort: null,
 		rewriteSystemPrompt: DEFAULT_REWRITE_SYSTEM_PROMPT,
-		rewriteModels: [],
-		fetchingRewriteModels: false,
-		rewriteModelsError: null,
-		rewriteKeyExists: false,
 		rewriting: false,
 		sttProvider: "local",
 		sttModelGroq: "",
@@ -233,8 +214,7 @@ function createDictationStore() {
 					longPressMs: config.long_press_ms ?? 400,
 					autoSend: config.auto_send ?? false,
 					rewriteEnabled: config.rewrite_enabled ?? false,
-					rewriteBaseUrl: config.rewrite_base_url ?? "",
-					rewriteModel: config.rewrite_model ?? "",
+					rewriteModelId: config.rewrite_model_id ?? "",
 					rewriteEffort: config.rewrite_effort ?? null,
 					rewriteSystemPrompt: config.rewrite_system_prompt ?? DEFAULT_REWRITE_SYSTEM_PROMPT,
 					sttProvider: config.stt_provider ?? "local",
@@ -257,8 +237,7 @@ function createDictationStore() {
 				long_press_ms: partial.long_press_ms ?? state.longPressMs,
 				auto_send: partial.auto_send ?? state.autoSend,
 				rewrite_enabled: partial.rewrite_enabled ?? state.rewriteEnabled,
-				rewrite_base_url: partial.rewrite_base_url ?? state.rewriteBaseUrl,
-				rewrite_model: partial.rewrite_model ?? state.rewriteModel,
+				rewrite_model_id: partial.rewrite_model_id ?? state.rewriteModelId,
 				rewrite_effort: partial.rewrite_effort !== undefined ? partial.rewrite_effort : state.rewriteEffort,
 				rewrite_system_prompt: partial.rewrite_system_prompt ?? state.rewriteSystemPrompt,
 				stt_provider: partial.stt_provider ?? state.sttProvider,
@@ -277,8 +256,7 @@ function createDictationStore() {
 				if (partial.long_press_ms !== undefined) storeUpdate.longPressMs = partial.long_press_ms;
 				if (partial.auto_send !== undefined) storeUpdate.autoSend = partial.auto_send;
 				if (partial.rewrite_enabled !== undefined) storeUpdate.rewriteEnabled = partial.rewrite_enabled;
-				if (partial.rewrite_base_url !== undefined) storeUpdate.rewriteBaseUrl = partial.rewrite_base_url;
-				if (partial.rewrite_model !== undefined) storeUpdate.rewriteModel = partial.rewrite_model;
+				if (partial.rewrite_model_id !== undefined) storeUpdate.rewriteModelId = partial.rewrite_model_id;
 				if (partial.rewrite_effort !== undefined) storeUpdate.rewriteEffort = partial.rewrite_effort;
 				if (partial.rewrite_system_prompt !== undefined)
 					storeUpdate.rewriteSystemPrompt = partial.rewrite_system_prompt;
@@ -323,13 +301,10 @@ function createDictationStore() {
 			actions.saveConfig({ rewrite_enabled: value });
 		},
 
-		setRewriteBaseUrl(value: string): void {
-			actions.saveConfig({ rewrite_base_url: value });
-		},
-
-		/** Set the rewrite model — resets effort in the same save (model change invalidates it) */
-		setRewriteModel(value: string): void {
-			actions.saveConfig({ rewrite_model: value, rewrite_effort: null });
+		/** Pick the provider-registry model — resets effort in the same save
+		 *  (a different model may not accept the previous effort). */
+		setRewriteModelId(value: string): void {
+			actions.saveConfig({ rewrite_model_id: value, rewrite_effort: null });
 		},
 
 		setRewriteEffort(value: string | null): void {
@@ -338,47 +313,6 @@ function createDictationStore() {
 
 		setRewriteSystemPrompt(value: string): void {
 			actions.saveConfig({ rewrite_system_prompt: value });
-		},
-
-		/** Fetch models from the configured rewrite endpoint's /models route */
-		async fetchRewriteModels(): Promise<void> {
-			const baseUrl = state.rewriteBaseUrl.trim();
-			if (!baseUrl) {
-				setState("rewriteModelsError", "Enter a base URL first");
-				return;
-			}
-			setState({ fetchingRewriteModels: true, rewriteModelsError: null });
-			try {
-				const models = await invoke<RewriteModelInfo[]>("dictation_fetch_rewrite_models", { baseUrl });
-				setState("rewriteModels", models);
-			} catch (err) {
-				setState("rewriteModelsError", String(err));
-				appLogger.error("dictation", "Failed to fetch rewrite models", err);
-			} finally {
-				setState("fetchingRewriteModels", false);
-			}
-		},
-
-		/** Refresh whether a rewrite API key is stored in the vault */
-		async refreshRewriteKeyExists(): Promise<void> {
-			try {
-				const exists = await invoke<boolean>("dictation_rewrite_api_key_exists");
-				setState("rewriteKeyExists", exists);
-			} catch (err) {
-				appLogger.error("dictation", "Failed to check rewrite API key", err);
-			}
-		},
-
-		/** Save the rewrite API key to the vault (throws on failure — caller shows feedback) */
-		async saveRewriteApiKey(key: string): Promise<void> {
-			await invoke("set_dictation_rewrite_api_key", { key });
-			setState("rewriteKeyExists", true);
-		},
-
-		/** Delete the rewrite API key from the vault (throws on failure — caller shows feedback) */
-		async deleteRewriteApiKey(): Promise<void> {
-			await invoke("delete_dictation_rewrite_api_key");
-			setState("rewriteKeyExists", false);
 		},
 
 		/** Set the STT provider ("local" | "groq" | "openai") — clears fetched models */
