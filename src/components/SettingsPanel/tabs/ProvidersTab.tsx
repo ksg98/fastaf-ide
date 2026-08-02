@@ -5,6 +5,7 @@ import { invoke } from "../../../invoke";
 import { agentConfigsStore } from "../../../stores/agentConfigs";
 import { appLogger } from "../../../stores/appLogger";
 import {
+	type DiscoveredModel,
 	type ModelEntry,
 	type ProviderEntry,
 	type ProviderType,
@@ -56,6 +57,13 @@ const LOCAL_PROVIDER_TYPES: ProviderType[] = ["ollama", "lm_studio", "lite_llm"]
 
 function needsApiKey(type: ProviderType): boolean {
 	return !LOCAL_PROVIDER_TYPES.includes(type);
+}
+
+/** First-party SDK providers whose endpoint is fixed — no base URL, nothing to probe. */
+const FIXED_ENDPOINT_TYPES: ProviderType[] = ["anthropic", "open_ai", "gemini"];
+
+function supportsBaseUrl(type: ProviderType): boolean {
+	return !FIXED_ENDPOINT_TYPES.includes(type);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +142,7 @@ const AddProviderForm: Component<{ onAdd: (e: ProviderEntry) => void; onCancel: 
 					onInput={(e) => setLabel(e.currentTarget.value)}
 				/>
 			</div>
-			<Show when={type() !== "anthropic" && type() !== "open_ai" && type() !== "gemini"}>
+			<Show when={supportsBaseUrl(type())}>
 				<div class={s.group}>
 					<label>Base URL (optional)</label>
 					<input
@@ -174,36 +182,173 @@ const AddProviderForm: Component<{ onAdd: (e: ProviderEntry) => void; onCancel: 
 // ---------------------------------------------------------------------------
 
 const AddModelForm: Component<{
-	providerId: string;
+	provider: ProviderEntry;
 	onAdd: (m: ModelEntry) => void;
 	onCancel: () => void;
 }> = (props) => {
 	const [modelName, setModelName] = createSignal("");
 	const [tier, setTier] = createSignal<ModelEntry["tier"]>("standard");
 	const [error, setError] = createSignal("");
+	const [manual, setManual] = createSignal(false);
+
+	// Live discovery against the provider's OpenAI-compatible /models route.
+	// Fixed-endpoint providers have no base URL to probe, so they stay text-only.
+	// Plain signals + onMount, NOT createResource — same reason as the Ollama
+	// probe below: a pending resource suspends the ancestor Suspense and flashes
+	// the settings dialog.
+	const [options, setOptions] = createSignal<DiscoveredModel[]>([]);
+	const [discoveryError, setDiscoveryError] = createSignal("");
+	const [discovering, setDiscovering] = createSignal(false);
+	const [effort, setEffort] = createSignal("");
+
+	async function discover() {
+		if (!supportsBaseUrl(props.provider.type)) return;
+		setDiscovering(true);
+		setDiscoveryError("");
+		try {
+			const models = await invoke<DiscoveredModel[]>("fetch_provider_models", {
+				providerId: props.provider.id,
+			});
+			setOptions(models ?? []);
+		} catch (e) {
+			appLogger.warn("settings", `Model discovery failed for ${props.provider.id}: ${String(e)}`);
+			setOptions([]);
+			setDiscoveryError(String(e));
+		} finally {
+			setDiscovering(false);
+		}
+	}
+
+	onMount(discover);
+
+	const showPicker = createMemo(() => !manual() && options().length > 0);
+
+	/** The discovered record for the model currently chosen, if it came from discovery. */
+	const selected = createMemo(() => options().find((m) => m.id === modelName().trim()));
+	const effortOptions = createMemo(() => selected()?.effort_options ?? []);
+	/** Reasoning is offered whenever the endpoint says the model supports it. */
+	const showEffort = createMemo(() => selected()?.supports_reasoning === true);
+
+	// Selecting a model adopts the effort that model's endpoint declares as its
+	// default, so the common case needs no extra click.
+	function chooseModel(id: string) {
+		setModelName(id);
+		setEffort(options().find((m) => m.id === id)?.default_effort ?? "");
+	}
 
 	function submit() {
 		if (!modelName().trim()) {
 			setError("Model name is required");
 			return;
 		}
-		const id = `model-${props.providerId}-${modelName()
+		// Tier is part of the id: the same model registered at two tiers must not
+		// collide, or removing one would take the other with it.
+		const id = `model-${props.provider.id}-${modelName()
 			.trim()
-			.replace(/[^a-z0-9]/gi, "-")}`;
-		props.onAdd({ id, provider_id: props.providerId, model_name: modelName().trim(), tier: tier() });
+			.replace(/[^a-z0-9]/gi, "-")}-${tier()}`;
+		props.onAdd({
+			id,
+			provider_id: props.provider.id,
+			model_name: modelName().trim(),
+			tier: tier(),
+			effort: effort().trim() || null,
+		});
 	}
 
 	return (
 		<div data-testid="add-model-form" class={s.section} style={{ "margin-top": "8px" }}>
 			<div class={s.group}>
 				<label>Model name</label>
-				<input
-					type="text"
-					placeholder="e.g. claude-sonnet-4-5-20241022"
-					value={modelName()}
-					onInput={(e) => setModelName(e.currentTarget.value)}
-				/>
+				<Show
+					when={showPicker()}
+					fallback={
+						<input
+							type="text"
+							placeholder="e.g. claude-sonnet-4-5-20241022"
+							value={modelName()}
+							onInput={(e) => setModelName(e.currentTarget.value)}
+						/>
+					}
+				>
+					<select data-testid="model-select" value={modelName()} onChange={(e) => chooseModel(e.currentTarget.value)}>
+						<option value="">Select a model…</option>
+						<For each={options()}>
+							{(m) => (
+								<option value={m.id}>
+									{m.id}
+									{m.supports_reasoning ? " · reasoning" : ""}
+								</option>
+							)}
+						</For>
+					</select>
+				</Show>
 			</div>
+
+			{/* Reasoning effort — offered only for models the endpoint says can
+			    reason, using the levels it advertises. Free text when it claims
+			    reasoning without enumerating levels. */}
+			<Show when={showEffort()}>
+				<div class={s.group}>
+					<label>Reasoning effort</label>
+					<Show
+						when={effortOptions().length > 0}
+						fallback={
+							<input
+								type="text"
+								data-testid="effort-input"
+								placeholder="unset — model decides"
+								value={effort()}
+								onInput={(e) => setEffort(e.currentTarget.value)}
+							/>
+						}
+					>
+						<select data-testid="effort-select" value={effort()} onChange={(e) => setEffort(e.currentTarget.value)}>
+							<option value="">unset — model decides</option>
+							<For each={effortOptions()}>{(level) => <option value={level}>{level}</option>}</For>
+						</select>
+					</Show>
+					<div class={s.hint}>
+						<Show
+							when={effortOptions().length > 0}
+							fallback={
+								<>
+									This model advertises reasoning but no effort levels — anything you type is sent as reasoning_effort.
+								</>
+							}
+						>
+							Levels advertised by the endpoint for this model.
+						</Show>
+					</div>
+				</div>
+			</Show>
+
+			{/* Discovery status — only meaningful for providers with a base URL */}
+			<Show when={supportsBaseUrl(props.provider.type)}>
+				<div class={s.hint}>
+					<Show when={discovering()}>Discovering models…</Show>
+					<Show when={!discovering() && showPicker()}>
+						{options().length} model{options().length === 1 ? "" : "s"} from provider ·{" "}
+						<button class={s.inlineBtn} onClick={() => setManual(true)}>
+							enter manually
+						</button>
+					</Show>
+					<Show when={!discovering() && !showPicker()}>
+						<Show when={discoveryError()} fallback={<>No models returned by this provider.</>}>
+							{discoveryError()}
+						</Show>{" "}
+						<button
+							class={s.inlineBtn}
+							data-testid="retry-discovery"
+							onClick={() => {
+								setManual(false);
+								void discover();
+							}}
+						>
+							retry discovery
+						</button>
+					</Show>
+				</div>
+			</Show>
 			<div class={s.group}>
 				<label>Tier</label>
 				<select value={tier()} onChange={(e) => setTier(e.currentTarget.value as ModelEntry["tier"])}>
@@ -216,7 +361,7 @@ const AddModelForm: Component<{
 				<p style={{ color: "var(--error)" }}>{error()}</p>
 			</Show>
 			<div class={s.actions}>
-				<button class={s.saveBtn} onClick={submit}>
+				<button class={s.saveBtn} data-testid="submit-add-model" onClick={submit}>
 					Add model
 				</button>
 				<button onClick={props.onCancel}>Cancel</button>
@@ -234,6 +379,13 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 	const [keyInput, setKeyInput] = createSignal("");
 	const [savingKey, setSavingKey] = createSignal(false);
 	const [keyMsg, setKeyMsg] = createSignal("");
+	const [baseUrlInput, setBaseUrlInput] = createSignal(props.provider.base_url ?? "");
+	const [baseUrlMsg, setBaseUrlMsg] = createSignal("");
+
+	function saveBaseUrl() {
+		providerRegistryStore.setProviderBaseUrl(props.provider.id, baseUrlInput());
+		setBaseUrlMsg(baseUrlInput().trim() ? "Base URL saved" : "Base URL cleared — using the provider default");
+	}
 
 	const models = createMemo(() =>
 		providerRegistryStore.state.registry.models.filter((m) => m.provider_id === props.provider.id),
@@ -313,6 +465,35 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 				</button>
 			</div>
 
+			{/* Base URL — editable after creation, so a wrong or version-less URL
+			    can be corrected without deleting the provider (which orphans the
+			    model ids and slot assignments that point at it). */}
+			<Show when={supportsBaseUrl(props.provider.type)}>
+				<div class={s.group} style={{ "margin-top": "8px" }}>
+					<label>Base URL</label>
+					<div class={s.groupRow}>
+						<input
+							type="text"
+							data-testid={`base-url-${props.provider.id}`}
+							placeholder="Leave blank to use default"
+							value={baseUrlInput()}
+							onInput={(e) => setBaseUrlInput(e.currentTarget.value)}
+						/>
+						<button class={s.inlineBtn} data-testid={`save-base-url-${props.provider.id}`} onClick={saveBaseUrl}>
+							Save URL
+						</button>
+					</div>
+					<div class={s.hint}>
+						<Show
+							when={baseUrlMsg()}
+							fallback={<>Include the version path — most OpenAI-compatible servers need a trailing /v1.</>}
+						>
+							{baseUrlMsg()}
+						</Show>
+					</div>
+				</div>
+			</Show>
+
 			{/* Models */}
 			<div style={{ "margin-top": "8px" }}>
 				<div class={s.hintInline}>Models ({models().length}):</div>
@@ -352,7 +533,7 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 					}
 				>
 					<AddModelForm
-						providerId={props.provider.id}
+						provider={props.provider}
 						onAdd={(m) => {
 							providerRegistryStore.addModel(m);
 							setShowAddModel(false);

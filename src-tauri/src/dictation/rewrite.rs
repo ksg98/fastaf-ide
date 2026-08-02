@@ -14,7 +14,6 @@
 //! Privacy: transcript content is never logged — errors carry only status codes
 //! and (truncated) server error bodies.
 
-use serde::Serialize;
 use std::time::Duration;
 
 use crate::provider_registry::{self, SlotName};
@@ -23,17 +22,9 @@ const REWRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A model advertised by the configured provider's /models endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct RewriteModelInfo {
-    pub id: String,
-    /// Whether the endpoint advertises reasoning support for this model.
-    pub supports_reasoning: bool,
-    /// Endpoint-enumerated effort values (e.g. OpenRouter `supported_efforts`).
-    /// None when reasoning is advertised without an enumeration.
-    pub effort_options: Option<Vec<String>>,
-    /// Endpoint-declared default effort, when provided.
-    pub default_effort: Option<String>,
-}
+/// Aliased to the shared registry type so the dictation frontend contract is
+/// unchanged while every surface parses one implementation.
+pub type RewriteModelInfo = crate::provider_registry::DiscoveredModel;
 
 /// Join a base URL and a path, tolerating trailing slashes on the base.
 fn join_url(base: &str, path: &str) -> String {
@@ -42,82 +33,9 @@ fn join_url(base: &str, path: &str) -> String {
     format!("{base}/{path}")
 }
 
-/// Parse a /models response leniently across providers.
-///
-/// Entries come from `data` (OpenAI/OpenRouter/Groq/LM Studio), else `models`
-/// (Ollama native), else a bare array. Each entry is an object with `id` (else
-/// `name`) or a bare string. Reasoning detection per entry:
-/// - a `reasoning` object → supported; efforts from its `supported_efforts`
-/// - else `supported_parameters` mentioning "reasoning"/"reasoning_effort" →
-///   supported, no enumeration
-/// - else unsupported
-///
-/// Entries that can't be parsed are skipped, never fatal.
-fn parse_models_response(json: &serde_json::Value) -> Vec<RewriteModelInfo> {
-    let entries = json
-        .get("data")
-        .and_then(|v| v.as_array())
-        .or_else(|| json.get("models").and_then(|v| v.as_array()))
-        .or_else(|| json.as_array());
-    let Some(entries) = entries else {
-        return Vec::new();
-    };
-
-    entries
-        .iter()
-        .filter_map(|entry| {
-            if let Some(id) = entry.as_str() {
-                return Some(RewriteModelInfo {
-                    id: id.to_string(),
-                    supports_reasoning: false,
-                    effort_options: None,
-                    default_effort: None,
-                });
-            }
-
-            let id = entry
-                .get("id")
-                .and_then(|v| v.as_str())
-                .or_else(|| entry.get("name").and_then(|v| v.as_str()))?
-                .to_string();
-
-            let mut supports_reasoning = false;
-            let mut effort_options: Option<Vec<String>> = None;
-            let mut default_effort: Option<String> = None;
-
-            if let Some(reasoning) = entry.get("reasoning").filter(|v| v.is_object()) {
-                supports_reasoning = true;
-                effort_options = reasoning
-                    .get("supported_efforts")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|e| e.as_str().map(String::from))
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|efforts| !efforts.is_empty());
-                default_effort = reasoning
-                    .get("default_effort")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-            } else if let Some(params) =
-                entry.get("supported_parameters").and_then(|v| v.as_array())
-            {
-                supports_reasoning = params
-                    .iter()
-                    .filter_map(|p| p.as_str())
-                    .any(|p| p == "reasoning" || p == "reasoning_effort");
-            }
-
-            Some(RewriteModelInfo {
-                id,
-                supports_reasoning,
-                effort_options,
-                default_effort,
-            })
-        })
-        .collect()
-}
+// The /models parser lives in `provider_registry` so the Providers picker, AI
+// Chat, and this rewrite all read the same effort vocabulary from one place.
+use crate::provider_registry::parse_discovered_models as parse_models_response;
 
 /// Truncate a server error body for error messages (~300 chars).
 fn truncate_body(body: &str) -> String {
@@ -169,13 +87,31 @@ pub(crate) fn build_request_body(
     Ok(body)
 }
 
+/// The provider the rewrite should actually use.
+///
+/// A stored id whose provider has since been removed is treated as unset rather
+/// than fatal. The picker already shows "Same as AI Chat" for an id it can't
+/// match, so erroring here would wedge the panel on a choice the user can no
+/// longer see or clear.
+fn effective_provider_id<'a>(
+    registry: &provider_registry::ProviderRegistry,
+    stored_id: &'a str,
+) -> &'a str {
+    let id = stored_id.trim();
+    if id.is_empty() || registry.providers.iter().any(|p| p.id == id) {
+        id
+    } else {
+        ""
+    }
+}
+
 /// Provider endpoint + key for the rewrite, honoring the explicit provider
 /// choice and falling back to whatever the Main slot points at.
 fn resolve_rewrite_endpoint(
     config: &super::commands::DictationConfig,
 ) -> Result<(Option<String>, String, String), String> {
     let registry = provider_registry::load_registry();
-    let provider_id = config.rewrite_provider_id.trim();
+    let provider_id = effective_provider_id(&registry, &config.rewrite_provider_id);
 
     if provider_id.is_empty() {
         let slot = provider_registry::resolve_slot(&registry, SlotName::Main)
@@ -203,11 +139,12 @@ pub async fn dictation_fetch_rewrite_models(
     provider_id: String,
 ) -> Result<Vec<RewriteModelInfo>, String> {
     let registry = provider_registry::load_registry();
-    let (base_url, api_key) = if provider_id.trim().is_empty() {
+    let provider_id = effective_provider_id(&registry, &provider_id);
+    let (base_url, api_key) = if provider_id.is_empty() {
         let slot = provider_registry::resolve_slot(&registry, SlotName::Main)?;
         (slot.config.base_url.clone(), slot.api_key)
     } else {
-        provider_registry::resolve_provider(&registry, provider_id.trim())?
+        provider_registry::resolve_provider(&registry, provider_id)?
     };
 
     let base = base_url.ok_or_else(|| {
@@ -397,6 +334,33 @@ mod tests {
 
     fn ids(models: &[RewriteModelInfo]) -> Vec<&str> {
         models.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    fn registry_with(provider_id: &str) -> provider_registry::ProviderRegistry {
+        let mut registry = provider_registry::ProviderRegistry::default();
+        registry.providers.push(provider_registry::ProviderEntry {
+            id: provider_id.to_string(),
+            provider_type: provider_registry::ProviderType::Custom,
+            label: "Test".to_string(),
+            base_url: Some("http://localhost:8317".to_string()),
+        });
+        registry
+    }
+
+    #[test]
+    fn effective_provider_id_keeps_a_live_provider() {
+        let registry = registry_with("custom-1");
+        assert_eq!(effective_provider_id(&registry, "custom-1"), "custom-1");
+        assert_eq!(effective_provider_id(&registry, "  custom-1  "), "custom-1");
+    }
+
+    #[test]
+    fn effective_provider_id_falls_back_when_provider_was_deleted() {
+        let registry = registry_with("custom-new");
+        // A provider the user removed and re-created leaves a dead id behind;
+        // it must degrade to the Main slot, not error.
+        assert_eq!(effective_provider_id(&registry, "custom-old"), "");
+        assert_eq!(effective_provider_id(&registry, ""), "");
     }
 
     #[test]

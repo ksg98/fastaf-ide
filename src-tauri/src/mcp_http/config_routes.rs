@@ -514,6 +514,10 @@ pub(super) async fn check_ollama_models_http(Json(b): Json<ProviderIdRef>) -> im
     Json(crate::provider_registry::check_ollama_models(b.provider_id).await)
 }
 
+pub(super) async fn fetch_provider_models_http(Json(b): Json<ProviderIdRef>) -> Response {
+    json_result(crate::provider_registry::fetch_provider_models(b.provider_id).await)
+}
+
 // --- MCP Status ---
 
 pub(super) async fn get_mcp_status_http(State(state): State<Arc<AppState>>) -> impl IntoResponse {
