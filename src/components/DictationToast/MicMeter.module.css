@@ -1,0 +1,17 @@
+.meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+}
+
+.bar {
+  width: 2px;
+  border-radius: 1px;
+  background: var(--fg-muted);
+  transition: height 70ms linear, background-color 70ms linear;
+}
+
+.barActive {
+  background: var(--activity);
+}
