@@ -194,9 +194,25 @@ describe("ProvidersTab", () => {
 		// The endpoint's declared default is adopted on selection.
 		expect(effort.value).toBe("high");
 
-		// A model without reasoning gets no effort control at all.
+		// A model with no advertised vocabulary still gets a control — most
+		// OpenAI-compatible endpoints publish no capability metadata at all.
 		fireEvent.change(modelSelect, { target: { value: "gpt-image-2" } });
-		expect(queryByTestId("effort-select")).toBeNull();
+		const fallback = (await findByTestId("effort-select")) as HTMLSelectElement;
+		expect([...fallback.options].map((o) => o.value)).toEqual(["", "minimal", "low", "medium", "high", "xhigh", "max"]);
+		expect(fallback.value).toBe("");
+	});
+
+	it("offers effort for a bare model listing with no capability metadata", async () => {
+		mockStore.state.registry.providers = [custom];
+		// Exactly what cli-proxy-api and most OpenAI-compatible servers return.
+		mockInvoke.mockResolvedValue([{ id: "gpt-5.6-terra", supports_reasoning: false }]);
+		const { getByTestId, findByTestId } = render(() => <ProvidersTab />);
+		fireEvent.click(getByTestId("add-model-btn-cli-codex"));
+
+		fireEvent.change((await findByTestId("model-select")) as HTMLSelectElement, {
+			target: { value: "gpt-5.6-terra" },
+		});
+		expect(await findByTestId("effort-select")).toBeTruthy();
 	});
 
 	it("stores the chosen effort and a tier-qualified id on the model", async () => {

@@ -9,8 +9,12 @@ import s from "../Settings.module.css";
 /// active model's endpoint advertises, so this can't be a closed union.
 type ReasoningEffort = string;
 
-/** Used only when the endpoint advertises no vocabulary of its own. */
-const FALLBACK_EFFORT_LEVELS = ["low", "medium", "high"];
+/**
+ * Used when the endpoint advertises no vocabulary of its own — which is the
+ * norm, since most OpenAI-compatible servers return bare model entries. These
+ * are exactly the levels the backend can encode (Rust `ReasoningLevel`).
+ */
+const FALLBACK_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 interface AiChatConfig {
 	temperature: number;

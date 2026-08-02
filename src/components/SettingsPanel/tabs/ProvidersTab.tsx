@@ -66,6 +66,13 @@ function supportsBaseUrl(type: ProviderType): boolean {
 	return !FIXED_ENDPOINT_TYPES.includes(type);
 }
 
+/**
+ * Effort levels the backend can encode (Rust `ReasoningLevel`). Used when the
+ * endpoint advertises no vocabulary of its own — offering free text there would
+ * be dishonest, since anything outside this set is mapped back to "auto".
+ */
+const ENCODABLE_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
 // ---------------------------------------------------------------------------
 // Add Provider Wizard
 // ---------------------------------------------------------------------------
@@ -225,9 +232,20 @@ const AddModelForm: Component<{
 
 	/** The discovered record for the model currently chosen, if it came from discovery. */
 	const selected = createMemo(() => options().find((m) => m.id === modelName().trim()));
-	const effortOptions = createMemo(() => selected()?.effort_options ?? []);
-	/** Reasoning is offered whenever the endpoint says the model supports it. */
-	const showEffort = createMemo(() => selected()?.supports_reasoning === true);
+
+	/**
+	 * Levels the endpoint advertised for this model, else the vocabulary the
+	 * backend can actually encode. Most OpenAI-compatible servers return bare
+	 * `{id, object, owned_by}` entries with no capability metadata at all, so
+	 * keying the control off `supports_reasoning` would hide it from nearly
+	 * every custom provider.
+	 */
+	const effortOptions = createMemo(() => {
+		const advertised = selected()?.effort_options;
+		return advertised?.length ? advertised : ENCODABLE_EFFORT_LEVELS;
+	});
+	/** Effort applies to any chosen model — absent metadata is not a "no". */
+	const showEffort = createMemo(() => modelName().trim().length > 0);
 
 	// Selecting a model adopts the effort that model's endpoint declares as its
 	// default, so the common case needs no extra click.
@@ -284,37 +302,20 @@ const AddModelForm: Component<{
 				</Show>
 			</div>
 
-			{/* Reasoning effort — offered only for models the endpoint says can
-			    reason, using the levels it advertises. Free text when it claims
-			    reasoning without enumerating levels. */}
+			{/* Reasoning effort for this model. Shown for any chosen model — most
+			    OpenAI-compatible endpoints publish no capability metadata, so
+			    absence of it can't mean "no reasoning". */}
 			<Show when={showEffort()}>
 				<div class={s.group}>
 					<label>Reasoning effort</label>
-					<Show
-						when={effortOptions().length > 0}
-						fallback={
-							<input
-								type="text"
-								data-testid="effort-input"
-								placeholder="unset — model decides"
-								value={effort()}
-								onInput={(e) => setEffort(e.currentTarget.value)}
-							/>
-						}
-					>
-						<select data-testid="effort-select" value={effort()} onChange={(e) => setEffort(e.currentTarget.value)}>
-							<option value="">unset — model decides</option>
-							<For each={effortOptions()}>{(level) => <option value={level}>{level}</option>}</For>
-						</select>
-					</Show>
+					<select data-testid="effort-select" value={effort()} onChange={(e) => setEffort(e.currentTarget.value)}>
+						<option value="">unset — model decides</option>
+						<For each={effortOptions()}>{(level) => <option value={level}>{level}</option>}</For>
+					</select>
 					<div class={s.hint}>
 						<Show
-							when={effortOptions().length > 0}
-							fallback={
-								<>
-									This model advertises reasoning but no effort levels — anything you type is sent as reasoning_effort.
-								</>
-							}
+							when={selected()?.effort_options?.length}
+							fallback={<>This endpoint advertises no effort levels, so these are the standard ones.</>}
 						>
 							Levels advertised by the endpoint for this model.
 						</Show>
