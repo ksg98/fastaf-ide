@@ -244,10 +244,8 @@ pub(crate) fn parse_clone_progress(line: &str) -> Option<(&'static str, u32)> {
         ("Counting objects", r)
     } else if let Some(r) = line.strip_prefix("Compressing objects:") {
         ("Compressing objects", r)
-    } else if let Some(r) = line.strip_prefix("Updating files:") {
-        ("Updating files", r)
     } else {
-        return None;
+        ("Updating files", line.strip_prefix("Updating files:")?)
     };
     let pct = rest
         .trim_start()
@@ -533,6 +531,11 @@ mod tests {
         assert_eq!(
             parse_clone_progress("Resolving deltas: 7% (14/200)"),
             Some(("Resolving deltas", 7))
+        );
+        // Last branch in the chain — the one the `?` rewrite folded into `else`.
+        assert_eq!(
+            parse_clone_progress("Updating files:  63% (1200/1900)"),
+            Some(("Updating files", 63))
         );
         assert_eq!(parse_clone_progress("Cloning into 'repo'..."), None);
         assert_eq!(parse_clone_progress("fatal: repository not found"), None);
