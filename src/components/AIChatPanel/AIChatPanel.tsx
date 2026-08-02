@@ -13,12 +13,14 @@ import {
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import { type ConversationMeta, conversationStore, type ToolCallEntry } from "../../stores/conversationStore";
+import { dictationStore } from "../../stores/dictation";
 import { ENCODABLE_EFFORT_LEVELS } from "../../stores/providerRegistry";
 import { terminalsStore } from "../../stores/terminals";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
 import { getShellFamily, sendCommand } from "../../utils/sendCommand";
+import { MicMeter } from "../DictationToast/MicMeter";
 import p from "../shared/panel.module.css";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
@@ -82,6 +84,14 @@ const IconSend = () => (
 const IconStop = () => (
 	<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
 		<rect x="2" y="2" width="10" height="10" rx="1" />
+	</svg>
+);
+
+const IconMic = () => (
+	<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+		<rect x="6" y="1.75" width="4" height="7.5" rx="2" fill="currentColor" stroke="none" />
+		<path d="M3.75 7.25v.75a4.25 4.25 0 008.5 0v-.75" stroke-linecap="round" />
+		<path d="M8 12.25v2" stroke-linecap="round" />
 	</svg>
 );
 
@@ -349,6 +359,71 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 			textareaRef.style.height = "auto";
 		}
 	};
+
+	// ── Dictation into the composer ────────────────────────────────────────
+	// The global hotkey path snapshots the focused element and routes terminals
+	// specially, so it can't target this textarea. Driving start/stop here keeps
+	// the transcript in the composer, where it can be edited before sending.
+	const [dictationError, setDictationError] = createSignal("");
+
+	/** True only while *this* panel owns the recording session. */
+	const [ownsRecording, setOwnsRecording] = createSignal(false);
+	const dictating = () =>
+		ownsRecording() &&
+		(dictationStore.state.recording || dictationStore.state.processing || dictationStore.state.rewriting);
+
+	const startDictation = async () => {
+		setDictationError("");
+		setOwnsRecording(true);
+		try {
+			await dictationStore.startRecording();
+		} catch (e) {
+			setOwnsRecording(false);
+			setDictationError(String(e));
+		}
+	};
+
+	/** Append text to the composer, keeping whatever the user already typed. */
+	const appendToInput = (text: string) => {
+		setInputText((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")} ${text}` : text));
+		autoResize();
+		textareaRef?.focus();
+	};
+
+	const stopDictation = async () => {
+		try {
+			const response = await dictationStore.stopRecording();
+			if (!response) {
+				setDictationError("Transcription failed");
+				return;
+			}
+			if (response.skip_reason) {
+				setDictationError(response.skip_reason);
+				return;
+			}
+			const text = response.text.trim();
+			if (!text) {
+				setDictationError("No speech detected");
+				return;
+			}
+			// Optional AI rewrite — any failure falls back to the raw transcript,
+			// so a broken rewrite provider never costs the user their words.
+			let finalText = text;
+			if (dictationStore.state.rewriteEnabled) {
+				const rewritten = await dictationStore.rewriteText(text);
+				if (rewritten?.trim()) finalText = rewritten.trim();
+			}
+			appendToInput(finalText);
+		} finally {
+			setOwnsRecording(false);
+		}
+	};
+
+	// Releasing the mic when the panel goes away matters: the recorder is a
+	// process-wide singleton, so a leaked session would block the next start.
+	onCleanup(() => {
+		if (ownsRecording() && dictationStore.state.recording) void dictationStore.stopRecording();
+	});
 
 	const handleKeyDown = (e: KeyboardEvent) => {
 		if (e.key === "Enter") {
@@ -827,6 +902,28 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 				<div class={s.frozenBanner}>No terminal focused — chat is read-only</div>
 			</Show>
 
+			{/* Live mic strip — its own row so the meter spans the composer width
+			    instead of competing with the textarea for horizontal space. */}
+			<Show when={dictating()}>
+				<div class={s.micLive} data-testid="chat-mic-live">
+					<span class={s.micDot} />
+					<MicMeter level={dictationStore.state.audioLevel} barCount={11} maxPx={14} />
+					<span class={s.micLabel}>
+						{dictationStore.state.rewriting
+							? "Rewriting…"
+							: dictationStore.state.processing
+								? "Transcribing…"
+								: dictationStore.state.partialText || "Listening…"}
+					</span>
+				</div>
+			</Show>
+
+			<Show when={dictationError()}>
+				<div class={s.micError} data-testid="chat-mic-error">
+					{dictationError()}
+				</div>
+			</Show>
+
 			{/* ── Input area ──────────────────────────────────────── */}
 			<div class={s.inputArea}>
 				<textarea
@@ -849,6 +946,32 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					onKeyDown={handleKeyDown}
 					disabled={isFrozen()}
 				/>
+				<Show
+					when={dictating()}
+					fallback={
+						<button
+							class={s.micBtn}
+							data-testid="chat-mic-btn"
+							onClick={startDictation}
+							disabled={isFrozen() || dictationStore.state.loading}
+							title="Dictate (transcribes into the message box)"
+							aria-label="Start dictation"
+						>
+							<IconMic />
+						</button>
+					}
+				>
+					<button
+						class={s.micBtnActive}
+						data-testid="chat-mic-stop-btn"
+						onClick={stopDictation}
+						disabled={dictationStore.state.processing || dictationStore.state.rewriting}
+						title="Stop dictation and insert the transcript"
+						aria-label="Stop dictation"
+					>
+						<IconStop />
+					</button>
+				</Show>
 				<Show
 					when={conversationStore.isStreaming()}
 					fallback={

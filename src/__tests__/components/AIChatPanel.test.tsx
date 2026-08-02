@@ -112,6 +112,38 @@ vi.mock("../../components/ui/ContentRenderer", () => ({
 	ContentRenderer: (props: { content: string }) => <div>{props.content}</div>,
 }));
 
+// Reactive store mock — `dictating()` reads state.recording, so a plain object
+// would never re-render the composer when recording flips. The store must be
+// built inside the (async) mock factory via a real import: a `require` here
+// resolves a second copy of solid-js/store, whose proxies the component's
+// reactive graph does not track.
+// biome-ignore lint/suspicious/noExplicitAny: filled in by the mock factory below
+const mockDictation = vi.hoisted(() => ({}) as any);
+
+vi.mock("../../stores/dictation", async () => {
+	const { createStore } = await import("solid-js/store");
+	const [state, setState] = createStore({
+		recording: false,
+		processing: false,
+		rewriting: false,
+		loading: false,
+		audioLevel: 0,
+		partialText: "",
+		rewriteEnabled: false,
+	});
+	mockDictation.state = state;
+	mockDictation.setState = setState;
+	mockDictation.startRecording = vi.fn(async () => {
+		setState("recording", true);
+	});
+	mockDictation.stopRecording = vi.fn(async () => {
+		setState("recording", false);
+		return { text: "hello from the mic", skip_reason: null, duration_s: 1 };
+	});
+	mockDictation.rewriteText = vi.fn(async () => "rewritten text");
+	return { dictationStore: mockDictation };
+});
+
 import { AIChatPanel } from "../../components/AIChatPanel/AIChatPanel";
 
 describe("AIChatPanel lifecycle", () => {
@@ -196,5 +228,99 @@ describe("AIChatPanel extended-thinking disclosure", () => {
 		mockIsThinking.mockReturnValue(false);
 		const { container } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
 		expect(container.querySelector("details")?.hasAttribute("open")).toBe(false);
+	});
+});
+
+describe("AIChatPanel dictation", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockMessages.mockReturnValue([]);
+		mockDictation.setState({
+			recording: false,
+			processing: false,
+			rewriting: false,
+			loading: false,
+			audioLevel: 0,
+			partialText: "",
+			rewriteEnabled: false,
+		});
+		// Restore the state-mutating implementations that clearAllMocks left in
+		// place but whose per-test overrides may have replaced.
+		mockDictation.startRecording.mockImplementation(async () => {
+			mockDictation.setState("recording", true);
+		});
+		mockDictation.stopRecording.mockImplementation(async () => {
+			mockDictation.setState("recording", false);
+			return { text: "hello from the mic", skip_reason: null, duration_s: 1 };
+		});
+		mockDictation.rewriteText.mockResolvedValue("rewritten text");
+	});
+
+	afterEach(() => cleanup());
+
+	it("shows a mic button and no live meter at rest", () => {
+		const { getByTestId, queryByTestId } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		expect(getByTestId("chat-mic-btn")).toBeTruthy();
+		expect(queryByTestId("chat-mic-live")).toBeNull();
+	});
+
+	it("starts recording and reveals the level meter and stop button", async () => {
+		const { getByTestId, findByTestId } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		getByTestId("chat-mic-btn").click();
+
+		await vi.waitFor(() => expect(mockDictation.startRecording).toHaveBeenCalled());
+		expect(await findByTestId("chat-mic-live")).toBeTruthy();
+		expect(await findByTestId("chat-mic-stop-btn")).toBeTruthy();
+	});
+
+	it("inserts the transcript into the composer on stop", async () => {
+		const { getByTestId, findByTestId, container } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		getByTestId("chat-mic-btn").click();
+		(await findByTestId("chat-mic-stop-btn")).click();
+
+		await vi.waitFor(() => {
+			const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+			expect(textarea.value).toBe("hello from the mic");
+		});
+		// The transcript lands in the box for editing — it is never auto-sent.
+		expect(mockDictation.rewriteText).not.toHaveBeenCalled();
+	});
+
+	it("applies the AI rewrite when it is enabled", async () => {
+		mockDictation.setState("rewriteEnabled", true);
+		const { getByTestId, findByTestId, container } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		getByTestId("chat-mic-btn").click();
+		(await findByTestId("chat-mic-stop-btn")).click();
+
+		await vi.waitFor(() => {
+			const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+			expect(textarea.value).toBe("rewritten text");
+		});
+	});
+
+	it("keeps the raw transcript when the rewrite fails", async () => {
+		mockDictation.setState("rewriteEnabled", true);
+		mockDictation.rewriteText.mockResolvedValueOnce(null);
+		const { getByTestId, findByTestId, container } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		getByTestId("chat-mic-btn").click();
+		(await findByTestId("chat-mic-stop-btn")).click();
+
+		await vi.waitFor(() => {
+			const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+			expect(textarea.value).toBe("hello from the mic");
+		});
+	});
+
+	it("surfaces a skip reason instead of inserting empty text", async () => {
+		mockDictation.stopRecording.mockImplementationOnce(async () => {
+			mockDictation.setState("recording", false);
+			return { text: "", skip_reason: "too short", duration_s: 0.1 };
+		});
+		const { getByTestId, findByTestId, container } = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		getByTestId("chat-mic-btn").click();
+		(await findByTestId("chat-mic-stop-btn")).click();
+
+		expect((await findByTestId("chat-mic-error")).textContent).toContain("too short");
+		expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
 	});
 });
