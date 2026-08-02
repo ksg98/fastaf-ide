@@ -49,7 +49,10 @@ const mockStore = vi.hoisted(() => ({
 	_reset: vi.fn(),
 }));
 
-vi.mock("../../stores/providerRegistry", () => ({
+// Partial mock: the store is replaced, but real exports the component depends on
+// (e.g. ENCODABLE_EFFORT_LEVELS) must still come through, or it imports undefined.
+vi.mock("../../stores/providerRegistry", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../stores/providerRegistry")>()),
 	providerRegistryStore: mockStore,
 }));
 

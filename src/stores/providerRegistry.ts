@@ -46,6 +46,14 @@ export interface ModelEntry {
 	effort?: string | null;
 }
 
+/**
+ * Effort levels the backend can encode (Rust `ReasoningLevel`). Used wherever an
+ * endpoint advertises no vocabulary of its own — which is the norm, since most
+ * OpenAI-compatible servers return bare model entries. Anything outside this set
+ * is mapped back to "auto", so these are the only values worth offering.
+ */
+export const ENCODABLE_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
 /** A model as its endpoint describes it — mirrors Rust `DiscoveredModel`. */
 export interface DiscoveredModel {
 	id: string;
