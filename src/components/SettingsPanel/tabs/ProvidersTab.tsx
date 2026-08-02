@@ -6,6 +6,7 @@ import { agentConfigsStore } from "../../../stores/agentConfigs";
 import { appLogger } from "../../../stores/appLogger";
 import {
 	type DiscoveredModel,
+	ENCODABLE_EFFORT_LEVELS,
 	type ModelEntry,
 	type ProviderEntry,
 	type ProviderType,
@@ -65,13 +66,6 @@ const FIXED_ENDPOINT_TYPES: ProviderType[] = ["anthropic", "open_ai", "gemini"];
 function supportsBaseUrl(type: ProviderType): boolean {
 	return !FIXED_ENDPOINT_TYPES.includes(type);
 }
-
-/**
- * Effort levels the backend can encode (Rust `ReasoningLevel`). Used when the
- * endpoint advertises no vocabulary of its own — offering free text there would
- * be dishonest, since anything outside this set is mapped back to "auto".
- */
-const ENCODABLE_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 // ---------------------------------------------------------------------------
 // Add Provider Wizard

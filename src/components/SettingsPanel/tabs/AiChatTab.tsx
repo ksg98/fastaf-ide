@@ -1,20 +1,13 @@
 import { type Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { invoke, listen } from "../../../invoke";
 import { appLogger } from "../../../stores/appLogger";
-import { type DiscoveredModel, providerRegistryStore } from "../../../stores/providerRegistry";
+import { type DiscoveredModel, ENCODABLE_EFFORT_LEVELS, providerRegistryStore } from "../../../stores/providerRegistry";
 import { toastsStore } from "../../../stores/toasts";
 import s from "../Settings.module.css";
 
 /// "auto"/"off" always apply; the levels in between come from whatever the
 /// active model's endpoint advertises, so this can't be a closed union.
 type ReasoningEffort = string;
-
-/**
- * Used when the endpoint advertises no vocabulary of its own — which is the
- * norm, since most OpenAI-compatible servers return bare model entries. These
- * are exactly the levels the backend can encode (Rust `ReasoningLevel`).
- */
-const FALLBACK_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 interface AiChatConfig {
 	temperature: number;
@@ -124,7 +117,7 @@ export const AiChatTab: Component = () => {
 	// Effort levels for the model the Main slot points at, read from its endpoint
 	// rather than hardcoded — different models expose different vocabularies
 	// (low/medium/high, xhigh, minimal, …).
-	const [effortLevels, setEffortLevels] = createSignal<string[]>(FALLBACK_EFFORT_LEVELS);
+	const [effortLevels, setEffortLevels] = createSignal<string[]>(ENCODABLE_EFFORT_LEVELS);
 	const [effortModel, setEffortModel] = createSignal("");
 
 	onMount(async () => {

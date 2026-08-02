@@ -685,7 +685,25 @@ function accumulateUsageForState(
 // Conversation control
 // ---------------------------------------------------------------------------
 
-async function sendMessage(text: string, sessionId: string | null): Promise<void> {
+/**
+ * Per-turn overrides chosen in the chat header. Both are optional; omitting one
+ * lets the backend fall through to the slot model's setting and then the global
+ * AI-chat config.
+ */
+export interface TurnOptions {
+	modelOverride?: string;
+	reasoningEffort?: string;
+}
+
+/** Drop empty strings so an unset picker doesn't override the configured default. */
+export function turnParams(opts?: TurnOptions): Record<string, string> {
+	const params: Record<string, string> = {};
+	if (opts?.modelOverride?.trim()) params.modelOverride = opts.modelOverride.trim();
+	if (opts?.reasoningEffort?.trim()) params.reasoningEffort = opts.reasoningEffort.trim();
+	return params;
+}
+
+async function sendMessage(text: string, sessionId: string | null, opts?: TurnOptions): Promise<void> {
 	const s = activeConversation();
 	if (s.isStreaming()) return;
 	if (!sessionId) {
@@ -709,13 +727,19 @@ async function sendMessage(text: string, sessionId: string | null): Promise<void
 			const { invoke: coreInvoke, Channel } = await import("@tauri-apps/api/core");
 			const onEvent = new Channel<ConversationEvent>();
 			onEvent.onmessage = (event) => applyConversationEvent(s, event, capturedKey);
-			await coreInvoke("start_conversation", { sessionId, message: text, autonomy: "assisted", onEvent });
+			await coreInvoke("start_conversation", {
+				sessionId,
+				message: text,
+				autonomy: "assisted",
+				...turnParams(opts),
+				onEvent,
+			});
 		} else {
 			// Browser/PWA: dedicated WS carries the token stream (event-bridge plan Step 5).
 			closeConversationStream(s); // drop any orphaned prior stream first
 			s.conversationStreamDispose = openConversationStream<ConversationEvent>(
 				sessionId,
-				{ message: text, autonomy: "assisted" },
+				{ message: text, autonomy: "assisted", ...turnParams(opts) },
 				(event) => applyConversationEvent(s, event, capturedKey),
 				() => onConversationStreamClosed(s, capturedKey),
 			);
@@ -743,7 +767,12 @@ async function cancelStream(): Promise<void> {
 	}
 }
 
-async function startAgent(sessionId: string, goal: string, isUnrestricted?: boolean): Promise<void> {
+async function startAgent(
+	sessionId: string,
+	goal: string,
+	isUnrestricted?: boolean,
+	opts?: TurnOptions,
+): Promise<void> {
 	const s = activeConversation();
 	const capturedKey = activeKey();
 	if (s.agentState() === "running" || s.agentState() === "paused") return;
@@ -774,6 +803,7 @@ async function startAgent(sessionId: string, goal: string, isUnrestricted?: bool
 				message: goal,
 				autonomy: "autonomous",
 				bypassedTools: bypassed,
+				...turnParams(opts),
 				onEvent,
 			});
 		} else {
@@ -781,7 +811,7 @@ async function startAgent(sessionId: string, goal: string, isUnrestricted?: bool
 			closeConversationStream(s); // drop any orphaned prior stream first
 			s.conversationStreamDispose = openConversationStream<ConversationEvent>(
 				sessionId,
-				{ message: goal, autonomy: "autonomous", bypassedTools: bypassed },
+				{ message: goal, autonomy: "autonomous", bypassedTools: bypassed, ...turnParams(opts) },
 				(event) => applyConversationEvent(s, event, capturedKey),
 				() => onConversationStreamClosed(s, capturedKey),
 			);

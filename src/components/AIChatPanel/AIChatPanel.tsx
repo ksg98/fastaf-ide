@@ -13,6 +13,7 @@ import {
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import { type ConversationMeta, conversationStore, type ToolCallEntry } from "../../stores/conversationStore";
+import { ENCODABLE_EFFORT_LEVELS } from "../../stores/providerRegistry";
 import { terminalsStore } from "../../stores/terminals";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
@@ -230,6 +231,8 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	const [maxSteps, setMaxSteps] = createSignal(20);
 	const [modelOverride, setModelOverride] = createSignal<string>("");
 	const [availableModels, setAvailableModels] = createSignal<string[]>([]);
+	const [effort, setEffort] = createSignal<string>("");
+	const [effortLevels, setEffortLevels] = createSignal<string[]>(ENCODABLE_EFFORT_LEVELS);
 	const [showHistory, setShowHistory] = createSignal(false);
 	const [showUnrestrictedConfirm, setShowUnrestrictedConfirm] = createSignal(false);
 	const [historyList, setHistoryList] = createSignal<ConversationMeta[]>([]);
@@ -249,16 +252,33 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 
 	// Load available models from the Main slot provider on mount
 	onMount(() => {
-		invoke<{ slots: Record<string, string>; models: Array<{ id: string; model_name: string }> }>(
-			"load_provider_registry",
-		)
-			.then((reg) => {
+		invoke<{
+			slots: Record<string, string>;
+			models: Array<{ id: string; model_name: string; provider_id: string; effort?: string | null }>;
+		}>("load_provider_registry")
+			.then(async (reg) => {
 				const mainModelId = reg.slots["Main"];
 				const names = reg.models.map((m) => m.model_name).filter(Boolean);
 				setAvailableModels(names);
+				const main = reg.models.find((m) => m.id === mainModelId);
+				if (!main) return;
 				if (!modelOverride()) {
-					const main = reg.models.find((m) => m.id === mainModelId);
-					if (main) setModelOverride(main.model_name);
+					setModelOverride(main.model_name);
+					// Start from the effort configured for this model, so the header
+					// reflects what would actually be sent rather than a blank.
+					if (main.effort) setEffort(main.effort);
+				}
+				// Prefer the levels this model's endpoint advertises over the generic
+				// set; best-effort, since many endpoints publish no metadata at all.
+				try {
+					const discovered = await invoke<Array<{ id: string; effort_options?: string[] | null }>>(
+						"fetch_provider_models",
+						{ providerId: main.provider_id },
+					);
+					const match = discovered.find((m) => m.id === main.model_name);
+					if (match?.effort_options?.length) setEffortLevels(match.effort_options);
+				} catch {
+					/* keep the generic list */
 				}
 			})
 			.catch(() => {
@@ -313,13 +333,15 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		if (!text || isFrozen()) return;
 		const sid = activeSessionId();
 
+		const turnOpts = { modelOverride: modelOverride(), reasoningEffort: effort() };
+
 		if (autonomy() === "autonomous") {
 			const st = conversationStore.agentState();
 			if (st === "running" || st === "paused") return;
-			if (sid) conversationStore.startAgent(sid, text, conversationStore.unrestricted());
+			if (sid) conversationStore.startAgent(sid, text, conversationStore.unrestricted(), turnOpts);
 		} else {
 			if (conversationStore.isStreaming()) return;
-			conversationStore.sendMessage(text, sid);
+			conversationStore.sendMessage(text, sid, turnOpts);
 		}
 
 		setInputText("");
@@ -484,6 +506,20 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 							<For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
 						</select>
 					</Show>
+					{/* Reasoning effort for this conversation. Seeded from the model's
+					    configured effort; leaving it on Default falls through to that,
+					    then to the global AI Chat setting. */}
+					<select
+						class={s.modelPicker}
+						data-testid="effort-picker"
+						value={effort()}
+						onChange={(e) => setEffort(e.currentTarget.value)}
+						title="Reasoning effort for this conversation"
+					>
+						<option value="">Default effort</option>
+						<option value="off">off</option>
+						<For each={effortLevels()}>{(level) => <option value={level}>{level}</option>}</For>
+					</select>
 					{/* Autonomy toggle */}
 					<button
 						class={cx(s.headerBtn, autonomy() === "autonomous" && s.headerBtnActive)}
