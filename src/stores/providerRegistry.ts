@@ -42,6 +42,16 @@ export interface ModelEntry {
 	provider_id: string;
 	model_name: string;
 	tier: ModelTier;
+	/** Reasoning effort for this model, from the levels its endpoint advertises. */
+	effort?: string | null;
+}
+
+/** A model as its endpoint describes it — mirrors Rust `DiscoveredModel`. */
+export interface DiscoveredModel {
+	id: string;
+	supports_reasoning: boolean;
+	effort_options?: string[] | null;
+	default_effort?: string | null;
 }
 
 export type Features = Record<string, never>;
@@ -112,6 +122,18 @@ function createProviderRegistryStore() {
 		setState(
 			produce((s) => {
 				s.registry.providers.push(entry);
+			}),
+		);
+		void save();
+	}
+
+	/** Update a provider's base URL in place. Empty string clears it back to the type's default. */
+	function setProviderBaseUrl(id: string, baseUrl: string): void {
+		const trimmed = baseUrl.trim();
+		setState(
+			produce((s) => {
+				const provider = s.registry.providers.find((p) => p.id === id);
+				if (provider) provider.base_url = trimmed || null;
 			}),
 		);
 		void save();
@@ -210,6 +232,7 @@ function createProviderRegistryStore() {
 		saveKey,
 		deleteKey,
 		addProvider,
+		setProviderBaseUrl,
 		removeProvider,
 		addModel,
 		removeModel,

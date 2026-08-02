@@ -1,10 +1,16 @@
 import { type Component, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { invoke, listen } from "../../../invoke";
 import { appLogger } from "../../../stores/appLogger";
+import { type DiscoveredModel, providerRegistryStore } from "../../../stores/providerRegistry";
 import { toastsStore } from "../../../stores/toasts";
 import s from "../Settings.module.css";
 
-type ReasoningEffort = "auto" | "off" | "low" | "medium" | "high";
+/// "auto"/"off" always apply; the levels in between come from whatever the
+/// active model's endpoint advertises, so this can't be a closed union.
+type ReasoningEffort = string;
+
+/** Used only when the endpoint advertises no vocabulary of its own. */
+const FALLBACK_EFFORT_LEVELS = ["low", "medium", "high"];
 
 interface AiChatConfig {
 	temperature: number;
@@ -110,6 +116,28 @@ interface SchedulerConfig {
 export const AiChatTab: Component = () => {
 	const [temperature, setTemperature] = createSignal(0.7);
 	const [reasoningEffort, setReasoningEffort] = createSignal<ReasoningEffort>("auto");
+
+	// Effort levels for the model the Main slot points at, read from its endpoint
+	// rather than hardcoded — different models expose different vocabularies
+	// (low/medium/high, xhigh, minimal, …).
+	const [effortLevels, setEffortLevels] = createSignal<string[]>(FALLBACK_EFFORT_LEVELS);
+	const [effortModel, setEffortModel] = createSignal("");
+
+	onMount(async () => {
+		const resolved = providerRegistryStore.resolveSlot("main");
+		if (!resolved) return;
+		setEffortModel(resolved.model.model_name);
+		try {
+			const models = await invoke<DiscoveredModel[]>("fetch_provider_models", {
+				providerId: resolved.provider.id,
+			});
+			const match = models.find((m) => m.id === resolved.model.model_name);
+			if (match?.effort_options?.length) setEffortLevels(match.effort_options);
+		} catch (e) {
+			// Discovery is best-effort — the fallback list still lets the user choose.
+			appLogger.warn("config", `Effort discovery failed for ${resolved.provider.id}: ${String(e)}`);
+		}
+	});
 
 	// Scheduler state
 	const [schedulerJobs, setSchedulerJobs] = createSignal<ScheduledJob[]>([]);
@@ -252,21 +280,22 @@ export const AiChatTab: Component = () => {
 			<div class={s.group}>
 				<label>Extended thinking</label>
 				<select
+					data-testid="reasoning-effort-select"
 					value={reasoningEffort()}
 					onChange={(e) => {
-						setReasoningEffort(e.currentTarget.value as ReasoningEffort);
+						setReasoningEffort(e.currentTarget.value);
 						saveConfig();
 					}}
 				>
 					<option value="auto">Auto (on for Opus 4.7+)</option>
 					<option value="off">Off</option>
-					<option value="low">Low</option>
-					<option value="medium">Medium</option>
-					<option value="high">High</option>
+					<For each={effortLevels()}>{(level) => <option value={level}>{level}</option>}</For>
 				</select>
 				<p class={s.hint}>
-					Streams the model's reasoning into a collapsible "Thinking" block. Only models that support extended thinking
-					(Claude Opus 4.7+) are affected; higher effort costs more tokens and latency.
+					Streams the model's reasoning into a collapsible "Thinking" block; higher effort costs more tokens and
+					latency. <em>Auto</em> only turns thinking on for models known to support it (Claude Opus 4.7+) — an explicit
+					level is sent to any model.{" "}
+					<Show when={effortModel()}>Levels shown are those advertised for {effortModel()}.</Show>
 				</p>
 			</div>
 

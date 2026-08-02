@@ -1764,6 +1764,7 @@ pub fn run() {
             provider_registry::delete_provider_api_key,
             provider_registry::test_slot_connection,
             provider_registry::check_ollama_models,
+            provider_registry::fetch_provider_models,
             llm_api::execute_api_prompt,
             ai_chat::load_ai_chat_config,
             ai_chat::save_ai_chat_config,

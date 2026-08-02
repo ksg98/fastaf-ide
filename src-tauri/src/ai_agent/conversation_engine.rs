@@ -51,25 +51,35 @@ pub(crate) struct ConversationConfig {
     pub compact_after_tokens: Option<usize>,
 }
 
-/// User-facing reasoning effort. `Auto` enables a sensible default on capable
-/// models; all levels are no-ops on models without extended thinking.
+/// User-facing reasoning effort. `Auto` enables a sensible default on models
+/// known to think; every other level is an explicit choice and is sent as-is.
+///
+/// The variants mirror what genai can encode, which is also the vocabulary
+/// endpoints advertise in practice (`supported_efforts`). An unrecognized value
+/// degrades to `Auto` rather than failing the call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ReasoningLevel {
     #[default]
     Auto,
     Off,
+    Minimal,
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl ReasoningLevel {
     pub(crate) fn from_opt(s: Option<&str>) -> Self {
-        match s {
-            Some("off") => Self::Off,
+        match s.map(str::trim) {
+            Some("off") | Some("none") => Self::Off,
+            Some("minimal") => Self::Minimal,
             Some("low") => Self::Low,
             Some("medium") => Self::Medium,
             Some("high") => Self::High,
+            Some("xhigh") => Self::XHigh,
+            Some("max") => Self::Max,
             _ => Self::Auto,
         }
     }
@@ -85,17 +95,25 @@ fn supports_extended_thinking(model: &str) -> bool {
 }
 
 /// Resolve the user's reasoning level + the active model into a genai effort.
-/// Returns `None` when the model can't think or the user turned it off.
+///
+/// Only `Auto` consults the built-in "can this model think" list — that list is
+/// a guess, and it can only ever know about Claude. An explicit level came from
+/// the user or from the endpoint's own advertised vocabulary, so it is passed
+/// through for any model; gating it here is what silently dropped effort on
+/// every OpenAI-compatible endpoint.
 fn resolve_reasoning(level: ReasoningLevel, model: &str) -> Option<genai::chat::ReasoningEffort> {
     use genai::chat::ReasoningEffort;
-    if !supports_extended_thinking(model) {
-        return None;
-    }
     match level {
         ReasoningLevel::Off => None,
-        ReasoningLevel::Auto | ReasoningLevel::Medium => Some(ReasoningEffort::Medium),
+        ReasoningLevel::Auto => {
+            supports_extended_thinking(model).then_some(ReasoningEffort::Medium)
+        }
+        ReasoningLevel::Minimal => Some(ReasoningEffort::Minimal),
         ReasoningLevel::Low => Some(ReasoningEffort::Low),
+        ReasoningLevel::Medium => Some(ReasoningEffort::Medium),
         ReasoningLevel::High => Some(ReasoningEffort::High),
+        ReasoningLevel::XHigh => Some(ReasoningEffort::XHigh),
+        ReasoningLevel::Max => Some(ReasoningEffort::Max),
     }
 }
 
@@ -361,15 +379,17 @@ pub(crate) async fn build_config(
     bypassed_tools: Option<Vec<String>>,
     reasoning_effort: Option<String>,
 ) -> ConversationConfig {
-    // The `reasoning_effort` fallback reads the AI-chat config from disk; do it on
-    // the blocking pool so we never stall an async worker thread.
+    // Precedence: explicit per-call > the effort stored on the Main slot's model
+    // > the global AI-chat setting. Both fallbacks read config from disk, so do
+    // them on the blocking pool rather than stalling an async worker thread.
     let reasoning_effort = match reasoning_effort {
         Some(r) => Some(r),
-        None => {
-            tokio::task::spawn_blocking(|| crate::ai_chat::load_ai_chat_config().reasoning_effort)
-                .await
-                .unwrap_or(None)
-        }
+        None => tokio::task::spawn_blocking(|| {
+            crate::provider_registry::slot_model_effort(crate::provider_registry::SlotName::Main)
+                .or_else(|| crate::ai_chat::load_ai_chat_config().reasoning_effort)
+        })
+        .await
+        .unwrap_or(None),
     };
     ConversationConfig {
         autonomy: match autonomy.as_deref() {
@@ -1131,8 +1151,18 @@ mod tests {
         use genai::chat::ReasoningEffort;
         // Off always disables, even on a capable model.
         assert!(resolve_reasoning(ReasoningLevel::Off, "claude-opus-4-8").is_none());
-        // Any level is a no-op on a model without extended thinking.
-        assert!(resolve_reasoning(ReasoningLevel::High, "gpt-5").is_none());
+        // Auto is a no-op on a model the built-in list doesn't know.
+        assert!(resolve_reasoning(ReasoningLevel::Auto, "gpt-5").is_none());
+        // ...but an explicit level is honored there — the endpoint advertised it,
+        // so we must not second-guess it away.
+        assert!(matches!(
+            resolve_reasoning(ReasoningLevel::High, "gpt-5"),
+            Some(ReasoningEffort::High)
+        ));
+        assert!(matches!(
+            resolve_reasoning(ReasoningLevel::XHigh, "gpt-5.6-terra"),
+            Some(ReasoningEffort::XHigh)
+        ));
         // Auto maps to Medium on a capable model (ReasoningEffort has no PartialEq → matches!).
         assert!(matches!(
             resolve_reasoning(ReasoningLevel::Auto, "claude-opus-4-8"),

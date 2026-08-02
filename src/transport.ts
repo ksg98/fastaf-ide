@@ -592,6 +592,9 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	check_ollama_models: {
 		map: (args) => ({ method: "POST", path: "/config/ollama-models", body: { providerId: args.providerId } }),
 	},
+	fetch_provider_models: {
+		map: (args) => ({ method: "POST", path: "/config/provider-models", body: { providerId: args.providerId } }),
+	},
 
 	// --- Git/GitHub ---
 	get_repo_info: {

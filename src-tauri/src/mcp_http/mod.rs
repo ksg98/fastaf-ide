@@ -1221,6 +1221,10 @@ pub fn build_router(state: Arc<AppState>, remote_auth: bool, mcp_enabled: bool) 
             post(config_routes::check_ollama_models_http),
         )
         .route(
+            "/config/provider-models",
+            post(config_routes::fetch_provider_models_http),
+        )
+        .route(
             "/config/remote-connections",
             get(config_routes::get_remote_connections).put(config_routes::put_remote_connection),
         )

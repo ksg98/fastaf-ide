@@ -100,6 +100,11 @@ pub(crate) struct ModelEntry {
     pub model_name: String,
     #[serde(default = "default_tier")]
     pub tier: ModelTier,
+    /// Reasoning effort for this model, as advertised by its endpoint. `None`
+    /// leaves the choice to the model. Additive and `serde(default)`, so a
+    /// registry written before this field still loads — no version bump needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -307,6 +312,7 @@ fn migrate_from_legacy() -> ProviderRegistry {
             provider_id: provider_id.clone(),
             model_name: chat_cfg.model.clone(),
             tier: ModelTier::Standard,
+            effort: None,
         });
 
         reg.slots.insert(SlotName::Main, model_id.clone());
@@ -328,6 +334,7 @@ fn migrate_from_legacy() -> ProviderRegistry {
                         provider_id: provider_id.clone(),
                         model_name: override_model.clone(),
                         tier: ModelTier::Standard,
+                        effort: None,
                     });
                 }
                 let mid = reg
@@ -367,6 +374,7 @@ fn migrate_from_legacy() -> ProviderRegistry {
                     provider_id: existing_provider_id,
                     model_name: llm_cfg.model.clone(),
                     tier: ModelTier::Standard,
+                    effort: None,
                 });
             }
             let mid = reg
@@ -393,6 +401,7 @@ fn migrate_from_legacy() -> ProviderRegistry {
                 provider_id: provider_id.clone(),
                 model_name: llm_cfg.model.clone(),
                 tier: ModelTier::Standard,
+                effort: None,
             });
 
             reg.slots.insert(SlotName::Headless, model_id);
@@ -426,6 +435,19 @@ pub(crate) struct ResolvedSlot {
     pub api_key: String,
     #[allow(dead_code)] // Wired in story 1481 (Tauri commands expose provider_type to UI)
     pub provider_type: ProviderType,
+}
+
+/// The reasoning effort configured on the model a slot points at, if any.
+/// Sits between an explicit per-call effort and the global AI-chat setting.
+pub(crate) fn slot_model_effort(slot: SlotName) -> Option<String> {
+    let registry = load_registry();
+    let model_id = registry.slots.get(&slot)?;
+    registry
+        .models
+        .iter()
+        .find(|m| &m.id == model_id)
+        .and_then(|m| m.effort.clone())
+        .filter(|e| !e.trim().is_empty())
 }
 
 pub(crate) fn resolve_slot(
@@ -588,6 +610,183 @@ pub(crate) async fn check_ollama_models(provider_id: String) -> crate::ai_chat::
     crate::ai_chat::detect_ollama(&base).await
 }
 
+/// Candidate `/models` URLs for a base URL, most-likely first.
+///
+/// A bare origin (`http://localhost:8317`) is a common paste for an
+/// OpenAI-compatible server whose routes all live under `/v1`, which makes the
+/// direct `{base}/models` probe 404 — so a `/v1`-prefixed retry is appended
+/// unless the base already carries it.
+fn models_url_candidates(base: &str) -> Vec<String> {
+    let trimmed = base.trim().trim_end_matches('/');
+    let mut urls = vec![format!("{trimmed}/models")];
+    if !trimmed.ends_with("/v1") {
+        urls.push(format!("{trimmed}/v1/models"));
+    }
+    urls
+}
+
+/// A model as the endpoint describes it, including whatever reasoning-effort
+/// vocabulary it advertises. Shared by every surface that lists models — the
+/// Providers picker, AI Chat, and the dictation rewrite — so effort levels are
+/// discovered once and never hardcoded per provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DiscoveredModel {
+    pub id: String,
+    /// Whether the endpoint advertises reasoning support for this model.
+    pub supports_reasoning: bool,
+    /// Endpoint-enumerated effort values (e.g. OpenRouter `supported_efforts`).
+    /// None when reasoning is advertised without an enumeration.
+    pub effort_options: Option<Vec<String>>,
+    /// Endpoint-declared default effort, when provided.
+    pub default_effort: Option<String>,
+}
+
+/// Parse a /models response leniently across providers.
+///
+/// Entries come from `data` (OpenAI/OpenRouter/Groq/LM Studio), else `models`
+/// (Ollama native), else a bare array. Each entry is an object with `id` (else
+/// `name`) or a bare string. Reasoning detection per entry:
+/// - a `reasoning` object → supported; efforts from its `supported_efforts`
+/// - else `supported_parameters` mentioning "reasoning"/"reasoning_effort" →
+///   supported, no enumeration
+/// - else unsupported
+///
+/// Entries that can't be parsed are skipped, never fatal.
+pub(crate) fn parse_discovered_models(json: &serde_json::Value) -> Vec<DiscoveredModel> {
+    let entries = json
+        .get("data")
+        .and_then(|v| v.as_array())
+        .or_else(|| json.get("models").and_then(|v| v.as_array()))
+        .or_else(|| json.as_array());
+    let Some(entries) = entries else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            if let Some(id) = entry.as_str() {
+                return Some(DiscoveredModel {
+                    id: id.to_string(),
+                    supports_reasoning: false,
+                    effort_options: None,
+                    default_effort: None,
+                });
+            }
+
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| entry.get("name").and_then(|v| v.as_str()))?
+                .to_string();
+
+            let mut supports_reasoning = false;
+            let mut effort_options: Option<Vec<String>> = None;
+            let mut default_effort: Option<String> = None;
+
+            if let Some(reasoning) = entry.get("reasoning").filter(|v| v.is_object()) {
+                supports_reasoning = true;
+                effort_options = reasoning
+                    .get("supported_efforts")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|e| e.as_str().map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|efforts| !efforts.is_empty());
+                default_effort = reasoning
+                    .get("default_effort")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+            } else if let Some(params) =
+                entry.get("supported_parameters").and_then(|v| v.as_array())
+            {
+                supports_reasoning = params
+                    .iter()
+                    .filter_map(|p| p.as_str())
+                    .any(|p| p == "reasoning" || p == "reasoning_effort");
+            }
+
+            Some(DiscoveredModel {
+                id,
+                supports_reasoning,
+                effort_options,
+                default_effort,
+            })
+        })
+        .collect()
+}
+
+/// Discover models — and their advertised reasoning-effort vocabulary — from an
+/// OpenAI-compatible provider's `GET {base}/models`.
+///
+/// Auth is sent only when a key is stored — endpoints that need none still work,
+/// and endpoints that do need one surface their own 401 rather than a guess here.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub(crate) async fn fetch_provider_models(
+    provider_id: String,
+) -> Result<Vec<DiscoveredModel>, String> {
+    let registry = load_registry();
+    let provider = registry
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| format!("Unknown provider: {provider_id}"))?;
+
+    let base = provider
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(String::from)
+        .or_else(|| provider.provider_type.default_base_url().map(String::from))
+        .ok_or_else(|| "This provider has no base URL — set one to discover models".to_string())?;
+
+    let api_key = crate::credentials::get(crate::credentials::Credential::Provider(&provider_id))
+        .unwrap_or(None)
+        .filter(|k| !k.is_empty());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let mut last_err = String::new();
+    for url in models_url_candidates(&base) {
+        let mut req = client.get(&url);
+        if let Some(key) = &api_key {
+            req = req.bearer_auth(key);
+        }
+
+        let response = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("{url} — {e}");
+                continue;
+            }
+        };
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        if status.is_success() {
+            let json: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| format!("Invalid JSON from {url}: {e}"))?;
+            return Ok(parse_discovered_models(&json));
+        }
+
+        last_err = format!("{url} → HTTP {status}");
+        // Only a 404 is worth retrying against the /v1-prefixed path; 401/500
+        // mean we found the route and it rejected us.
+        if status != reqwest::StatusCode::NOT_FOUND {
+            break;
+        }
+    }
+
+    Err(format!("Model discovery failed: {last_err}"))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -646,12 +845,14 @@ mod tests {
                     provider_id: "anthropic-main".to_string(),
                     model_name: "claude-sonnet-4-5-20241022".to_string(),
                     tier: ModelTier::Standard,
+                    effort: None,
                 },
                 ModelEntry {
                     id: "haiku".to_string(),
                     provider_id: "anthropic-main".to_string(),
                     model_name: "claude-haiku-4-5-20241022".to_string(),
                     tier: ModelTier::Economic,
+                    effort: None,
                 },
             ],
             slots,
@@ -909,6 +1110,7 @@ mod tests {
                 provider_id: "p1".to_string(),
                 model_name: "gpt-4o".to_string(),
                 tier: ModelTier::Premium,
+                effort: None,
             }],
             slots,
             phase_overrides: HashMap::new(),
@@ -967,24 +1169,28 @@ mod tests {
                     provider_id: "anthropic-main".to_string(),
                     model_name: "claude-sonnet-4-5-20241022".to_string(),
                     tier: ModelTier::Standard,
+                    effort: None,
                 },
                 ModelEntry {
                     id: "haiku".to_string(),
                     provider_id: "anthropic-main".to_string(),
                     model_name: "claude-haiku-4-5-20241022".to_string(),
                     tier: ModelTier::Economic,
+                    effort: None,
                 },
                 ModelEntry {
                     id: "gpt4o".to_string(),
                     provider_id: "openai-main".to_string(),
                     model_name: "gpt-4o".to_string(),
                     tier: ModelTier::Premium,
+                    effort: None,
                 },
                 ModelEntry {
                     id: "llama".to_string(),
                     provider_id: "ollama-local".to_string(),
                     model_name: "llama3.2".to_string(),
                     tier: ModelTier::Standard,
+                    effort: None,
                 },
             ],
             slots,
@@ -1069,6 +1275,7 @@ mod tests {
             provider_id: "deleted-provider".to_string(),
             model_name: "orphan-model".to_string(),
             tier: ModelTier::Standard,
+            effort: None,
         });
         reg.slots.insert(SlotName::Headless, "orphan".to_string());
 
@@ -1095,6 +1302,7 @@ mod tests {
             provider_id: "custom".to_string(),
             model_name: "my-model".to_string(),
             tier: ModelTier::Standard,
+            effort: None,
         });
         reg.slots.insert(SlotName::Main, "m1".to_string());
 
@@ -1356,5 +1564,81 @@ mod tests {
         // Second load should read from file, not migrate again
         let reg2 = load_registry();
         assert_eq!(reg2.providers.len(), 1);
+    }
+
+    #[test]
+    fn models_url_candidates_appends_v1_fallback() {
+        assert_eq!(
+            models_url_candidates("http://localhost:8317"),
+            vec![
+                "http://localhost:8317/models".to_string(),
+                "http://localhost:8317/v1/models".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn models_url_candidates_skips_fallback_when_v1_present() {
+        assert_eq!(
+            models_url_candidates("http://localhost:8317/v1/"),
+            vec!["http://localhost:8317/v1/models".to_string()]
+        );
+    }
+
+    fn ids(models: &[DiscoveredModel]) -> Vec<&str> {
+        models.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn parse_discovered_models_reads_openai_data_shape() {
+        let json = serde_json::json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-5.4", "object": "model" },
+                { "id": "gpt-5.6-sol", "object": "model" },
+            ]
+        });
+        let models = parse_discovered_models(&json);
+        assert_eq!(ids(&models), vec!["gpt-5.4", "gpt-5.6-sol"]);
+        // A plain OpenAI listing advertises no reasoning vocabulary.
+        assert!(models.iter().all(|m| !m.supports_reasoning));
+    }
+
+    #[test]
+    fn parse_discovered_models_reads_alternate_shapes() {
+        let named = serde_json::json!({ "models": [{ "name": "b" }, { "name": "a" }] });
+        assert_eq!(ids(&parse_discovered_models(&named)), vec!["b", "a"]);
+
+        let bare = serde_json::json!(["b", "a"]);
+        assert_eq!(ids(&parse_discovered_models(&bare)), vec!["b", "a"]);
+
+        assert!(parse_discovered_models(&serde_json::json!({ "error": "nope" })).is_empty());
+    }
+
+    #[test]
+    fn parse_discovered_models_surfaces_advertised_effort_levels() {
+        let json = serde_json::json!({
+            "data": [{
+                "id": "gpt-5.6-terra",
+                "reasoning": { "supported_efforts": ["low", "high", "xhigh"], "default_effort": "high" },
+            }]
+        });
+        let models = parse_discovered_models(&json);
+        assert!(models[0].supports_reasoning);
+        assert_eq!(
+            models[0].effort_options.as_deref(),
+            Some(["low", "high", "xhigh"].map(String::from).as_slice())
+        );
+        assert_eq!(models[0].default_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn model_entry_without_effort_still_deserializes() {
+        // Registries written before the field existed must keep loading.
+        let entry: ModelEntry = serde_json::from_str(
+            r#"{"id":"m1","provider_id":"p1","model_name":"gpt-5.5","tier":"standard"}"#,
+        )
+        .unwrap();
+        assert_eq!(entry.effort, None);
     }
 }
