@@ -585,10 +585,16 @@ async fn drain_stream(
     let mut captured = None;
     let mut usage = None;
     let mut emitted = false;
+    // A stream that stops producing without erroring or closing would otherwise
+    // park here forever — the select below only ever checked `cancel`, so the
+    // retry path and LOOP_TIMEOUT were both unreachable and the agent sat at
+    // "running" until the user hit stop.
+    let mut last_event = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
             event = stream.next() => {
+                last_event = tokio::time::Instant::now();
                 match event {
                     Some(Ok(GenaiStreamEvent::Chunk(chunk))) => {
                         emitted = true;
@@ -620,6 +626,20 @@ async fn drain_stream(
             _ = tokio::time::sleep(Duration::from_millis(50)) => {
                 if cancel.load(Ordering::Acquire) {
                     return DrainOutcome::Cancelled;
+                }
+                let idle = last_event.elapsed();
+                if idle >= engine::STREAM_IDLE_TIMEOUT {
+                    // Transient so the caller's bounded retry can re-issue the
+                    // request; if text was already streamed it surfaces as an
+                    // error instead, which still beats hanging silently.
+                    return DrainOutcome::Failed {
+                        transient: true,
+                        emitted,
+                        msg: format!(
+                            "stream stalled — no data for {}s",
+                            idle.as_secs()
+                        ),
+                    };
                 }
             }
         }

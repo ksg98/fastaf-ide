@@ -30,6 +30,15 @@ pub(crate) const TOOL_DISPATCH_LIMIT_PER_SESSION: usize = 500;
 
 /// Max retry attempts for a single transient LLM call (excludes the first try).
 pub(crate) const MAX_LLM_RETRIES: u32 = 4;
+
+/// Longest gap tolerated between two events on a streaming LLM response before
+/// the stream is treated as dead.
+///
+/// A stalled stream is otherwise invisible: no error arrives, so nothing in the
+/// retry path or the LOOP_TIMEOUT deadline is ever reached and the agent shows
+/// "running" forever. Generous enough for a high-effort model's time-to-first-
+/// token, which can be tens of seconds before anything is emitted.
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const BACKOFF_BASE_MS: u64 = 500;
 const BACKOFF_CAP: Duration = Duration::from_secs(16);
 
@@ -509,6 +518,11 @@ mod tests {
     fn constants_are_reasonable() {
         assert!(MAX_ITERATIONS > 0 && MAX_ITERATIONS <= 100);
         assert!(LOOP_TIMEOUT.as_secs() >= 60);
+        // The idle guard must be able to fire before the whole loop gives up,
+        // or a stalled stream still eats the entire turn budget in one wait.
+        assert!(STREAM_IDLE_TIMEOUT < LOOP_TIMEOUT);
+        // ...but long enough that a slow first token isn't mistaken for a stall.
+        assert!(STREAM_IDLE_TIMEOUT.as_secs() >= 60);
         assert!(MAX_IDENTICAL_CALLS >= 2);
         assert!(RATE_LIMIT_PER_MINUTE > 0);
         assert!(RATE_LIMIT_PER_SESSION > RATE_LIMIT_PER_MINUTE);
