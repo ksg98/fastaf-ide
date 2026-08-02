@@ -50,10 +50,13 @@ describe("AiChatTab extended-thinking setting", () => {
 		cleanup();
 	});
 
-	it("renders the effort options Auto/Off/Low/Medium/High", () => {
+	it("renders auto/off plus every level the backend can encode", () => {
+		// With no provider slot resolved there is nothing to ask an endpoint about,
+		// so the list falls back to the encodable vocabulary rather than a
+		// Claude-shaped subset.
 		const { container } = render(() => <AiChatTab />);
 		const values = Array.from(reasoningSelect(container).options).map((o) => o.value);
-		expect(values).toEqual(["auto", "off", "low", "medium", "high"]);
+		expect(values).toEqual(["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 	});
 
 	it("defaults to auto", () => {
