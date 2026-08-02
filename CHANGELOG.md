@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-08-02
+
+### Added
+
+- **Dictate straight into the AI chat box** — A mic button now sits beside Send. Recording opens a strip above the composer with a live level meter and the partial transcript, and the stop button drops the finished text into the message box rather than sending it, so it can be edited first. Existing input is preserved. The optional AI rewrite runs if enabled and falls back to the raw transcript when it fails, so a broken rewrite provider never costs the words. Previously dictation was hotkey-only, and because that path captures the focused element at key-press and routes terminals through a separate injection step, speaking while the chat was focused wrote nowhere useful.
+- **Models and reasoning effort are discovered from the provider, not typed from memory** — Adding a model to an OpenAI-compatible provider now offers a dropdown read from its `/models` endpoint, with an effort control alongside it. When the endpoint publishes a reasoning vocabulary its levels and default are used; when it publishes nothing — the norm for OpenAI-compatible servers, which return bare model entries — the levels the backend can encode are offered instead. The chosen effort is stored per model and feeds the Main slot. AI Chat's effort list is sourced the same way rather than being hardcoded.
+- **A provider's base URL is editable after creation** — Correcting a wrong or version-less URL previously meant deleting and re-creating the provider, which orphaned the model ids and slot assignments pointing at it.
+
+### Fixed
+
+- **A stalled model response can no longer hang the agent** — After a tool call the agent could sit at "running" forever: the tool result returned, the next streaming request opened, and then nothing arrived — no chunk, no error, no close. The stream drain only ever checked the cancel flag, so neither the bounded retry nor the loop deadline could fire and pressing stop was the only way out. Streams now give up after 120 seconds without data and hand the failure to the existing retry path.
+- **An explicit reasoning effort reaches every model** — Effort was gated behind a built-in list of models known to support extended thinking, which only ever named Claude Opus, so an explicit level was silently discarded on every OpenAI-compatible endpoint. Only *Auto* consults that list now.
+- **Dictation survives a deleted rewrite provider** — A stored provider id whose provider had been removed failed the panel outright instead of falling back to the model AI Chat uses, which is what the picker was already displaying.
+- **Model entries are tier-qualified** — Registering the same model at two tiers collided on one id, so removing one removed both.
+- **CI is green again** — `cargo clippy -- -D warnings` had failed on every platform and every commit since 2026-07-17 on a `question_mark` lint in the clone progress parser.
+
 ### Changed
 
 - **AI rewrite now uses your configured AI providers, and discovers everything else live** — Settings → Dictation → AI Rewrite no longer carries its own endpoint and API key. Pick a provider from the registry (Settings → Providers) — or leave it on the default to follow the same model AI Chat uses — then **Fetch models** to read the model list straight from that endpoint's `/models`, pick one, and pick a reasoning effort from the levels that model actually advertises. Nothing is hardcoded per provider: the model list, the effort vocabulary, and its default all come from the endpoint, and a model that advertises no levels gets a free-text effort field instead. Below that sit the system prompt and an **extra request body** field — a JSON object merged into the chat-completions body last, so it can override anything (an endpoint wanting `reasoning: {effort}` instead of `reasoning_effort`, a `top_p`, a custom parameter) without a code change. **Show request body** renders the exact JSON that will be POSTed, built by the same code that sends it, and **Test rewrite** runs the real path and shows the output or the raw error — which normal dictation hides by falling back to the untouched transcript.
