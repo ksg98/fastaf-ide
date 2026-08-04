@@ -10,6 +10,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# See release.yml: sccache's idle timer measures time without new requests, so a
+# long single-crate compile outlives the server and kills the rustc talking to
+# it. Workflow level because sccache-action is what starts the server.
+env:
+  SCCACHE_IDLE_TIMEOUT: "0"
+
 jobs:
   socket:
     name: Socket Security
@@ -75,7 +81,11 @@ jobs:
   # Always runs: clippy + tests on Linux (fastest, catches most issues)
   rust:
     name: Rust (Linux-x64)
-    runs-on: ubuntu-22.04
+    # 24.04: the default feature set is `desktop`, which links ONNX Runtime via
+    # `ort` — its prebuilt needs glibc 2.38+/libstdc++ 13+, and 22.04 has
+    # 2.35/12. `check-remote` below stays on 22.04 and is what proves the
+    # daemon still builds against the older toolchain.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
         with:
@@ -84,7 +94,8 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+          # libayatana-appindicator3-dev: libappindicator3-dev is gone in 24.04.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev mold
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

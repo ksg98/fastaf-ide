@@ -15,6 +15,12 @@ concurrency:
   group: nightly
   cancel-in-progress: true
 
+# See release.yml: sccache's idle timer measures time without new requests, so a
+# long single-crate compile outlives the server and kills the rustc talking to
+# it. Workflow level because sccache-action is what starts the server.
+env:
+  SCCACHE_IDLE_TIMEOUT: "0"
+
 jobs:
   cleanup:
     permissions:
@@ -60,7 +66,9 @@ jobs:
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'
             label: macOS-ARM
-          - platform: ubuntu-22.04
+          # 24.04: see release.yml — `ort`'s ONNX Runtime prebuilt needs
+          # glibc 2.38+/libstdc++ 13+, which 22.04 does not have.
+          - platform: ubuntu-24.04
             args: ''
             label: Linux-x64
           - platform: windows-latest
@@ -97,10 +105,11 @@ jobs:
           sed "s/^version = \"$VERSION\"/version = \"$NIGHTLY\"/" src-tauri/Cargo.toml > tmp.toml && mv tmp.toml src-tauri/Cargo.toml
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+          # libayatana-appindicator3-dev: libappindicator3-dev is gone in 24.04.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev mold
 
       # Keep the Windows build/target dir short (C:/t): whisper.cpp's nested
       # CMake TryCompile paths can exceed the 260-char MAX_PATH that MSBuild's
