@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-08-04
+
+### Fixed
+
+- **The Linux and Windows builds are back** — v1.7.0 shipped macOS only. Linux could not link: the ONNX Runtime prebuilt behind the new voice agent needs glibc 2.38 and libstdc++ 13, and the build ran on Ubuntu 22.04, which has 2.35 and 12. The desktop build has moved to Ubuntu 24.04, which raises the requirement for the `.deb` and `.AppImage` to glibc 2.39 — **Ubuntu 22.04 and Debian 12 can no longer run the Linux app**. The `tuic-remote` daemon binaries are unaffected; they are still built on 22.04 and never link ONNX Runtime. Windows failed for an unrelated reason: the compile cache server timed out during the final long single-unit compile and took the compiler down with it.
+
 ## [1.7.0] - 2026-08-04
 
 ### Added
