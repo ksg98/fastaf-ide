@@ -222,18 +222,40 @@ fn process_audio_chunk(
     let meter_level = (rms * 20.0).sqrt().clamp(0.0, 1.0);
     level.store(meter_level.to_bits(), Ordering::Relaxed);
 
-    // Simple nearest-neighbor resampling to 16kHz
+    // Downsample to 16kHz by averaging every input sample that falls into each
+    // output bin, rather than picking one and discarding the rest.
+    //
+    // The averaging is the point. Nearest-neighbour decimation has no
+    // anti-alias filter, so at 48kHz everything above 8kHz folds back into the
+    // speech band as broadband hiss — which raises the floor the voice agent's
+    // VAD scores against and puts noise under whisper. A box filter is crude,
+    // but averaging three samples attenuates that band substantially, and it is
+    // what the browser-side resampler in the reference implementation does.
     let output = if sample_rate == 16000 {
         &mono_buf[..]
     } else {
         resample_buf.clear();
-        let ratio = 16000.0 / f64::from(sample_rate);
-        let output_len = (mono_buf.len() as f64 * ratio) as usize;
+        let ratio = f64::from(sample_rate) / 16000.0;
+        let output_len = (mono_buf.len() as f64 / ratio) as usize;
         resample_buf.reserve(output_len);
+        let mut src_idx = 0usize;
         for i in 0..output_len {
-            let src_idx = (i as f64 / ratio) as usize;
-            if src_idx < mono_buf.len() {
-                resample_buf.push(mono_buf[src_idx]);
+            // Bin boundary in input samples, so bins tile the input exactly
+            // even when the ratio is fractional (44.1kHz -> 16kHz).
+            let bin_end = (((i + 1) as f64) * ratio) as usize;
+            let bin_end = bin_end.min(mono_buf.len());
+            let start = src_idx;
+            let mut sum = 0.0f32;
+            while src_idx < bin_end {
+                sum += mono_buf[src_idx];
+                src_idx += 1;
+            }
+            // A bin can be empty when upsampling; repeat the neighbour rather
+            // than emit a zero, which would be an audible click.
+            if src_idx > start {
+                resample_buf.push(sum / (src_idx - start) as f32);
+            } else {
+                resample_buf.push(mono_buf.get(src_idx).copied().unwrap_or(0.0));
             }
         }
         &resample_buf[..]
@@ -409,7 +431,114 @@ mod tests {
         for s in &result {
             assert!(
                 (s - 0.25).abs() < 1e-6,
-                "Nearest-neighbor should preserve value"
+                "Averaging a constant signal should preserve its value"
+            );
+        }
+    }
+
+    /// The reason the resampler averages instead of picking a sample.
+    ///
+    /// A 16kHz tone at a 48kHz input rate is above the 8kHz Nyquist limit of
+    /// the 16kHz output. Decimating without a filter would alias it down into
+    /// the speech band at full amplitude, where it looks like signal to a VAD
+    /// and like noise to whisper. Averaging each bin attenuates it instead.
+    #[test]
+    fn above_nyquist_content_is_attenuated_rather_than_aliased_down() {
+        let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
+        let mut mono_buf = Vec::new();
+        let mut resample_buf = Vec::new();
+
+        // 16kHz sine sampled at 48kHz — three samples per cycle.
+        let data: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 16000.0 / 48000.0).sin())
+            .collect();
+        let input_rms =
+            (data.iter().map(|s| s * s).sum::<f32>() / data.len() as f32).sqrt();
+
+        process_audio_chunk(
+            &data,
+            48000,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
+        let result: Vec<f32> = buf.lock().drain(..).collect();
+        let output_rms =
+            (result.iter().map(|s| s * s).sum::<f32>() / result.len() as f32).sqrt();
+
+        assert_eq!(result.len(), 1600);
+        assert!(
+            output_rms < input_rms * 0.1,
+            "expected the above-Nyquist tone to be suppressed, \
+             got {output_rms:.4} out from {input_rms:.4} in"
+        );
+    }
+
+    /// The complement: content the output rate can actually represent must
+    /// survive, or the filter would just be muffling speech.
+    #[test]
+    fn in_band_content_survives_resampling() {
+        let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
+        let mut mono_buf = Vec::new();
+        let mut resample_buf = Vec::new();
+
+        // 300Hz — squarely in the range a voice occupies.
+        let data: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 300.0 / 48000.0).sin())
+            .collect();
+        let input_rms =
+            (data.iter().map(|s| s * s).sum::<f32>() / data.len() as f32).sqrt();
+
+        process_audio_chunk(
+            &data,
+            48000,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
+        let result: Vec<f32> = buf.lock().drain(..).collect();
+        let output_rms =
+            (result.iter().map(|s| s * s).sum::<f32>() / result.len() as f32).sqrt();
+
+        assert!(
+            output_rms > input_rms * 0.9,
+            "a 300Hz tone must pass through intact, \
+             got {output_rms:.4} out from {input_rms:.4} in"
+        );
+    }
+
+    /// 44.1kHz is not an integer multiple of 16kHz, so bins straddle input
+    /// samples. The tiling must still cover the input without gaps or overlap.
+    #[test]
+    fn a_fractional_ratio_tiles_the_input_without_gaps() {
+        let buf: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let level = Arc::new(AtomicU32::new(0));
+        let mut mono_buf = Vec::new();
+        let mut resample_buf = Vec::new();
+
+        let data = vec![0.4f32; 4410]; // 100ms at 44.1kHz
+        process_audio_chunk(
+            &data,
+            44100,
+            1,
+            &buf,
+            &level,
+            &mut mono_buf,
+            &mut resample_buf,
+        );
+        let result: Vec<f32> = buf.lock().drain(..).collect();
+
+        assert_eq!(result.len(), 1600, "100ms at 44.1kHz is 1600 samples at 16kHz");
+        for s in &result {
+            assert!(
+                (s - 0.4).abs() < 1e-6,
+                "every bin must average real samples, got {s}"
             );
         }
     }

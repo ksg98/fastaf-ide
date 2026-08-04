@@ -46,6 +46,7 @@ export type AppLogSource =
 	| "github"
 	| "ci-heal"
 	| "dictation"
+	| "voice"
 	| "store"
 	| "config"
 	| "settings"

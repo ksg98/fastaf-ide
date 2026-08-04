@@ -10,12 +10,14 @@ import {
 	Show,
 	Suspense,
 } from "solid-js";
+import { useVoiceAgent } from "../../hooks/useVoiceAgent";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import { type ConversationMeta, conversationStore, type ToolCallEntry } from "../../stores/conversationStore";
 import { dictationStore } from "../../stores/dictation";
 import { ENCODABLE_EFFORT_LEVELS } from "../../stores/providerRegistry";
 import { terminalsStore } from "../../stores/terminals";
+import { voiceStore } from "../../stores/voice";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
@@ -92,6 +94,16 @@ const IconMic = () => (
 		<rect x="6" y="1.75" width="4" height="7.5" rx="2" fill="currentColor" stroke="none" />
 		<path d="M3.75 7.25v.75a4.25 4.25 0 008.5 0v-.75" stroke-linecap="round" />
 		<path d="M8 12.25v2" stroke-linecap="round" />
+	</svg>
+);
+
+// Mic inside a conversation bubble — a running voice session, distinct from
+// the plain mic that dictates one message into the composer.
+const IconVoice = () => (
+	<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
+		<path d="M1.75 6.5a6.25 4.75 0 1112.5 0 6.25 4.75 0 01-8.7 4.37L2.5 12l.7-2.2A4.6 4.6 0 011.75 6.5z" />
+		<rect x="7" y="4" width="2" height="3.5" rx="1" fill="currentColor" stroke="none" />
+		<path d="M6 6.75v.25a2 2 0 004 0v-.25" stroke-linecap="round" />
 	</svg>
 );
 
@@ -424,6 +436,32 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	onCleanup(() => {
 		if (ownsRecording() && dictationStore.state.recording) void dictationStore.stopRecording();
 	});
+
+	// ── Hands-free voice mode ──────────────────────────────────────────────
+	// Shares the microphone with dictation above, so the two are mutually
+	// exclusive — enforced in Rust as well, not just by the disabled buttons.
+	const voice = useVoiceAgent({
+		sessionId: activeSessionId,
+		autonomy,
+		turnOptions: () => ({ modelOverride: modelOverride(), reasoningEffort: effort() }),
+	});
+
+	const voiceStatusLabel = () => {
+		switch (voiceStore.state.agentState) {
+			case "starting":
+				return "Starting…";
+			case "transcribing":
+				return "Transcribing…";
+			case "thinking":
+				return "Thinking…";
+			case "speaking":
+				return "Speaking…";
+			case "error":
+				return voiceStore.state.error || "Voice error";
+			default:
+				return "Listening…";
+		}
+	};
 
 	const handleKeyDown = (e: KeyboardEvent) => {
 		if (e.key === "Enter") {
@@ -918,6 +956,26 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 				</div>
 			</Show>
 
+			{/* Voice session strip. The meter goes flat while the agent speaks —
+			    in half-duplex mode the microphone really is muted then. */}
+			<Show when={voice.active()}>
+				<div class={s.micLive} data-testid="chat-voice-live">
+					<span class={s.micDot} />
+					<MicMeter level={voiceStore.state.audioLevel} barCount={11} maxPx={14} />
+					<span class={s.micLabel}>{voiceStatusLabel()}</span>
+					<Show when={voiceStore.state.agentState === "speaking"}>
+						<button
+							class={s.micStopBtn}
+							data-testid="chat-voice-interrupt-btn"
+							onClick={() => voice.bargeIn()}
+							title="Stop speaking and cancel this turn"
+						>
+							Interrupt
+						</button>
+					</Show>
+				</div>
+			</Show>
+
 			<Show when={dictationError()}>
 				<div class={s.micError} data-testid="chat-mic-error">
 					{dictationError()}
@@ -946,6 +1004,21 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					onKeyDown={handleKeyDown}
 					disabled={isFrozen()}
 				/>
+				<button
+					class={voice.active() ? s.micBtnActive : s.micBtn}
+					data-testid="chat-voice-btn"
+					onClick={() => voice.toggle()}
+					disabled={isFrozen() || dictating()}
+					title={
+						voice.active()
+							? "End the voice conversation"
+							: "Talk to the agent — it listens, answers out loud, and keeps going"
+					}
+					aria-label={voice.active() ? "Stop voice mode" : "Start voice mode"}
+					aria-pressed={voice.active()}
+				>
+					<IconVoice />
+				</button>
 				<Show
 					when={dictating()}
 					fallback={
@@ -953,8 +1026,10 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 							class={s.micBtn}
 							data-testid="chat-mic-btn"
 							onClick={startDictation}
-							disabled={isFrozen() || dictationStore.state.loading}
-							title="Dictate (transcribes into the message box)"
+							disabled={isFrozen() || dictationStore.state.loading || voice.active()}
+							title={
+								voice.active() ? "Voice mode is using the microphone" : "Dictate (transcribes into the message box)"
+							}
 							aria-label="Start dictation"
 						>
 							<IconMic />

@@ -26,6 +26,7 @@ import {
 	RepoScriptsTab,
 	RepoWorktreeTab,
 	ServicesTab,
+	VoiceTab,
 } from "./tabs";
 import { ProvidersTab } from "./tabs/ProvidersTab";
 
@@ -44,6 +45,7 @@ const BASE_GLOBAL_TABS: SettingsShellTab[] = [
 	{ key: "appearance", label: t("settings.appearance", "Appearance") },
 	{ key: "notifications", label: t("settings.notifications", "Notifications") },
 	{ key: "dictation", label: t("settings.dictation", "Dictation") },
+	{ key: "voice", label: t("settings.voice", "Voice") },
 	{ key: "github", label: "Git & GitHub" },
 	{ key: "services", label: t("settings.services", "Services") },
 	{ key: "plugins", label: t("settings.plugins", "Plugins") },
@@ -52,7 +54,11 @@ const BASE_GLOBAL_TABS: SettingsShellTab[] = [
 ];
 
 function getGlobalTabs(): SettingsShellTab[] {
-	const tabs = isTauri() ? BASE_GLOBAL_TABS : BASE_GLOBAL_TABS.filter((tab) => tab.key !== "dictation");
+	// Dictation and Voice both need native audio, so they exist only in the
+	// desktop app — the browser client has no microphone path.
+	const tabs = isTauri()
+		? BASE_GLOBAL_TABS
+		: BASE_GLOBAL_TABS.filter((tab) => tab.key !== "dictation" && tab.key !== "voice");
 	if (settingsStore.isAiChatEnabled()) {
 		return [...tabs, { key: "ai-chat", label: "AI Chat" }];
 	}
@@ -216,6 +222,9 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
 			</Show>
 			<Show when={activeTab() === "dictation"}>
 				<DictationSettings />
+			</Show>
+			<Show when={activeTab() === "voice"}>
+				<VoiceTab />
 			</Show>
 			<Show when={activeTab() === "github"}>
 				<GitHubTab />

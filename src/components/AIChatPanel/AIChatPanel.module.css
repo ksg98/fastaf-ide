@@ -807,6 +807,23 @@
   animation: micPulse 1s ease-in-out infinite;
   flex-shrink: 0;
 }
+/* Interrupt, in the voice strip. Pushed to the trailing edge so it sits clear
+   of the meter and does not shift as the status text changes length. */
+.micStopBtn {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.micStopBtn:hover {
+  color: var(--fg-primary);
+  border-color: var(--accent);
+}
 
 @keyframes micPulse {
   0%, 100% { opacity: 1; }
