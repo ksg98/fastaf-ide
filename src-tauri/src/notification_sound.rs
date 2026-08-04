@@ -277,7 +277,10 @@ pub(crate) fn list_output_devices() -> Vec<AudioOutputDevice> {
 // ---------------------------------------------------------------------------
 
 /// Resolve an output device by name, falling back to default.
-fn resolve_output_stream(device_name: Option<&str>) -> Option<MixerDeviceSink> {
+///
+/// Shared with `voice::playback`, which speaks Kokoro's output through the same
+/// device the user picked for notification sounds.
+pub(crate) fn resolve_output_stream(device_name: Option<&str>) -> Option<MixerDeviceSink> {
     if let Some(name) = device_name {
         let host = rodio::cpal::default_host();
         let device = host.output_devices().ok()?.find(|d| {

@@ -540,6 +540,7 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 			} else {
 				s.setStreamingText((prev) => prev + event.text);
 			}
+			notifyDelta(event.text);
 			break;
 
 		case "reasoning_chunk":
@@ -622,6 +623,9 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 			break;
 
 		case "error":
+			// Same as completion for observers: the turn is over, so whatever a
+			// chunker is holding must not leak into the next one.
+			notifyTurnEnd();
 			batch(() => {
 				s.setIsThinking(false);
 				if (mode === "autonomous") {
@@ -638,6 +642,7 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 		case "completed": {
 			const usage = event.usage;
 			s.setIsThinking(false);
+			notifyTurnEnd();
 			if (usage) {
 				appLogger.info("conversation", `usage: input=${usage.input_tokens} output=${usage.output_tokens}`);
 				accumulateUsageForState(s, usage);
@@ -1039,6 +1044,49 @@ function setError(e: string | null): void {
 // Registry subscription (cross-window sync)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Reply observers
+// ---------------------------------------------------------------------------
+
+/**
+ * Callbacks fired as the assistant's reply streams. Voice mode uses these to
+ * push deltas into a sentence chunker and speak them; polling `streamingText()`
+ * in an effect would work too, but would re-derive the delta on every render.
+ */
+type ReplyObserver = {
+	onDelta?: (text: string) => void;
+	onTurnEnd?: () => void;
+};
+
+const replyObservers = new Set<ReplyObserver>();
+
+/** Subscribe to streamed reply text. Returns an unsubscribe function. */
+function observeReply(observer: ReplyObserver): () => void {
+	replyObservers.add(observer);
+	return () => replyObservers.delete(observer);
+}
+
+function notifyDelta(text: string): void {
+	// An observer that throws must not break the chat stream it is watching.
+	for (const observer of replyObservers) {
+		try {
+			observer.onDelta?.(text);
+		} catch (e) {
+			appLogger.warn("conversation", "reply observer failed", { error: String(e) });
+		}
+	}
+}
+
+function notifyTurnEnd(): void {
+	for (const observer of replyObservers) {
+		try {
+			observer.onTurnEnd?.();
+		} catch (e) {
+			appLogger.warn("conversation", "reply observer failed", { error: String(e) });
+		}
+	}
+}
+
 function applyRegistryEvent(s: PerTerminalConversationState, event: RegistryChatEvent): void {
 	switch (event.kind) {
 		case "snapshot":
@@ -1275,6 +1323,9 @@ export const conversationStore = {
 	// Registry subscription
 	subscribeToRegistry,
 	unsubscribeFromRegistry,
+
+	// Reply observers (voice mode)
+	observeReply,
 
 	// History
 	listAllConversations,

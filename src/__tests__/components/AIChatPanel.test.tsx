@@ -11,6 +11,8 @@ const {
 	mockReasoningChunks,
 	mockIsThinking,
 	mockMessages,
+	mockObserveReply,
+	mockVoiceStore,
 } = vi.hoisted(() => ({
 	mockSubscribe: vi.fn().mockResolvedValue(undefined),
 	mockUnsubscribe: vi.fn().mockResolvedValue(undefined),
@@ -21,6 +23,30 @@ const {
 	mockReasoningChunks: vi.fn(() => ""),
 	mockIsThinking: vi.fn(() => false),
 	mockMessages: vi.fn(() => [] as Array<{ role: string; content: string }>),
+	// Returns the unsubscribe function the hook stores for cleanup.
+	mockObserveReply: vi.fn(() => vi.fn()),
+	mockVoiceStore: {
+		state: {
+			config: { model: "q8f16", voice: "af_heart", speed: 1, barge_in: false, output_device: null },
+			models: [],
+			voices: [],
+			outputDevices: [],
+			engineState: "stopped",
+			loadedModel: null,
+			sessionActive: false,
+			agentState: "idle" as const,
+			audioLevel: 0,
+			downloading: null,
+			downloadPercent: 0,
+			loadingEngine: false,
+			error: "",
+		},
+		startSession: vi.fn().mockResolvedValue(undefined),
+		stopSession: vi.fn().mockResolvedValue(undefined),
+		speak: vi.fn(),
+		cancelSpeech: vi.fn(),
+		setAgentState: vi.fn(),
+	},
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -70,6 +96,7 @@ vi.mock("../../stores/conversationStore", () => ({
 		reset: vi.fn(),
 		reasoningChunks: mockReasoningChunks,
 		isThinking: mockIsThinking,
+		observeReply: mockObserveReply,
 	},
 }));
 
@@ -106,6 +133,10 @@ vi.mock("../../stores/ui", () => ({
 
 vi.mock("../../transport", () => ({
 	isTauri: () => true,
+}));
+
+vi.mock("../../stores/voice", () => ({
+	voiceStore: mockVoiceStore,
 }));
 
 vi.mock("../../components/ui/ContentRenderer", () => ({

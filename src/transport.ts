@@ -1880,6 +1880,26 @@ export const INTENTIONALLY_UNMAPPED: ReadonlySet<string> = new Set<string>([
 	// Microphone permission — OS permission dialogs, host-only.
 	"check_microphone_permission",
 	"open_microphone_settings",
+	// Voice agent — captures from the host microphone and plays synthesized
+	// speech out of the host's speakers, both of which belong to whoever is
+	// sitting at the machine, not to a remote browser client. The Settings tab
+	// is desktop-gated to match, so nothing in the browser UI calls these.
+	"voice_status",
+	"voice_model_info",
+	"voice_list_voices",
+	"voice_download_model",
+	"voice_download_voice",
+	"voice_delete_model",
+	"voice_delete_voice",
+	"voice_load_engine",
+	"voice_unload_engine",
+	"voice_start",
+	"voice_stop",
+	"voice_speak",
+	"voice_cancel_speech",
+	"voice_get_config",
+	"voice_set_config",
+	"voice_list_output_devices",
 	// Screenshot capture response — driven by the native screenshot pipeline.
 	"screenshot_response",
 	// Connectivity/host identity — these describe the host server itself; a remote

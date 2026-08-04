@@ -160,6 +160,19 @@ tauri-plugin-single-instance = { version = "2", optional = true }
 whisper-rs = { version = "0.16", optional = true }
 cpal = { version = "0.17.3", optional = true }
 rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+# Voice agent: Kokoro TTS + Silero VAD run as ONNX graphs. `ort` links ONNX
+# Runtime statically via its default download-binaries feature, so nothing extra
+# ships in the bundle. Desktop-only — the remote-daemon targets never link it.
+ort = { version = "2.0.0-rc.13", optional = true }
+# Grapheme-to-phoneme for Kokoro. default-features = false drops the bundled
+# espeak-ng CMake build; out-of-vocabulary words are spelled letter-by-letter
+# instead, which is why voice/speech.rs strips code spans before speaking.
+misaki-rs = { version = "0.3", default-features = false, optional = true }
+# Acoustic echo cancellation — a pure-Rust port of WebRTC's AEC3, the same
+# canceller a browser applies for `getUserMedia({echoCancellation: true})`.
+# Without it the microphone hears our own speech through the speakers and the
+# agent interrupts itself, so barge-in only works on headphones.
+aec3 = { version = "0.3", optional = true }
 reqwest = { version = "0.13", features = ["stream", "json", "form", "multipart"] }
 futures-util = "0.3"
 axum = { version = "0.8", features = ["ws"] }
@@ -232,6 +245,9 @@ desktop = [
     "dep:whisper-rs",
     "dep:cpal",
     "dep:rodio",
+    "dep:ort",
+    "dep:misaki-rs",
+    "dep:aec3",
     "dep:objc2",
     "dep:objc2-foundation",
     "dep:objc2-app-kit",

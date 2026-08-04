@@ -112,16 +112,27 @@ pub async fn download_model(
     model: WhisperModel,
     on_progress: impl Fn(u64, u64) + Send + 'static,
 ) -> Result<PathBuf, String> {
-    let dest = model_path(model);
+    download_file(&model.download_url(), model_path(model), on_progress).await
+}
+
+/// Stream `url` to `dest`, reporting (bytes_downloaded, total_bytes) as it goes.
+///
+/// Writes to a `.downloading` sibling and renames on success, so an interrupted
+/// download never leaves a truncated file that `model_exists` would accept.
+/// Shared by the whisper models above and the voice assets in `voice::assets`.
+pub async fn download_file(
+    url: &str,
+    dest: PathBuf,
+    on_progress: impl Fn(u64, u64) + Send + 'static,
+) -> Result<PathBuf, String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create models directory: {e}"))?;
     }
 
-    let url = model.download_url();
     let client = reqwest::Client::new();
     let resp = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|e| format!("Download request failed: {e}"))?;
@@ -134,7 +145,7 @@ pub async fn download_model(
     let mut downloaded: u64 = 0;
 
     // Write to a temp file first, then rename (atomic-ish)
-    let tmp_path = dest.with_extension("bin.downloading");
+    let tmp_path = dest.with_extension("downloading");
     let mut file = tokio::fs::File::create(&tmp_path)
         .await
         .map_err(|e| format!("Failed to create temp file: {e}"))?;

@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Talk to the AI chat and hear it answer** — A new voice button beside the mic starts a hands-free session: it detects when you stop speaking, transcribes the turn, sends it to the agent, and speaks the reply sentence by sentence as it streams, then goes back to listening. It works in both assisted and autonomous modes, respects the model and effort pickers, and leaves the approval prompt for tool calls exactly where it was, so a spoken instruction still cannot silently run anything dangerous. Everything runs on-device: turn detection is Silero VAD v5 compiled into the binary, and speech is synthesized by Kokoro-82M through ONNX Runtime at roughly 2.7x realtime on CPU. Code blocks are stripped before speaking rather than being spelled out letter by letter.
+- **Settings > Voice** — Download the speech model (86 MB quantized, or 326 MB full precision), see its size on disk, delete it, and load or unload it from memory with one click; pick from six voices, each fetched on first use; set the speaking rate and output device. Barge-in — interrupting the agent by talking over it — is on by default; a pure-Rust port of WebRTC's AEC3 cancels the agent's own voice out of the microphone, so it no longer interrupts itself and headphones are not required.
+
+### Fixed
+
+- **Speech no longer resamples through an aliasing filter** — Microphone audio was downsampled to 16 kHz by keeping every third sample and discarding the rest, with no low-pass ahead of it. Everything above 8 kHz folded back into the speech band as broadband hiss, which raised the floor that turn detection scored against and put noise under whisper. Each output sample is now the average of the input samples it covers. This affects hotkey dictation and the chat mic as well as the voice agent.
+
 ## [1.6.4] - 2026-08-02
 
 ### Added

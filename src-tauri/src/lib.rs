@@ -26,6 +26,8 @@ pub(crate) mod cpu_watchdog;
 pub(crate) mod credentials;
 #[cfg(feature = "desktop")]
 mod dictation;
+#[cfg(feature = "desktop")]
+mod voice;
 pub(crate) mod diff_triage;
 pub(crate) mod dir_watcher;
 pub(crate) mod error_classification;
@@ -1300,6 +1302,7 @@ pub fn run() {
     #[cfg(feature = "desktop")]
     let builder = builder
         .manage(dictation::DictationState::new())
+        .manage(voice::VoiceState::new())
         .manage(sleep_prevention::SleepBlocker::new());
 
     // Single-instance lock only in release builds — allows tauri dev to run
@@ -1696,6 +1699,22 @@ pub fn run() {
             dictation::stt_cloud::dictation_fetch_stt_models,
             dictation::stt_cloud::set_dictation_stt_api_key,
             dictation::stt_cloud::dictation_stt_api_key_exists,
+            voice::commands::voice_status,
+            voice::commands::voice_model_info,
+            voice::commands::voice_list_voices,
+            voice::commands::voice_download_model,
+            voice::commands::voice_download_voice,
+            voice::commands::voice_delete_model,
+            voice::commands::voice_delete_voice,
+            voice::commands::voice_load_engine,
+            voice::commands::voice_unload_engine,
+            voice::commands::voice_start,
+            voice::commands::voice_stop,
+            voice::commands::voice_speak,
+            voice::commands::voice_cancel_speech,
+            voice::commands::voice_get_config,
+            voice::commands::voice_set_config,
+            voice::commands::voice_list_output_devices,
             dictation::stt_cloud::delete_dictation_stt_api_key,
             global_hotkey::set_global_hotkey,
             global_hotkey::get_global_hotkey,
@@ -1925,6 +1944,12 @@ pub fn run() {
                 // streaming thread (which holds an Arc<WhisperContext>), then drops
                 // the transcriber while the process is still alive.
                 tauri::RunEvent::Exit => {
+                    // Before dictation: the voice session thread transcribes
+                    // through the same WhisperContext, so it has to be joined
+                    // while that context is still alive.
+                    if let Some(voice) = app_handle.try_state::<voice::VoiceState>() {
+                        voice.shutdown();
+                    }
                     if let Some(dictation) = app_handle.try_state::<dictation::DictationState>() {
                         dictation.shutdown();
                     }

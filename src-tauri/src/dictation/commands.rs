@@ -200,6 +200,17 @@ pub fn delete_whisper_model(
 
 #[tauri::command]
 pub fn start_dictation(app: AppHandle, dictation: State<'_, DictationState>) -> Result<(), String> {
+    // The microphone is a process-wide singleton, and a voice session holds it
+    // for its whole duration. Enforced here rather than only in the UI so no
+    // caller — hotkey, chat mic button, IPC — can take it out from under one.
+    if app
+        .state::<crate::voice::VoiceState>()
+        .active
+        .load(Ordering::Acquire)
+    {
+        return Err("Voice mode is active — turn it off to use dictation".to_string());
+    }
+
     // Atomic test-and-set: prevents TOCTOU race from concurrent IPC calls
     if dictation
         .recording
@@ -655,6 +666,101 @@ pub async fn stop_dictation_and_transcribe(app: AppHandle) -> Result<TranscribeR
     *app.state::<DictationState>().audio.lock() = None;
 
     result
+}
+
+/// Transcribe one already-captured utterance with whatever STT provider is
+/// configured, applying the correction map to the result.
+///
+/// Split out of `stop_dictation_and_transcribe` so the voice agent can reuse the
+/// provider selection, the model-loading path and the corrections without
+/// re-implementing any of it. Unlike the command above it owns no recording
+/// lifecycle — the caller supplies the audio and decides what to do with the text.
+///
+/// Returns an empty string when nothing was recognized; only genuine failures
+/// (a cloud error, a missing key) come back as `Err`.
+pub(crate) async fn transcribe_utterance(
+    app: &AppHandle,
+    audio: Vec<f32>,
+) -> Result<String, String> {
+    let config = get_dictation_config();
+    let language = (config.language != "auto").then(|| config.language.clone());
+
+    let raw = if let Some((provider, model)) = cloud_stt_model(&config) {
+        if model.is_empty() {
+            return Err(format!("No {provider} transcription model selected"));
+        }
+        let provider_owned = provider.clone();
+        let api_key = tokio::task::spawn_blocking(move || {
+            crate::credentials::get(crate::credentials::Credential::DictationSttApiKey(
+                &provider_owned,
+            ))
+        })
+        .await
+        .map_err(|e| format!("Keyring task failed: {e}"))??
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| format!("API key not set for {provider}"))?;
+
+        super::stt_cloud::transcribe_cloud(
+            &provider,
+            &model,
+            &api_key,
+            language.as_deref(),
+            &audio,
+        )
+        .await?
+    } else {
+        // Local whisper. Loading is idempotent — the model stays resident in
+        // DictationState between utterances, so only the first pays for it.
+        let transcriber = ensure_local_transcriber(app)?;
+        tokio::task::spawn_blocking(move || {
+            match transcriber.transcribe(&audio, language.as_deref()) {
+                Ok(result) if result.skip_reason.is_none() => result.text,
+                _ => String::new(),
+            }
+        })
+        .await
+        .map_err(|e| format!("Transcription task panicked: {e}"))?
+    };
+
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    let corrections = app.state::<DictationState>().corrections.clone();
+    let corrected = corrections.lock().correct(&raw);
+    Ok(corrected.replace('\n', " "))
+}
+
+/// Load the configured whisper model if it isn't already resident, and hand back
+/// a shared handle to it.
+pub(crate) fn ensure_local_transcriber(
+    app: &AppHandle,
+) -> Result<Arc<dyn transcribe::Transcriber>, String> {
+    let dictation = app.state::<DictationState>();
+    let whisper_model = configured_model();
+
+    let mut transcriber_lock = dictation.transcriber_arc.lock();
+    let mut active_model_lock = dictation.active_model.lock();
+    let model_changed = active_model_lock
+        .as_deref()
+        .is_none_or(|name| name != whisper_model.name());
+
+    if model_changed || transcriber_lock.is_none() {
+        if !model::model_exists(whisper_model) {
+            return Err("Model not downloaded".to_string());
+        }
+        let loaded = transcribe::WhisperTranscriber::load(&model::model_path(whisper_model))?;
+        *transcriber_lock = Some(Arc::new(loaded));
+        *active_model_lock = Some(whisper_model.name().to_string());
+        app_logger::log_via_handle(
+            app,
+            "info",
+            "dictation",
+            &format!("Model loaded (backend: {})", transcribe::backend_label()),
+        );
+    }
+    transcriber_lock
+        .clone()
+        .ok_or_else(|| "Transcriber not available".to_string())
 }
 
 #[tauri::command]
