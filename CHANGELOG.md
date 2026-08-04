@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-04
+
 ### Added
 
 - **Talk to the AI chat and hear it answer** — A new voice button beside the mic starts a hands-free session: it detects when you stop speaking, transcribes the turn, sends it to the agent, and speaks the reply sentence by sentence as it streams, then goes back to listening. It works in both assisted and autonomous modes, respects the model and effort pickers, and leaves the approval prompt for tool calls exactly where it was, so a spoken instruction still cannot silently run anything dangerous. Everything runs on-device: turn detection is Silero VAD v5 compiled into the binary, and speech is synthesized by Kokoro-82M through ONNX Runtime at roughly 2.7x realtime on CPU. Code blocks are stripped before speaking rather than being spelled out letter by letter.
