@@ -6,6 +6,15 @@ on:
     tags:
       - 'v*'
 
+# sccache's 600s idle timer counts time without *new* requests, so the final
+# single-codegen-unit compile of the tuicommander lib — well over ten minutes on
+# the Windows runner — outlives it: the server exits and the in-flight rustc dies
+# with "connection forcibly closed" (os error 10054). 0 keeps the server alive for
+# the whole job. It sits at workflow level because sccache-action starts the
+# server, so a step-level value would never reach it.
+env:
+  SCCACHE_IDLE_TIMEOUT: "0"
+
 jobs:
   build:
     permissions:
@@ -17,7 +26,15 @@ jobs:
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'
             label: macOS-ARM
-          - platform: ubuntu-22.04
+          # 24.04, not 22.04, because ONNX Runtime's prebuilt (pulled in by
+          # `ort` for the voice agent) needs glibc 2.38+ and libstdc++ 13+ —
+          # 22.04 ships 2.35/12 and the link fails on __isoc23_strtoll and
+          # basic_string::_M_replace_cold. This raises the glibc floor of the
+          # published .deb/.AppImage to 2.39, so Ubuntu 22.04 and Debian 12 are
+          # no longer supported targets for the desktop app. The remote-daemon
+          # jobs below stay on 22.04: they build without the `desktop` feature,
+          # so they never link ort and keep the wider compatibility.
+          - platform: ubuntu-24.04
             args: ''
             label: Linux-x64
           - platform: windows-latest
@@ -29,10 +46,12 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: startsWith(matrix.platform, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev mold
+          # libayatana-appindicator3-dev, not libappindicator3-dev: the latter
+          # was dropped in Ubuntu 24.04.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libasound2-dev mold
 
       # Keep the Windows build/target dir short (C:/t): whisper.cpp's nested
       # CMake TryCompile paths can exceed the 260-char MAX_PATH that MSBuild's
