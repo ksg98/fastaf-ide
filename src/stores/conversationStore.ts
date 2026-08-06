@@ -654,6 +654,7 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 				});
 			} else {
 				const full = s.streamingText();
+				const cutShort = truncatedReason(event.reason);
 				batch(() => {
 					s.setIsStreaming(false);
 					s.setStreamingText("");
@@ -664,12 +665,42 @@ function applyConversationEvent(s: PerTerminalConversationState, event: Conversa
 							return next.length > MAX_MESSAGES ? next.slice(next.length - MAX_MESSAGES) : next;
 						});
 					}
+					// Assisted mode used to drop `reason` on the floor, so a turn
+					// the backend cut off mid-thought was indistinguishable from
+					// one that finished — the chat just stopped after the last
+					// tool result with nothing to explain it.
+					if (cutShort) s.setError(cutShort);
 				});
+				if (cutShort) appLogger.warn("conversation", "Assisted turn ended early", { reason: event.reason });
 				schedulePersist(ownerKey ?? activeKey());
 			}
 			break;
 		}
 	}
+}
+
+/**
+ * Turn a backend completion reason into something worth showing the user, or
+ * null when the turn ended normally.
+ *
+ * The backend reports why a turn stopped, but only two of those reasons mean
+ * "finished". The rest cut the turn off with work still pending, and reporting
+ * them as a clean finish is what made a truncated reply look like the model
+ * simply had nothing more to say.
+ */
+function truncatedReason(reason: string): string | null {
+	if (reason === "end_turn" || reason === "cancelled") return null;
+	if (reason === "max_iterations") {
+		return "The reply stopped early: it reached the tool-step limit for chat. Switch to autonomous mode for longer tool chains.";
+	}
+	if (reason === "timeout") return "The reply stopped early: the turn ran out of time.";
+	if (reason.startsWith("repetition_detected")) {
+		return "The reply stopped early: the model repeated the same tool call too many times.";
+	}
+	if (reason.endsWith("rate_limit") || reason.endsWith("limit")) {
+		return "The reply stopped early: a rate limit was reached.";
+	}
+	return `The reply stopped early (${reason}).`;
 }
 
 function accumulateUsageForState(

@@ -38,7 +38,9 @@ pub(crate) enum Autonomy {
 
 pub(crate) struct ConversationConfig {
     pub autonomy: Autonomy,
-    /// None = stop after first text response (chat-like). Some(n) = up to n iterations.
+    /// Iteration ceiling. `None` — which is what every caller actually passes —
+    /// takes the per-autonomy default: `CHAT_MAX_ITERATIONS` for assisted,
+    /// `MAX_ITERATIONS` for autonomous.
     pub max_steps: Option<usize>,
     pub temperature: f32,
     /// Override the main model from the provider registry.
@@ -403,6 +405,21 @@ pub(crate) async fn build_config(
         reasoning: ReasoningLevel::from_opt(reasoning_effort.as_deref()),
         compact_after_tokens: Some(engine::DEFAULT_COMPACT_THRESHOLD_TOKENS),
     }
+}
+
+/// How many model round-trips a conversation may take.
+///
+/// Nothing sets `max_steps` in practice — neither the chat path nor the agent
+/// passes it — so this default is what actually governs both modes. It used to
+/// collapse to a single tool round-trip regardless of autonomy, which silently
+/// truncated any turn where the model wanted a second call: the second batch of
+/// tools was never dispatched and no text was produced, so the reply just
+/// stopped after the first tool's output.
+fn iteration_ceiling(config: &ConversationConfig) -> usize {
+    config.max_steps.unwrap_or(match config.autonomy {
+        Autonomy::Autonomous => MAX_ITERATIONS,
+        Autonomy::Assisted => engine::CHAT_MAX_ITERATIONS,
+    })
 }
 
 /// Apply 50ms TextChunk/ReasoningChunk batching to a raw conversation broadcast
@@ -771,9 +788,7 @@ async fn run_conversation(
     let mut repetition = RepetitionDetector::new();
     let deadline = tokio::time::Instant::now() + LOOP_TIMEOUT;
     let mut last_tool_names: Vec<String> = Vec::new();
-    let max_iterations = config.max_steps.unwrap_or(MAX_ITERATIONS);
-    // When no max_steps configured: allow one tool-use round-trip, then stop.
-    let is_single_response = config.max_steps.is_none();
+    let max_iterations = iteration_ceiling(&config);
 
     for iteration in 0..max_iterations {
         if cancel.load(Ordering::Acquire) {
@@ -913,9 +928,6 @@ async fn run_conversation(
         // On end_turn the conversation stops, so chat_req is never reused — no point
         // appending the final assistant message (it would be discarded).
         if tool_calls.is_empty() {
-            return Ok("end_turn".into());
-        }
-        if is_single_response && iteration > 0 {
             return Ok("end_turn".into());
         }
 
@@ -1065,6 +1077,15 @@ async fn run_conversation(
         }
     }
 
+    // Only reachable with tool calls still pending — every other exit returns
+    // from inside the loop. The turn is being cut off mid-thought, so say so
+    // rather than reporting it as a normal completion.
+    tracing::warn!(
+        session_id = %session_id,
+        max_iterations,
+        last_tools = ?last_tool_names,
+        "Conversation hit its step ceiling with tool calls still pending"
+    );
     Ok("max_iterations".into())
 }
 
@@ -1364,23 +1385,50 @@ mod tests {
         assert!(!config.bypassed_tools.contains("run_command"));
     }
 
+    /// The regression behind "the chat stops once a tool result is rendered":
+    /// both modes are started without `max_steps`, and the default they fall
+    /// back to allowed exactly one tool round-trip. A model that wanted a second
+    /// call — the normal shape for MCP tools, which chain — produced no further
+    /// output at all.
     #[test]
-    fn single_response_mode_has_no_max_steps() {
-        let config = ConversationConfig {
-            max_steps: None,
-            ..Default::default()
-        };
-        assert!(config.max_steps.is_none());
+    fn a_turn_started_without_max_steps_gets_more_than_one_round_trip() {
+        for autonomy in [Autonomy::Assisted, Autonomy::Autonomous] {
+            let config = ConversationConfig {
+                autonomy,
+                max_steps: None,
+                ..Default::default()
+            };
+            assert!(
+                iteration_ceiling(&config) > 1,
+                "{autonomy:?} must be able to run a second tool round-trip"
+            );
+        }
     }
 
     #[test]
-    fn autonomous_mode_sets_max_steps() {
-        let config = ConversationConfig {
-            autonomy: Autonomy::Autonomous,
-            max_steps: Some(20),
+    fn assisted_chat_gets_a_tighter_ceiling_than_the_agent() {
+        let assisted = ConversationConfig {
+            autonomy: Autonomy::Assisted,
+            max_steps: None,
             ..Default::default()
         };
-        assert_eq!(config.max_steps, Some(20));
-        assert_eq!(config.autonomy, Autonomy::Autonomous);
+        let autonomous = ConversationConfig {
+            autonomy: Autonomy::Autonomous,
+            max_steps: None,
+            ..Default::default()
+        };
+        assert_eq!(iteration_ceiling(&assisted), engine::CHAT_MAX_ITERATIONS);
+        assert_eq!(iteration_ceiling(&autonomous), MAX_ITERATIONS);
+        assert!(iteration_ceiling(&assisted) < iteration_ceiling(&autonomous));
+    }
+
+    #[test]
+    fn an_explicit_max_steps_overrides_the_per_autonomy_default() {
+        let config = ConversationConfig {
+            autonomy: Autonomy::Autonomous,
+            max_steps: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(iteration_ceiling(&config), 3);
     }
 }
