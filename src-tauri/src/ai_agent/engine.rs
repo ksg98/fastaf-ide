@@ -18,6 +18,20 @@ use super::tools;
 // ── Constants ─────────────────────────────────────────────────
 
 pub(crate) const MAX_ITERATIONS: usize = 20;
+
+/// Step ceiling for assisted chat, which sets no explicit `max_steps`.
+///
+/// This used to be a single tool round-trip: one batch of tools, one reply,
+/// stop. That silently truncated any turn where the model needed a second call
+/// — the common shape for MCP tools, which chain (list, then read; search, then
+/// fetch). The second call was never dispatched and no text was ever produced,
+/// so the chat showed the first tool's output and then nothing.
+///
+/// Lower than `MAX_ITERATIONS` because chat turns should stay snappy, and
+/// because a model that wants more than this in a conversational reply is
+/// usually looping. Every tool still passes the assisted-mode approval gate, so
+/// a larger budget does not mean anything runs unattended.
+pub(crate) const CHAT_MAX_ITERATIONS: usize = 8;
 pub(crate) const LOOP_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
 pub(crate) const MAX_IDENTICAL_CALLS: usize = 3;
 pub(crate) const RATE_WINDOW: Duration = Duration::from_secs(60);
