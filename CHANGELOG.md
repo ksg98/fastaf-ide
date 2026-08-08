@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Barge-in no longer cuts the agent off after its first word on laptop speakers** — On macOS, voice sessions now capture the microphone through the system's voice processing (the same engine FaceTime uses), so the OS removes everything the machine is playing — including the agent's own voice — from the mic signal before the app ever sees it, with noise suppression and automatic gain control included. Previously an in-app echo canceller had to estimate the delay between two unsynchronized audio streams, and while it converged the first word of every reply leaked through, scored as speech, and cancelled the reply — the agent kept interrupting itself. Where OS voice processing isn't available, a detection made while the agent is speaking now ducks playback and cancels only if the audio transcribes to actual words; its own echo transcribes to nothing, and the reply resumes at full volume.
+
 ## [1.7.1] - 2026-08-04
 
 ### Fixed

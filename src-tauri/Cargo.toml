@@ -248,6 +248,8 @@ desktop = [
     "dep:ort",
     "dep:misaki-rs",
     "dep:aec3",
+    "dep:coreaudio-rs",
+    "dep:objc2-audio-toolbox",
     "dep:objc2",
     "dep:objc2-foundation",
     "dep:objc2-app-kit",
@@ -262,6 +264,13 @@ tokio-console = ["console-subscriber"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal"], optional = true }
+# Voice sessions capture through kAudioUnitSubType_VoiceProcessingIO instead of
+# cpal, so the OS cancels everything the machine is playing out of the mic
+# signal — the same engine-owned echo cancellation a browser gets from
+# getUserMedia, which is what makes barge-in work on open laptop speakers.
+# Same versions cpal already pulls in, so nothing new is compiled.
+coreaudio-rs = { version = "0.14", optional = true }
+objc2-audio-toolbox = { version = "0.3", optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSDictionary", "NSString", "NSValue"], optional = true }
 objc2-app-kit = { version = "0.3", features = ["NSEvent", "block2"], optional = true }
