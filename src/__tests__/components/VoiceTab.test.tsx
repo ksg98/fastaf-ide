@@ -142,10 +142,33 @@ describe("VoiceTab", () => {
 
 	it("fetches an undownloaded voice before selecting it, so one click is enough", async () => {
 		render(() => <VoiceTab />);
-		fireEvent.click(screen.getByText("Get & use"));
+		// Two rows offer it in the baseline: the selected-but-missing default
+		// and the never-selected one. The second is Michael.
+		fireEvent.click(screen.getAllByText("Get & use")[1]);
 		await Promise.resolve();
 		expect(store.downloadVoice).toHaveBeenCalledWith("am_michael");
 		expect(store.saveConfig).toHaveBeenCalledWith({ voice: "am_michael" });
+	});
+
+	it("never marks a voice Active while its file is missing", async () => {
+		// The #6 trap: af_heart is the configured default on a fresh install,
+		// with nothing on disk. That must read as something to fetch, not as a
+		// working setup.
+		const { unmount } = render(() => <VoiceTab />);
+		expect(screen.queryByText("Active")).toBeNull();
+		fireEvent.click(screen.getAllByText("Get & use")[0]);
+		await Promise.resolve();
+		expect(store.downloadVoice).toHaveBeenCalledWith("af_heart");
+		unmount();
+
+		// Once the file exists, the selected voice is Active and the fetch
+		// button is gone.
+		store.state.voices = store.state.voices.map((v) =>
+			v.id === "af_heart" ? { ...v, downloaded: true } : v,
+		);
+		render(() => <VoiceTab />);
+		expect(screen.getByText("Active")).toBeTruthy();
+		expect(screen.getAllByText("Get & use")).toHaveLength(1);
 	});
 
 	it("offers Load when the engine is cold and Unload once it is resident", () => {

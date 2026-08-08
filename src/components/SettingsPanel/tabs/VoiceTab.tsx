@@ -87,12 +87,15 @@ const VoiceRow: Component<{ voice: VoiceInfo }> = (props) => {
 				<Show when={isDownloading()}>
 					<DownloadBar />
 				</Show>
-				<Show when={!isDownloading() && !isSelected()}>
+				<Show when={!isDownloading() && !(isSelected() && props.voice.downloaded)}>
 					<button class={d.modelSelect} onClick={() => void use()}>
 						{props.voice.downloaded ? "Use" : "Get & use"}
 					</button>
 				</Show>
-				<Show when={isSelected()}>
+				{/* Selected is not enough — the default voice is selected out of
+				    the box with nothing on disk, and labelling that Active reads
+				    as a working setup right up until Load fails (#6). */}
+				<Show when={isSelected() && props.voice.downloaded}>
 					<span class={d.modelActiveLabel}>Active</span>
 				</Show>
 				<Show when={props.voice.downloaded && !isSelected()}>
