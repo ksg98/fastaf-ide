@@ -148,10 +148,17 @@ pub async fn voice_download_model(app: AppHandle, model_name: String) -> Result<
         return Ok("Model already downloaded".to_string());
     }
     let app_clone = app.clone();
+    // tracing as well as the returned error: the frontend shows failures in a
+    // Settings banner and nowhere else, which left nothing in the log file to
+    // grep when a download had quietly failed (#6).
     let path = assets::download_model(model, move |downloaded, total| {
         emit_progress(&app_clone, downloaded, total);
     })
-    .await?;
+    .await
+    .inspect_err(|e| {
+        tracing::warn!(source = "voice", model = model.name(), "Model download failed: {e}");
+    })?;
+    tracing::info!(source = "voice", model = model.name(), "Model downloaded to {}", path.display());
     Ok(format!("Downloaded to {}", path.display()))
 }
 
@@ -164,7 +171,11 @@ pub async fn voice_download_voice(app: AppHandle, voice_id: String) -> Result<St
     let path = assets::download_voice(&voice_id, move |downloaded, total| {
         emit_progress(&app_clone, downloaded, total);
     })
-    .await?;
+    .await
+    .inspect_err(|e| {
+        tracing::warn!(source = "voice", voice = voice_id, "Voice download failed: {e}");
+    })?;
+    tracing::info!(source = "voice", voice = voice_id, "Voice downloaded to {}", path.display());
     Ok(format!("Downloaded to {}", path.display()))
 }
 
@@ -227,11 +238,16 @@ pub async fn voice_load_engine(app: AppHandle) -> Result<(), String> {
     .await
     .map_err(|e| format!("Voice engine load panicked: {e}"))?;
 
-    let (engine, voice) = loaded?;
+    // The classic failure here is "voice X is not downloaded" on a fresh
+    // install (#6) — put it in the log file, not just the Settings banner.
+    let (engine, voice) = loaded.inspect_err(|e| {
+        tracing::warn!(source = "voice", "Voice engine load failed: {e}");
+    })?;
     let state = app.state::<VoiceState>();
     state.set_engine(engine);
     *state.voice.lock() = Some(voice);
     app_logger::log_via_handle(&app, "info", "voice", "TTS engine loaded");
+    tracing::info!(source = "voice", "TTS engine loaded");
     Ok(())
 }
 
