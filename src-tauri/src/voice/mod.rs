@@ -17,13 +17,51 @@ pub mod playback;
 pub mod session;
 pub mod silero;
 pub mod turn;
+#[cfg(target_os = "macos")]
+pub mod vpio;
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use parking_lot::Mutex;
-use std::sync::atomic::AtomicBool;
 
 use kokoro::{Kokoro, Voice};
 use playback::Playback;
 use session::Session;
+
+/// Where a session's microphone samples come from.
+///
+/// The listening loop only ever sees the shared buffer, so the two variants
+/// are interchangeable from its point of view; what differs is who removes the
+/// agent's own voice from the signal. With `Vpio` the OS does it before we see
+/// a sample; with `Cpal` it is `echo::EchoCanceller` in the session loop, or
+/// half-duplex muting when barge-in is off.
+pub enum VoiceCapture {
+    /// Plain cpal stream, identical to dictation's.
+    Cpal(crate::dictation::audio::AudioCapture),
+    /// macOS voice processing — OS echo cancellation, noise suppression, AGC.
+    #[cfg(target_os = "macos")]
+    Vpio(vpio::VpioCapture),
+}
+
+impl VoiceCapture {
+    pub fn buffer_handle(&self) -> Arc<Mutex<VecDeque<f32>>> {
+        match self {
+            Self::Cpal(capture) => capture.buffer_handle(),
+            #[cfg(target_os = "macos")]
+            Self::Vpio(capture) => capture.buffer_handle(),
+        }
+    }
+
+    pub fn level(&self) -> f32 {
+        match self {
+            Self::Cpal(capture) => capture.level(),
+            #[cfg(target_os = "macos")]
+            Self::Vpio(capture) => capture.level(),
+        }
+    }
+}
 
 /// Shared voice state, registered with Tauri's `.manage()`.
 pub struct VoiceState {
@@ -44,7 +82,7 @@ pub struct VoiceState {
     /// Microphone capture for the session. Owned here rather than by the
     /// listening thread so `voice_status` can read its level meter; the thread
     /// only gets the shared sample buffer.
-    pub audio: Mutex<Option<crate::dictation::audio::AudioCapture>>,
+    pub audio: Mutex<Option<VoiceCapture>>,
     /// The listening loop. `None` when not in a voice session.
     pub session: Mutex<Option<Session>>,
     /// Mirrors `session.is_some()` without taking the lock, so dictation can

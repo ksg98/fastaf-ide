@@ -195,7 +195,7 @@ impl AudioCapture {
 ///
 /// `mono_buf` and `resample_buf` are pre-allocated scratch buffers owned by
 /// the closure to avoid per-callback heap allocations.
-fn process_audio_chunk(
+pub(crate) fn process_audio_chunk(
     data: &[f32],
     sample_rate: u32,
     channels: usize,

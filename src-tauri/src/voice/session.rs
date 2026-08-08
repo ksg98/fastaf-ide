@@ -42,31 +42,66 @@ pub struct Session {
 
 impl Session {
     /// Start listening on an already-running capture. `barge_in` keeps the
-    /// detector live while the agent is speaking; with it off the session is
-    /// half-duplex, which is the only way to avoid hearing our own output on a
-    /// machine with no echo cancellation.
+    /// detector live while the agent is speaking; `os_aec` says the capture is
+    /// already echo-cancelled by the operating system (macOS voice processing),
+    /// so the session must not run its own canceller on top.
     ///
-    /// Takes only the shared sample buffer, not the `AudioCapture` itself —
-    /// the caller keeps that in `VoiceState` so `voice_status` can read its
-    /// level meter while this thread is draining it.
+    /// Takes only the shared sample buffer, not the capture itself — the
+    /// caller keeps that in `VoiceState` so `voice_status` can read its level
+    /// meter while this thread is draining it.
     pub fn start(
         app: AppHandle,
         playback: Playback,
         buffer: Arc<Mutex<VecDeque<f32>>>,
         barge_in: bool,
+        os_aec: bool,
     ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
 
         let handle = std::thread::Builder::new()
             .name("voice-session".into())
-            .spawn(move || listen_loop(&app, &buffer, &playback, &stop_thread, barge_in))
+            .spawn(move || listen_loop(&app, &buffer, &playback, &stop_thread, barge_in, os_aec))
             .map_err(|e| format!("Failed to spawn voice session thread: {e}"))?;
 
         Ok(Self {
             stop,
             handle: Some(handle),
         })
+    }
+}
+
+/// How the agent's own voice is kept out of the turn detector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EchoPath {
+    /// The OS removes system output from the mic before we ever see a sample
+    /// (macOS voice processing). Echo cannot reach the detector, so a barge-in
+    /// cancels playback the instant speech is detected — the behaviour the
+    /// browser-based reference implementation gets from its audio engine.
+    Os,
+    /// `aec3` runs in this loop over a plain capture. It has to estimate the
+    /// delay between two unsynchronized streams, and around playback onset the
+    /// residue is strong enough to score as speech — so a detection over our
+    /// own playback is treated as *suspected* echo: playback is ducked, and
+    /// only a transcript with actual words in it cancels the reply.
+    Software,
+    /// No cancellation available: the mic is discarded while the agent speaks.
+    HalfDuplex,
+}
+
+/// Decide the echo strategy from what the capture and canceller can offer.
+fn echo_path(barge_in: bool, os_aec: bool, software_available: bool) -> EchoPath {
+    if !barge_in {
+        return EchoPath::HalfDuplex;
+    }
+    if os_aec {
+        EchoPath::Os
+    } else if software_available {
+        EchoPath::Software
+    } else {
+        // Barge-in without any canceller would have the agent interrupting
+        // itself on every reply, which is worse than not interrupting at all.
+        EchoPath::HalfDuplex
     }
 }
 
@@ -85,6 +120,7 @@ fn listen_loop(
     playback: &Playback,
     stop: &AtomicBool,
     barge_in: bool,
+    os_aec: bool,
 ) {
     let mut detector = match TurnDetector::new(TurnConfig::default()) {
         Ok(detector) => detector,
@@ -101,9 +137,10 @@ fn listen_loop(
     let mut turn_started = std::time::Instant::now();
 
     // With barge-in the microphone stays live while the agent speaks, so the
-    // echo has to be cancelled or the detector scores our own voice as the
-    // user's. Half-duplex mutes the mic instead and needs none of this.
-    let mut canceller = if barge_in {
+    // echo has to be cancelled somewhere or the detector scores our own voice
+    // as the user's. An OS-cancelled capture needs nothing here; otherwise
+    // aec3 runs in this loop; half-duplex mutes the mic instead.
+    let mut canceller = if barge_in && !os_aec {
         match EchoCanceller::new() {
             Ok(aec) => Some(aec),
             Err(e) => {
@@ -117,9 +154,11 @@ fn listen_loop(
     } else {
         None
     };
-    // Barge-in without a working canceller would have the agent interrupting
-    // itself on every reply, which is worse than not interrupting at all.
-    let half_duplex = !barge_in || canceller.is_none();
+    let path = echo_path(barge_in, os_aec, canceller.is_some());
+    let half_duplex = path == EchoPath::HalfDuplex;
+    // Software path only: a detection fired over our own playback, now ducked
+    // and waiting for its transcript to prove it contains words.
+    let mut pending_barge = false;
     let mut cleaned: Vec<f32> = Vec::with_capacity(FRAME * 4);
     let mut playback_generation = playback.generation();
 
@@ -127,7 +166,7 @@ fn listen_loop(
     app_logger::log_via_handle(app, "info", "voice", "Voice session started");
     // tracing (not just the in-app log buffer) so a session that misbehaves
     // leaves a trace in the log file after the fact.
-    tracing::info!(source = "voice", barge_in, "Voice session started");
+    tracing::info!(source = "voice", barge_in, echo = ?path, "Voice session started");
 
     while !stop.load(Ordering::Acquire) {
         std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
@@ -197,12 +236,24 @@ fn listen_loop(
             match event {
                 TurnEvent::SpeechStart => {
                     turn_started = std::time::Instant::now();
-                    tracing::info!(
-                        source = "voice",
-                        speaking_out = playback.is_speaking(),
-                        "Speech started"
-                    );
-                    let _ = app.emit("voice-speech-start", ());
+                    let speaking_out = playback.is_speaking();
+                    tracing::info!(source = "voice", speaking_out, "Speech started");
+                    if path == EchoPath::Software && speaking_out {
+                        // Could be the user, could be our own voice leaking
+                        // through the canceller — at VAD level they look the
+                        // same (issue #7: the leak cut off every reply after
+                        // its first word). Duck the speaker, which collapses
+                        // the echo and leaves real speech clean for whisper,
+                        // and decide when the transcript comes back.
+                        pending_barge = true;
+                        playback.duck();
+                        tracing::info!(
+                            source = "voice",
+                            "Speech over playback — ducked, awaiting words before barge-in"
+                        );
+                    } else {
+                        let _ = app.emit("voice-speech-start", ());
+                    }
                 }
                 TurnEvent::SpeechEnd | TurnEvent::Truncated => {
                     if event == TurnEvent::Truncated {
@@ -224,10 +275,24 @@ fn listen_loop(
                             "Turn ended"
                         );
                         emit_state(app, STATE_TRANSCRIBING);
-                        spawn_transcription(app.clone(), audio);
+                        let barge_gate = if pending_barge {
+                            pending_barge = false;
+                            Some(playback.clone())
+                        } else {
+                            None
+                        };
+                        spawn_transcription(app.clone(), audio, barge_gate);
                     }
                 }
                 TurnEvent::Misfire => {
+                    if pending_barge {
+                        pending_barge = false;
+                        playback.restore_volume();
+                        tracing::debug!(
+                            source = "voice",
+                            "Suspected barge-in was a misfire — playback restored"
+                        );
+                    }
                     tracing::debug!(
                         source = "voice",
                         wall_s = turn_started.elapsed().as_secs_f32(),
@@ -240,16 +305,35 @@ fn listen_loop(
         pending.drain(..offset);
     }
 
+    // A duck must not survive the session that applied it.
+    if pending_barge {
+        playback.restore_volume();
+    }
+
     app_logger::log_via_handle(app, "info", "voice", "Voice session stopped");
 }
 
 /// Transcribe off the listening thread so the detector never stops consuming
 /// audio — a blocking whisper pass here would drop the start of the next turn.
-fn spawn_transcription(app: AppHandle, audio: Vec<f32>) {
+///
+/// `barge_gate` is Some when this utterance was detected over the agent's own
+/// (now ducked) playback on the software echo path. The transcript settles what
+/// the detector could not: words cancel the reply and become a barge-in, while
+/// an empty result was our own echo, so the reply is restored to full volume
+/// and keeps going.
+fn spawn_transcription(app: AppHandle, audio: Vec<f32>, barge_gate: Option<Playback>) {
     let seconds = audio.len() as f64 / 16_000.0;
     tauri::async_runtime::spawn(async move {
         match crate::dictation::commands::transcribe_utterance(&app, audio).await {
             Ok(text) if text.trim().is_empty() => {
+                if let Some(playback) = &barge_gate {
+                    playback.restore_volume();
+                    tracing::info!(
+                        source = "voice",
+                        audio_s = seconds,
+                        "Speech over playback had no words — echo, not a barge-in; reply continues"
+                    );
+                }
                 app_logger::log_via_handle(
                     &app,
                     "info",
@@ -260,6 +344,9 @@ fn spawn_transcription(app: AppHandle, audio: Vec<f32>) {
                 emit_state(&app, STATE_LISTENING);
             }
             Ok(text) if is_low_yield(seconds, text.trim().len()) => {
+                if let Some(playback) = &barge_gate {
+                    playback.restore_volume();
+                }
                 // Speech the model was confident about, that transcribes to
                 // almost nothing, is background audio — a television across the
                 // room, not a request. Sending it would put noise in the chat
@@ -282,6 +369,18 @@ fn spawn_transcription(app: AppHandle, audio: Vec<f32>) {
                 emit_state(&app, STATE_LISTENING);
             }
             Ok(text) => {
+                if let Some(playback) = &barge_gate {
+                    // Words while the agent was talking: a real interruption.
+                    // Kill the reply audio here rather than waiting for the
+                    // frontend round-trip, then tell it so the LLM stream is
+                    // cancelled too.
+                    playback.stop_all();
+                    let _ = app.emit("voice-speech-start", ());
+                    tracing::info!(
+                        source = "voice",
+                        "Barge-in confirmed by transcript — playback cancelled"
+                    );
+                }
                 // Length only — transcripts are never written to the log.
                 app_logger::log_via_handle(
                     &app,
@@ -298,6 +397,9 @@ fn spawn_transcription(app: AppHandle, audio: Vec<f32>) {
                 let _ = app.emit("voice-utterance", serde_json::json!({ "text": text }));
             }
             Err(e) => {
+                if let Some(playback) = &barge_gate {
+                    playback.restore_volume();
+                }
                 app_logger::log_via_handle(
                     &app,
                     "warn",
@@ -337,6 +439,21 @@ fn is_low_yield(seconds: f64, chars: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The full strategy table. The one row that ever bit us is barge-in with
+    /// only software cancellation: it must NOT behave like the OS path,
+    /// because residual echo there scores as speech (issue #7).
+    #[test]
+    fn echo_strategy_is_chosen_by_what_can_actually_cancel() {
+        use EchoPath::{HalfDuplex, Os, Software};
+        // barge_in, os_aec, software_available -> path
+        assert_eq!(echo_path(false, false, false), HalfDuplex);
+        assert_eq!(echo_path(false, true, true), HalfDuplex, "no barge-in wanted, no need to listen through playback");
+        assert_eq!(echo_path(true, true, false), Os);
+        assert_eq!(echo_path(true, true, true), Os, "OS cancellation wins even if aec3 would build");
+        assert_eq!(echo_path(true, false, true), Software);
+        assert_eq!(echo_path(true, false, false), HalfDuplex, "barge-in without any canceller would self-interrupt");
+    }
 
     #[test]
     fn short_turns_are_never_judged_by_their_length() {

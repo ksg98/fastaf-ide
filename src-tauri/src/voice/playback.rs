@@ -93,15 +93,38 @@ impl Playback {
         !self.inner.player.empty()
     }
 
+    /// Quieten playback while a possible barge-in is being verified.
+    ///
+    /// Used by the software echo path: when the detector fires over our own
+    /// playback it cannot tell residual echo from a real interruption, so the
+    /// session ducks the speaker — which collapses the echo and makes the
+    /// user's speech transcribable — and only cancels once the audio proves to
+    /// contain words. Loud enough to tell the reply is still going, quiet
+    /// enough that the mic stops caring.
+    pub fn duck(&self) {
+        self.inner.player.set_volume(DUCK_VOLUME);
+    }
+
+    /// Undo `duck` once the barge-in question is settled.
+    pub fn restore_volume(&self) {
+        self.inner.player.set_volume(1.0);
+    }
+
     /// Drop everything queued and invalidate in-flight synthesis.
     pub fn stop_all(&self) {
         self.inner.generation.fetch_add(1, Ordering::AcqRel);
         self.inner.player.clear();
+        // A duck must not outlive the speech it was ducking — the next reply
+        // would start at a whisper.
+        self.inner.player.set_volume(1.0);
         // Reference audio for sound that will now never be heard would only
         // mislead the echo canceller.
         self.inner.tee.lock().clear();
     }
 }
+
+/// Volume applied by `duck` while a suspected barge-in is checked for words.
+const DUCK_VOLUME: f32 = 0.2;
 
 /// Copies every sample the audio device pulls into the echo canceller's
 /// reference queue.

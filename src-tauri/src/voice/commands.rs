@@ -10,7 +10,7 @@ use super::config::{self, VoiceConfig};
 use super::kokoro::{Kokoro, Voice};
 use super::playback::Playback;
 use super::session::Session;
-use super::VoiceState;
+use super::{VoiceCapture, VoiceState};
 use crate::app_logger;
 use crate::dictation::DictationState;
 
@@ -72,7 +72,46 @@ fn current_audio_level(voice: &VoiceState, dictation: &DictationState) -> f32 {
     if let Some(capture) = voice.audio.lock().as_ref() {
         return capture.level();
     }
-    dictation.audio.lock().as_ref().map_or(0.0, AudioCapture::level)
+    dictation
+        .audio
+        .lock()
+        .as_ref()
+        .map_or(0.0, AudioCapture::level)
+}
+
+/// Open the microphone for a session, choosing who cancels the echo.
+///
+/// With barge-in on, macOS captures through the OS voice-processing unit, which
+/// removes everything the machine is playing — including the agent's own voice —
+/// from the mic signal at the hardware layer. That is the same engine-owned
+/// echo cancellation the browser-based reference implementation relies on, and
+/// it is what makes talking over the agent work on open laptop speakers.
+/// Everywhere else (and if voice processing fails to open), a plain cpal
+/// capture is used and the session runs `aec3` in software.
+fn open_voice_capture(barge_in: bool, device: Option<&str>) -> Result<(VoiceCapture, bool), String> {
+    #[cfg(target_os = "macos")]
+    if barge_in {
+        match super::vpio::VpioCapture::start(device) {
+            Ok(capture) => {
+                tracing::info!(
+                    source = "voice",
+                    "Capturing through macOS voice processing (OS echo cancellation)"
+                );
+                return Ok((VoiceCapture::Vpio(capture), true));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    source = "voice",
+                    "Voice processing unavailable, falling back to software echo cancellation: {e}"
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = barge_in;
+
+    let capture = crate::dictation::audio::AudioCapture::start_with_device(device)?;
+    Ok((VoiceCapture::Cpal(capture), false))
 }
 
 #[tauri::command]
@@ -248,12 +287,13 @@ pub async fn voice_start(app: AppHandle) -> Result<(), String> {
     let input_device = crate::dictation::commands::get_dictation_config()
         .device
         .filter(|d| !d.is_empty());
-    let capture = crate::dictation::audio::AudioCapture::start_with_device(input_device.as_deref())?;
+    let (capture, os_aec) = open_voice_capture(config.barge_in, input_device.as_deref())?;
     let session = Session::start(
         app.clone(),
         playback.clone(),
         capture.buffer_handle(),
         config.barge_in,
+        os_aec,
     )?;
 
     let state = app.state::<VoiceState>();
