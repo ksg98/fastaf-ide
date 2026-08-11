@@ -337,7 +337,18 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Seed the themes directory with built-in themes (only when the dir doesn't exist).
+/// Byte-exact contents of builtin theme files as shipped by PREVIOUS app
+/// versions. Write-if-missing seeding means a retuned builtin never reaches
+/// existing installs on its own; keeping the superseded bytes here lets
+/// `seed_builtin_themes` distinguish "stale but never touched" (safe to
+/// upgrade) from "edited by the user" (must be preserved). When retuning a
+/// builtin, copy its old file into `themes/legacy/` and register it here.
+const SUPERSEDED_BUILTIN_THEMES: &[(&str, &str)] = &[(
+    "cursor-dark.json",
+    include_str!("themes/legacy/cursor-dark-v1.json"),
+)];
+
+/// Seed the themes directory with built-in themes.
 pub(crate) fn seed_builtin_themes(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     // Per-file, write-if-missing: built-ins added in app updates reach existing
@@ -345,6 +356,20 @@ pub(crate) fn seed_builtin_themes(dir: &Path) -> std::io::Result<()> {
     for (filename, content) in BUILTIN_THEMES {
         let path = dir.join(filename);
         if !path.exists() {
+            std::fs::write(path, content)?;
+            continue;
+        }
+        // Existing file: deliver a retuned builtin only when the on-disk bytes
+        // exactly match a version this app previously shipped — anything else
+        // is a user edit. Unreadable files are left alone for the same reason.
+        let Ok(existing) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if existing != *content
+            && SUPERSEDED_BUILTIN_THEMES
+                .iter()
+                .any(|(f, old)| f == filename && existing == *old)
+        {
             std::fs::write(path, content)?;
         }
     }
@@ -643,6 +668,75 @@ mod tests {
         // …and the user-modified built-in was NOT overwritten.
         let content = fs::read_to_string(themes_dir.join(builtin_name)).unwrap();
         assert!(content.contains("UserEdited"));
+    }
+
+    /// Filename → current builtin bytes, for the seed-migration tests.
+    fn current_builtin(filename: &str) -> &'static str {
+        BUILTIN_THEMES
+            .iter()
+            .find(|(f, _)| *f == filename)
+            .map(|(_, c)| *c)
+            .unwrap()
+    }
+
+    #[test]
+    fn seed_writes_current_builtin_bytes_on_fresh_seed() {
+        let dir = TempDir::new().unwrap();
+        let themes_dir = dir.path().join("themes");
+
+        seed_builtin_themes(&themes_dir).unwrap();
+
+        let (filename, _) = SUPERSEDED_BUILTIN_THEMES[0];
+        let on_disk = fs::read_to_string(themes_dir.join(filename)).unwrap();
+        assert_eq!(on_disk, current_builtin(filename));
+    }
+
+    #[test]
+    fn seed_upgrades_builtin_left_at_previously_shipped_bytes() {
+        let dir = TempDir::new().unwrap();
+        let themes_dir = dir.path().join("themes");
+        fs::create_dir_all(&themes_dir).unwrap();
+        // The install still has the old shipped bytes — the user never edited
+        // the file, so re-seeding must deliver the retuned builtin.
+        let (filename, old_content) = SUPERSEDED_BUILTIN_THEMES[0];
+        fs::write(themes_dir.join(filename), old_content).unwrap();
+
+        seed_builtin_themes(&themes_dir).unwrap();
+
+        let on_disk = fs::read_to_string(themes_dir.join(filename)).unwrap();
+        assert_eq!(on_disk, current_builtin(filename));
+    }
+
+    #[test]
+    fn seed_never_overwrites_user_edited_builtin_even_if_stale() {
+        let dir = TempDir::new().unwrap();
+        let themes_dir = dir.path().join("themes");
+        fs::create_dir_all(&themes_dir).unwrap();
+        // One byte off the previously-shipped version means "user edit" —
+        // the retune must not clobber it.
+        let (filename, old_content) = SUPERSEDED_BUILTIN_THEMES[0];
+        let edited = old_content.replace("#4c9df3", "#ff00ff");
+        assert_ne!(edited, old_content);
+        fs::write(themes_dir.join(filename), &edited).unwrap();
+
+        seed_builtin_themes(&themes_dir).unwrap();
+
+        let on_disk = fs::read_to_string(themes_dir.join(filename)).unwrap();
+        assert_eq!(on_disk, edited);
+    }
+
+    #[test]
+    fn superseded_entries_reference_changed_builtins() {
+        for (filename, old_content) in SUPERSEDED_BUILTIN_THEMES {
+            // Every legacy copy must correspond to a real builtin, and must
+            // differ from it — a legacy copy equal to the current bytes can
+            // never trigger an upgrade and means the retune was lost.
+            assert_ne!(
+                *old_content,
+                current_builtin(filename),
+                "superseded {filename} equals the current builtin"
+            );
+        }
     }
 
     #[test]

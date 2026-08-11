@@ -412,7 +412,7 @@ function createSettingsStore() {
 		fontWeight: DEFAULTS.fontWeight,
 		defaultFontSize: DEFAULTS.fontSize,
 		shell: null,
-		theme: "commander",
+		theme: "cursor-dark",
 		confirmBeforeQuit: true,
 		confirmBeforeClosingTab: true,
 		maxTabNameLength: 25,

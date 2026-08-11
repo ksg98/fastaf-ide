@@ -163,17 +163,19 @@ const FALLBACK_TERMINAL: TerminalTheme = {
 	cursor: "#cccccc",
 };
 
+// Mirrors cursor-dark.json / the :root seed, so the rare no-theme-loaded path
+// looks like the default instead of a ghost of the pre-restyle palette.
 const FALLBACK_APP: IAppTheme = {
-	bgPrimary: "#1e1e1e",
-	bgSecondary: "#252526",
-	bgTertiary: "#2d2d30",
-	bgHighlight: "#37373d",
-	fgPrimary: "#cccccc",
-	fgSecondary: "#a0a0a0",
-	fgMuted: "#9aa1a9",
-	accent: "#59a8dd",
-	accentHover: "#7abde5",
-	border: "#3e3e42",
+	bgPrimary: "#141414",
+	bgSecondary: "#1a1a1a",
+	bgTertiary: "#202020",
+	bgHighlight: "#282828",
+	fgPrimary: "#e0e0e0",
+	fgSecondary: "#c2c2c2",
+	fgMuted: "#8c8c8c",
+	accent: "#4c9df3",
+	accentHover: "#66aefa",
+	border: "#2a2a2a",
 	success: "#4ade80",
 	warning: "#dcdcaa",
 	error: "#ef4444",
@@ -314,7 +316,19 @@ export function applyAppTheme(key: string): void {
 	const root = document.documentElement.style;
 	for (const [prop, value] of Object.entries(theme)) {
 		root.setProperty(camelToKebab(prop), value);
+		// Companion -rgb triple so CSS can compose alphas: rgba(var(--bg-primary-rgb), α)
+		root.setProperty(`${camelToKebab(prop)}-rgb`, hexToRgb(value).join(", "));
 	}
+	// Gloss borders/washes need polarity flipped on light themes (dark borders
+	// on light surfaces, white sheen stronger to stay visible).
+	const light = relativeLuminance(theme.bgPrimary) > 0.5;
+	root.setProperty("--border-subtle", light ? "rgba(0, 0, 0, 0.08)" : "rgba(255, 255, 255, 0.06)");
+	root.setProperty("--border-strong", light ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.12)");
+	root.setProperty("--surface-hover", light ? "rgba(0, 0, 0, 0.05)" : "rgba(255, 255, 255, 0.05)");
+	root.setProperty(
+		"--highlight-inset",
+		light ? "inset 0 1px 0 rgba(255, 255, 255, 0.65)" : "inset 0 1px 0 rgba(255, 255, 255, 0.05)",
+	);
 	const termTheme = getTerminalTheme(key);
 	const ansiRgb: [number, number, number][] = [];
 	for (const k of ANSI_KEYS) {

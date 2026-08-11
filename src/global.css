@@ -194,17 +194,25 @@
 }
 
 :root {
-  --bg-primary: #1a1b1d;
-  --bg-secondary: #1a1b1d;
-  --bg-tertiary: #222427;
-  --bg-highlight: #26282b;
-  --fg-primary: #f1f4fb;
-  --fg-secondary: #d6dbe8;
-  --fg-muted: #a4adc2;
-  --accent: #7f9aff;
-  --accent-hover: #6f8eff;
+  /* Cursor Dark seed — kept in lockstep with cursor-dark.json appChrome */
+  --bg-primary: #141414;      /* window base / editor / terminal */
+  --bg-secondary: #1a1a1a;    /* sidebar, toolbars, resting chrome */
+  --bg-tertiary: #202020;     /* elevated: menus, popovers, cards */
+  --bg-highlight: #282828;    /* hover / selection fill */
+  --fg-primary: #e0e0e0;
+  --fg-secondary: #c2c2c2;
+  --fg-muted: #8c8c8c;
+  --accent: #4c9df3;
+  --accent-hover: #66aefa;
   --activity: #59a8dd;  /* semantic: always blue, not overridden by themes */
-  --border: #2c2f33;
+  --border: #2a2a2a;          /* ~ white 8.6% on #141414 */
+
+  /* Static RGB triples — FOUC guard before applyAppTheme emits runtime ones */
+  --bg-primary-rgb: 20, 20, 20;
+  --bg-secondary-rgb: 26, 26, 26;
+  --bg-tertiary-rgb: 32, 32, 32;
+  --bg-highlight-rgb: 40, 40, 40;
+  --accent-rgb: 76, 157, 243;
   --success: #3dd68c;
   --warning: #f5a623;
   --attention: #e8984c;
@@ -230,13 +238,58 @@
   --tab-remote-rgb: 34, 211, 238;    /* cyan — remote/network */
 
   /* Border radius scale */
-  --radius-xs: 2px;
-  --radius-sm: 3px;
-  --radius-md: 4px;
-  --radius-lg: 6px;
-  --radius-xl: 8px;
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
   --radius-pill: 12px;
   --radius-full: 50%;
+  --radius-panel: 12px;  /* floating panels/modals — independent of the scale so
+                            panels can diverge later */
+
+  /* Spacing — 4px grid, numeric suffix = multiples of 4 */
+  --space-half: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Z-index bands — slot over the existing raw-value clusters */
+  --z-raised: 1;
+  --z-sticky: 10;
+  --z-toolbar: 50;
+  --z-overlay: 100;
+  --z-dropdown: 200;
+  --z-modal: 1000;
+  --z-toast: 1100;
+  --z-critical: 9999;
+
+  /* Motion */
+  --duration-instant: 50ms;
+  --duration-fast: 100ms;
+  --duration-base: 150ms;
+  --duration-slow: 250ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+
+  /* Gloss — opaque by default; html.vibrancy swaps in the translucent values,
+     so components can use these tokens unconditionally and collapse to
+     opaque/no-op on non-macOS or when transparency is reduced. */
+  --bg-app: var(--bg-primary);            /* body paint */
+  --surface-glass: var(--bg-secondary);   /* resting chrome (sidebar, toolbars) */
+  --surface-overlay: var(--bg-tertiary);  /* transient overlays (menus, palettes, modals) */
+  --blur-glass: none;                     /* backdrop-filter: var(--blur-glass) no-ops when none */
+  --blur-overlay: none;
+  --surface-hover: rgba(255, 255, 255, 0.05);  /* hover wash over any surface */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --highlight-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);  /* 1px top sheen */
 
   /* Font size scale */
   --font-3xs: 8px;
@@ -251,9 +304,10 @@
   --font-3xl: 24px;
 
   /* Elevation */
-  --shadow-popup: 0 8px 32px rgba(0, 0, 0, 0.4);
-  --shadow-dropdown: 0 4px 16px rgba(0, 0, 0, 0.3);
-  --shadow-bottom-anchor: 0 -4px 20px rgba(0, 0, 0, 0.4);
+  --shadow-popup: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-bottom-anchor: 0 -8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-2xl: 0 24px 64px rgba(0, 0, 0, 0.6);  /* detached/floating panels */
 
   --sidebar-width: 300px;
   --toolbar-height: 32px;
@@ -262,35 +316,67 @@
   --font-mono: "JetBrains Mono", "Fira Code", "Hack", "Cascadia Code", "Source Code Pro", "DejaVu Sans Mono", monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Liberation Sans", sans-serif;
 
-  /* ANSI terminal palette (matches the nezha-dark default theme) */
-  --ansi-black: #484f58;
-  --ansi-red: #ff7b72;
-  --ansi-green: #3fb950;
-  --ansi-yellow: #d29922;
-  --ansi-blue: #58a6ff;
-  --ansi-magenta: #d2a8ff;
-  --ansi-cyan: #39c5cf;
-  --ansi-white: #b1bac4;
-  --ansi-bright-black: #6e7681;
-  --ansi-bright-red: #ffa198;
-  --ansi-bright-green: #56d364;
-  --ansi-bright-yellow: #e3b341;
-  --ansi-bright-blue: #79c0ff;
-  --ansi-bright-magenta: #f0a1ff;
-  --ansi-bright-cyan: #56d4dd;
-  --ansi-bright-white: #f0f6fc;
+  /* ANSI terminal palette (matches the cursor-dark default theme) */
+  --ansi-black: #2a2a2a;
+  --ansi-red: #bf616a;
+  --ansi-green: #a3be8c;
+  --ansi-yellow: #ebcb8b;
+  --ansi-blue: #81a1c1;
+  --ansi-magenta: #b48ead;
+  --ansi-cyan: #88c0d0;
+  --ansi-white: #ffffff;
+  --ansi-bright-black: #505050;
+  --ansi-bright-red: #bf616a;
+  --ansi-bright-green: #a3be8c;
+  --ansi-bright-yellow: #ebcb8b;
+  --ansi-bright-blue: #81a1c1;
+  --ansi-bright-magenta: #b48ead;
+  --ansi-bright-cyan: #88c0d0;
+  --ansi-bright-white: #ffffff;
+}
+
+/* Vibrancy opt-in — added to <html> at boot on macOS unless transparency is
+   reduced. Swapping token values here (rather than styling per-component)
+   keeps every consumer's CSS unconditional. */
+html.vibrancy {
+  --bg-app: rgba(var(--bg-primary-rgb), 0.62);
+  --surface-glass: rgba(var(--bg-secondary-rgb), 0.55);
+  --surface-overlay: rgba(var(--bg-tertiary-rgb), 0.86);
+  --blur-glass: blur(24px) saturate(1.35);
+  --blur-overlay: blur(16px) saturate(1.2);
+}
+
+/* OS-level "Reduce transparency" wins even if the class was applied */
+@media (prefers-reduced-transparency: reduce) {
+  html.vibrancy {
+    --bg-app: var(--bg-primary);
+    --surface-glass: var(--bg-secondary);
+    --surface-overlay: var(--bg-tertiary);
+    --blur-glass: none;
+    --blur-overlay: none;
+  }
 }
 
 html, body {
   height: 100%;
   overflow: hidden;
-  background: var(--bg-primary);
   color: var(--fg-primary);
   font-family: var(--font-ui);
   font-size: var(--font-base);
   /* Dark app: make native controls (number-input spinners, selects, pickers)
      render their affordances light instead of the default black-on-dark. */
   color-scheme: dark;
+}
+
+/* Body ALONE paints the veil — if html painted it too, the rgba alphas would
+   stack under vibrancy and kill the see-through effect. On opaque platforms
+   the window backgroundColor sits beneath the transparent html. */
+html {
+  background: transparent;
+}
+
+body {
+  background: var(--bg-app);
 }
 
 #app {

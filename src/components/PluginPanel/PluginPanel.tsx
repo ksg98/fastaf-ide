@@ -25,7 +25,8 @@ export interface PluginPanelProps {
 
 /**
  * Extract CSS custom properties from the app's :root for injection into iframe.
- * Only includes --bg-*, --fg-*, --border*, --accent*, --error*, --warning*, --success* vars.
+ * Only vars matching the prefix allowlist below are forwarded — new token axes
+ * must be added there or plugins never see them.
  */
 function extractThemeVars(): string {
 	const root = getComputedStyle(document.documentElement);
@@ -40,6 +41,11 @@ function extractThemeVars(): string {
 		"--success",
 		"--ring-",
 		"--text-",
+		"--surface-",
+		"--highlight-",
+		"--shadow-",
+		"--radius-",
+		"--blur-",
 	];
 	for (const sheet of document.styleSheets) {
 		try {
@@ -64,6 +70,8 @@ function extractThemeVars(): string {
 function extractThemeObject(): Record<string, string> {
 	const root = getComputedStyle(document.documentElement);
 	const theme: Record<string, string> = {};
+	// Keep in lockstep with extractThemeVars above — the SDK theme object and
+	// the injected CSS vars must expose the same vocabulary.
 	const prefixes = [
 		"--bg-",
 		"--fg-",
@@ -74,6 +82,11 @@ function extractThemeObject(): Record<string, string> {
 		"--success",
 		"--ring-",
 		"--text-",
+		"--surface-",
+		"--highlight-",
+		"--shadow-",
+		"--radius-",
+		"--blur-",
 	];
 	for (const sheet of document.styleSheets) {
 		try {
