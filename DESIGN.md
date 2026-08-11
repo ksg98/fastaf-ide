@@ -125,74 +125,77 @@ A palette of cool, desaturated neutrals with a single technical accent. Dark by 
 Structural, not decorative. Shadows signal functional elevation (dropdown menus, modal overlays, context menus). Default surfaces are flat at rest.
 
 ### Shadow Vocabulary
-- **Popup Shadow** (`0 8px 32px rgba(0, 0, 0, 0.4)`): Full-screen modals, large overlays, detached panels. Deep, diffuse shadow for clear separation from underlying content.
-- **Dropdown Shadow** (`0 4px 16px rgba(0, 0, 0, 0.3)`): Context menus, select dropdowns, tooltips. Medium shadow for transient overlays.
-- **Bottom-Anchor Shadow** (`0 -4px 20px rgba(0, 0, 0, 0.4)`): Bottom-docked panels or drawers that slide up. Inverted shadow (negative Y offset) for upward elevation cue.
+- **Popup Shadow** (`0 16px 48px rgba(0, 0, 0, 0.55)`): Full-screen modals, large overlays. Deep, diffuse shadow for clear separation from underlying content.
+- **Dropdown Shadow** (`0 8px 24px rgba(0, 0, 0, 0.4)`): Context menus, select dropdowns, tooltips. Medium shadow for transient overlays.
+- **Bottom-Anchor Shadow** (`0 -8px 28px rgba(0, 0, 0, 0.45)`): Bottom-docked panels or drawers that slide up. Inverted shadow (negative Y offset) for upward elevation cue.
+- **2XL Shadow** (`--shadow-2xl`, `0 24px 64px rgba(0, 0, 0, 0.6)`): Detached floating panels (command palette, detached AI Chat window). The deepest tier, reserved for surfaces that float free of the layout.
 
 ### Named Rules
 
 **The Flat-By-Default Rule.** Cards, panels, and containers at rest have no shadow. Elevation is state-driven: a dropdown appears on click, a modal overlays the app on open. Shadows are never used for "card depth" decoration.
 
-**The No-Glassmorphism Rule.** Blurs and translucent glass effects are prohibited. FastAF surfaces are opaque. Overlays use solid backgrounds + shadows, not backdrop-filter.
+**The Layered-Translucency Rule (Desktop).** Desktop surfaces exist at three depths. (1) The *window veil*: real macOS vibrancy showing through `--bg-app` on the window body. (2) *Resting chrome*: sidebar and toolbars sit on `--surface-glass` with no CSS blur of their own — the window material beneath provides it. (3) *Transient overlays*: menus, palettes, and modals sit on `--surface-overlay` with `backdrop-filter: var(--blur-overlay)`, a shadow from the vocabulary above, a 1px `--border-subtle` edge, and a `--highlight-inset` top sheen. Blur budget: blur transient overlays plus at most the sidebar — never scrolling content, no nested blurs, at most 3 blurred layers on screen. Every surface must stay legible when transparency is reduced: all glass tokens collapse to opaque.
+
+**Mobile: the glassmorphism ban stands unchanged.** Mobile surfaces are opaque — no backdrop-filter, no translucency.
 
 ## 5. Components
 
 Tactile and confident. Clear affordances, strong state feedback, crisp edges. Components feel engineered, not designed. Every interactive element gives immediate visual response (hover, focus, active).
 
 ### Buttons
-- **Shape:** Minimal radius (3–4px), no pill shapes. Buttons are rectangular with subtle corners.
-- **Primary:** Observation Blue background (#59a8dd), black text (#000000), padding 8px 16px. Uppercase label text (Label hierarchy, 12px, 500 weight).
-- **Hover:** Background shifts to Observation Blue Hover (#7abde5).
-- **Secondary / Ghost:** Transparent background, Observation Blue border (1px), Observation Blue text. Hover fills background with Slate Highlight (#37373d).
-- **Focus:** 2px solid outline in Observation Blue, 2px offset for accessibility.
+- **Shape:** 6px radius (`--radius-md`). Ordinary buttons are rectangular with subtle corners — pill geometry is reserved for the surfaces that name it (chat composer, toasts).
+- **Primary:** Accent background (`--accent`, #4c9df3), black text (#000000), padding 8px 16px. Uppercase label text (Label hierarchy, 12px, 500 weight).
+- **Hover:** Background shifts to Accent Hover (`--accent-hover`, #66aefa).
+- **Secondary / Ghost:** Transparent background, Accent border (1px), Accent text. Hover fills background with Highlight (`--bg-highlight`, #282828).
+- **Focus:** 2px solid outline in Accent, 2px offset for accessibility.
 
 ### Inputs / Fields
-- **Style:** 1px Steel Border stroke (#3e3e42), Slate Panel background (#2d2d30), 3px radius. Padding 6px 10px.
-- **Focus:** Border shifts to Observation Blue (#59a8dd), no glow. Clean state transition.
+- **Style:** 1px Border stroke (`--border`, #2a2a2a), Tertiary background (`--bg-tertiary`, #202020), 6px radius (`--radius-md`). Padding 6px 10px.
+- **Focus:** Border shifts to Accent (`--accent`, #4c9df3) with a soft ring (`0 0 0 3px rgba(var(--accent-rgb), 0.18)`). Clean state transition.
 - **Error:** Border shifts to Error Red (#ef4444).
-- **Disabled:** Graphite Dim text (#9aa1a9), no background change.
+- **Disabled:** Muted text (`--fg-muted`, #8c8c8c), no background change.
 
 ### Tabs
-- **Style:** 32px height, horizontal layout, no rounded top corners. Active tab has Slate Panel background (#2d2d30), inactive tabs have Slate Surface (#252526). 1px Steel Border bottom divider.
-- **Active Indicator:** 2px solid Observation Blue bottom border on active tab.
+- **Style:** 32px height, horizontal layout. Active tab has Tertiary background (`--bg-tertiary`, #202020), inactive tabs have Secondary background (`--bg-secondary`, #1a1a1a). 1px Border (`--border`, #2a2a2a) bottom divider.
+- **Active Indicator:** 2px solid Accent border on active tab.
 - **Status Dots:** Small circular badges (6px diameter) in semantic colors (Success Green, Warning Amber, Error Red, Unseen Purple) appear on tab labels to signal state. Positioned top-right of tab text.
-- **Hover:** Inactive tabs lighten to Slate Highlight (#37373d).
+- **Hover:** Inactive tabs lighten to Highlight (`--bg-highlight`, #282828).
 
 ### Cards / Panels
-- **Corner Style:** 4px radius (--radius-md).
-- **Background:** Slate Panel (#2d2d30) for elevated panels, Slate Surface (#252526) for sidebar/chrome.
-- **Shadow Strategy:** No shadow at rest. Use Popup Shadow only for detached floating panels (e.g., detached AI Chat window).
-- **Border:** 1px Steel Border (#3e3e42) for panel edges, dividers between sections.
+- **Corner Style:** 6px radius (`--radius-md`) for inline cards; floating panels and modals use 10–12px (`--radius-panel`).
+- **Background:** Tertiary (`--bg-tertiary`, #202020) for elevated panels, Secondary (`--bg-secondary`, #1a1a1a) for sidebar/chrome.
+- **Shadow Strategy:** No shadow at rest. Use the 2XL Shadow only for detached floating panels (e.g., detached AI Chat window).
+- **Border:** 1px Border (`--border`, #2a2a2a) for panel edges, dividers between sections.
 - **Internal Padding:** 8–16px depending on content density.
 
 ### Navigation (Sidebar)
-- **Style:** Vertical list, Slate Surface background (#252526), 300px wide. Each item is 28px tall, left-aligned text (Body hierarchy, 14px).
-- **Default State:** Muted Silver text (#a0a0a0).
-- **Hover:** Slate Highlight background (#37373d), Silver Text (#cccccc).
-- **Active:** Observation Blue left border (3px), Slate Panel background (#2d2d30), Silver Text.
-- **Icons:** 16px monochrome icons (Muted Silver), shift to Silver Text on hover/active.
+- **Style:** Vertical list, Secondary background (`--bg-secondary`, #1a1a1a), 300px wide. Each item is 28px tall, left-aligned text (Body hierarchy, 14px).
+- **Default State:** Secondary text (`--fg-secondary`, #c2c2c2).
+- **Hover:** Highlight background (`--bg-highlight`, #282828), Primary text (`--fg-primary`, #e0e0e0).
+- **Active:** Accent left border (3px), Tertiary background (`--bg-tertiary`, #202020), Primary text.
+- **Icons:** 16px monochrome icons (`--fg-secondary`), shift to `--fg-primary` on hover/active.
 
 ### Status Indicators
 - **Dots:** 6–8px circular badges in semantic colors (Success, Warning, Error, Unseen, Merged). Used in tab bars, sidebar items, activity dashboard.
 - **Badges:** Pill-shaped labels (--radius-pill), semantic background + white/black text depending on contrast. Small font (11px), 500 weight, uppercase.
-- **Progress Bars:** 4px height, Slate Highlight track, Observation Blue fill. No stripes, no animation.
+- **Progress Bars:** 4px height, Highlight track (`--bg-highlight`, #282828), Accent fill. No stripes, no animation.
 
 ## 6. Do's and Don'ts
 
 Concrete, forceful guardrails derived from PRODUCT.md anti-references and the design system's principles.
 
 ### Do:
-- **Do** use Observation Blue sparingly (≤10% of any screen). Accent overuse dilutes signal.
+- **Do** use the Accent (`--accent`, #4c9df3) sparingly (≤10% of any screen). Accent overuse dilutes signal.
 - **Do** apply shadows only to functional overlays (dropdowns, modals, context menus). Never decorate cards with shadows.
 - **Do** give every interactive element clear hover/focus states. Tactile feedback is non-negotiable.
 - **Do** use status dots and semantic colors to reduce "where was that?" cognitive load. Make state visible at a glance.
-- **Do** keep borders crisp (1px) and corners minimal (2–4px). FastAF is precise, not soft.
+- **Do** keep borders crisp (1px) and corners controlled: 6px (`--radius-md`) on buttons, inputs, and cards; 10–12px (`--radius-panel`) on floating panels and modals. FastAF is precise, not soft.
 - **Do** respect the mono-forward hierarchy. Terminal content is primary; UI chrome is support.
 
 ### Don't:
-- **Don't** use pill-shaped buttons (--radius-pill or --radius-full on buttons). Buttons are rectangular with subtle corners.
-- **Don't** apply gradient backgrounds or gradient text (`background-clip: text`). Solid colors only.
-- **Don't** use glassmorphism (backdrop-filter, translucent overlays). All surfaces are opaque.
+- **Don't** make ordinary buttons pill-shaped (--radius-pill or --radius-full on standard buttons). Buttons stay rectangular with subtle corners; pill geometry belongs only to the surfaces that name it (chat composer, toasts, status badges).
+- **Don't** apply decorative gradients or gradient text (`background-clip: text`). Brand gradients and gradient text stay banned. The one exception: surface-gloss gradients of ≤5% luminance delta (vertical, on chrome surfaces only) to suggest depth.
+- **Don't** blur resting content surfaces — glass belongs to the window veil and transient overlays only (Layered-Translucency Rule, §4). On mobile there is no translucency at all: surfaces are fully opaque.
 - **Don't** converge toward the VS Code / Electron-IDE layout reflex (sidebar-left, tabs-top, panels-bottom). FastAF's layout is distinct.
 - **Don't** soften edges with excessive rounding or rounded-everything. This is not a consumer app (no Slack-style chatty SaaS polish).
 - **Don't** hide power behind "simple mode" or tutorial overlays. Users chose FastAF because they outgrew simpler tools; trust them to learn.

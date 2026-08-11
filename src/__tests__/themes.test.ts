@@ -191,8 +191,8 @@ describe("themes", () => {
 		it("returns hardcoded fallback when themes not loaded", async () => {
 			const { getAppTheme } = await import("../themes");
 			const theme = getAppTheme("anything");
-			expect(theme.bgPrimary).toBe("#1e1e1e");
-			expect(theme.accent).toBe("#59a8dd");
+			expect(theme.bgPrimary).toBe("#141414");
+			expect(theme.accent).toBe("#4c9df3");
 		});
 	});
 

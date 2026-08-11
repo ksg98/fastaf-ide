@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const css = readFileSync(resolve(__dirname, "../components/BottomTabs.module.css"), "utf-8");
 
-describe("BottomTabs CSS", () => {
+describe("BottomTabs CSS (mobile)", () => {
 	it("defines a real (non-transparent) background", () => {
 		// Must be a genuine fill, not `none`/`transparent` — without the frosted
 		// blur the bar relies on its background for legibility over content.
@@ -12,7 +12,7 @@ describe("BottomTabs CSS", () => {
 		expect(match, "no opaque background found in BottomTabs.module.css").toBeTruthy();
 	});
 
-	it("does not use backdrop-filter (glassmorphism ban)", () => {
+	it("does not use backdrop-filter (mobile glassmorphism ban — desktop is exempt per DESIGN.md §4)", () => {
 		const match = css.match(/backdrop-filter/);
 		expect(match).toBeNull();
 	});
