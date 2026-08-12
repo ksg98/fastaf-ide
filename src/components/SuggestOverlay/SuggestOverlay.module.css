@@ -13,14 +13,16 @@
   gap: 10px;
   padding: 10px 16px;
   max-width: calc(100% - 32px);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   /* Must beat .terminal-pane.active z-index:20 (styles.css) */
   z-index: 30;
-  animation: fadeIn 0.15s ease-out;
+  animation: fadeIn var(--duration-base) var(--ease-out);
   pointer-events: auto;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -50,12 +52,14 @@
   font-size: var(--chip-font-size);
   padding: 8px 16px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   background: var(--bg-tertiary);
   color: var(--fg-primary);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.1s ease, border-color 0.1s ease, font-size 0.08s ease;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    font-size 0.08s ease;
 }
 
 .chipLabel {
@@ -72,7 +76,7 @@
 }
 
 .chip:hover .shortcut {
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--surface-overlay);
   color: var(--text-on-accent);
 }
 
@@ -84,17 +88,18 @@
   height: 24px;
   padding: 0;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--fg-muted);
   cursor: pointer;
   flex-shrink: 0;
-  transition: color 0.1s ease, background 0.1s ease;
+  transition: color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
 }
 
 .closeBtn:hover {
   color: var(--fg-primary);
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .shortcut {

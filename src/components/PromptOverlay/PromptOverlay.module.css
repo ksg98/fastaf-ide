@@ -1,24 +1,40 @@
+/* Prompt Overlay — center-anchored glass dialog for selection prompts.
+   State classes owned by tests: .hidden, .selected. */
 .overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
+  composes: overlay from "../shared/dialog.module.css";
 }
 
 .hidden {
   display: none;
 }
 
+@keyframes promptOverlayIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .dialog {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   min-width: 400px;
   max-width: 600px;
-  box-shadow: var(--shadow-dropdown);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
+  animation: promptOverlayIn var(--duration-base) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog {
+    animation: none;
+  }
 }
 
 .hint {
@@ -45,18 +61,20 @@
   align-items: center;
   gap: 12px;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .option:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
+/* Owned by tests: keyboard-selected option. */
 .selected {
   background: var(--accent);
   color: var(--text-on-accent);
+  box-shadow: var(--highlight-inset);
 }
 
 .optionKey {
@@ -69,7 +87,7 @@
 }
 
 .selected .optionKey {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--surface-hover);
   color: var(--text-on-accent);
 }
 

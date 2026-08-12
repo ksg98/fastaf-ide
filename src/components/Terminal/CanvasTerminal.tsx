@@ -209,9 +209,28 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		writeClipboard(text).catch(() => {});
 	};
 
-	// Cached CSS custom properties (re-read on remeasure, not every frame)
+	// Cached CSS custom properties (re-read on remeasure, not every frame).
+	// The bg/fg defaults feed the ANSI/theme-pipeline canvas paint — they must
+	// stay reachable to gridRenderer.setTheme(). The `chrome*` cache holds
+	// resolved values for the overlay chrome (search/fold/exit/selection marks
+	// and scrollbar hover); canvas 2D fillStyle cannot parse `var(...)`, so
+	// tokens are resolved to rgb triples / hex strings here and reused via
+	// `chromeTint()` when an alpha wash is needed.
 	let cachedBgDefault = "#1e1e1e";
 	let cachedFgDefault = "#d4d4d4";
+	let cachedAccentRgb = "76, 157, 243";
+	let cachedWarningRgb = "245, 166, 35";
+	let cachedErrorRgb = "255, 85, 85";
+	let cachedSuccessRgb = "61, 214, 140";
+	let cachedFgMutedRgb = "140, 140, 140";
+	let cachedFgPrimaryRgb = "224, 224, 224";
+	let cachedWarning = "#f5a623";
+	let cachedError = "#ff5555";
+	let cachedSuccess = "#3dd68c";
+
+	function chromeTint(rgbTriple: string, alpha: number): string {
+		return `rgba(${rgbTriple}, ${alpha})`;
+	}
 
 	// Tracks cumulative gesture distance (px) to ramp the scroll acceleration factor.
 	// Row index → row data lookup (persistent, updated incrementally)
@@ -349,8 +368,20 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const m = getSharedMetrics(fontSize, fontFamily, dpr, snapLineHeight(fontSize), fontWeight);
 		setMetrics(m);
 
-		cachedBgDefault = getComputedStyle(canvasRef).getPropertyValue("--bg-secondary").trim() || "#1e1e1e";
-		cachedFgDefault = getComputedStyle(canvasRef).getPropertyValue("--fg-primary").trim() || "#d4d4d4";
+		const cs = getComputedStyle(canvasRef);
+		cachedBgDefault = cs.getPropertyValue("--bg-secondary").trim() || "#1e1e1e";
+		cachedFgDefault = cs.getPropertyValue("--fg-primary").trim() || "#d4d4d4";
+		// Overlay chrome tokens — kept in sync with the app theme so search/fold/
+		// exit/selection marks recolor when the user swaps themes at runtime.
+		cachedAccentRgb = cs.getPropertyValue("--accent-rgb").trim() || cachedAccentRgb;
+		cachedWarningRgb = cs.getPropertyValue("--warning-rgb").trim() || cachedWarningRgb;
+		cachedErrorRgb = cs.getPropertyValue("--error-rgb").trim() || cachedErrorRgb;
+		cachedSuccessRgb = cs.getPropertyValue("--success-rgb").trim() || cachedSuccessRgb;
+		cachedFgMutedRgb = cs.getPropertyValue("--fg-muted-rgb").trim() || cachedFgMutedRgb;
+		cachedFgPrimaryRgb = cs.getPropertyValue("--fg-primary-rgb").trim() || cachedFgPrimaryRgb;
+		cachedWarning = cs.getPropertyValue("--warning").trim() || cachedWarning;
+		cachedError = cs.getPropertyValue("--error").trim() || cachedError;
+		cachedSuccess = cs.getPropertyValue("--success").trim() || cachedSuccess;
 		gridRenderer.setTheme(cachedBgDefault, cachedFgDefault);
 
 		const { rows, cols } = gridDimsForBox(rect.width, rect.height, m.cellWidth, m.cellHeight);
@@ -528,10 +559,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			const x = match.col_start * m.cellWidth;
 			const y = vpRow * m.cellHeight;
 			const w = (match.col_end - match.col_start) * m.cellWidth;
-			octx.fillStyle = "rgba(255, 180, 50, 0.2)";
+			octx.fillStyle = chromeTint(cachedWarningRgb, 0.2);
 			octx.fillRect(x, y, w, m.cellHeight);
 			if (isActive) {
-				octx.fillStyle = "#e8984c";
+				octx.fillStyle = cachedWarning;
 				octx.fillRect(x, y + m.cellHeight - 2, w, 2);
 			}
 		}
@@ -546,7 +577,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			if (block.exitCode === null || block.exitCode === 0) continue;
 			const vpRow = absRowToViewport(block.promptLine);
 			if (vpRow === null) continue;
-			octx.fillStyle = "#f85149";
+			octx.fillStyle = cachedError;
 			octx.fillRect(-GUTTER_PX, vpRow * m.cellHeight, 3, m.cellHeight);
 		}
 	}
@@ -577,10 +608,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			octx.globalAlpha = 1.0;
 			const label = `  ··· ${foldedCount} lines folded ···`;
 			octx.font = `${Math.round(m.cellHeight * 0.7)}px ${fontFamily}`;
-			octx.fillStyle = "rgba(150,150,150,0.6)";
+			octx.fillStyle = chromeTint(cachedFgMutedRgb, 0.6);
 			octx.fillText(label, 4, y + m.cellHeight * 0.75);
 			// Fold gutter indicator
-			octx.fillStyle = "rgba(88,166,255,0.5)";
+			octx.fillStyle = chromeTint(cachedAccentRgb, 0.5);
 			const gutterVp = absRowToViewport(block.promptLine);
 			if (gutterVp !== null) {
 				octx.fillRect(-GUTTER_PX, gutterVp * m.cellHeight, 3, m.cellHeight);
@@ -599,7 +630,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const fontFamily = settingsStore.getFontFamily();
 		const fontSize = Math.round(m.cellHeight * 0.7);
 		octx.font = `${fontSize}px ${fontFamily}`;
-		octx.fillStyle = "rgba(150,150,150,0.5)";
+		octx.fillStyle = chromeTint(cachedFgMutedRgb, 0.5);
 		const canvasW = overlayCanvasRef.width / m.dpr;
 		let lastLabelBottom = -Infinity;
 		for (const block of all) {
@@ -619,7 +650,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const absStartRow = Math.min(selection.start.row, selection.end.row);
 		const absEndRow = Math.max(selection.start.row, selection.end.row);
 
-		octx.fillStyle = "rgba(58, 130, 220, 0.35)";
+		octx.fillStyle = chromeTint(cachedAccentRgb, 0.35);
 
 		for (let absRi = absStartRow; absRi <= absEndRow; absRi++) {
 			const vpRow = absRowToViewport(absRi);
@@ -756,7 +787,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (showBlocks) {
 			for (const block of blocks) {
 				const ratio = block.promptLine / totalRows;
-				const color = block.exitCode !== null && block.exitCode !== 0 ? "#f85149" : "rgba(88,166,255,0.5)";
+				const color = block.exitCode !== null && block.exitCode !== 0 ? cachedError : chromeTint(cachedAccentRgb, 0.5);
 				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${ratio * trackH}px;background:${color}"></div>`;
 			}
 			// Dedicated GREEN tick at each line where the USER submitted a prompt
@@ -764,7 +795,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			// one per turn. Drawn after the block ticks so it sits on top.
 			for (const line of promptLines) {
 				const ratio = line / totalRows;
-				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${ratio * trackH}px;background:#3fb950"></div>`;
+				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${ratio * trackH}px;background:${cachedSuccess}"></div>`;
 			}
 		}
 		if (searchCount > 0) {
@@ -773,7 +804,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				const rounded = Math.round((match.row / totalRows) * trackH);
 				if (seen.has(rounded)) continue;
 				seen.add(rounded);
-				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${rounded}px;background:#e8984c"></div>`;
+				html += `<div style="position:absolute;right:0;width:100%;height:2px;top:${rounded}px;background:${cachedWarning}"></div>`;
 			}
 		}
 		scrollbarMarksContainer.innerHTML = html;
@@ -855,7 +886,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				}
 				if (hiddenRows.length > 0) row = hiddenRows[hiddenRows.length - 1];
 			} else if (INTENT_RE.test(text)) {
-				newChildren.push(makeOverlayDiv(row * m.cellHeight, m.cellHeight, "rgba(181,147,90,0.12)"));
+				newChildren.push(makeOverlayDiv(row * m.cellHeight, m.cellHeight, chromeTint(cachedWarningRgb, 0.12)));
 				parts.push(`i${row}`);
 			}
 		}
@@ -3233,9 +3264,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				<div
 					ref={scrollThumbRef!}
 					onMouseEnter={(e) => {
-						// Darker, subtle hover like the old terminal scrollbar (#cccccc @0.3),
-						// not the bright --fg-muted.
-						e.currentTarget.style.background = "rgba(204, 204, 204, 0.3)";
+						// Darker, subtle hover — a fg-primary wash at 0.3 keeps the old
+						// #cccccc @0.3 feel while flowing through the theme pipeline.
+						e.currentTarget.style.background = chromeTint(cachedFgPrimaryRgb, 0.3);
 					}}
 					onMouseLeave={(e) => {
 						e.currentTarget.style.background = "var(--bg-highlight)";

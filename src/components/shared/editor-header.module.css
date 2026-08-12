@@ -1,11 +1,13 @@
-/* Shared Editor Header (CodeEditorTab, MarkdownTab) */
+/* Shared Editor Header (CodeEditorTab, MarkdownTab)
+   Transparent bar over the panel body so the editor surface reads as one
+   continuous plane — the subtle rule below separates content, not chrome. */
 .header {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
   font-size: var(--font-md);
 }
 

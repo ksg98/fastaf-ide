@@ -5,7 +5,7 @@
   min-width: 300px;
   max-width: 50%;
   background: var(--bg-primary);
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -22,28 +22,22 @@
   gap: 4px;
 }
 
+/* Header icon buttons inherit the app-wide iconBtn recipe
+   (transparent chip, muted glyph, hover wash, focus ring) and
+   only override the tighter hit-area the header historically uses. */
 .headerBtn {
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  cursor: pointer;
+  composes: iconBtn from "../shared/controls.module.css";
+  width: auto;
   padding: 2px 4px;
-  border-radius: var(--radius-md);
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 
-.headerBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.headerBtnActive {
+.headerBtnActive,
+.headerBtnActive:hover:not(:disabled) {
   color: var(--accent);
 }
 
-.headerBtnDanger {
+.headerBtnDanger,
+.headerBtnDanger:hover:not(:disabled) {
   color: var(--error);
 }
 
@@ -72,7 +66,7 @@
 
 .terminalSelect {
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   color: var(--fg-primary);
   font-size: var(--font-sm);
@@ -103,7 +97,7 @@
   font-size: var(--font-xs);
   color: var(--fg-secondary);
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   text-align: center;
 }
 
@@ -139,7 +133,8 @@
   background: var(--bg-tertiary);
   color: var(--fg-primary);
   padding: 8px 12px;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--highlight-inset);
   font-size: var(--font-base);
   line-height: 1.5;
   white-space: pre-wrap;
@@ -164,7 +159,7 @@
   word-break: break-all;
   padding: 8px 10px;
   margin-bottom: 8px;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   font-size: 13px;
 }
 
@@ -218,11 +213,12 @@
   align-items: center;
   justify-content: center;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   color: var(--fg-secondary);
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .codeActionBtn:hover {
@@ -262,7 +258,7 @@
   padding: 2px 8px;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .retryBtn:hover {
@@ -270,35 +266,47 @@
 }
 
 /* ── Input area ─────────────────────────────────────────── */
+/* Floating pill composer: the focus ring lives on the container so
+   the textarea inside can render transparent/borderless. */
 .inputArea {
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-secondary);
+  margin: 10px 12px;
+  padding: 6px 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
   display: flex;
   align-items: flex-end;
-  gap: 8px;
+  gap: 6px;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.inputArea:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent),
+    0 0 14px rgba(var(--accent-rgb), 0.25);
 }
 
 .textarea {
   flex: 1;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  border-radius: 0;
   color: var(--fg-primary);
   font-size: var(--font-base);
   font-family: var(--font-ui);
-  padding: 8px 12px;
+  padding: 4px 6px;
   resize: none;
-  min-height: 36px;
+  min-height: 28px;
   max-height: 150px;
   line-height: 1.4;
   box-sizing: border-box;
   overflow-y: auto;
+  outline: none;
 }
 
 .textarea:focus {
   outline: none;
-  border-color: var(--accent);
 }
 
 .textarea::placeholder {
@@ -307,22 +315,24 @@
 }
 
 .sendBtn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--accent);
   color: var(--text-on-accent);
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
+  box-shadow: var(--highlight-inset);
   cursor: pointer;
   flex-shrink: 0;
-  transition: opacity 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-out),
+    opacity var(--duration-fast) var(--ease-out);
 }
 
 .sendBtn:hover:not(:disabled) {
-  opacity: 0.85;
+  background: var(--accent-hover);
 }
 
 .sendBtn:disabled {
@@ -331,18 +341,19 @@
 }
 
 .stopBtn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--error);
   color: var(--text-on-error);
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
+  box-shadow: var(--highlight-inset);
   cursor: pointer;
   flex-shrink: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-out);
 }
 
 .stopBtn:hover {
@@ -430,8 +441,8 @@
 
 /* ── Tool call cards ───────────────────────────────────── */
 .toolCallCard {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   margin: 4px 0;
   font-size: var(--font-sm);
   overflow: hidden;
@@ -489,7 +500,7 @@
 
 .toolCallBody {
   padding: 6px 8px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
   font-size: var(--font-xs);
   line-height: 1.4;
@@ -515,7 +526,7 @@
 
 .toolCallCopyBtn {
   background: none;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--fg-muted);
   font-size: var(--font-xs);
@@ -523,7 +534,8 @@
   padding: 0 4px;
   cursor: pointer;
   line-height: 1.4;
-  transition: color 0.15s ease, border-color 0.15s ease;
+  transition: color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .toolCallCopyBtn:hover {
@@ -549,8 +561,8 @@
 
 /* ── Approval prompt ───────────────────────────────────── */
 .approvalCard {
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   padding: 8px 12px;
   margin: 4px 0;
   background: color-mix(in srgb, var(--warning) 8%, transparent);
@@ -567,32 +579,39 @@
   gap: 8px;
 }
 
+/* Approval buttons ride the shared btn recipe (26px hit area, focus
+   ring, muted resting state). Approve/deny paint semantic fills on
+   top; alwaysAllow keeps the default btn appearance for lower emphasis. */
 .approvalBtn {
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: var(--font-sm);
-  padding: 3px 12px;
-  cursor: pointer;
-  transition: opacity 0.15s ease;
-}
-
-.approvalBtn:hover {
-  opacity: 0.85;
+  composes: btn from "../shared/controls.module.css";
 }
 
 .approveBtn {
   background: var(--success);
+  color: var(--text-on-accent);
+  border-color: transparent;
+  box-shadow: var(--highlight-inset);
+}
+
+.approveBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--success) 85%, black);
   color: var(--text-on-accent);
 }
 
 .denyBtn {
   background: var(--error);
   color: var(--text-on-error);
+  border-color: transparent;
+  box-shadow: var(--highlight-inset);
+}
+
+.denyBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 85%, black);
+  color: var(--text-on-error);
 }
 
 .alwaysAllowBtn {
-  background: var(--fg-muted);
-  color: var(--bg-primary);
+  /* Default btn styling — no additional emphasis. */
 }
 
 /* ── Model picker ──────────────────────────────────────── */
@@ -600,7 +619,7 @@
   font-size: var(--font-xs);
   background: var(--bg-secondary);
   color: var(--fg-secondary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: 1px 4px;
   cursor: pointer;
@@ -616,7 +635,7 @@
   font-size: var(--font-xs);
   background: var(--bg-secondary);
   color: var(--fg-secondary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: 1px 4px;
   width: 48px;
@@ -734,7 +753,7 @@
 .usageFooter {
   padding: 3px 16px;
   background: var(--bg-secondary);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   font-size: 10px;
   color: var(--fg-muted);
   display: flex;
@@ -748,7 +767,7 @@
 /* Extended-thinking disclosure (Opus 4.7+ reasoning) */
 .reasoningDisclosure {
   margin: 4px 0;
-  border-left: 2px solid var(--border);
+  border-left: 2px solid var(--border-subtle);
   padding-left: 8px;
 }
 
@@ -785,7 +804,7 @@
   align-items: center;
   gap: 8px;
   padding: 6px 16px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   background: var(--bg-secondary);
   font-size: 12px;
   color: var(--fg-muted);
@@ -813,7 +832,7 @@
   margin-left: auto;
   flex-shrink: 0;
   padding: 2px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--fg-secondary);
@@ -832,18 +851,19 @@
 
 .micBtn,
 .micBtnActive {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
   cursor: pointer;
   flex-shrink: 0;
   background: var(--bg-tertiary);
   color: var(--fg-primary);
-  transition: opacity 0.15s ease, background-color 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out);
 }
 
 .micBtnActive {
