@@ -133,12 +133,17 @@
   min-height: 0;
   overflow: hidden;
   padding: 26px 4px 4px; /* top band hosts the tile header */
-  border: 1px solid var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 #terminal-panes.multiview > .terminal-pane.mv-tile.active {
   border-color: var(--accent);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.2);
 }
 
 .mv-tile-header {
@@ -153,8 +158,11 @@
   padding: 0 8px;
   font-size: var(--font-xs);
   color: var(--fg-muted);
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--bg-highlight);
+  background: var(--surface-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border-bottom: 1px solid var(--border-subtle);
+  box-shadow: var(--highlight-inset);
   cursor: pointer;
   user-select: none;
 }
@@ -193,6 +201,9 @@
   color: var(--success);
 }
 
+/* iconBtn-parity: 24px hit area, subtle hover wash, focus ring. Kept as a
+   compound selector (not composed) because .mv-* lives in styles.css, outside
+   the CSS-module space. */
 .mv-tile-btn {
   flex: none;
   width: 18px;
@@ -202,29 +213,36 @@
   justify-content: center;
   padding: 0;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--fg-muted);
   font-size: var(--font-xs);
   line-height: 1;
   cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .mv-tile-btn:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
+}
+
+.mv-tile-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .mv-tile-btn-close:hover {
   color: var(--error);
 }
 
-/* Top-right multiview controls: overflow pill + "+" project picker */
+/* Top-right multiview controls: overflow pill + "+" project picker (glass) */
 .mv-controls {
   position: absolute;
   top: 4px;
   right: 8px;
-  z-index: 40;
+  z-index: var(--z-toolbar);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -233,12 +251,17 @@
 .mv-overflow-pill {
   height: 20px;
   padding: 0 8px;
-  border: 1px solid var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
-  background: var(--bg-primary);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   color: var(--fg-muted);
   font-size: var(--font-2xs);
   cursor: pointer;
+  box-shadow: var(--highlight-inset);
+  transition: color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .mv-overflow-pill:hover {
@@ -253,13 +276,18 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: 1px solid var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: var(--bg-primary);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   color: var(--fg-muted);
   font-size: var(--font-md);
   line-height: 1;
   cursor: pointer;
+  box-shadow: var(--highlight-inset);
+  transition: color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .mv-add-btn:hover {
@@ -271,13 +299,15 @@
   position: absolute;
   top: 28px;
   right: 8px;
-  z-index: 50;
+  z-index: var(--z-dropdown);
   width: 220px;
   padding: 6px;
-  background: var(--bg-primary);
-  border: 1px solid var(--bg-highlight);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
 }
 
 .mv-picker-input {
@@ -285,16 +315,19 @@
   height: 24px;
   padding: 0 8px;
   margin-bottom: 4px;
-  border: 1px solid var(--bg-highlight);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
   color: var(--fg-primary);
   font-size: var(--font-sm);
   outline: none;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .mv-picker-input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .mv-picker-list {
@@ -309,17 +342,18 @@
   gap: 6px;
   padding: 4px 6px;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--fg-primary);
   font-size: var(--font-sm);
   text-align: left;
   cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .mv-picker-item:hover,
 .mv-picker-item:first-child {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .mv-picker-name {
@@ -419,7 +453,7 @@
 
 /* @git-diff-view theme overrides — match FastAF palette */
 .diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root {
-  --diff-border--: var(--border);
+  --diff-border--: var(--border-subtle);
   --diff-plain-content--: var(--bg-primary);
   --diff-expand-content--: var(--bg-secondary);
   --diff-empty-content--: var(--bg-secondary);

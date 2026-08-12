@@ -13,36 +13,24 @@
   flex-direction: column;
   gap: 6px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 
+/* Commit message textarea — composes the shared input recipe (focus ring),
+   layered with row-specific sizing/behavior. */
 .commitTextarea {
-  width: 100%;
+  composes: textarea from "../shared/controls.module.css";
   min-height: 38px;
   max-height: 114px;
   overflow-y: hidden;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
   font-family: var(--font-mono);
   padding: 6px 8px;
   resize: none;
   line-height: 1.6;
-  box-sizing: border-box;
-  transition: border-color 0.15s ease, height 0.1s ease;
-}
-
-.commitTextarea:focus {
-  border-color: var(--accent);
-  outline: none;
-}
-
-.commitTextarea:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out),
+    height var(--duration-fast) var(--ease-out);
 }
 
 .commitRow {
@@ -52,28 +40,7 @@
 }
 
 .commitBtn {
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  font-weight: 600;
-  padding: 4px 12px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  transition: opacity 0.15s ease;
-}
-
-.commitBtn:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.commitBtn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
+  composes: btnPrimary from "../shared/controls.module.css";
 }
 
 .commitBtnDisabled {
@@ -109,30 +76,20 @@
   min-width: 0;
 }
 
+/* Sparkle "generate commit message" — icon-button variant sized 28x28
+   with a subtle border so it reads next to the textarea. */
 .generateBtn {
+  composes: iconBtn from "../shared/controls.module.css";
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   width: 28px;
   height: 28px;
   margin-top: 5px; /* align with textarea padding */
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  border: 1px solid var(--border-subtle);
 }
 
 .generateBtn:hover:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);
-}
-
-.generateBtn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
 }
 
 .generateBtnBusy {
@@ -182,21 +139,10 @@
 }
 
 .filterInput {
-  width: 100%;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-primary);
+  composes: input from "../shared/controls.module.css";
+  padding: 4px 24px 4px 8px;
   font-size: var(--font-sm);
   font-family: var(--font-ui);
-  padding: 4px 24px 4px 8px;
-  box-sizing: border-box;
-  transition: border-color 0.15s ease;
-}
-
-.filterInput:focus {
-  border-color: var(--accent);
-  outline: none;
 }
 
 .filterInput::placeholder {
@@ -205,21 +151,15 @@
 }
 
 .filterClear {
+  composes: iconBtn from "../shared/controls.module.css";
   position: absolute;
   right: 16px;
   top: 50%;
   transform: translateY(-50%);
-  background: none;
-  border: none;
-  color: var(--fg-muted);
+  width: 20px;
+  height: 20px;
   font-size: var(--font-md);
-  cursor: pointer;
-  padding: 0 4px;
   line-height: 1;
-}
-
-.filterClear:hover {
-  color: var(--fg-primary);
 }
 
 /* Section headers (STAGED, CHANGES) */
@@ -237,17 +177,17 @@
   letter-spacing: 0.05em;
   color: var(--fg-muted);
   background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s ease;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .sectionHeader:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .chevron {
   font-size: var(--font-xs);
-  transition: transform 0.15s ease;
+  transition: transform var(--duration-base) var(--ease-out);
   flex-shrink: 0;
 }
 
@@ -274,7 +214,9 @@
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   opacity: 0;
-  transition: opacity 0.15s ease, background 0.1s ease, color 0.1s ease;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .sectionAction:first-of-type {
@@ -286,39 +228,42 @@
 }
 
 .sectionAction:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
-/* File entries */
+/* File entries — inset rows (Cursor-style): 6px side gutter, rounded, and
+   a hover/selection wash rather than an edge-to-edge fill. */
 .fileEntry {
   position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 12px 3px 20px;
+  margin: 0 6px;
+  padding: 3px 6px 3px 14px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.1s ease;
+  transition: background var(--duration-fast) var(--ease-out);
   font-size: var(--font-md);
   font-family: var(--font-ui);
 }
 
 .fileEntry:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .fileFocused {
-  background: var(--bg-highlight);
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  background: var(--surface-hover);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .fileSelected {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  background: rgba(var(--accent-rgb), 0.14);
 }
 
 .fileSelected.fileFocused {
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  background: rgba(var(--accent-rgb), 0.22);
 }
 
 .fileFocused .actions {
@@ -388,7 +333,7 @@
   flex-shrink: 0;
   font-size: var(--font-2xs);
   font-family: var(--font-ui);
-  transition: opacity 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-out);
 }
 
 .diffAdd {
@@ -402,13 +347,13 @@
 /* Action buttons — overlay on hover, replacing diff stats */
 .actions {
   position: absolute;
-  right: 12px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   gap: 2px;
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-out);
   background: inherit;
   padding-left: 4px;
 }
@@ -422,30 +367,18 @@
 }
 
 .actionBtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 20px;
   height: 20px;
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  padding: 0;
-  transition: background 0.1s ease, color 0.1s ease;
 }
 
-.actionBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.actionBtnDanger:hover {
+/* Semantic hover overrides — beat the composed iconBtn:hover specificity
+   with a matching :not(:disabled) qualifier. */
+.actionBtnDanger:hover:not(:disabled) {
   color: var(--error);
 }
 
-.actionBtnStage:hover {
+.actionBtnStage:hover:not(:disabled) {
   color: var(--success);
 }
 

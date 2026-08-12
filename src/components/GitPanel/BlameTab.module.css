@@ -13,7 +13,7 @@
   gap: 8px;
   padding: 6px 12px;
   background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   font-size: var(--font-sm);
   font-family: var(--font-mono);
   color: var(--fg-secondary);
@@ -70,21 +70,21 @@
 .blameLine {
   display: flex;
   cursor: default;
-  transition: background 0.1s ease;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .blameLine:hover {
-  background: var(--bg-highlight) !important;
+  background: var(--surface-hover) !important;
 }
 
 /* Highlight all lines from the same commit when one is clicked */
 .blameLineHighlighted {
-  background: color-mix(in srgb, var(--accent) 12%, transparent) !important;
+  background: rgba(var(--accent-rgb), 0.14) !important;
 }
 
 /* First line of a commit group gets a top border separator */
 .blameLineGroupStart {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 /* Gutter: hash + author + age */
@@ -98,7 +98,7 @@
   color: var(--fg-muted);
   font-size: var(--font-xs);
   user-select: none;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-subtle);
   overflow: hidden;
 }
 
@@ -154,7 +154,7 @@
   align-items: center;
   gap: 6px;
   padding: 4px 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   background: var(--bg-tertiary);
   font-size: var(--font-xs);
   color: var(--fg-muted);
@@ -168,12 +168,15 @@
   overflow: hidden;
 }
 
+/* Recency heatmap: strong success wash → nearly-transparent wash.
+   Uses --success (semantic) rather than a hand-picked green literal so
+   the tint tracks theme palettes. */
 .heatmapRecent {
   flex: 1;
-  background: rgba(100, 200, 100, 0.25);
+  background: color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 .heatmapOld {
   flex: 1;
-  background: rgba(100, 200, 100, 0.03);
+  background: color-mix(in srgb, var(--success) 3%, transparent);
 }

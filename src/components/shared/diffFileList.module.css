@@ -29,7 +29,7 @@
 
 /* File section */
 .fileSection {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .fileHeader {
@@ -37,14 +37,15 @@
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--bg-highlight);
+  background: var(--bg-tertiary);
   cursor: pointer;
   user-select: none;
-  border-bottom: 1px solid var(--border);
-  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
   position: sticky;
   top: var(--diff-header-height);
   z-index: 2;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .fileHeader:hover {
@@ -53,7 +54,7 @@
 
 .chevron {
   color: var(--fg-muted);
-  transition: transform 0.15s ease;
+  transition: transform var(--duration-base) var(--ease-out);
   flex-shrink: 0;
 }
 
@@ -86,5 +87,5 @@
 
 /* Per-file diff content (wraps DiffViewer) */
 .fileDiff {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }

@@ -1,11 +1,13 @@
-/* FileBrowserPanel */
+/* FileBrowserPanel — glass side panel, inset rows */
 .panel {
   position: relative;
   width: 300px;
   min-width: 200px;
   max-width: 50%;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
+  background: var(--surface-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -19,14 +21,14 @@
   outline: none;
 }
 
-/* Toolbar: breadcrumb + sort control */
+/* Toolbar: breadcrumb + sort control (subtle strip aligned with panel vocab) */
 .toolbar {
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 4px 8px 4px 12px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .breadcrumb {
@@ -45,13 +47,15 @@
 .breadcrumbSegment {
   cursor: pointer;
   color: var(--fg-secondary);
-  padding: 1px 3px;
+  padding: 1px 4px;
   border-radius: var(--radius-sm);
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .breadcrumbSegment:hover {
   color: var(--fg-primary);
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .breadcrumbCurrent {
@@ -75,23 +79,9 @@
 }
 
 .sortTrigger {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 22px;
   height: 22px;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: color 0.1s, background 0.1s;
-}
-
-.sortTrigger:hover {
-  color: var(--fg-secondary);
-  background: var(--bg-highlight);
-  border-color: var(--border);
 }
 
 /* Empty states */
@@ -105,31 +95,33 @@
   color: var(--error);
 }
 
-/* File entries */
+/* File entries — inset rows with radius, hover wash, accent selection */
 .entry {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 12px;
+  margin: 0 4px;
+  padding: 4px 8px;
   cursor: pointer;
   font-size: var(--font-md);
   font-family: var(--font-ui);
-  transition: background 0.1s;
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .entry:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 
 .entrySelected {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .entryActive {
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
-  border-radius: var(--radius-sm);
+  background: rgba(var(--accent-rgb), 0.14);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.3);
 }
 
 .entryActive .entryName {
@@ -188,7 +180,7 @@
 .treeChevron {
   flex-shrink: 0;
   color: var(--fg-muted);
-  transition: transform 0.15s ease;
+  transition: transform var(--duration-base) var(--ease-out);
 }
 
 .treeChevronExpanded {
@@ -208,28 +200,14 @@
 }
 
 .viewModeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 22px;
   height: 18px;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: color 0.1s, background 0.1s;
-}
-
-.viewModeBtn:hover {
-  color: var(--fg-secondary);
-  background: var(--bg-highlight);
 }
 
 .viewModeBtnActive {
   color: var(--accent);
-  background: var(--bg-highlight);
-  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.14);
 }
 
 /* Enhanced search bar */
@@ -238,7 +216,7 @@
   align-items: center;
   gap: 4px;
   padding: 4px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .modeToggle {
@@ -249,14 +227,16 @@
   height: 22px;
   padding: 0 4px;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--fg-secondary);
   font-size: var(--font-xs);
   font-family: var(--font-ui);
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
   flex-shrink: 0;
 }
 
@@ -266,7 +246,7 @@
 }
 
 .modeToggle:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -282,24 +262,9 @@
 }
 
 .toggleBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 22px;
   height: 22px;
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-  flex-shrink: 0;
-}
-
-.toggleBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .toggleBtn svg {
@@ -319,7 +284,7 @@
 
 /* Content search results */
 .contentGroup {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .contentGroupHeader {
@@ -331,12 +296,13 @@
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   color: var(--fg-secondary);
-  background: var(--bg-tertiary);
-  transition: background 0.1s;
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .contentGroupHeader:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -355,11 +321,11 @@
   cursor: pointer;
   font-size: var(--font-sm);
   font-family: var(--font-mono);
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .contentMatch:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .contentMatchLine {
@@ -380,7 +346,7 @@
 }
 
 .contentMatchHighlight {
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: rgba(var(--accent-rgb), 0.3);
   color: var(--accent);
   border-radius: 2px;
   padding: 0 1px;
@@ -392,7 +358,7 @@
   font-size: var(--font-xs);
   font-family: var(--font-ui);
   color: var(--fg-muted);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .searchStatusTruncated {
@@ -433,17 +399,19 @@
   width: 100%;
   box-sizing: border-box;
   padding: 1px 4px;
-  background: var(--bg-secondary);
+  background: var(--bg-tertiary);
   color: var(--fg-primary);
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
   font-size: var(--font-md);
   font-family: var(--font-ui);
   outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .inlineCreateInputError {
   border-color: var(--error);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 25%, transparent);
 }
 
 .inlineCreateError {
@@ -451,11 +419,14 @@
   top: calc(100% + 2px);
   left: 0;
   right: 0;
-  z-index: 20;
+  z-index: var(--z-dropdown);
   padding: 3px 6px;
-  background: var(--bg-secondary);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   border: 1px solid var(--error);
   border-radius: var(--radius-sm);
   color: var(--fg-primary);
   font-size: var(--font-xs);
+  box-shadow: var(--shadow-dropdown);
 }

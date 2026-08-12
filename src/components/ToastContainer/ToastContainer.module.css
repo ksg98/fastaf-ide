@@ -2,13 +2,15 @@
   position: fixed;
   bottom: calc(var(--status-bar-height, 24px) + 8px);
   right: 16px;
-  z-index: 9999;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
   gap: 6px;
   pointer-events: none;
 }
 
+/* Glass pill — --surface-overlay + --blur-overlay collapse to opaque when
+ * vibrancy is off, so the same recipe works everywhere. */
 .toast {
   pointer-events: auto;
   display: flex;
@@ -16,15 +18,17 @@
   gap: 8px;
   padding: 10px 14px;
   max-width: 420px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   font-family: var(--font-ui);
   font-size: var(--font-md);
   color: var(--fg-primary);
   cursor: pointer;
-  animation: slideIn 200ms ease-out;
+  animation: slideIn var(--duration-base) var(--ease-out);
 }
 
 .toast[data-level="warn"] {
@@ -89,10 +93,12 @@
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-weight: 600;
+  box-shadow: var(--highlight-inset);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .action:hover {
-  opacity: 0.85;
+  background: var(--accent-hover);
 }
 
 @keyframes slideIn {

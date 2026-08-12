@@ -50,7 +50,7 @@
 }
 
 .columnTitle {
-  font-size: var(--font-sm);
+  font-size: 11px;
   font-weight: 600;
   color: var(--fg-muted);
   text-transform: uppercase;
@@ -80,14 +80,18 @@
 
 .scanButton,
 .issueButton {
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   background: var(--bg-tertiary);
   color: var(--fg-primary);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: var(--font-2xs);
   font-family: var(--font-ui);
   line-height: 1;
   cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .scanButton {
@@ -98,6 +102,14 @@
 .scanButton:hover,
 .issueButton:hover {
   background: var(--bg-highlight);
+  color: var(--fg-primary);
+}
+
+.scanButton:focus-visible,
+.issueButton:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .scanButton:disabled,
@@ -106,10 +118,16 @@
   cursor: default;
 }
 
+/* Stat card recipe: sheened top edge + subtle border + inset highlight. */
 .card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary)),
+    var(--bg-secondary)
+  );
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset);
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
@@ -189,9 +207,9 @@
 }
 
 .badgeMuted {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-muted);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
 }
 
 .empty {
@@ -200,6 +218,6 @@
   font-size: var(--font-xs);
   text-align: center;
   background: var(--bg-secondary);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
 }

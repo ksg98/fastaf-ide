@@ -1,14 +1,14 @@
 .bar {
   flex-shrink: 0;
   background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--fg-muted);
   cursor: pointer;
   user-select: none;
   overflow: hidden;
-  transition: max-height 0.15s ease-out;
+  transition: max-height var(--duration-base) var(--ease-out);
 }
 
 .collapsed {
@@ -47,7 +47,7 @@
 .chevron {
   flex-shrink: 0;
   opacity: 0.5;
-  transition: transform 0.15s;
+  transition: transform var(--duration-base) var(--ease-out);
 }
 
 .chevronUp {

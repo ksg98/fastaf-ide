@@ -1,4 +1,6 @@
-/* Clone-from-GitHub dialog — widens the shared popover and adds repo-list UI */
+/* Clone-from-GitHub dialog — widens the shared glass popover and adds repo-list UI.
+ * Base surface (blur, radius, shadow) comes from shared/dialog.module.css .popover.
+ * Local buttons compose from shared/controls.module.css so the design system stays one. */
 .wide {
   width: 480px;
   max-width: calc(100vw - 48px);
@@ -16,24 +18,8 @@
 }
 
 .browseBtn {
-  padding: 6px 12px;
-  background: var(--bg-highlight);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  font-size: var(--font-md);
-  cursor: pointer;
+  composes: btn from "../shared/controls.module.css";
   white-space: nowrap;
-}
-
-.browseBtn:hover:not(:disabled) {
-  background: var(--border);
-  color: var(--fg-primary);
-}
-
-.browseBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .sectionLabel {
@@ -55,8 +41,8 @@
   margin-top: 6px;
   max-height: 220px;
   overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   background: var(--bg-tertiary);
 }
 
@@ -68,7 +54,7 @@
   padding: 6px 10px;
   background: none;
   border: none;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   color: var(--fg-primary);
   font-size: var(--font-md);
   text-align: left;
@@ -80,11 +66,11 @@
 }
 
 .repoRow:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .repoRowActive {
-  background: var(--bg-highlight);
+  background: rgba(var(--accent-rgb), 0.14);
 }
 
 .repoName {
@@ -97,7 +83,7 @@
 .privateBadge {
   flex-shrink: 0;
   padding: 1px 6px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 999px;
   font-size: 10px;
   color: var(--fg-muted);
@@ -139,7 +125,7 @@
   background: var(--accent);
   border-radius: 3px;
   transform-origin: left;
-  transition: transform 0.2s ease;
+  transition: transform var(--duration-slow) var(--ease-out);
 }
 
 .progressFill.indeterminate {

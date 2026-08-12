@@ -1,4 +1,4 @@
-/* Activity Dashboard overlay */
+/* Activity Dashboard overlay — glass card floating over a scrim. */
 .overlay {
   position: fixed;
   inset: 0;
@@ -7,19 +7,40 @@
   align-items: flex-start;
   justify-content: center;
   padding-top: 80px;
-  z-index: 1000;
+  z-index: var(--z-modal);
+}
+
+@keyframes activityDashboardIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .dashboard {
   width: 700px;
   max-width: 90vw;
   max-height: 70vh;
-  background: var(--bg-secondary);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-popup);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  animation: activityDashboardIn var(--duration-base) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard {
+    animation: none;
+  }
 }
 
 .header {
@@ -27,13 +48,17 @@
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
 }
 
 .header h3 {
   margin: 0;
-  font-size: var(--font-lg);
+  font-size: 11px;
   font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .headerActions {
@@ -61,19 +86,19 @@
   padding: 10px 16px;
   gap: 6px;
   cursor: pointer;
-  border-bottom: 1px solid var(--border);
-}
-
-.row:last-child {
-  border-bottom: none;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .row:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .activeRow {
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-highlight));
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.activeRow:hover {
+  background: rgba(var(--accent-rgb), 0.18);
 }
 
 .idleRow {
@@ -111,7 +136,7 @@
 .project {
   font-size: var(--font-xs);
   color: var(--fg-muted);
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   max-width: 120px;
@@ -136,29 +161,29 @@
 }
 
 .statusWorking {
-  background: rgba(78, 201, 176, 0.2);
+  background: color-mix(in srgb, var(--success) 20%, transparent);
   color: var(--success);
   font-weight: 600;
 }
 
 .statusWaiting {
-  background: rgba(220, 220, 170, 0.2);
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
   color: var(--warning);
 }
 
 .statusRateLimited {
-  background: rgba(244, 135, 113, 0.2);
+  background: color-mix(in srgb, var(--error) 20%, transparent);
   color: var(--error);
 }
 
 .statusError {
-  background: rgba(244, 135, 113, 0.28);
+  background: color-mix(in srgb, var(--error) 28%, transparent);
   color: var(--error);
   font-weight: 600;
 }
 
 .statusIdle {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-muted);
 }
 
@@ -181,13 +206,15 @@
   padding: 2px;
   border-radius: var(--radius-sm);
   opacity: 0.4;
-  transition: opacity 0.15s, color 0.15s;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
 }
 
 .promoteBtn:hover {
   opacity: 1;
   color: var(--fg-primary);
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .promoteBtn.promoted {
@@ -229,7 +256,7 @@
   align-items: center;
   gap: 16px;
   padding: 8px 16px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   font-size: var(--font-sm);
   color: var(--fg-muted);
 }

@@ -13,9 +13,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: var(--font-xl);
+  font-size: 11px;
   font-weight: 600;
-  color: var(--fg-primary);
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .empty {
@@ -30,23 +32,29 @@
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary)),
+    var(--bg-secondary)
+  );
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--highlight-inset);
   cursor: pointer;
   user-select: none;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .row:hover {
   background: var(--bg-highlight);
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
 }
 
 .exitDot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: var(--radius-full);
   flex-shrink: 0;
 }
 
@@ -66,6 +74,12 @@
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .exitRunning {
+    animation: none;
+  }
 }
 
 .name {

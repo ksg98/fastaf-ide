@@ -76,7 +76,7 @@
 }
 
 .badge[data-type="available"] {
-  background: rgba(63, 185, 80, 0.15);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
   color: var(--success);
 }
 
@@ -86,12 +86,12 @@
 }
 
 .badge[data-type="disabled"] {
-  background: rgba(248, 81, 73, 0.1);
+  background: color-mix(in srgb, var(--error) 10%, transparent);
   color: var(--fg-muted);
 }
 
 .badge[data-type="mcp"] {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
 }
 
@@ -179,7 +179,7 @@
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
   flex-shrink: 0;
 }
@@ -191,23 +191,16 @@
 }
 
 .smallBtn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--fg-secondary);
+  composes: btn from "../../shared/controls.module.css";
+  min-height: 0;
+  background: transparent;
   font-size: var(--font-sm);
   padding: 2px 6px;
   border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
 }
 
-.smallBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.smallBtn.danger:hover {
-  background: rgba(248, 81, 73, 0.1);
+.smallBtn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
   border-color: var(--error);
 }
@@ -224,10 +217,12 @@
   right: 0;
   margin-top: 2px;
   min-width: 90px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 20;
   overflow: hidden;
 }
@@ -251,7 +246,7 @@
 }
 
 .menuItem.danger:hover {
-  background: rgba(248, 81, 73, 0.1);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
 }
 
@@ -276,20 +271,13 @@
 }
 
 .formInput {
+  composes: input from "../../shared/controls.module.css";
   flex: 1;
   width: 100%;
   padding: 4px 8px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--fg-primary);
   font-size: var(--font-sm);
   box-sizing: border-box;
-}
-
-.formInput:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 
 .formInput.mono {
@@ -315,25 +303,16 @@
 }
 
 .actionBtn {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--fg-secondary);
+  composes: btn from "../../shared/controls.module.css";
+  min-height: 0;
+  background: transparent;
   font-size: var(--font-sm);
   padding: 4px 10px;
   border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-.actionBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+.actionBtn:hover:not(:disabled) {
   border-color: var(--accent);
-}
-
-.actionBtn:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .actionBtn.installed {
@@ -341,8 +320,8 @@
   color: var(--success);
 }
 
-.actionBtn.installed:hover {
-  background: rgba(248, 81, 73, 0.1);
+.actionBtn.installed:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
   border-color: var(--error);
 }

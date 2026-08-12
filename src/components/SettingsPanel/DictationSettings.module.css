@@ -62,46 +62,37 @@
   margin-left: auto;
 }
 
-.modelSelect,
-.modelDownload {
+.modelSelect {
+  composes: btn from "../shared/controls.module.css";
+  min-height: 0;
   padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-tertiary);
-  color: var(--fg-secondary);
   font-size: var(--font-sm);
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
 }
 
-.modelSelect:hover {
+.modelSelect:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
 }
 
 .modelDownload {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--text-on-accent);
-}
-
-.modelDownload:hover {
-  opacity: 0.85;
+  composes: btnPrimary from "../shared/controls.module.css";
+  min-height: 0;
+  padding: 4px 10px;
+  font-size: var(--font-sm);
 }
 
 .modelDelete {
-  background: none;
-  border: none;
+  composes: iconBtn from "../shared/controls.module.css";
+  width: auto;
   color: var(--fg-secondary);
-  cursor: pointer;
   font-size: var(--font-xl);
   padding: 0 2px;
   line-height: 1;
-  transition: color 0.15s;
 }
 
-.modelDelete:hover {
+.modelDelete:hover:not(:disabled) {
   color: var(--error);
+  background: transparent;
 }
 
 .modelActiveLabel {
@@ -213,18 +204,17 @@
 }
 
 .correctionDelete {
-  background: none;
-  border: none;
+  composes: iconBtn from "../shared/controls.module.css";
+  width: auto;
   color: var(--fg-secondary);
-  cursor: pointer;
   font-size: var(--font-xl);
   padding: 0;
   line-height: 1;
-  transition: color 0.15s;
 }
 
-.correctionDelete:hover {
+.correctionDelete:hover:not(:disabled) {
   color: var(--error);
+  background: transparent;
 }
 
 .correctionAdd {
@@ -254,22 +244,11 @@
 }
 
 .correctionAddBtn {
+  composes: btn from "../shared/controls.module.css";
   padding: 6px 12px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
-  cursor: pointer;
   font-size: var(--font-sm);
-  transition: background 0.15s, border-color 0.15s;
 }
 
 .correctionAddBtn:hover:not(:disabled) {
-  background: var(--bg-highlight);
   border-color: var(--accent);
-}
-
-.correctionAddBtn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
 }

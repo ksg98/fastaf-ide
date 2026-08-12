@@ -1,14 +1,15 @@
 /* Settings Shell & Shared Form Styles */
 
 /* ── Shell Layout ── */
+/* Glass modal recipe: token-only so vibrancy on/off is uniform. */
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.85);
+  background: rgba(0, 0, 0, 0.5); /* scrim — no token yet, kept literal */
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
 }
 
 .panel {
@@ -16,13 +17,27 @@
   max-width: 90vw;
   height: 80vh;
   max-height: 90vh;
-  background: var(--bg-secondary);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-popup);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border-radius: var(--radius-panel);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  animation: settingsPanelIn var(--duration-slow) var(--ease-out);
+}
+
+@keyframes settingsPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .header {
@@ -30,7 +45,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 
@@ -48,10 +64,12 @@
   cursor: pointer;
   padding: 4px 8px;
   border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .close:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -66,9 +84,9 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 8px 0;
-  background: var(--bg-tertiary);
-  border-right: 1px solid var(--border);
+  padding: 8px 6px;
+  background: transparent;
+  border-right: 1px solid var(--border-subtle);
   overflow-y: auto;
   position: relative;
 }
@@ -77,42 +95,42 @@
   display: block;
   width: 100%;
   text-align: left;
-  padding: 3px 16px 5px;
+  padding: 3px 12px 5px;
   background: transparent;
   border: none;
   color: var(--fg-secondary);
   font-size: var(--font-md);
   font-family: var(--font-ui);
+  border-radius: var(--radius-md);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   flex-shrink: 0;
 }
 
 .navItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
 .navItem.active {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg-highlight));
+  background: rgba(var(--accent-rgb), 0.14);
   color: var(--fg-primary);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
-  border-radius: var(--radius-sm);
 }
 
 .navSeparator {
   height: 1px;
-  margin: 6px 12px;
-  background: var(--border);
+  margin: 6px 6px;
+  background: var(--border-subtle);
   flex-shrink: 0;
 }
 
 .navLabel {
-  padding: 10px 16px 4px;
-  font-size: var(--font-xs);
+  padding: 10px 12px 4px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
   color: var(--fg-muted);
@@ -122,7 +140,7 @@
 }
 
 .navItemRepo {
-  padding-left: 24px;
+  padding-left: 20px;
 }
 
 .navResizeHandle {
@@ -151,7 +169,7 @@
 /* ── Repo Header Variant ── */
 .headerRepo {
   align-items: flex-start;
-  background: var(--bg-tertiary);
+  background: transparent;
 }
 
 .titleRepo {
@@ -183,40 +201,16 @@
   display: flex;
   justify-content: space-between;
   padding: 12px 20px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
 }
 
 .footerReset {
-  padding: 6px 14px;
-  background: var(--bg-highlight);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.footerReset:hover {
-  background: var(--border);
-  color: var(--fg-primary);
+  composes: btnGhost from "../shared/controls.module.css";
 }
 
 .footerDone {
-  padding: 6px 16px;
-  background: var(--accent);
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text-on-accent);
-  font-size: var(--font-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.footerDone:hover {
-  background: var(--accent-hover);
+  composes: btnPrimary from "../shared/controls.module.css";
 }
 
 /* ── Shared Form Elements ── */
@@ -226,13 +220,15 @@
 
 .section h3 {
   margin: 0 0 14px;
-  font-size: var(--font-md);
+  font-size: 11px;
   font-weight: 600;
-  color: var(--fg-primary);
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+  text-transform: uppercase;
 }
 
 .section h3:not(:first-child) {
-  margin-top: 8px;
+  margin-top: 16px;
 }
 
 .group {
@@ -305,7 +301,7 @@
   color: var(--warning);
   font-size: var(--font-sm);
   padding: 12px;
-  background: rgba(224, 175, 104, 0.1);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
   border-radius: var(--radius-sm);
   margin-bottom: 8px;
 }
@@ -354,16 +350,17 @@
 .toggle input[type="checkbox"] {
   -webkit-appearance: none;
   appearance: none;
-  width: 30px;
-  height: 16px;
-  min-height: 16px;
-  max-height: 16px;
+  width: 34px;
+  height: 18px;
+  min-height: 18px;
+  max-height: 18px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 9999px;
   position: relative;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
   flex-shrink: 0;
 }
 
@@ -371,14 +368,15 @@
   content: "";
   display: block;
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 10px;
-  height: 10px;
+  top: 1px;
+  left: 1px;
+  width: 14px;
+  height: 14px;
   aspect-ratio: 1;
   background: var(--fg-muted);
   border-radius: 9999px;
-  transition: transform 0.2s, background 0.2s;
+  transition: transform var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
 }
 
 .toggle input[type="checkbox"]:checked {
@@ -387,8 +385,8 @@
 }
 
 .toggle input[type="checkbox"]:checked::after {
-  transform: translateX(14px);
-  background: white;
+  transform: translateX(16px);
+  background: var(--text-on-accent);
 }
 
 .toggle span {
@@ -413,24 +411,12 @@
 }
 
 .testBtn {
-  padding: 4px 12px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  composes: btn from "../shared/controls.module.css";
   font-size: var(--font-sm);
-  cursor: pointer;
 }
 
-.testBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+.testBtn:hover:not(:disabled) {
   border-color: var(--accent);
-}
-
-.testBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .testBtnOk {
@@ -522,21 +508,12 @@
 }
 
 .groupDeleteBtn {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-md);
+  composes: iconBtn from "../shared/controls.module.css";
   color: var(--fg-secondary);
   font-size: var(--font-md);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
 }
 
-.groupDeleteBtn:hover {
+.groupDeleteBtn:hover:not(:disabled) {
   background: var(--error);
   color: var(--text-on-accent);
 }
@@ -618,38 +595,28 @@
 }
 
 .groupsAddBtn {
+  composes: btnGhost from "../shared/controls.module.css";
   width: 100%;
   padding: 10px;
-  background: transparent;
-  border: 1px dashed var(--border);
+  border: 1px dashed var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--fg-secondary);
   font-size: var(--font-sm);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
   margin-top: 8px;
 }
 
-.groupsAddBtn:hover {
+.groupsAddBtn:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent);
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 /* ── Services Tab (MCP) ── */
 .input {
-  width: 100%;
+  composes: input from "../shared/controls.module.css";
   padding: 8px 12px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
   font-size: var(--font-sm);
-}
-
-.input:focus {
-  outline: none;
-  border-color: var(--accent);
+  border-radius: var(--radius-sm);
 }
 
 .passwordRow {
@@ -663,61 +630,36 @@
 }
 
 .toggleBtn {
+  composes: iconBtn from "../shared/controls.module.css";
   width: 30px;
   height: 30px;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   flex-shrink: 0;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--fg-secondary);
-  cursor: pointer;
-}
-
-.toggleBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .inlineBtn {
+  composes: btnGhost from "../shared/controls.module.css";
   margin-left: 8px;
+  min-height: 22px;
   padding: 2px 8px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
   color: var(--fg-muted);
   font-size: var(--font-sm);
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
 }
 
-.inlineBtn:hover {
+.inlineBtn:hover:not(:disabled) {
   color: var(--accent);
   border-color: var(--accent);
 }
 
 .saveBtn {
+  composes: btnPrimary from "../shared/controls.module.css";
   padding: 6px 12px;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  color: var(--text-on-accent);
   font-size: var(--font-sm);
   font-weight: 600;
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-
-.saveBtn:hover {
-  opacity: 0.85;
-}
-
-.saveBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  border-radius: var(--radius-sm);
 }
 
 .url {
@@ -801,24 +743,17 @@
 }
 
 .copyBtn {
+  composes: iconBtn from "../shared/controls.module.css";
   width: 30px;
   height: 30px;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   flex-shrink: 0;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--fg-secondary);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-.copyBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+.copyBtn:hover:not(:disabled) {
   border-color: var(--accent);
 }
 
@@ -901,7 +836,7 @@
   margin-left: 6px;
   border-radius: 50%;
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-hover);
   color: var(--fg-muted);
   font-size: var(--font-xs);
   font-weight: 600;
@@ -934,19 +869,10 @@
 }
 
 .downloadBtn {
+  composes: btnPrimary from "../shared/controls.module.css";
   padding: 8px 16px;
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-md);
-  cursor: pointer;
   font-size: var(--font-sm);
   align-self: flex-start;
-  transition: opacity 0.15s;
-}
-
-.downloadBtn:hover {
-  opacity: 0.85;
 }
 
 /* ── Scheduler ── */
@@ -981,18 +907,18 @@
 }
 
 .schedulerRemove {
+  composes: iconBtn from "../shared/controls.module.css";
   flex-shrink: 0;
-  background: none;
-  border: none;
+  width: auto;
   color: var(--fg-secondary);
-  cursor: pointer;
   font-size: var(--font-lg);
   line-height: 1;
   padding: 0 4px;
 }
 
-.schedulerRemove:hover {
+.schedulerRemove:hover:not(:disabled) {
   color: var(--error);
+  background: transparent;
 }
 
 .schedulerAdd {
@@ -1035,22 +961,15 @@
 }
 
 .schedulerUnitSelect {
+  composes: select from "../shared/controls.module.css";
   width: 64px;
   height: 32px;
   flex-shrink: 0;
   padding: 0 8px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--fg-primary);
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   box-sizing: border-box;
-}
-
-.schedulerUnitSelect:focus {
-  outline: none;
-  border-color: var(--accent);
 }
 
 .schedulerOneShotLabel {
@@ -1111,32 +1030,23 @@
 }
 
 .schedulerCronInput {
+  composes: input from "../shared/controls.module.css";
   width: 64px;
   height: 32px;
   flex-shrink: 0;
   padding: 0 8px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--fg-primary);
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   box-sizing: border-box;
 }
 
-.schedulerCronInput:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
 .schedulerGoalInput {
+  composes: input from "../shared/controls.module.css";
   flex: 1;
   height: 32px;
   padding: 0 12px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--fg-primary);
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   box-sizing: border-box;
@@ -1147,22 +1057,15 @@
   opacity: 0.5;
 }
 
-.schedulerGoalInput:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
 /* Manual MCP configuration disclosure */
 .mcpDisclosure {
-  background: none;
-  border: none;
+  composes: btnGhost from "../shared/controls.module.css";
+  min-height: 0;
   color: var(--fg-secondary);
-  cursor: pointer;
   font-size: var(--font-sm);
   padding: 2px 0;
-  display: flex;
-  align-items: center;
   gap: 4px;
+  justify-content: flex-start;
 }
 
 .mcpDisclosureArrow {
@@ -1189,16 +1092,15 @@
 }
 
 .mcpSnippetCopy {
+  composes: btn from "../shared/controls.module.css";
   position: absolute;
   top: 4px;
   right: 4px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  color: var(--fg-secondary);
-  cursor: pointer;
+  min-height: 0;
   padding: 2px 8px;
   border-radius: var(--radius-sm);
   font-size: var(--font-xs);
+  background: var(--bg-secondary);
 }
 
 .mcpCode {

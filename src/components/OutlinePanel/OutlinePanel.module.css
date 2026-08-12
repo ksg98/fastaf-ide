@@ -2,8 +2,10 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
+  background: var(--surface-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border-left: 1px solid var(--border-subtle);
   width: 280px;
   min-width: 200px;
 }
@@ -16,13 +18,15 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  padding: 4px 0;
 }
 
 .symbolItem {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 12px;
+  margin: 0 4px;
+  padding: 3px 8px;
   cursor: pointer;
   font-size: var(--font-sm);
   font-family: var(--font-mono);
@@ -30,10 +34,12 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .symbolItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .kindBadge {
@@ -50,7 +56,7 @@
 }
 
 .kindFunction {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  background: rgba(var(--accent-rgb), 0.2);
   color: var(--accent);
 }
 

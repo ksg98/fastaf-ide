@@ -1,26 +1,49 @@
-/* Worktree Manager overlay */
+/* WorktreeManager overlay — large glass panel with filter pills, list and batch bar.
+ * State classes preserved verbatim: .filterPillActive, .prOpen, .prMerged, .prClosed,
+ * .mainRow, .orphanRow, .actionBtnDanger, .statsAdded/.statsRemoved/.statsClean. */
+
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.65);
+  background: rgba(0, 0, 0, 0.5); /* scrim — kept literal, app-wide choice */
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 80px;
-  z-index: 1000;
+  z-index: var(--z-modal);
 }
 
 .panel {
   width: 900px;
   max-width: 90vw;
   max-height: 75vh;
-  background: var(--bg-secondary);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-popup);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  animation: wtIn var(--duration-slow) var(--ease-out);
+}
+
+@keyframes wtIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel {
+    animation: none;
+  }
 }
 
 .header {
@@ -28,8 +51,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
 }
 
 .header h3 {
@@ -39,18 +62,8 @@
 }
 
 .close {
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
+  composes: iconBtn from "../shared/controls.module.css";
   font-size: var(--font-2xl);
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: var(--radius-md);
-}
-
-.close:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .toolbar {
@@ -58,7 +71,7 @@
   flex-direction: column;
   gap: 6px;
   padding: 8px 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .toolbarTop {
@@ -78,16 +91,18 @@
   font-family: var(--font-ui);
   color: var(--fg-secondary);
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   padding: 2px 8px;
   border-radius: var(--radius-md);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .filterPill:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -98,20 +113,12 @@
 }
 
 .searchInput {
+  composes: input from "../shared/controls.module.css";
   flex: 1;
   min-width: 0;
   height: 36px;
-  font-size: var(--font-sm);
-  color: var(--fg-primary);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
   padding: 0 8px;
-  outline: none;
-}
-
-.searchInput:focus {
-  border-color: var(--accent);
+  font-size: var(--font-sm);
 }
 
 .searchInput::placeholder {
@@ -124,8 +131,8 @@
   align-items: center;
   gap: 12px;
   padding: 6px 16px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
   font-size: var(--font-sm);
   color: var(--fg-muted);
 }
@@ -133,30 +140,32 @@
 .batchMergeBtn {
   font-size: var(--font-xs);
   color: var(--success);
-  background: none;
+  background: transparent;
   border: 1px solid var(--success);
   padding: 2px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
   margin-left: auto;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .batchMergeBtn:hover {
-  background: rgba(78, 201, 176, 0.15);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
 }
 
 .batchDeleteBtn {
   font-size: var(--font-xs);
   color: var(--error);
-  background: none;
+  background: transparent;
   border: 1px solid var(--error);
   padding: 2px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .batchDeleteBtn:hover {
-  background: rgba(244, 135, 113, 0.15);
+  background: color-mix(in srgb, var(--error) 15%, transparent);
 }
 
 .selectAll {
@@ -182,8 +191,8 @@
   align-items: center;
   gap: 8px;
   padding: 4px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
   font-size: var(--font-2xs);
   font-family: var(--font-ui);
   color: var(--fg-muted);
@@ -191,7 +200,7 @@
   letter-spacing: 0.05em;
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--z-sticky);
 }
 
 .empty {
@@ -209,11 +218,11 @@
   gap: 8px;
   padding: 6px 16px;
   cursor: default;
-  transition: background 0.1s ease;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .row:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .mainRow {
@@ -291,7 +300,7 @@
   font-size: var(--font-2xs);
   color: var(--fg-muted);
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   padding: 1px 6px;
   border-radius: var(--radius-md);
 }
@@ -306,17 +315,17 @@
 }
 
 .prOpen {
-  background: rgba(78, 201, 176, 0.15);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
   color: var(--success);
 }
 
 .prMerged {
-  background: rgba(163, 113, 247, 0.15);
+  background: color-mix(in srgb, var(--merged) 15%, transparent);
   color: var(--merged);
 }
 
 .prClosed {
-  background: rgba(244, 135, 113, 0.15);
+  background: color-mix(in srgb, var(--error) 15%, transparent);
   color: var(--error);
 }
 
@@ -330,19 +339,21 @@
   font-size: var(--font-xs);
   font-family: var(--font-ui);
   color: var(--fg-muted);
-  background: none;
+  background: transparent;
   border: 1px solid transparent;
   padding: 2px 6px;
   border-radius: var(--radius-md);
   cursor: pointer;
   line-height: 1.2;
-  transition: color 0.1s ease, background 0.1s ease;
+  transition: color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .actionBtn:hover:not(:disabled) {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
-  border-color: var(--border);
+  border-color: var(--border-subtle);
 }
 
 .actionBtn:disabled {
@@ -363,25 +374,17 @@
   font-family: var(--font-ui);
   font-weight: 600;
   color: var(--warning);
-  background: rgba(255, 200, 50, 0.15);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
   padding: 1px 6px;
   border-radius: var(--radius-pill);
 }
 
 .pruneBtn {
+  composes: btn from "../shared/controls.module.css";
   font-size: var(--font-xs);
-  color: var(--fg-secondary);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  min-height: 22px;
   padding: 1px 8px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
   flex-shrink: 0;
-}
-
-.pruneBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .timestamp {
@@ -398,7 +401,7 @@
   align-items: center;
   gap: 16px;
   padding: 8px 16px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   font-size: var(--font-sm);
   color: var(--fg-muted);
 }

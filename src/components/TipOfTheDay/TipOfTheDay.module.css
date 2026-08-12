@@ -1,3 +1,5 @@
+/* Elevated glass card — --radius-panel + --shadow-popup for its "big
+ * floating card" weight; collapses to opaque when vibrancy is off. */
 .card {
   pointer-events: auto;
   display: flex;
@@ -7,11 +9,14 @@
   max-width: 480px;
   width: 90%;
   padding: 16px 20px 12px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-popup);
   opacity: 0.85;
-  transition: opacity 0.15s ease;
+  transition: opacity var(--duration-base) var(--ease-out);
 }
 
 .card:hover {
@@ -63,9 +68,9 @@
   font-family: var(--font-ui);
   font-size: var(--font-sm);
   color: var(--fg-primary);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  background: var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
   padding: 2px 8px;
   margin-top: 2px;
 }
@@ -83,12 +88,14 @@
   color: var(--fg-secondary);
   cursor: pointer;
   opacity: 0.6;
-  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .arrow:hover {
   opacity: 1;
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -106,7 +113,9 @@
   background: var(--fg-secondary);
   opacity: 0.4;
   cursor: pointer;
-  transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
 }
 
 .dotActive {

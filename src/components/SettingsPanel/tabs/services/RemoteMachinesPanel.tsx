@@ -227,7 +227,7 @@ export const RemoteMachinesPanel: Component = () => {
 					/>
 					<div style={{ display: "flex", gap: "8px" }}>
 						<div style={{ flex: 1 }}>
-							<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Port</label>
+							<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Port</label>
 							<input
 								type="number"
 								class={s.input}
@@ -240,7 +240,7 @@ export const RemoteMachinesPanel: Component = () => {
 							/>
 						</div>
 						<div style={{ flex: 2 }}>
-							<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>User</label>
+							<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>User</label>
 							<input
 								type="text"
 								class={s.input}
@@ -258,7 +258,7 @@ export const RemoteMachinesPanel: Component = () => {
 						onInput={(e) => props.setFormData((f) => ({ ...f, identityFile: e.currentTarget.value }))}
 					/>
 					<div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-						<label style={{ "font-size": "12px", color: "var(--text-dimmed)", "white-space": "nowrap" }}>
+						<label style={{ "font-size": "12px", color: "var(--fg-muted)", "white-space": "nowrap" }}>
 							Remote daemon port
 						</label>
 						<input
@@ -320,7 +320,7 @@ export const RemoteMachinesPanel: Component = () => {
 			<Show when={showAdd()}>
 				<div
 					class={s.group}
-					style={{ background: "var(--bg-secondary, rgba(255,255,255,0.03))", padding: "12px", "border-radius": "6px" }}
+					style={{ background: "var(--bg-secondary)", padding: "12px", "border-radius": "6px" }}
 				>
 					<div style={{ display: "grid", gap: "8px" }}>
 						<input
@@ -347,7 +347,7 @@ export const RemoteMachinesPanel: Component = () => {
 							</button>
 						</div>
 						<Show when={error()}>
-							<p class={s.hint} style={{ color: "var(--error, #e06c75)" }}>
+							<p class={s.hint} style={{ color: "var(--error)" }}>
 								{error()}
 							</p>
 						</Show>
@@ -357,7 +357,7 @@ export const RemoteMachinesPanel: Component = () => {
 
 			{/* Empty state */}
 			<Show when={connectionList().length === 0 && !showAdd()}>
-				<p class={s.hint} style={{ color: "var(--text-dimmed)" }}>
+				<p class={s.hint} style={{ color: "var(--fg-muted)" }}>
 					No remote machines configured. Click <strong>+</strong> to add one.
 				</p>
 			</Show>
@@ -368,7 +368,7 @@ export const RemoteMachinesPanel: Component = () => {
 					const conn = () => connState.connection;
 					const isEditing = () => editingId() === conn().id;
 					return (
-						<div style={{ "border-bottom": "1px solid var(--border-subtle, rgba(255,255,255,0.06))" }}>
+						<div style={{ "border-bottom": "1px solid var(--border-subtle)" }}>
 							<div class={s.group} style={{ display: "flex", "align-items": "center", gap: "8px", padding: "8px 0" }}>
 								{/* Status dot */}
 								<span
@@ -392,8 +392,10 @@ export const RemoteMachinesPanel: Component = () => {
 												padding: "1px 5px",
 												"border-radius": "3px",
 												background:
-													conn().transport.type === "Ssh" ? "rgba(97,175,239,0.15)" : "rgba(152,195,121,0.15)",
-												color: conn().transport.type === "Ssh" ? "#61afef" : "#98c379",
+													conn().transport.type === "Ssh"
+															? "rgba(var(--accent-rgb), 0.15)"
+															: "color-mix(in srgb, var(--success) 15%, transparent)",
+												color: conn().transport.type === "Ssh" ? "var(--accent)" : "var(--success)",
 											}}
 										>
 											{conn().transport.type === "Ssh" ? "SSH" : "DIRECT"}
@@ -418,7 +420,7 @@ export const RemoteMachinesPanel: Component = () => {
 										{transportSummary(conn().transport)}
 									</div>
 									<Show when={connState.error}>
-										<div class={s.hint} style={{ margin: 0, "font-size": "11px", color: "var(--accent-red, #ef4444)" }}>
+										<div class={s.hint} style={{ margin: 0, "font-size": "11px", color: "var(--error)" }}>
 											{connState.error}
 										</div>
 									</Show>
@@ -453,7 +455,7 @@ export const RemoteMachinesPanel: Component = () => {
 									class={s.copyBtn}
 									title="Remove"
 									onClick={() => removeConnection(conn().id, conn().name)}
-									style={{ color: "var(--error, #e06c75)", "flex-shrink": 0 }}
+									style={{ color: "var(--error)", "flex-shrink": 0 }}
 								>
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
 										<path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z" />
@@ -465,7 +467,7 @@ export const RemoteMachinesPanel: Component = () => {
 							<Show when={isEditing()}>
 								<div
 									style={{
-										background: "var(--bg-secondary, rgba(255,255,255,0.03))",
+										background: "var(--bg-secondary)",
 										padding: "12px",
 										"border-radius": "6px",
 										"margin-bottom": "8px",
@@ -488,7 +490,7 @@ export const RemoteMachinesPanel: Component = () => {
 											</button>
 										</div>
 										<Show when={error()}>
-											<p class={s.hint} style={{ color: "var(--error, #e06c75)", margin: "4px 0 0" }}>
+											<p class={s.hint} style={{ color: "var(--error)", margin: "4px 0 0" }}>
 												{error()}
 											</p>
 										</Show>

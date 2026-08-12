@@ -30,18 +30,21 @@
 .scopeSelect {
   padding: 4px 8px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--fg-primary);
   font-size: var(--font-sm);
   cursor: pointer;
   flex: 0 1 auto;
   max-width: 100%;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .scopeSelect:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 /* Rate limit section */
@@ -52,7 +55,7 @@
 }
 
 .sectionTitle {
-  font-size: var(--font-sm);
+  font-size: 11px;
   font-weight: 600;
   color: var(--fg-muted);
   text-transform: uppercase;
@@ -86,10 +89,16 @@
   gap: 8px;
 }
 
+/* Stat card recipe: sheened top edge + subtle border + inset highlight. */
 .rateCard {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary)),
+    var(--bg-secondary)
+  );
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -111,7 +120,7 @@
 
 .rateBar {
   height: 4px;
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -121,11 +130,11 @@
   width: 100%;
   border-radius: 2px;
   transform-origin: left;
-  transition: transform 0.3s ease;
+  transition: transform var(--duration-slow) var(--ease-out);
 }
 
 .rateOk {
-  background: var(--success);
+  background: var(--accent);
 }
 
 .rateWarn {
@@ -152,9 +161,14 @@
   width: 100%;
   height: auto;
   max-height: 220px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary)),
+    var(--bg-secondary)
+  );
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset);
   font-family: var(--font-ui);
 }
 
@@ -187,9 +201,14 @@
 }
 
 .insightCard {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary)),
+    var(--bg-secondary)
+  );
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -197,10 +216,10 @@
 }
 
 .insightLabel {
-  font-size: var(--font-2xs);
+  font-size: 11px;
   color: var(--fg-muted);
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.5px;
 }
 
 .insightValue {
@@ -214,7 +233,7 @@
   color: var(--fg-secondary);
 }
 
-/* Activity heatmap (GitHub-style) */
+/* Activity heatmap (GitHub-style — hard-coded green ramp intentional) */
 .heatmapContainer {
   overflow: hidden;
 }
@@ -236,7 +255,7 @@
   width: 100%;
   aspect-ratio: 1;
   border-radius: 2px;
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .heatmapLevel1 {
@@ -255,7 +274,7 @@
   background: #39d353;
 }
 
-/* Model breakdown */
+/* Model breakdown — borderless rows, hover wash. */
 .modelTable {
   width: 100%;
   border-collapse: collapse;
@@ -265,41 +284,48 @@
 .modelTable th {
   text-align: left;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   color: var(--fg-muted);
   font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .modelTable td {
   padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
   color: var(--fg-secondary);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.modelTable tr:hover td {
+  background: var(--surface-hover);
 }
 
 .modelTable td:first-child {
   color: var(--fg-primary);
 }
 
-.modelTable tr:last-child td {
-  border-bottom: none;
-}
-
 /* Per-project breakdown */
 .projectList {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .projectRow {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  background: transparent;
+  border-radius: var(--radius-md);
   font-size: var(--font-sm);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.projectRow:hover {
+  background: var(--surface-hover);
 }
 
 .projectSlug {
@@ -329,8 +355,8 @@
 .errorState {
   padding: 8px 12px;
   background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--fg-muted);
   font-size: var(--font-sm);
   display: flex;
@@ -342,15 +368,17 @@
 .retryButton {
   padding: 3px 10px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--fg-secondary);
   font-size: var(--font-xs);
   cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .retryButton:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -361,9 +389,14 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary)),
+    var(--bg-secondary)
+  );
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset);
   flex-wrap: wrap;
 }
 
@@ -376,7 +409,7 @@
 }
 
 .planLabel {
-  font-size: var(--font-2xs);
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--fg-muted);
@@ -393,10 +426,10 @@
   font-family: var(--font-mono);
   font-size: var(--font-xs);
   color: var(--fg-secondary);
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   padding: 2px 8px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
 }
 
 .planStatusWrap {
@@ -466,8 +499,9 @@
 
 /* ---------- Bottleneck annotation on rate cards ---------- */
 .rateCardBottleneck {
-  border-color: color-mix(in srgb, var(--warning) 60%, var(--border));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 25%, transparent) inset;
+  border-color: color-mix(in srgb, var(--warning) 60%, var(--border-subtle));
+  box-shadow: var(--highlight-inset),
+    0 0 0 1px color-mix(in srgb, var(--warning) 25%, transparent) inset;
 }
 
 .bottleneckArrow {
@@ -480,9 +514,14 @@
 /* ---------- Extra Usage card ---------- */
 .extraUsageCard {
   grid-column: 1 / -1;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary)),
+    var(--bg-secondary)
+  );
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -491,7 +530,7 @@
 }
 
 .extraEnabled {
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border-subtle));
 }
 
 .extraDisabled {
@@ -506,9 +545,9 @@
 }
 
 .extraTitle {
-  font-size: var(--font-sm);
+  font-size: 11px;
   font-weight: 600;
-  color: var(--fg-primary);
+  color: var(--fg-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -540,13 +579,19 @@
   50% { opacity: 0.35; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .extraInUseDot {
+    animation: none;
+  }
+}
+
 .extraOff {
   font-size: var(--font-2xs);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--fg-muted);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  background: var(--surface-hover);
+  border: 1px solid var(--border-subtle);
   padding: 2px 8px;
   border-radius: var(--radius-full);
 }
@@ -573,7 +618,7 @@
 
 .extraBar {
   height: 6px;
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -583,7 +628,8 @@
   width: 100%;
   border-radius: 3px;
   transform-origin: left;
-  transition: transform 0.3s ease;
+  background: var(--accent);
+  transition: transform var(--duration-slow) var(--ease-out);
 }
 
 .extraSub {

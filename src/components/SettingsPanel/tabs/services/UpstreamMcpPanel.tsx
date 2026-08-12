@@ -250,18 +250,18 @@ export const UpstreamMcpPanel: Component = () => {
 	function statusColor(st: string | undefined): string {
 		switch (st) {
 			case "ready":
-				return "var(--green, #98c379)";
+				return "var(--success)";
 			case "connecting":
-				return "var(--warning, #e5c07b)";
+				return "var(--warning)";
 			case "authenticating":
-				return "var(--info, #61afef)";
+				return "var(--accent)";
 			case "needs_auth":
-				return "var(--warning, #e5c07b)";
+				return "var(--warning)";
 			case "circuit_open":
 			case "failed":
-				return "var(--error, #e06c75)";
+				return "var(--error)";
 			default:
-				return "var(--text-dimmed)";
+				return "var(--fg-muted)";
 		}
 	}
 
@@ -405,7 +405,7 @@ export const UpstreamMcpPanel: Component = () => {
 			<Show when={showAdd()}>
 				<div
 					class={s.group}
-					style={{ background: "var(--bg-secondary, rgba(255,255,255,0.03))", padding: "12px", "border-radius": "6px" }}
+					style={{ background: "var(--bg-secondary)", padding: "12px", "border-radius": "6px" }}
 				>
 					<div style={{ display: "grid", gap: "8px" }}>
 						<input
@@ -436,7 +436,7 @@ export const UpstreamMcpPanel: Component = () => {
 								onInput={(e) => setForm((f) => ({ ...f, url: e.currentTarget.value }))}
 							/>
 							<div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-								<label style={{ "font-size": "12px", color: "var(--text-dimmed)", "min-width": "90px" }}>
+								<label style={{ "font-size": "12px", color: "var(--fg-muted)", "min-width": "90px" }}>
 									Authentication
 								</label>
 								<select
@@ -509,7 +509,7 @@ export const UpstreamMcpPanel: Component = () => {
 							/>
 						</Show>
 						<div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-							<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Timeout (s):</label>
+							<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Timeout (s):</label>
 							<input
 								type="number"
 								class={s.input}
@@ -534,7 +534,7 @@ export const UpstreamMcpPanel: Component = () => {
 							</button>
 						</div>
 						<Show when={error()}>
-							<p class={s.hint} style={{ color: "var(--error, #e06c75)" }}>
+							<p class={s.hint} style={{ color: "var(--error)" }}>
 								{error()}
 							</p>
 						</Show>
@@ -544,7 +544,7 @@ export const UpstreamMcpPanel: Component = () => {
 
 			{/* Upstream list */}
 			<Show when={upstreams().length === 0 && !showAdd()}>
-				<p class={s.hint} style={{ color: "var(--text-dimmed)" }}>
+				<p class={s.hint} style={{ color: "var(--fg-muted)" }}>
 					No upstream servers configured. Click <strong>+</strong> to add one.
 				</p>
 			</Show>
@@ -554,7 +554,7 @@ export const UpstreamMcpPanel: Component = () => {
 					const st = () => getStatus(server.name);
 					const isEditing = () => editingId() === server.id;
 					return (
-						<div style={{ "border-bottom": "1px solid var(--border-subtle, rgba(255,255,255,0.06))" }}>
+						<div style={{ "border-bottom": "1px solid var(--border-subtle)" }}>
 							<div class={s.group} style={{ display: "flex", "align-items": "center", gap: "8px", padding: "8px 0" }}>
 								{/* Enable toggle */}
 								<div class={s.toggle} style={{ "margin-right": "4px" }}>
@@ -574,8 +574,10 @@ export const UpstreamMcpPanel: Component = () => {
 												padding: "1px 5px",
 												"border-radius": "3px",
 												background:
-													server.transport.type === "http" ? "rgba(97,175,239,0.15)" : "rgba(152,195,121,0.15)",
-												color: server.transport.type === "http" ? "#61afef" : "#98c379",
+													server.transport.type === "http"
+															? "rgba(var(--accent-rgb), 0.15)"
+															: "color-mix(in srgb, var(--success) 15%, transparent)",
+												color: server.transport.type === "http" ? "var(--accent)" : "var(--success)",
 											}}
 										>
 											{server.transport.type.toUpperCase()}
@@ -608,8 +610,8 @@ export const UpstreamMcpPanel: Component = () => {
 													"font-size": "10px",
 													padding: "1px 5px",
 													"border-radius": "3px",
-													background: "rgba(255,255,255,0.05)",
-													color: "var(--text-dimmed)",
+													background: "var(--surface-hover)",
+													color: "var(--fg-muted)",
 												}}
 											>
 												Disabled
@@ -654,7 +656,7 @@ export const UpstreamMcpPanel: Component = () => {
 													width: "auto",
 													padding: "0 10px",
 													"flex-shrink": 0,
-													color: st()?.status === "needs_auth" ? "var(--warning, #e5c07b)" : "var(--info, #61afef)",
+													color: st()?.status === "needs_auth" ? "var(--warning)" : "var(--accent)",
 													"font-weight": st()?.status === "needs_auth" ? "600" : undefined,
 												}}
 												title={
@@ -676,7 +678,7 @@ export const UpstreamMcpPanel: Component = () => {
 									>
 										<button
 											class={s.copyBtn}
-											style={{ width: "auto", padding: "0 10px", "flex-shrink": 0, color: "var(--warning, #e5c07b)" }}
+											style={{ width: "auto", padding: "0 10px", "flex-shrink": 0, color: "var(--warning)" }}
 											title="Cancel authorization"
 											onClick={() =>
 												rpc("cancel_mcp_upstream_oauth", { name: server.name }).catch((e) =>
@@ -719,7 +721,7 @@ export const UpstreamMcpPanel: Component = () => {
 									class={s.copyBtn}
 									title="Remove"
 									onClick={() => removeUpstream(server.id, server.name)}
-									style={{ color: "var(--error, #e06c75)", "flex-shrink": 0 }}
+									style={{ color: "var(--error)", "flex-shrink": 0 }}
 								>
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
 										<path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z" />
@@ -731,7 +733,7 @@ export const UpstreamMcpPanel: Component = () => {
 							<Show when={isEditing()}>
 								<div
 									style={{
-										background: "var(--bg-secondary, rgba(255,255,255,0.03))",
+										background: "var(--bg-secondary)",
 										padding: "12px",
 										"border-radius": "6px",
 										"margin-bottom": "8px",
@@ -740,7 +742,7 @@ export const UpstreamMcpPanel: Component = () => {
 									<div style={{ display: "grid", gap: "8px" }}>
 										<Show when={editForm().transportType === "http"}>
 											<div>
-												<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>URL</label>
+												<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>URL</label>
 												<input
 													type="text"
 													class={s.input}
@@ -749,7 +751,7 @@ export const UpstreamMcpPanel: Component = () => {
 												/>
 											</div>
 											<div>
-												<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Authentication</label>
+												<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Authentication</label>
 												<select
 													class={s.input}
 													value={editForm().authMethod}
@@ -763,7 +765,7 @@ export const UpstreamMcpPanel: Component = () => {
 											</div>
 											<Show when={editForm().authMethod === "bearer"}>
 												<div>
-													<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Bearer token</label>
+													<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Bearer token</label>
 													<input
 														type="password"
 														class={s.input}
@@ -786,7 +788,7 @@ export const UpstreamMcpPanel: Component = () => {
 											</Show>
 											<Show when={editForm().authMethod === "oauth2"}>
 												<div>
-													<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>OAuth client ID</label>
+													<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>OAuth client ID</label>
 													<input
 														type="text"
 														class={s.input}
@@ -796,7 +798,7 @@ export const UpstreamMcpPanel: Component = () => {
 													/>
 												</div>
 												<div>
-													<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Client Secret</label>
+													<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Client Secret</label>
 													<input
 														type="password"
 														class={s.input}
@@ -806,7 +808,7 @@ export const UpstreamMcpPanel: Component = () => {
 													/>
 												</div>
 												<div>
-													<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Scopes</label>
+													<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Scopes</label>
 													<input
 														type="text"
 														class={s.input}
@@ -819,7 +821,7 @@ export const UpstreamMcpPanel: Component = () => {
 										</Show>
 										<Show when={editForm().transportType === "stdio"}>
 											<div>
-												<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Command</label>
+												<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Command</label>
 												<input
 													type="text"
 													class={s.input}
@@ -828,7 +830,7 @@ export const UpstreamMcpPanel: Component = () => {
 												/>
 											</div>
 											<div>
-												<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Args</label>
+												<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Args</label>
 												<input
 													type="text"
 													class={s.input}
@@ -837,7 +839,7 @@ export const UpstreamMcpPanel: Component = () => {
 												/>
 											</div>
 											<div>
-												<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Working directory</label>
+												<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Working directory</label>
 												<input
 													type="text"
 													class={s.input}
@@ -848,7 +850,7 @@ export const UpstreamMcpPanel: Component = () => {
 											</div>
 										</Show>
 										<div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-											<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>Timeout (s):</label>
+											<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>Timeout (s):</label>
 											<input
 												type="number"
 												class={s.input}
@@ -864,14 +866,14 @@ export const UpstreamMcpPanel: Component = () => {
 										{/* Discovered tools */}
 										<Show when={st()?.tools?.length}>
 											<div>
-												<label style={{ "font-size": "12px", color: "var(--text-dimmed)" }}>
+												<label style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
 													Discovered tools ({st()!.tools.length})
 												</label>
 												<div
 													style={{
 														"font-family": "monospace",
 														"font-size": "11px",
-														color: "var(--text-dimmed)",
+														color: "var(--fg-muted)",
 														"margin-top": "4px",
 														"line-height": "1.6",
 													}}
@@ -895,7 +897,7 @@ export const UpstreamMcpPanel: Component = () => {
 											</button>
 										</div>
 										<Show when={error()}>
-											<p class={s.hint} style={{ color: "var(--error, #e06c75)", margin: "4px 0 0" }}>
+											<p class={s.hint} style={{ color: "var(--error)", margin: "4px 0 0" }}>
 												{error()}
 											</p>
 										</Show>
