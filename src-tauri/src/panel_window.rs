@@ -67,10 +67,12 @@ pub async fn open_panel_window(
     let h = geo.map_or_else(|| height.unwrap_or(600.0), |g| f64::from(g.height));
 
     let url = tauri::WebviewUrl::App(format!("/?{query}").into());
-    let mut builder = tauri::WebviewWindowBuilder::new(&app, &label, url)
-        .title(&title)
-        .inner_size(w, h)
-        .min_inner_size(300.0, 300.0);
+    let mut builder = crate::with_vibrancy(
+        tauri::WebviewWindowBuilder::new(&app, &label, url)
+            .title(&title)
+            .inner_size(w, h)
+            .min_inner_size(300.0, 300.0),
+    );
 
     if let Some(g) = geo {
         builder = builder.position(f64::from(g.x), f64::from(g.y));

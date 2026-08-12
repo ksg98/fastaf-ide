@@ -551,6 +551,11 @@ pub(crate) struct AppConfig {
     /// Show suggested follow-up actions from agents (from `suggest: A | B | C` tokens)
     #[serde(default = "default_true")]
     pub(crate) suggest_followups: bool,
+    /// Render the window opaque instead of with macOS vibrancy. The window
+    /// itself stays transparent (a build-time property); the frontend gates the
+    /// translucent tokens on this, so flipping it needs no restart.
+    #[serde(default)]
+    pub(crate) reduce_transparency: bool,
     /// Auto-copy terminal selection to clipboard
     #[serde(default = "default_true")]
     pub(crate) copy_on_select: bool,
@@ -762,6 +767,7 @@ impl Default for AppConfig {
             disabled_native_tools: vec!["config".to_string(), "debug".to_string()],
             intent_tab_title: true,
             suggest_followups: true,
+            reduce_transparency: false,
             copy_on_select: true,
             osc52_clipboard: true,
             show_last_prompt: true,
@@ -2340,6 +2346,7 @@ mod tests {
             intent_tab_title: false,
             suggest_followups: false,
             global_hotkey: Some("CommandOrControl+Shift+T".to_string()),
+            reduce_transparency: false,
             copy_on_select: true,
             osc52_clipboard: true,
             show_last_prompt: false,
