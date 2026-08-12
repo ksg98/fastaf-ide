@@ -6,6 +6,7 @@ import { repositoriesStore } from "../../../stores/repositories";
 import type { FontType } from "../../../stores/settings";
 import { FONT_FAMILIES, settingsStore } from "../../../stores/settings";
 import { uiStore } from "../../../stores/ui";
+import { syncVibrancy } from "../../../vibrancy";
 import { getTerminalTheme, getThemeNames } from "../../../themes";
 import { UiLegend } from "../../HelpPanel/UiLegend";
 import { ColorSwatchPicker } from "../../shared/ColorSwatchPicker";
@@ -381,6 +382,23 @@ export const AppearanceTab: Component = () => {
 				options={themeOptions()}
 				hint={t("appearance.hint.terminalTheme", "Color theme for terminal output and app chrome")}
 			/>
+
+			<Show when={/Mac/.test(navigator.platform)}>
+				<SettingToggle
+					checked={settingsStore.state.reduceTransparency}
+					onChange={(v) => {
+						settingsStore.setReduceTransparency(v);
+						// Live: an opaque body fully hides the native material, so
+						// no window-level change is needed.
+						syncVibrancy();
+					}}
+					label={t("appearance.label.reduceTransparency", "Reduce Transparency")}
+					hint={t(
+						"appearance.hint.reduceTransparency",
+						"Render surfaces opaque instead of showing the desktop blurred through the window",
+					)}
+				/>
+			</Show>
 
 			<SettingToggle
 				checked={settingsStore.state.fileTreeColorsEnabled}

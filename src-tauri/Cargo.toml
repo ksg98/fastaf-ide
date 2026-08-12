@@ -127,7 +127,10 @@ path = "src/bin/tuic_remote.rs"
 tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"], optional = true }
+# macos-private-api: required for transparent windows on macOS, which the
+# vibrancy look needs. Forecloses Mac App Store distribution — releases ship
+# through the GitHub updater, so that is an accepted permanent constraint.
+tauri = { version = "2", features = ["protocol-asset", "macos-private-api"], optional = true }
 tauri-plugin-opener = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

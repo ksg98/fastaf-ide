@@ -133,14 +133,47 @@ async fn open_secondary_window(app: tauri::AppHandle) -> Result<(), String> {
     }
 
     let url = tauri::WebviewUrl::App("/?mode=secondary".into());
-    tauri::WebviewWindowBuilder::new(&app, "secondary", url)
+    let builder = tauri::WebviewWindowBuilder::new(&app, "secondary", url)
         .title("FastAF — Secondary")
         .inner_size(1200.0, 800.0)
-        .min_inner_size(800.0, 600.0)
+        .min_inner_size(800.0, 600.0);
+    with_vibrancy(builder)
         .build()
         .map_err(|e| format!("Failed to create secondary window: {e}"))?;
 
     Ok(())
+}
+
+/// Give a runtime-created window the same vibrancy treatment the main window
+/// gets from `tauri.macos.conf.json`: a transparent surface with the desktop
+/// blurred behind it. The frontend renders opaque until it opts in by putting
+/// `.vibrancy` on `<html>`, so a window whose webview never opts in simply
+/// paints its solid background over the material.
+///
+/// About that overlay file: Tauri merge-patches it onto `tauri.conf.json`, and
+/// arrays are replaced wholesale — it restates the whole main-window object.
+/// Any edit to `windows[0]` in the base config must be mirrored there, or
+/// macOS silently loses it. (Strict config parsing forbids comments in the
+/// JSON itself, which is why this warning lives here.)
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn with_vibrancy<R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'_, R, M>,
+) -> tauri::WebviewWindowBuilder<'_, R, M> {
+    use tauri::utils::config::WindowEffectsConfig;
+    use tauri::utils::{WindowEffect, WindowEffectState};
+    builder.transparent(true).effects(WindowEffectsConfig {
+        effects: vec![WindowEffect::UnderWindowBackground],
+        state: Some(WindowEffectState::FollowsWindowActiveState),
+        radius: None,
+        color: None,
+    })
+}
+
+#[cfg(all(feature = "desktop", not(target_os = "macos")))]
+fn with_vibrancy<R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'_, R, M>,
+) -> tauri::WebviewWindowBuilder<'_, R, M> {
+    builder
 }
 
 #[cfg(feature = "desktop")]

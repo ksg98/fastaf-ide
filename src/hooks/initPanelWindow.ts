@@ -1,6 +1,7 @@
 import { appLogger } from "../stores/appLogger";
 import { settingsStore } from "../stores/settings";
 import { applyAppTheme, applyFontFamily, listenForThemeChanges, loadThemes } from "../themes";
+import { syncVibrancy } from "../vibrancy";
 
 export async function initPanelWindow(): Promise<void> {
 	document.getElementById("splash")?.remove();
@@ -11,4 +12,5 @@ export async function initPanelWindow(): Promise<void> {
 	void listenForThemeChanges();
 	applyAppTheme(settingsStore.state.theme);
 	applyFontFamily(settingsStore.state.font);
+	syncVibrancy();
 }

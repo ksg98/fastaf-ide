@@ -54,6 +54,7 @@ interface RustAppConfig {
 	disabled_agents: string[];
 	intent_tab_title: boolean;
 	suggest_followups: boolean;
+	reduce_transparency: boolean;
 	copy_on_select: boolean;
 	osc52_clipboard: boolean;
 	show_last_prompt: boolean;
@@ -369,6 +370,7 @@ interface SettingsStoreState {
 	disabledAgents: string[];
 	intentTabTitle: boolean;
 	suggestFollowups: boolean;
+	reduceTransparency: boolean;
 	copyOnSelect: boolean;
 	osc52Clipboard: boolean;
 	showLastPrompt: boolean;
@@ -429,6 +431,7 @@ function createSettingsStore() {
 		disabledAgents: [],
 		intentTabTitle: true,
 		suggestFollowups: true,
+		reduceTransparency: false,
 		copyOnSelect: true,
 		osc52Clipboard: true,
 		showLastPrompt: true,
@@ -505,6 +508,7 @@ function createSettingsStore() {
 		config.disabled_agents = [...state.disabledAgents];
 		config.intent_tab_title = state.intentTabTitle;
 		config.suggest_followups = state.suggestFollowups;
+		config.reduce_transparency = state.reduceTransparency;
 		config.copy_on_select = state.copyOnSelect;
 		config.osc52_clipboard = state.osc52Clipboard;
 		config.show_last_prompt = state.showLastPrompt;
@@ -614,6 +618,7 @@ function createSettingsStore() {
 				setState("updateChannel", channel === "nightly" ? channel : "stable");
 				setState("disabledAgents", config.disabled_agents ?? []);
 				setState("intentTabTitle", config.intent_tab_title ?? true);
+				setState("reduceTransparency", config.reduce_transparency ?? false);
 				setState("copyOnSelect", config.copy_on_select ?? true);
 				setState("osc52Clipboard", config.osc52_clipboard ?? true);
 				setState("showLastPrompt", config.show_last_prompt ?? false);
@@ -812,6 +817,12 @@ function createSettingsStore() {
 		/** Set suggest-followups preference */
 		setSuggestFollowups(enabled: boolean): void {
 			setState("suggestFollowups", enabled);
+			save();
+		},
+
+		/** Opaque surfaces instead of macOS vibrancy; applied live by syncVibrancy() */
+		setReduceTransparency(enabled: boolean): void {
+			setState("reduceTransparency", enabled);
 			save();
 		},
 
