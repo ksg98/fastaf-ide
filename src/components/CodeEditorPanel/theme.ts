@@ -29,19 +29,19 @@ const editorTheme = EditorView.theme(
 			borderLeftColor: "var(--accent)",
 		},
 		"&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
-			backgroundColor: "rgba(122, 162, 247, 0.2)",
+			backgroundColor: "rgba(var(--accent-rgb), 0.2)",
 		},
 		".cm-activeLine": {
-			backgroundColor: "rgba(255, 255, 255, 0.04)",
+			backgroundColor: "var(--surface-hover)",
 		},
+		// Seamless Cursor-style gutter — same bg as the editor, no vertical divider.
 		".cm-gutters": {
-			backgroundColor: "var(--bg-tertiary)",
+			backgroundColor: "var(--bg-primary)",
 			color: "var(--fg-muted)",
 			border: "none",
-			borderRight: "1px solid var(--border)",
 		},
 		".cm-activeLineGutter": {
-			backgroundColor: "rgba(255, 255, 255, 0.06)",
+			backgroundColor: "var(--surface-hover)",
 			color: "var(--fg-secondary)",
 		},
 		".cm-lineNumbers .cm-gutterElement": {
@@ -49,8 +49,8 @@ const editorTheme = EditorView.theme(
 			minWidth: "3ch",
 		},
 		".cm-matchingBracket": {
-			backgroundColor: "rgba(122, 162, 247, 0.25)",
-			outline: "1px solid rgba(122, 162, 247, 0.5)",
+			backgroundColor: "rgba(var(--accent-rgb), 0.25)",
+			outline: "1px solid rgba(var(--accent-rgb), 0.5)",
 		},
 		".cm-searchMatch": {
 			backgroundColor: "rgba(224, 175, 104, 0.3)",
@@ -62,11 +62,17 @@ const editorTheme = EditorView.theme(
 		// clashes with the orange search marks (it lights up every occurrence of the
 		// selected word). Tone it down to a subtle accent tint.
 		".cm-selectionMatch": {
-			backgroundColor: "rgba(122, 162, 247, 0.15)",
+			backgroundColor: "rgba(var(--accent-rgb), 0.15)",
 		},
+		// Autocomplete/hover popups adopt the app's glass overlay recipe so they
+		// collapse to opaque when vibrancy is off and pick up the shared shadow.
 		".cm-tooltip": {
-			backgroundColor: "var(--bg-secondary)",
-			border: "1px solid var(--border)",
+			background: "var(--surface-overlay)",
+			backdropFilter: "var(--blur-overlay)",
+			WebkitBackdropFilter: "var(--blur-overlay)",
+			border: "1px solid var(--border-subtle)",
+			borderRadius: "var(--radius-lg)",
+			boxShadow: "var(--highlight-inset), var(--shadow-dropdown)",
 			color: "var(--fg-primary)",
 		},
 		/* Search/replace panel */

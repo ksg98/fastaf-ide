@@ -5,14 +5,15 @@ import { registerModal } from "../../stores/modalStack";
 import { onClickKeyDown } from "../../utils/a11y";
 import s from "./McpPopup.module.css";
 
+// Status dot palette resolved from theme tokens — recolors with themes/vibrancy.
 const STATUS_COLORS: Record<string, string> = {
-	ready: "#98c379",
-	connecting: "#e5c07b",
-	circuit_open: "#e06c75",
-	disabled: "#5c6370",
-	failed: "#e06c75",
-	authenticating: "#61afef",
-	needs_auth: "#e5c07b",
+	ready: "var(--success)",
+	connecting: "var(--warning)",
+	circuit_open: "var(--error)",
+	disabled: "var(--fg-muted)",
+	failed: "var(--error)",
+	authenticating: "var(--accent)",
+	needs_auth: "var(--warning)",
 };
 
 export const McpPopup: Component<{ onOpenSettings: (tab: string) => void }> = (props) => {
@@ -113,8 +114,8 @@ export const McpPopup: Component<{ onOpenSettings: (tab: string) => void }> = (p
 											style={{
 												background:
 													enabled() && !isProjectFiltered(server.name)
-														? (STATUS_COLORS[st()?.status ?? "disabled"] ?? "#5c6370")
-														: "#5c6370",
+														? (STATUS_COLORS[st()?.status ?? "disabled"] ?? "var(--fg-muted)")
+														: "var(--fg-muted)",
 											}}
 											title={
 												isProjectFiltered(server.name)

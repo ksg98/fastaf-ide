@@ -1,8 +1,20 @@
-/* PR Detail Popover */
+/* PR Detail Popover — glass surface anchored to status/toolbar edge.
+   Status tint washes go through color-mix so they track the semantic tokens. */
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-modal);
+}
+
+@keyframes prDetailIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .popover {
@@ -11,14 +23,23 @@
   right: 12px;
   width: 380px;
   max-height: 500px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-bottom-anchor);
-  z-index: 1001;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-bottom-anchor);
+  z-index: calc(var(--z-modal) + 1);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  animation: prDetailIn var(--duration-base) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .popover {
+    animation: none;
+  }
 }
 
 .popover.anchorTop {
@@ -38,13 +59,13 @@
 }
 
 .repo {
-  /* top padding clears the popover's radius-xl (8px) rounded corner so the
-     owner/repo line isn't clipped against the top edge */
+  /* top padding clears the popover's rounded corner so the owner/repo line
+     isn't clipped against the top edge */
   padding: 10px 14px 2px;
   font-size: var(--font-xs);
   font-weight: 600;
   color: var(--accent);
-  background: var(--bg-tertiary);
+  background: transparent;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -55,8 +76,8 @@
   align-items: center;
   gap: 8px;
   padding: 6px 14px 10px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
 }
 
 /* PR state badge */
@@ -70,7 +91,7 @@
 }
 
 .stateBadge.open {
-  background: rgba(63, 185, 80, 0.12);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
   color: var(--success);
 }
 
@@ -80,12 +101,12 @@
 }
 
 .stateBadge.closed {
-  background: rgba(248, 81, 73, 0.12);
+  background: color-mix(in srgb, var(--error) 15%, transparent);
   color: var(--error);
 }
 
 .stateBadge.draft {
-  background: rgba(132, 141, 151, 0.12);
+  background: color-mix(in srgb, var(--fg-muted) 15%, transparent);
   color: var(--fg-muted);
 }
 
@@ -120,7 +141,7 @@
 
 .branchName {
   font-family: var(--font-ui);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
   padding: 1px 6px;
   border-radius: var(--radius-md);
   font-size: var(--font-xs);
@@ -159,22 +180,22 @@
 }
 
 .mergeStateBadge.clean {
-  background: rgba(63, 185, 80, 0.2);
+  background: color-mix(in srgb, var(--success) 20%, transparent);
   color: var(--success);
 }
 
 .mergeStateBadge.behind {
-  background: rgba(220, 220, 170, 0.2);
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
   color: var(--warning);
 }
 
 .mergeStateBadge.blocked {
-  background: rgba(247, 118, 142, 0.1);
+  background: color-mix(in srgb, var(--error) 15%, transparent);
   color: var(--error);
 }
 
 .mergeStateBadge.conflicting {
-  background: rgba(248, 81, 73, 0.12);
+  background: color-mix(in srgb, var(--error) 15%, transparent);
   color: var(--error);
 }
 
@@ -189,17 +210,17 @@
 }
 
 .reviewStateBadge.approved {
-  background: rgba(63, 185, 80, 0.2);
+  background: color-mix(in srgb, var(--success) 20%, transparent);
   color: var(--success);
 }
 
 .reviewStateBadge.changesRequested {
-  background: rgba(248, 81, 73, 0.12);
+  background: color-mix(in srgb, var(--error) 15%, transparent);
   color: var(--error);
 }
 
 .reviewStateBadge.reviewRequired {
-  background: rgba(220, 220, 170, 0.2);
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
   color: var(--warning);
 }
 
@@ -228,19 +249,14 @@
 }
 
 .close {
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  font-size: var(--font-xl);
-  cursor: pointer;
+  composes: iconBtn from "../shared/controls.module.css";
+  /* Popover close reads the "×" glyph oversized against the surface — keep
+     the enlarged font while inheriting hover wash + focus ring. */
+  width: auto;
   padding: 2px 6px;
-  border-radius: var(--radius-md);
+  font-size: var(--font-xl);
+  color: var(--fg-secondary);
   flex-shrink: 0;
-}
-
-.close:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .meta {
@@ -250,7 +266,7 @@
   padding: 8px 14px;
   font-size: var(--font-sm);
   color: var(--fg-muted);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .author {
@@ -280,7 +296,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .ciText {
@@ -309,8 +325,8 @@
   align-items: center;
   gap: 10px;
   padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  transition: background 0.1s;
+  border-radius: var(--radius-md);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 /* Only rows carrying a details URL are interactive (story 096-2ac0) — the base
@@ -320,7 +336,7 @@
 }
 
 .checkItem.clickable:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .checkIcon {
@@ -349,17 +365,17 @@
 }
 
 .checkStatus.success {
-  background: rgba(158, 206, 106, 0.12);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
   color: var(--success);
 }
 
 .checkStatus.failure {
-  background: rgba(247, 118, 142, 0.12);
+  background: color-mix(in srgb, var(--error) 15%, transparent);
   color: var(--error);
 }
 
 .checkStatus.pending {
-  background: rgba(224, 175, 104, 0.2);
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
   color: var(--warning);
 }
 
@@ -368,7 +384,7 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px 14px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .aiReviewHeader {
@@ -386,26 +402,12 @@
 
 .aiReviewBtn,
 .postReviewBtn {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
-  color: var(--fg-secondary);
+  composes: btn from "../shared/controls.module.css";
+  /* Inline actions inside the aiReview footer sit tighter than a stock btn. */
+  min-height: 0;
+  padding: 4px 8px;
   font-size: var(--font-xs);
   font-weight: 600;
-  padding: 4px 8px;
-  cursor: pointer;
-}
-
-.aiReviewBtn:hover,
-.postReviewBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.aiReviewBtn:disabled,
-.postReviewBtn:disabled {
-  opacity: 0.55;
-  cursor: default;
 }
 
 .aiReviewError {
@@ -495,50 +497,38 @@
   flex-wrap: wrap;
   gap: 6px;
   padding: 8px 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .viewDiffBtn {
+  composes: btn from "../shared/controls.module.css";
+  /* Compact action row — smaller than the stock btn footprint. */
+  min-height: 0;
   padding: 4px 12px;
   font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: none;
-  color: var(--fg-secondary);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  background: transparent;
 }
 
-.viewDiffBtn:hover {
+.viewDiffBtn:hover:not(:disabled) {
   background: var(--accent);
   color: var(--text-on-accent);
   border-color: var(--accent);
 }
 
-.viewDiffBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .mergeBtn {
+  composes: btn from "../shared/controls.module.css";
+  min-height: 0;
   padding: 4px 12px;
   font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--success);
-  background: none;
+  background: transparent;
+  border-color: var(--success);
   color: var(--success);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
 
-.mergeBtn:hover {
+.mergeBtn:hover:not(:disabled) {
   background: var(--success);
   color: var(--text-on-success);
-}
-
-.mergeBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  border-color: var(--success);
 }
 
 .errorMsg {
@@ -553,14 +543,14 @@
   align-items: center;
   gap: 10px;
   padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: var(--font-md);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .autoHealRow:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .autoHealToggle {
@@ -584,10 +574,11 @@
   position: absolute;
   inset: 0;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: 9999px;
   cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
+  transition: background var(--duration-base) var(--ease-out),
+    border-color var(--duration-base) var(--ease-out);
 }
 
 .autoHealSlider::after {
@@ -600,7 +591,8 @@
   height: 10px;
   background: var(--fg-muted);
   border-radius: 9999px;
-  transition: transform 0.2s, background 0.2s;
+  transition: transform var(--duration-base) var(--ease-out),
+    background var(--duration-base) var(--ease-out);
 }
 
 .autoHealToggle input:checked + .autoHealSlider {
@@ -610,7 +602,7 @@
 
 .autoHealToggle input:checked + .autoHealSlider::after {
   transform: translateX(14px);
-  background: white;
+  background: var(--text-on-accent);
 }
 
 .autoHealLabel {

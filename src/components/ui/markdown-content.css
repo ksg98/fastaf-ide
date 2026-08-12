@@ -91,7 +91,7 @@
   padding: 0.2em 0.4em;
   margin: 0;
   font-size: 85%;
-  background-color: rgba(175, 184, 193, 0.2);
+  background-color: var(--surface-hover);
   border-radius: var(--radius-lg);
   font-family: var(--font-mono);
 }
@@ -131,9 +131,11 @@
 
 #markdown-content blockquote {
   margin: 0 0 16px;
-  padding: 0 1em;
+  padding: 8px 12px;
   color: var(--fg-secondary);
-  border-left: 0.25em solid var(--border);
+  background: rgba(var(--accent-rgb), 0.08);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
 }
 
 #markdown-content blockquote > :first-child {
@@ -172,6 +174,10 @@
 
 #markdown-content table tr:nth-child(2n) {
   background-color: var(--bg-secondary);
+}
+
+#markdown-content table tr:hover {
+  background-color: var(--surface-hover);
 }
 
 #markdown-content img {

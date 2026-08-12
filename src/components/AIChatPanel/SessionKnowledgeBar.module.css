@@ -1,5 +1,5 @@
 .bar {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   background: var(--bg-secondary);
   font-size: var(--font-xs);
 }
@@ -142,7 +142,7 @@
   flex-shrink: 0;
   padding: 1px 6px;
   background: none;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--fg-secondary);
   font: inherit;
