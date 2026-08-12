@@ -1,4 +1,5 @@
-/* PostMergeCleanupDialog — stepper UI for post-merge branch cleanup */
+/* PostMergeCleanupDialog — stepper UI for post-merge branch cleanup.
+ * Rides on the shared glass dialog surface; only the stepper vocabulary lives here. */
 
 .stepList {
   list-style: none;
@@ -65,13 +66,21 @@
 }
 
 .worktreeSelect {
-  background: var(--bg-secondary);
+  background: var(--bg-tertiary);
   color: var(--fg-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
   padding: 2px 6px;
   font-size: var(--font-md);
   cursor: pointer;
+  outline: none;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.worktreeSelect:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .subtitle {

@@ -19,30 +19,48 @@
   width: 100%;
 }
 
-/* Commit row */
+/* Commit row — virtualizer sets position:absolute + width:100% inline, so
+   the "inset rounded row" look is painted by a ::before overlay clipped
+   to a 6px side gutter. The overlay carries the hover / expanded / focused
+   washes; the row itself stays a transparent container. */
 .commitRow {
   position: absolute;
   left: 0;
   width: 100%;
   padding: 6px 12px;
   cursor: pointer;
-  transition: background 0.1s ease;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.commitRow:hover {
-  background: var(--bg-highlight);
+.commitRow::before {
+  content: "";
+  position: absolute;
+  inset: 2px 6px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  pointer-events: none;
+  transition: background var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+  z-index: 0;
 }
 
-.commitRowExpanded {
-  background: var(--bg-tertiary);
+.commitRow > * {
+  position: relative;
+  z-index: 1;
 }
 
-.commitRowFocused {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+.commitRow:hover::before {
+  background: var(--surface-hover);
+}
+
+.commitRowExpanded::before {
+  background: var(--surface-hover);
+}
+
+.commitRowFocused::before {
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 /* Line 1: dot + hash + subject */
@@ -96,29 +114,36 @@
   flex-shrink: 0;
 }
 
+/* Ref badge — pill vocabulary (bg-highlight base, 1px subtle border,
+   full pill radius); semantic tokens tint the text and border only, so
+   the badge stays legible against any row wash. */
 .refBadge {
+  display: inline-flex;
+  align-items: center;
   font-size: var(--font-2xs);
   font-family: var(--font-mono);
   font-weight: 600;
-  padding: 0 5px;
+  padding: 0 6px;
+  background: var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
   white-space: nowrap;
   line-height: 16px;
 }
 
 .refBranch {
-  background: color-mix(in srgb, var(--success) 20%, transparent);
   color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border-subtle));
 }
 
 .refTag {
-  background: color-mix(in srgb, var(--warning) 20%, transparent);
   color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 35%, var(--border-subtle));
 }
 
 .refHead {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
 }
 
 /* Expanded: full commit message */
@@ -151,7 +176,7 @@
 }
 
 .changedFileClickable:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -213,25 +238,10 @@
 }
 
 .loadMoreBtn {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  composes: btn from "../shared/controls.module.css";
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   padding: 4px 16px;
-  cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease;
-}
-
-.loadMoreBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.loadMoreBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 /* Empty / loading states */

@@ -1,15 +1,22 @@
+/* Dropdown follows the glass overlay recipe. Unlike ContextMenu it KEEPS a
+ * solid-accent .selected row — the macOS menu convention for pickers where
+ * the currently-active option needs a strong visual anchor. */
+
 .dropdown {
   position: absolute;
   top: 100%;
   right: 0;
   margin-top: 4px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
   min-width: 140px;
-  box-shadow: var(--shadow-dropdown);
-  z-index: 100;
+  z-index: var(--z-dropdown);
   overflow: hidden;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
+  animation: dropdownIn var(--duration-base) var(--ease-out);
 }
 
 .top {
@@ -17,6 +24,17 @@
   bottom: 100%;
   margin-top: 0;
   margin-bottom: 4px;
+}
+
+@keyframes dropdownIn {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .itemIcon {
@@ -34,15 +52,18 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  margin: 0 4px;
+  padding: 6px 10px;
   font-size: var(--font-md);
   color: var(--fg-secondary);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .item:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -51,8 +72,13 @@
   color: var(--text-on-accent);
 }
 
+.selected:hover {
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
 .divider {
   height: 1px;
-  background: var(--border);
+  background: var(--border-subtle);
   margin: 4px 0;
 }

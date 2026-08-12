@@ -1,16 +1,36 @@
-/* Task Queue Panel */
+/* Task Queue Panel — right-edge floating glass overlay */
 .panel {
   position: fixed;
-  right: 0;
-  top: 0;
-  bottom: 0;
+  right: 12px;
+  top: 12px;
+  bottom: 12px;
   width: 320px;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
   display: flex;
   flex-direction: column;
-  z-index: 100;
-  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.3);
+  z-index: var(--z-overlay);
+  box-shadow: var(--highlight-inset), var(--shadow-popup);
+  overflow: hidden;
+  animation: taskPanelIn var(--duration-base) var(--ease-out);
+}
+
+@keyframes taskPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel { animation: none; }
 }
 
 .header {
@@ -18,8 +38,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
 }
 
 .header h3 {
@@ -36,39 +56,15 @@
 }
 
 .clearBtn {
-  padding: 4px 10px;
-  background: var(--bg-highlight);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  composes: btnGhost from "../shared/controls.module.css";
+  min-height: 22px;
+  padding: 2px 10px;
   font-size: var(--font-sm);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.clearBtn:hover {
-  background: var(--border);
-  color: var(--fg-primary);
 }
 
 .closeBtn {
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  color: var(--fg-secondary);
+  composes: iconBtn from "../shared/controls.module.css";
   font-size: var(--font-2xl);
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  transition: background 0.15s, color 0.15s;
-}
-
-.closeBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .content {
@@ -82,7 +78,7 @@
 }
 
 .sectionTitle {
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   font-weight: 600;
   text-transform: uppercase;
   color: var(--fg-muted);
@@ -114,7 +110,7 @@
 /* Task Item */
 .itemWrapper {
   margin-bottom: 4px;
-  transition: opacity 0.15s;
+  transition: opacity var(--duration-base) var(--ease-out);
 }
 
 .itemWrapper.dragging {
@@ -126,16 +122,18 @@
   align-items: flex-start;
   gap: 10px;
   padding: 10px 12px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--highlight-inset);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .item:hover {
-  border-color: var(--accent);
-  background: var(--bg-highlight);
+  border-color: rgba(var(--accent-rgb), 0.4);
+  background: var(--surface-hover);
 }
 
 .item.compact {
@@ -144,7 +142,7 @@
 
 .item.running {
   border-color: var(--accent);
-  background: var(--bg-highlight);
+  background: rgba(var(--accent-rgb), 0.08);
 }
 
 .item.completed {
@@ -214,18 +212,10 @@
 }
 
 .itemCancel {
+  composes: iconBtn from "../shared/controls.module.css";
   width: 20px;
   height: 20px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  color: var(--fg-secondary);
   font-size: var(--font-md);
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  transition: background 0.15s, color 0.15s;
 }
 
 .itemCancel:hover {

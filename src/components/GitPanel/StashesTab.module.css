@@ -10,23 +10,28 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  padding: 2px 0;
 }
 
-/* Stash entry card */
+/* Stash entry card — inset (6px side gutter, radius-md, hover wash),
+   matches the app-wide list-row recipe. */
 .stashEntry {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s ease;
+  margin: 0 6px 4px 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .stashEntry:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .stashEntryFocused {
-  background: var(--bg-highlight);
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
+  border-color: var(--accent);
 }
 
 /* Line 1: ref name + message */
@@ -63,34 +68,19 @@
 }
 
 .actionBtn {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  composes: btn from "../shared/controls.module.css";
+  min-height: 22px;
+  padding: 2px 10px;
   font-size: var(--font-xs);
   font-family: var(--font-ui);
-  padding: 2px 8px;
-  cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease;
-}
-
-.actionBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.actionBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .actionBtnDanger {
-  composes: actionBtn;
-}
-
-.actionBtnDanger:hover {
-  background: color-mix(in srgb, var(--error) 20%, transparent);
-  color: var(--error);
+  composes: btnDanger from "../shared/controls.module.css";
+  min-height: 22px;
+  padding: 2px 10px;
+  font-size: var(--font-xs);
+  font-family: var(--font-ui);
 }
 
 /* Show diff toggle */
@@ -106,7 +96,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  transition: color 0.1s ease;
+  transition: color var(--duration-fast) var(--ease-out);
 }
 
 .diffToggle:hover {
@@ -115,7 +105,7 @@
 
 .chevron {
   display: inline-block;
-  transition: transform 0.15s ease;
+  transition: transform var(--duration-base) var(--ease-out);
   font-size: var(--font-2xs);
 }
 
@@ -129,7 +119,7 @@
   padding: 6px 8px;
   background: var(--bg-primary);
   border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   overflow-x: auto;
   max-height: 300px;
   overflow-y: auto;

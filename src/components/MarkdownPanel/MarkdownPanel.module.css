@@ -4,8 +4,10 @@
   width: 400px;
   min-width: 300px;
   max-width: 50%;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
+  background: var(--surface-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -49,16 +51,18 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  margin: 0 4px;
+  padding: 4px 8px;
   cursor: pointer;
   border-radius: var(--radius-md);
   font-size: var(--font-md);
   font-family: var(--font-ui);
-  transition: background 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .fileItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .fileIgnored {
@@ -101,14 +105,17 @@
   margin-right: 6px;
   padding: 0;
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--fg-secondary);
   cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .modeToggle:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -126,23 +133,9 @@
 }
 
 .sortTrigger {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 22px;
   height: 22px;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: color 0.1s, background 0.1s;
-}
-
-.sortTrigger:hover {
-  color: var(--fg-secondary);
-  background: var(--bg-highlight);
-  border-color: var(--border);
 }
 
 .filePath {

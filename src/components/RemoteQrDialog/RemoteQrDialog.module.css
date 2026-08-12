@@ -1,3 +1,5 @@
+/* RemoteQrDialog — QR-code sharing modal on the shared glass surface. */
+
 .dialog {
 	width: 380px;
 	max-width: calc(100vw - 32px);
@@ -10,11 +12,12 @@
 	color: var(--warning);
 	background: color-mix(in srgb, var(--warning) 12%, transparent);
 	border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
-	border-radius: var(--radius-sm);
+	border-radius: var(--radius-md);
 }
 
 /* White card behind the QR — black-on-white guarantees reliable scanning
-   regardless of the app theme. */
+   regardless of the app theme. The white/#555 literals are exempt from
+   tokenization because they encode QR-reader contrast, not chrome color. */
 .qrCard {
 	display: flex;
 	align-items: center;
@@ -44,7 +47,7 @@
 	padding: 16px;
 	text-align: center;
 	font-size: var(--font-sm);
-	color: #555;
+	color: #555; /* on the white qrCard — kept literal to guarantee contrast */
 }
 
 .ipRow {
@@ -62,9 +65,17 @@
 	padding: 6px 8px;
 	background: var(--bg-tertiary);
 	color: var(--fg-primary);
-	border: 1px solid var(--border);
-	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-md);
 	font-size: var(--font-sm);
+	outline: none;
+	transition: border-color var(--duration-fast) var(--ease-out),
+		box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.ipRow select:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .url {
@@ -77,10 +88,12 @@
 	text-align: center;
 	color: var(--fg-muted);
 	background: var(--bg-tertiary);
-	border: 1px solid var(--border);
-	border-radius: var(--radius-sm);
+	border: 1px solid var(--border-subtle);
+	border-radius: var(--radius-md);
 	cursor: pointer;
 	word-break: break-all;
+	transition: color var(--duration-fast) var(--ease-out),
+		border-color var(--duration-fast) var(--ease-out);
 }
 
 .url:hover {

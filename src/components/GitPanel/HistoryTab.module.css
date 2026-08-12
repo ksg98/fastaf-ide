@@ -13,7 +13,7 @@
   gap: 6px;
   padding: 6px 12px;
   background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   font-size: var(--font-md);
   font-family: var(--font-ui);
   color: var(--fg-primary);
@@ -36,20 +36,24 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  padding: 2px 0;
 }
 
-/* Commit row — matches LogTab pattern */
+/* Commit row — inset (6px gutter, radius-md, hover wash) matches
+   the app-wide list-row recipe. */
 .commitRow {
-  padding: 6px 12px;
+  margin: 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  transition: background 0.1s ease;
+  transition: background var(--duration-fast) var(--ease-out);
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .commitRow:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 /* Line 1: dot + hash + subject */
@@ -107,25 +111,10 @@
 }
 
 .loadMoreBtn {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  composes: btn from "../shared/controls.module.css";
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   padding: 4px 16px;
-  cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease;
-}
-
-.loadMoreBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.loadMoreBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 /* Empty / loading states */

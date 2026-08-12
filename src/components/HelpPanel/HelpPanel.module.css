@@ -5,20 +5,33 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
 }
 
 .panel {
   width: 420px;
   max-width: 90vw;
   max-height: 80vh;
-  background: var(--bg-secondary);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-popup);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   display: flex;
   flex-direction: column;
-  transition: width 0.15s ease;
+  overflow: hidden;
+  animation: helpPanelIn var(--duration-slow) var(--ease-out);
+  transition: width var(--duration-base) var(--ease-out);
+}
+
+@keyframes helpPanelIn {
+  from { opacity: 0; transform: translateY(4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel { animation: none; }
 }
 
 .panelWide {
@@ -30,46 +43,28 @@
   align-items: center;
   justify-content: space-between;
   padding: 16px 20px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
 }
 
 .header h2 {
   margin: 0;
   font-size: var(--font-xl);
   font-weight: 600;
+  color: var(--fg-primary);
 }
 
 .close {
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  font-size: var(--font-2xl);
-  cursor: pointer;
+  composes: iconBtn from "../shared/controls.module.css";
+  width: auto;
+  height: auto;
   padding: 4px 8px;
-  border-radius: var(--radius-md);
-}
-
-.close:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+  font-size: var(--font-2xl);
 }
 
 .backButton {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  cursor: pointer;
-  padding: 4px;
-  border-radius: var(--radius-md);
+  composes: iconBtn from "../shared/controls.module.css";
   margin-right: 4px;
-}
-
-.backButton:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .content {
@@ -92,20 +87,11 @@
 }
 
 .copyVersionBtn {
+  composes: btnGhost from "../shared/controls.module.css";
+  min-height: 22px;
   padding: 2px 8px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
   font-size: var(--font-sm);
   font-family: var(--font-ui);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-
-.copyVersionBtn:hover {
-  background: var(--bg-tertiary);
-  color: var(--fg-primary);
 }
 
 .section {
@@ -113,7 +99,7 @@
 }
 
 .sectionTitle {
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   font-weight: 600;
   text-transform: uppercase;
   color: var(--fg-muted);
@@ -148,11 +134,12 @@
   font-family: var(--font-ui);
   cursor: pointer;
   text-align: left;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .linkButton:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 

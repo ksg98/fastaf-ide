@@ -20,7 +20,7 @@
 .fileDropOverlay {
   position: absolute;
   inset: 0;
-  z-index: 50;
+  z-index: var(--z-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -35,8 +35,12 @@
   gap: 12px;
   padding: 32px 48px;
   border: 2px dashed var(--accent);
-  border-radius: 12px;
+  border-radius: var(--radius-panel);
   color: var(--fg-primary);
   font-size: 14px;
   opacity: 0.9;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
 }

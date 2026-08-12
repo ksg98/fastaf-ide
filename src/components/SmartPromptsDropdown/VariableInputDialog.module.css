@@ -1,9 +1,10 @@
-/* VariableInputDialog — compact inline form for unresolved prompt variables */
+/* VariableInputDialog — compact inline form for unresolved prompt variables.
+ * Cursor-glass surface; input and buttons defer to shared vocabularies. */
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: 1100;
-  background: rgba(0, 0, 0, 0.5);
+  z-index: var(--z-toast);
+  background: rgba(0, 0, 0, 0.5); /* scrim — kept literal, app-wide choice */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -12,18 +13,38 @@
 .dialog {
   width: 360px;
   max-width: 90vw;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  animation: variableDialogIn var(--duration-slow) var(--ease-out);
+}
+
+@keyframes variableDialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog {
+    animation: none;
+  }
 }
 
 .header {
   padding: 12px 16px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .title {
@@ -68,18 +89,10 @@
 }
 
 .fieldInput {
+  composes: input from "../shared/controls.module.css";
   padding: 6px 10px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-primary);
   font-size: var(--font-base);
   font-family: inherit;
-  outline: none;
-}
-
-.fieldInput:focus {
-  border-color: var(--accent);
 }
 
 .fieldInput::placeholder {
@@ -92,7 +105,7 @@
   justify-content: flex-end;
   gap: 8px;
   padding: 8px 16px 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
 }
 
 /* Buttons delegate to the shared controls vocabulary. Local class names

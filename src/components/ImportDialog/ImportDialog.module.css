@@ -1,4 +1,6 @@
-/* Import-from-other-tools dialog — list styles on top of shared/dialog.module.css */
+/* Import-from-other-tools dialog — list styles on top of shared/dialog.module.css.
+ * Base glass surface inherits from .popover; local classes below only style the
+ * list body and chips. */
 
 .widePopover {
   width: 520px;
@@ -37,8 +39,8 @@
 .projectList {
   max-height: 320px;
   overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 
 .projectRow {
@@ -47,7 +49,7 @@
   gap: 8px;
   padding: 8px 10px;
   cursor: pointer;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .projectRow:last-child {
@@ -55,7 +57,7 @@
 }
 
 .projectRow:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .projectRow input[type="checkbox"] {
@@ -99,7 +101,7 @@
   padding: 1px 6px;
   border-radius: 8px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   color: var(--fg-secondary);
   white-space: nowrap;
 }
@@ -108,7 +110,7 @@
   font-size: 9px;
   padding: 1px 5px;
   border-radius: 8px;
-  background: var(--accent-muted, var(--bg-tertiary));
+  background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.04em;

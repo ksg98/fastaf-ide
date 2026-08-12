@@ -1,20 +1,45 @@
+/* QuitDialog — small confirmation modal.
+ * Uses the glass recipe directly (no shared/dialog.module.css composition
+ * because ApplicationOverlays imports these local class names). Buttons
+ * compose from shared/controls.module.css so the design system stays one. */
+
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.5); /* scrim — kept literal, app-wide choice */
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 2000;
+  z-index: var(--z-modal);
 }
 
 .dialog {
   width: 380px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popup);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   padding: 20px;
+  animation: quitDialogIn var(--duration-slow) var(--ease-out);
+}
+
+@keyframes quitDialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog {
+    animation: none;
+  }
 }
 
 .dialog h3 {
@@ -36,31 +61,21 @@
   justify-content: flex-end;
 }
 
-.actions button {
-  padding: 8px 16px;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-md);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
+/* Buttons compose from the shared controls vocabulary — local class names
+   (.cancel / .quit) are preserved because ApplicationOverlays.tsx imports
+   them. `.quit` = destructive filled primary, so it composes btnPrimary
+   and overrides the background to --error. */
 .cancel {
-  background: var(--bg-highlight);
-  color: var(--fg-secondary);
-}
-
-.cancel:hover {
-  background: var(--border);
-  color: var(--fg-primary);
+  composes: btn from "../shared/controls.module.css";
 }
 
 .quit {
+  composes: btnPrimary from "../shared/controls.module.css";
   background: var(--error);
   color: var(--text-on-error);
 }
 
-.quit:hover {
-  filter: brightness(1.1);
+.quit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 85%, white);
+  color: var(--text-on-error);
 }

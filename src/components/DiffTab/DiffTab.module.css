@@ -22,39 +22,22 @@
   align-items: center;
   gap: 2px;
   padding: 4px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-secondary);
   flex-shrink: 0;
 }
 
+/* View-mode icon-button — composes iconBtn, sized for the toolbar row. */
 .modeBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 26px;
   height: 22px;
-  background: none;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: color 0.1s, background 0.1s;
-}
-
-.modeBtn:hover {
-  color: var(--fg-secondary);
-  background: var(--bg-highlight);
-}
-
-.modeBtn:disabled {
-  opacity: 0.3;
-  cursor: default;
-  pointer-events: none;
 }
 
 .modeBtnActive {
   color: var(--accent);
-  background: var(--bg-highlight);
+  background: rgba(var(--accent-rgb), 0.14);
   border-color: var(--accent);
 }
 
@@ -66,23 +49,21 @@
   overflow: auto;
 }
 
-/* Hunk revert button (positioned absolutely over hunk header rows) */
+/* Hunk revert button — icon-button, positioned absolutely over hunk headers.
+   Fades in via `.revertBtnVisible`; hover flips its border/color to error. */
 .revertBtn {
+  composes: iconBtn from "../shared/controls.module.css";
   position: absolute;
   right: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   width: 22px;
   height: 22px;
   background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  cursor: pointer;
+  border: 1px solid var(--border-subtle);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.1s, color 0.1s;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
   z-index: 2;
 }
 
@@ -91,7 +72,7 @@
   pointer-events: auto;
 }
 
-.revertBtn:hover {
+.revertBtn:hover:not(:disabled) {
   color: var(--error);
   border-color: var(--error);
 }
@@ -105,7 +86,7 @@
 :global(.diff-tailwindcss-wrapper) tr.lineSelected {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
-  background: color-mix(in srgb, var(--accent) 12%, transparent) !important;
+  background: rgba(var(--accent-rgb), 0.14) !important;
 }
 
 :global(.diff-tailwindcss-wrapper) tr.lineSelected td {
@@ -128,102 +109,65 @@
   pointer-events: auto;
 }
 
+/* Glass pill hosting the selection actions — surface-overlay + overlay blur
+   + subtle border + dropdown shadow (collapses to opaque when vibrancy off). */
 .selectionBar {
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 4px 6px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-dropdown);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   width: fit-content;
 }
 
 .restoreSelectedBtn {
+  composes: btnPrimary from "../shared/controls.module.css";
   padding: 4px 12px;
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-md);
   font-size: var(--font-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-
-.restoreSelectedBtn:hover {
-  background: var(--accent-hover);
 }
 
 .commentBtn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
+  composes: btn from "../shared/controls.module.css";
   padding: 4px 12px;
-  background: var(--bg-highlight);
-  color: var(--fg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
   font-size: var(--font-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-
-.commentBtn:hover {
-  background: var(--bg-tertiary);
-  color: var(--fg-primary);
 }
 
 .clearSelectionBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 22px;
   height: 22px;
-  background: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
   font-size: var(--font-lg);
-  cursor: pointer;
 }
 
-.clearSelectionBtn:hover {
-  color: var(--fg-primary);
-  background: var(--bg-highlight);
-}
-
-/* Comment box (stacked above selection bar inside floater) */
+/* Comment box (stacked above selection bar inside floater) — same glass
+   vocabulary, wider surface for the textarea + actions row. */
 .commentBox {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-dropdown);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   width: min(480px, calc(100vw - 64px));
 }
 
 .commentTextarea {
-  width: 100%;
+  composes: textarea from "../shared/controls.module.css";
+  min-height: 60px;
   padding: 6px 8px;
-  background: var(--bg-primary);
-  color: var(--fg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
   font-size: var(--font-sm);
   font-family: inherit;
   resize: vertical;
-  min-height: 60px;
-  outline: none;
-}
-
-.commentTextarea:focus {
-  border-color: var(--accent);
+  background: var(--bg-primary);
 }
 
 .commentActions {
@@ -240,39 +184,15 @@
 }
 
 .commentCancelBtn {
+  composes: btn from "../shared/controls.module.css";
   padding: 4px 10px;
-  background: none;
-  color: var(--fg-muted);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
   font-size: var(--font-sm);
-  cursor: pointer;
-}
-
-.commentCancelBtn:hover {
-  color: var(--fg-primary);
-  background: var(--bg-highlight);
 }
 
 .commentSendBtn {
+  composes: btnPrimary from "../shared/controls.module.css";
   padding: 4px 12px;
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-md);
   font-size: var(--font-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-
-.commentSendBtn:hover {
-  background: var(--accent-hover);
-}
-
-.commentSendBtn:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
 .commentErrorMsg {
@@ -294,17 +214,7 @@
 }
 
 .largeDiffBtn {
+  composes: btnPrimary from "../shared/controls.module.css";
   padding: 4px 12px;
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-md);
   font-size: var(--font-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-
-.largeDiffBtn:hover {
-  background: var(--accent-hover);
 }

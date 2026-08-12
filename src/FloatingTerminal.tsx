@@ -44,11 +44,11 @@ export const FloatingTerminal: Component = () => {
 					"align-items": "center",
 					"justify-content": "center",
 					height: "100vh",
-					color: "#f44",
-					background: "#1e1e1e",
-					"font-family": "monospace",
-					"font-size": "14px",
-					padding: "24px",
+					color: "var(--error, #f44)",
+					background: "var(--bg-primary, #141414)",
+					"font-family": "var(--font-mono, monospace)",
+					"font-size": "var(--font-md, 14px)",
+					padding: "var(--space-6, 24px)",
 				}}
 			>
 				Missing sessionId or tabId — cannot attach to terminal.
@@ -182,10 +182,10 @@ export const FloatingTerminal: Component = () => {
 
 	const statusColor = () => {
 		if (awaitingInput()) return "var(--warning, #d29922)";
-		if (isBusy()) return "var(--activity, #58a6ff)";
+		if (isBusy()) return "var(--accent, #4c9df3)";
 		if (shellState() === "idle") return "var(--success, #3fb950)";
-		if (shellState() === "exited") return "var(--text-muted, #666)";
-		return "var(--text-secondary, #848d97)";
+		if (shellState() === "exited") return "var(--fg-muted, #8c8c8c)";
+		return "var(--fg-secondary, #c2c2c2)";
 	};
 
 	const statusLabel = () => {
@@ -205,11 +205,15 @@ export const FloatingTerminal: Component = () => {
 				height: "100vh",
 				display: "flex",
 				"flex-direction": "column",
-				background: "var(--bg-primary, #1e1e1e)",
+				/* Terminal pane stays OPAQUE — readability first. */
+				background: "var(--bg-primary, #141414)",
+				"border-radius": "var(--radius-panel, 12px)",
+				"box-shadow": "var(--shadow-2xl, 0 24px 64px rgba(0, 0, 0, 0.6))",
 				overflow: "hidden",
 			}}
 		>
 			<Show when={ready()}>
+				{/* Glass header strip — surface-glass + backdrop blur. */}
 				<div
 					style={{
 						display: "flex",
@@ -218,9 +222,12 @@ export const FloatingTerminal: Component = () => {
 						padding: "3px 12px",
 						"font-size": "11px",
 						"font-family": "var(--font-mono, monospace)",
-						color: "var(--text-secondary, #848d97)",
-						background: "var(--bg-secondary, #161b22)",
-						"border-bottom": "1px solid var(--border, #30363d)",
+						color: "var(--fg-secondary, #c2c2c2)",
+						background: "var(--surface-glass, rgba(26, 26, 26, 0.55))",
+						"backdrop-filter": "var(--blur-glass, none)",
+						"-webkit-backdrop-filter": "var(--blur-glass, none)",
+						"border-bottom": "1px solid var(--border-subtle, rgba(255, 255, 255, 0.06))",
+						"box-shadow": "var(--highlight-inset, inset 0 1px 0 rgba(255, 255, 255, 0.05))",
 						"-webkit-app-region": "drag",
 						"min-height": "20px",
 					}}
@@ -243,10 +250,10 @@ export const FloatingTerminal: Component = () => {
 						title="Bring back to main window"
 						style={{
 							"-webkit-app-region": "no-drag",
-							background: "none",
-							border: "1px solid var(--border, #30363d)",
-							"border-radius": "3px",
-							color: "var(--text-secondary, #848d97)",
+							background: "transparent",
+							border: "1px solid var(--border-subtle, rgba(255, 255, 255, 0.06))",
+							"border-radius": "var(--radius-md, 6px)",
+							color: "var(--fg-secondary, #c2c2c2)",
 							padding: "2px 4px",
 							cursor: "pointer",
 							display: "inline-flex",
@@ -268,9 +275,9 @@ export const FloatingTerminal: Component = () => {
 						left: "0",
 						right: "0",
 						"text-align": "center",
-						color: "#848d97",
-						"font-family": "monospace",
-						"font-size": "12px",
+						color: "var(--fg-muted, #8c8c8c)",
+						"font-family": "var(--font-mono, monospace)",
+						"font-size": "var(--font-sm, 12px)",
 					}}
 				>
 					{error()} — closing...

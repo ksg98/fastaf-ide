@@ -1,3 +1,7 @@
+/* CreateWorktreeDialog — sits on shared/dialog.module.css glass surface.
+ * Dropdown popover uses the glass recipe; branch list uses inset selection
+ * (accent wash, not solid accent) to match the app-wide selection language. */
+
 .inputRow {
   display: flex;
   gap: 6px;
@@ -10,22 +14,10 @@
 }
 
 .generateBtn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: btn from "../shared/controls.module.css";
   width: 34px;
+  padding: 0;
   flex-shrink: 0;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.generateBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .baseRefRow {
@@ -54,22 +46,24 @@
   width: 100%;
   padding: 6px 10px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--fg-primary);
   font-size: var(--font-md);
   font-family: var(--font-ui);
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .dropdownTrigger:hover {
-  border-color: var(--fg-muted);
+  border-color: var(--border-strong);
 }
 
 .dropdownTrigger:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .dropdownValue {
@@ -90,24 +84,40 @@
   right: 0;
   max-height: 160px;
   overflow-y: auto;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-popup);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 10;
+  animation: dropdownIn var(--duration-base) var(--ease-out);
+}
+
+@keyframes dropdownIn {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .dropdownItem {
   padding: 6px 10px;
+  margin: 0 4px;
+  border-radius: var(--radius-md);
   font-size: var(--font-md);
   font-family: var(--font-ui);
   color: var(--fg-primary);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .dropdownItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .dropdownItemActive {
@@ -133,8 +143,8 @@
   max-height: 150px;
   overflow-y: auto;
   margin-top: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   background: var(--bg-tertiary);
 }
 
@@ -147,11 +157,11 @@
   font-family: var(--font-ui);
   color: var(--fg-primary);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .branchItem:hover:not(.disabled) {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .branchItem.disabled {
@@ -159,9 +169,10 @@
   cursor: not-allowed;
 }
 
+/* Inset selection wash — matches sidebar/list selection idiom */
 .branchItem.selected {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--fg-primary);
 }
 
 .worktreeTag {

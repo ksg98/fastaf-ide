@@ -1,9 +1,10 @@
+/* Glass pill — collapses to opaque when vibrancy is off. */
 .toast {
   position: fixed;
   bottom: calc(var(--status-bar-height, 24px) + 8px);
   left: 50%;
   transform: translateX(-50%);
-  z-index: 9999;
+  z-index: var(--z-toast);
 
   display: flex;
   align-items: center;
@@ -11,21 +12,23 @@
   padding: 6px 16px;
   max-width: 600px;
 
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
 
   font-family: var(--font-ui);
   font-size: var(--font-md);
   color: var(--fg-primary);
 
   opacity: 0;
-  animation: slideUp 200ms ease-out forwards;
+  animation: slideUp var(--duration-base) var(--ease-out) forwards;
 }
 
 .toast[data-exiting="true"] {
-  animation: fadeOut 150ms ease-in forwards;
+  animation: fadeOut var(--duration-base) var(--ease-out) forwards;
 }
 
 .indicator {
@@ -73,7 +76,7 @@
 @keyframes slideUp {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(8px);
+    transform: translateX(-50%) translateY(4px);
   }
   to {
     opacity: 1;
@@ -88,7 +91,7 @@
   }
   to {
     opacity: 0;
-    transform: translateX(-50%) translateY(8px);
+    transform: translateX(-50%) translateY(4px);
   }
 }
 

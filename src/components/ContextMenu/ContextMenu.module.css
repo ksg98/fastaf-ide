@@ -1,24 +1,31 @@
+/* Menus follow the glass overlay recipe. Both .menu and .submenu are
+ * transient floats, so they use --surface-overlay + --blur-overlay
+ * (collapses to opaque when vibrancy is off) with a --radius-lg shell and
+ * inset items at --radius-md. */
+
 .menu {
   position: fixed;
   min-width: 180px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
   padding: 4px;
   overflow-y: auto;
-  z-index: 1000;
-  animation: fadeIn 0.1s ease-out;
+  z-index: var(--z-dropdown);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
+  animation: menuIn var(--duration-base) var(--ease-out);
 }
 
-@keyframes fadeIn {
+@keyframes menuIn {
   from {
     opacity: 0;
-    transform: scale(0.95);
+    transform: translateY(2px);
   }
   to {
     opacity: 1;
-    transform: scale(1);
+    transform: translateY(0);
   }
 }
 
@@ -27,7 +34,7 @@
   justify-content: space-between;
   align-items: center;
   width: 100%;
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
@@ -35,11 +42,11 @@
   font-size: var(--font-base);
   text-align: left;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .item:hover:not(.disabled) {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .disabled {
@@ -59,8 +66,8 @@
 
 .separator {
   height: 1px;
-  background: var(--border);
-  margin: 4px 8px;
+  background: var(--border-subtle);
+  margin: 4px 6px;
 }
 
 .itemWrap {
@@ -79,12 +86,15 @@
   min-width: 160px;
   max-height: 400px;
   overflow-y: auto;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
   padding: 4px;
-  z-index: 1001;
+  z-index: calc(var(--z-dropdown) + 1);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
+  animation: menuIn var(--duration-base) var(--ease-out);
 }
 
 .submenu .item {

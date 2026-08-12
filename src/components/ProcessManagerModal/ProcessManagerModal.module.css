@@ -1,3 +1,5 @@
+/* ProcessManagerModal — process table living inside the shared glass dialog. */
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -13,7 +15,7 @@
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   white-space: nowrap;
   user-select: none;
 }
@@ -41,7 +43,7 @@
 }
 
 .table tr:hover td {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .tuicRow td {
@@ -79,7 +81,7 @@
   width: 100%;
   border-radius: 2px;
   transform-origin: left;
-  transition: transform 0.3s ease;
+  transition: transform var(--duration-slow) var(--ease-out);
 }
 
 .cpuFill {
@@ -99,8 +101,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 8px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
   font-size: 11px;
   color: var(--fg-muted);
 }

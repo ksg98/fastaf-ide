@@ -65,22 +65,22 @@ interface BadgeEntry {
 }
 
 const PR_BADGE_LEGEND: BadgeEntry[] = [
-	{ label: "#N", description: "Open PR (number)", bg: "var(--accent)", fg: "#000" },
-	{ label: "Ready", description: "Approved and mergeable", bg: "var(--success)", fg: "#000" },
+	{ label: "#N", description: "Open PR (number)", bg: "var(--accent)", fg: "var(--text-on-accent)" },
+	{ label: "Ready", description: "Approved and mergeable", bg: "var(--success)", fg: "var(--text-on-success)" },
 	{ label: "Draft", description: "PR is a draft", bg: "transparent", fg: "var(--fg-muted)", border: "var(--fg-muted)" },
-	{ label: "Conflicts", description: "Merge conflicts", bg: "var(--error)", fg: "#000", pulsing: true },
-	{ label: "CI Failed", description: "CI checks failed", bg: "var(--error)", fg: "#000" },
-	{ label: "Changes Req.", description: "Changes requested", bg: "#d29922", fg: "#000" },
-	{ label: "Review Req.", description: "Awaiting review", bg: "transparent", fg: "#d29922", border: "#d29922" },
+	{ label: "Conflicts", description: "Merge conflicts", bg: "var(--error)", fg: "var(--text-on-error)", pulsing: true },
+	{ label: "CI Failed", description: "CI checks failed", bg: "var(--error)", fg: "var(--text-on-error)" },
+	{ label: "Changes Req.", description: "Changes requested", bg: "var(--changes)", fg: "var(--text-on-success)" },
+	{ label: "Review Req.", description: "Awaiting review", bg: "transparent", fg: "var(--changes)", border: "var(--changes)" },
 	{
 		label: "CI Running",
 		description: "CI in progress",
 		bg: "transparent",
-		fg: "#e3b341",
-		border: "#e3b341",
+		fg: "var(--warning)",
+		border: "var(--warning)",
 		pulsing: true,
 	},
-	{ label: "Merged", description: "PR merged", bg: "#a371f7", fg: "#000" },
+	{ label: "Merged", description: "PR merged", bg: "var(--merged)", fg: "var(--text-on-accent)" },
 ];
 
 const STATS_LEGEND: SymbolEntry[] = [

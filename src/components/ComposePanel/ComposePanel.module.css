@@ -1,17 +1,22 @@
+/* ComposePanel — bottom-anchored slide-up drawer. Rides the glass recipe
+ * (surface-overlay + overlay blur) so it feels detached from the surface
+ * beneath. Send button uses the accent recipe. */
 .panel {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
   height: 200px;
-  background: var(--bg-primary);
-  border-top: 1px solid var(--border);
-  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.3);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border-top: 1px solid var(--border-subtle);
+  box-shadow: var(--highlight-inset), var(--shadow-bottom-anchor);
   display: flex;
   flex-direction: column;
-  z-index: 20;
+  z-index: var(--z-overlay);
   transform: translateY(100%);
-  transition: transform 0.15s ease-out;
+  transition: transform var(--duration-base) var(--ease-out);
   pointer-events: none;
 }
 
@@ -33,7 +38,7 @@
   color: var(--fg-muted);
   font-size: var(--font-xs);
   font-family: var(--font-ui);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   user-select: none;
 }
 
@@ -46,12 +51,14 @@
   border: none;
   border-radius: var(--radius-sm);
   background: var(--accent);
-  color: var(--bg-primary);
+  color: var(--text-on-accent);
   cursor: pointer;
   padding: 0;
   flex-shrink: 0;
+  box-shadow: var(--highlight-inset);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .sendButton:hover {
-  opacity: 0.85;
+  background: var(--accent-hover);
 }

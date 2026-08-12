@@ -39,8 +39,12 @@ const DOT_RADIUS = 4;
 /** Half-width of the horizontal crossbar marking where a lane starts */
 const LANE_CAP_HALF_WIDTH = 4;
 
-/** 8 lane colors matching the style guide palette */
-const COLORS = [
+/** Lane color fallbacks used when CSS custom properties (`--graph-lane-N`
+ *  on the canvas element in CommitGraph.module.css) haven't resolved yet —
+ *  e.g. before the canvas is mounted, or during the first synchronous draw
+ *  in Effect 1 (offscreen rebuild) which runs off-DOM.
+ *  Kept in sync with the token defaults declared in CommitGraph.module.css. */
+const FALLBACK_LANE_COLORS = [
 	"#4FC1FF", // blue
 	"#7FE07F", // green
 	"#FF7F7F", // red
@@ -49,7 +53,20 @@ const COLORS = [
 	"#20B2AA", // teal
 	"#FF8C00", // orange
 	"#BA55D3", // purple
-];
+] as const;
+
+/** Resolve lane colors from the canvas element's computed style so themes
+ *  can override `--graph-lane-N` without touching the draw code. Falls back
+ *  to the hex constants above when the property is unset or when there is
+ *  no live element to read from (e.g. offscreen rebuild before mount). */
+function resolveLaneColors(el: HTMLElement | undefined): readonly string[] {
+	if (!el) return FALLBACK_LANE_COLORS;
+	const cs = getComputedStyle(el);
+	return FALLBACK_LANE_COLORS.map((fallback, i) => {
+		const v = cs.getPropertyValue(`--graph-lane-${i + 1}`).trim();
+		return v || fallback;
+	});
+}
 
 /** Maximum offscreen canvas height in CSS pixels (browser safety limit) */
 const MAX_OFFSCREEN_HEIGHT = 32768;
@@ -60,13 +77,13 @@ const MAX_OFFSCREEN_HEIGHT = 32768;
 
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
-function drawConnection(ctx: Ctx2D, conn: Connection): void {
+function drawConnection(ctx: Ctx2D, conn: Connection, colors: readonly string[]): void {
 	const x1 = conn.from_col * LANE_WIDTH + LANE_WIDTH / 2;
 	const y1 = conn.from_row * ROW_HEIGHT + ROW_HEIGHT / 2;
 	const x2 = conn.to_col * LANE_WIDTH + LANE_WIDTH / 2;
 	const y2 = conn.to_row * ROW_HEIGHT + ROW_HEIGHT / 2;
 
-	ctx.strokeStyle = COLORS[conn.color_index % COLORS.length];
+	ctx.strokeStyle = colors[conn.color_index % colors.length];
 	ctx.lineWidth = 2;
 	ctx.beginPath();
 	ctx.moveTo(x1, y1);
@@ -88,11 +105,17 @@ function drawConnection(ctx: Ctx2D, conn: Connection): void {
  * lane below (a cell no commit occupies). A short crossbar perpendicular to the
  * lane, visually distinct from the vertical line.
  */
-function drawLaneStartCap(ctx: Ctx2D, col: number, row: number, colorIndex: number): void {
+function drawLaneStartCap(
+	ctx: Ctx2D,
+	col: number,
+	row: number,
+	colorIndex: number,
+	colors: readonly string[],
+): void {
 	const x = col * LANE_WIDTH + LANE_WIDTH / 2;
 	const y = row * ROW_HEIGHT + ROW_HEIGHT / 2;
 
-	ctx.strokeStyle = COLORS[colorIndex % COLORS.length];
+	ctx.strokeStyle = colors[colorIndex % colors.length];
 	ctx.lineWidth = 2;
 	ctx.beginPath();
 	ctx.moveTo(x - LANE_CAP_HALF_WIDTH, y);
@@ -100,10 +123,10 @@ function drawLaneStartCap(ctx: Ctx2D, col: number, row: number, colorIndex: numb
 	ctx.stroke();
 }
 
-function drawDot(ctx: Ctx2D, node: GraphNode): void {
+function drawDot(ctx: Ctx2D, node: GraphNode, colors: readonly string[]): void {
 	const x = node.column * LANE_WIDTH + LANE_WIDTH / 2;
 	const y = node.row * ROW_HEIGHT + ROW_HEIGHT / 2;
-	const color = COLORS[node.color_index % COLORS.length];
+	const color = colors[node.color_index % colors.length];
 
 	ctx.fillStyle = color;
 	ctx.beginPath();
@@ -159,6 +182,11 @@ export const CommitGraph: Component<CommitGraphProps> = (props) => {
 
 				ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+				// Resolve palette from CSS custom properties on the canvas element
+				// so themes can override `--graph-lane-N` without touching this
+				// draw code. Falls back to the module.css defaults pre-mount.
+				const colors = resolveLaneColors(canvasRef());
+
 				// Draw all connections first (lines behind dots), and find where
 				// each lane starts — the chronological foot, where a first-parent
 				// line bottoms out at a cell no commit occupies (it bends into
@@ -170,7 +198,7 @@ export const CommitGraph: Component<CommitGraphProps> = (props) => {
 				const laneStarts = new Map<string, number>();
 				for (const node of nodes) {
 					for (const conn of node.connections) {
-						drawConnection(ctx, conn);
+						drawConnection(ctx, conn, colors);
 						// A line's visual bottom is (to_col, to_row). When no commit
 						// occupies that cell, the line dangles there — that's a lane
 						// foot, where the lane starts. Holds for straight first-parent
@@ -188,12 +216,12 @@ export const CommitGraph: Component<CommitGraphProps> = (props) => {
 				// visible case needs it.
 				for (const [foot, colorIndex] of laneStarts) {
 					const [col, row] = foot.split(":").map(Number);
-					drawLaneStartCap(ctx, col, row, colorIndex);
+					drawLaneStartCap(ctx, col, row, colorIndex, colors);
 				}
 
 				// Draw commit dots on top
 				for (const node of nodes) {
-					drawDot(ctx, node);
+					drawDot(ctx, node, colors);
 				}
 
 				setOffscreen(oc);
