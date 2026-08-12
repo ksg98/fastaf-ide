@@ -29,22 +29,15 @@
 }
 
 .btn {
-  display: inline-flex;
-  align-items: center;
+  composes: btnGhost from "./controls.module.css";
+  /* Editor headers use compact inline actions — override the composed
+     26px min-height and 4/12 padding for the tighter header rhythm while
+     inheriting the transparent bg, hover wash, and focus ring. */
   gap: 4px;
-  white-space: nowrap;
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
+  min-height: 0;
   padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.btn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  white-space: nowrap;
 }
 
 .btn svg {

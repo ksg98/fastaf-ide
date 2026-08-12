@@ -4,8 +4,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
   font-size: var(--font-md);
 }
 
@@ -22,19 +22,12 @@
 }
 
 .headerBtn {
-  background: none;
-  border: none;
-  color: var(--fg-muted);
-  cursor: pointer;
+  composes: iconBtn from "./controls.module.css";
+  /* Panel headers historically use a slightly tighter hit area than
+     the 24×24 default; keep the auto width but let the composed rules
+     drive color, radius, hover wash, and focus ring. */
+  width: auto;
   padding: 2px 6px;
-  border-radius: var(--radius-md);
-  display: flex;
-  align-items: center;
-}
-
-.headerBtn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .title {
@@ -53,18 +46,13 @@
 }
 
 .close {
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  font-size: var(--font-xl);
-  cursor: pointer;
+  composes: iconBtn from "./controls.module.css";
+  /* Panel close buttons render an oversized glyph — keep the enlarged
+     font, auto width, and slim padding while inheriting hover/focus. */
+  width: auto;
   padding: 2px 6px;
-  border-radius: var(--radius-md);
-}
-
-.close:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+  font-size: var(--font-xl);
+  color: var(--fg-secondary);
 }
 
 .content {
@@ -76,23 +64,19 @@
   display: flex;
   align-items: center;
   padding: 4px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .searchInput {
+  composes: input from "./controls.module.css";
+  /* Search rows sit inside a slim strip — override the composed
+     defaults for width/padding/typography while keeping the input
+     background, border, focus ring, and disabled treatment. */
   flex: 1;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
+  width: auto;
+  padding: 3px 6px;
   font-size: var(--font-sm);
   font-family: var(--font-mono);
-  padding: 3px 6px;
-  outline: none;
-}
-
-.searchInput:focus {
-  border-color: var(--accent);
 }
 
 .searchInput::placeholder {

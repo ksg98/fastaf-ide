@@ -158,49 +158,15 @@
   flex: 1;
 }
 
+/* Footer buttons defer to the shared controls vocabulary — see
+   src/components/shared/controls.module.css. Only genuinely local quirks
+   (SVG shrink guard) survive; sizing/color/hover/focus come from controls. */
 .btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  font-size: var(--font-xs);
-  font-weight: 600;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: none;
-  color: var(--fg-secondary);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
-}
-
-.btn:hover:not(:disabled) {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
+  composes: btn from "../shared/controls.module.css";
 }
 
 .btnPrimary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  font-size: var(--font-xs);
-  font-weight: 600;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--accent-fg, #fff);
-  cursor: pointer;
-  transition: opacity 0.1s;
-}
-
-.btnPrimary:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.btnPrimary:disabled,
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  composes: btnPrimary from "../shared/controls.module.css";
 }
 
 .btnPrimary svg,

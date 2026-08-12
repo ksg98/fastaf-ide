@@ -31,7 +31,8 @@
   align-items: center;
   justify-content: center;
   z-index: 1;
-  background: var(--bg-secondary);
+  background: transparent;
+  transition: box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .pane-resize-vertical {
@@ -46,7 +47,8 @@
 
 .pane-resize-handle::after {
   content: "";
-  background: var(--border);
+  background: var(--border-subtle);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .pane-resize-vertical::after {
@@ -59,8 +61,14 @@
   width: 100%;
 }
 
-.pane-resize-handle:hover::after {
+.pane-resize-handle:hover::after,
+.pane-resize-handle.dragging::after {
   background: var(--accent);
+}
+
+.pane-resize-handle:hover,
+.pane-resize-handle.dragging {
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.25);
 }
 
 /* ---- Pane Group (leaf container) ---- */
@@ -222,54 +230,56 @@
   background: var(--bg-highlight);
 }
 
-/* ---- Tab type coloring (mirrors main TabBar) ---- */
+/* ---- Tab type coloring (mirrors main TabBar) ----
+   Muted to keep pane tabs quieter than the main TabBar: surface tints halved,
+   active border-color lands on rgba(var(--tab-*-rgb), .75) per the Cursor plan. */
 
 .pane-tab-diff {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.1), rgba(var(--tab-diff-rgb), 0.05));
-  border-bottom: 2px solid rgba(var(--tab-diff-rgb), 0.3);
+  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.05), rgba(var(--tab-diff-rgb), 0.025));
+  border-bottom: 2px solid rgba(var(--tab-diff-rgb), 0.2);
 }
 .pane-tab-diff:hover {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.15), rgba(var(--tab-diff-rgb), 0.08));
+  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.08), rgba(var(--tab-diff-rgb), 0.04));
 }
 .pane-tab-diff.pane-tab-active {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.25), rgba(var(--tab-diff-rgb), 0.15));
-  border-bottom-color: rgb(var(--tab-diff-rgb));
+  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.12), rgba(var(--tab-diff-rgb), 0.06));
+  border-bottom-color: rgba(var(--tab-diff-rgb), 0.75);
 }
 
 .pane-tab-edit {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.1), rgba(var(--tab-edit-rgb), 0.05));
-  border-bottom: 2px solid rgba(var(--tab-edit-rgb), 0.3);
+  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.05), rgba(var(--tab-edit-rgb), 0.025));
+  border-bottom: 2px solid rgba(var(--tab-edit-rgb), 0.2);
 }
 .pane-tab-edit:hover {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.15), rgba(var(--tab-edit-rgb), 0.08));
+  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.08), rgba(var(--tab-edit-rgb), 0.04));
 }
 .pane-tab-edit.pane-tab-active {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.25), rgba(var(--tab-edit-rgb), 0.15));
-  border-bottom-color: var(--accent);
+  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.12), rgba(var(--tab-edit-rgb), 0.06));
+  border-bottom-color: rgba(var(--accent-rgb), 0.75);
 }
 
 .pane-tab-md {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.1), rgba(var(--tab-md-rgb), 0.05));
-  border-bottom: 2px solid rgba(var(--tab-md-rgb), 0.3);
+  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.05), rgba(var(--tab-md-rgb), 0.025));
+  border-bottom: 2px solid rgba(var(--tab-md-rgb), 0.2);
 }
 .pane-tab-md:hover {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.15), rgba(var(--tab-md-rgb), 0.08));
+  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.08), rgba(var(--tab-md-rgb), 0.04));
 }
 .pane-tab-md.pane-tab-active {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.2), rgba(var(--tab-md-rgb), 0.1));
-  border-bottom-color: var(--success);
+  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.1), rgba(var(--tab-md-rgb), 0.05));
+  border-bottom-color: rgba(var(--tab-md-rgb), 0.75);
 }
 
 .pane-tab-panel {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.1), rgba(var(--tab-panel-rgb), 0.05));
-  border-bottom: 2px solid rgba(var(--tab-panel-rgb), 0.3);
+  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.05), rgba(var(--tab-panel-rgb), 0.025));
+  border-bottom: 2px solid rgba(var(--tab-panel-rgb), 0.2);
 }
 .pane-tab-panel:hover {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.15), rgba(var(--tab-panel-rgb), 0.08));
+  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.08), rgba(var(--tab-panel-rgb), 0.04));
 }
 .pane-tab-panel.pane-tab-active {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.2), rgba(var(--tab-panel-rgb), 0.1));
-  border-bottom-color: var(--merged);
+  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.1), rgba(var(--tab-panel-rgb), 0.05));
+  border-bottom-color: rgba(var(--tab-panel-rgb), 0.75);
 }
 
 /* ---- Tab Content (mount all, show active) ---- */

@@ -6,6 +6,15 @@
  * use the CSS custom properties already injected by extractThemeVars().
  *
  * Plugins can override any of these styles — this is a default, not a cage.
+ *
+ * ─── IMPORTANT ────────────────────────────────────────────────────────
+ * Iframes cannot `composes:` from the host stylesheet, so the button,
+ * input, card, and toast values below are duplicated by hand from
+ * src/components/shared/controls.module.css (and the .dash-stat top
+ * sheen mirrors the dashboard sweep). When you touch either side of
+ * this pair, update the other in the same commit — otherwise plugin
+ * chrome drifts from the app-wide control vocabulary.
+ * ──────────────────────────────────────────────────────────────────────
  */
 
 export const PLUGIN_BASE_CSS = `
@@ -51,71 +60,87 @@ a:hover {
   text-decoration: underline;
 }
 
-/* ── Buttons ── */
+/* ── Buttons ──
+   Values mirror shared/controls.module.css .btn / .btnPrimary / .btnDanger.
+   Iframes can't composes: — keep this block in sync when you touch
+   controls.module.css. */
 button, .btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  font-size: 12px;
+  justify-content: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 4px 12px;
+  font-size: 13px;
   font-weight: 500;
   font-family: inherit;
-  color: var(--fg-primary, #ccc);
-  background: var(--bg-tertiary, #2d2d30);
-  border: 1px solid var(--border, #3e3e42);
-  border-radius: 4px;
+  line-height: 1.2;
+  color: var(--fg-secondary, #c2c2c2);
+  background: var(--bg-tertiary, #202020);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-radius: 6px;
   cursor: pointer;
-  transition: background 0.1s, border-color 0.15s;
-  line-height: 1.4;
+  transition: background 0.1s ease-out, color 0.1s ease-out,
+    border-color 0.1s ease-out, box-shadow 0.1s ease-out;
 }
-button:hover, .btn:hover {
-  background: var(--bg-highlight, #37373d);
+button:hover:not(:disabled), .btn:hover:not(:disabled) {
+  background: var(--bg-highlight, #282828);
+  color: var(--fg-primary, #e0e0e0);
 }
-button:active, .btn:active {
-  background: var(--bg-secondary, #252526);
+button:focus-visible, .btn:focus-visible {
+  outline: none;
+  border-color: var(--accent, #4c9df3);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb, 76, 157, 243), 0.18);
+}
+button:active:not(:disabled), .btn:active:not(:disabled) {
+  background: var(--bg-secondary, #1a1a1a);
 }
 button.primary, .btn-primary {
-  background: var(--accent, #59a8dd);
-  color: var(--text-on-accent, #000);
-  border-color: var(--accent, #59a8dd);
+  background: var(--accent, #4c9df3);
+  color: var(--text-on-accent, #ffffff);
+  border-color: transparent;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
-button.primary:hover, .btn-primary:hover {
-  background: var(--accent-hover, #7abde5);
-  border-color: var(--accent-hover, #7abde5);
+button.primary:hover:not(:disabled), .btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover, #66aefa);
+  color: var(--text-on-accent, #ffffff);
 }
 button.danger, .btn-danger {
   background: transparent;
-  color: var(--error, #ef4444);
-  border-color: var(--error, #ef4444);
+  color: var(--error, #ff5555);
+  border-color: var(--error, #ff5555);
 }
-button.danger:hover, .btn-danger:hover {
-  background: var(--error, #ef4444);
-  color: var(--text-on-error, #000);
+button.danger:hover:not(:disabled), .btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error, #ff5555) 15%, transparent);
+  color: var(--error, #ff5555);
+  border-color: var(--error, #ff5555);
 }
 button:disabled, .btn:disabled {
-  opacity: 0.4;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* ── Inputs ── */
+/* ── Inputs ──
+   Mirrors shared/controls.module.css .input / .textarea / .select. */
 input[type="text"], input[type="search"], input[type="number"],
 input[type="email"], input[type="url"], input[type="password"],
 textarea, select {
-  padding: 4px 8px;
+  padding: 6px 10px;
   font-size: 13px;
   font-family: inherit;
-  color: var(--fg-primary, #ccc);
-  background: var(--bg-tertiary, #2d2d30);
-  border: 1px solid var(--border, #3e3e42);
-  border-radius: 4px;
+  color: var(--fg-primary, #e0e0e0);
+  background: var(--bg-tertiary, #202020);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-radius: 6px;
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color 0.1s ease-out, box-shadow 0.1s ease-out;
 }
 input:focus, textarea:focus, select:focus {
-  border-color: var(--accent, #59a8dd);
+  border-color: var(--accent, #4c9df3);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb, 76, 157, 243), 0.18);
 }
 input::placeholder, textarea::placeholder {
-  color: var(--fg-muted, #9aa1a9);
+  color: var(--fg-muted, #8c8c8c);
 }
 
 /* ── Checkboxes ── */
@@ -123,16 +148,25 @@ input[type="checkbox"] {
   accent-color: var(--accent, #59a8dd);
 }
 
-/* ── Cards ── */
+/* ── Cards ──
+   Radius bumps to 10px and picks up the top-sheen gradient so plugin
+   dashboards read like the built-in Cursor-style stat cards. */
 .card {
-  background: var(--bg-secondary, #252526);
-  border: 1px solid var(--border, #3e3e42);
-  border-radius: 4px;
-  padding: 8px;
-  transition: box-shadow 0.1s;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary, #1a1a1a)),
+    var(--bg-secondary, #1a1a1a)
+  );
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: box-shadow 0.15s ease-out, border-color 0.15s ease-out;
 }
 .card:hover {
-  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  border-color: var(--border-strong, rgba(255,255,255,0.12));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 24px 64px rgba(0, 0, 0, 0.6);
 }
 
 /* ── Tables ── */
@@ -238,16 +272,22 @@ hr {
   opacity: 0.7;
 }
 
-/* ── Toast notifications ── */
+/* ── Toast notifications ──
+   Glass pill styling — collapses to opaque when vibrancy is off. */
 .toast {
   position: fixed;
   bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   padding: 6px 14px;
-  border-radius: 4px;
+  border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
+  color: var(--fg-primary, #e0e0e0);
+  background: var(--surface-overlay, var(--bg-tertiary, #202020));
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 24px 64px rgba(0, 0, 0, 0.6);
   opacity: 0;
   transition: opacity 0.2s;
   pointer-events: none;
@@ -341,13 +381,18 @@ hr {
   gap: 8px;
 }
 .dash-stat {
-  background: var(--bg-secondary, #252526);
-  border: 1px solid var(--border, #3e3e42);
-  border-radius: 4px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 3%, var(--bg-secondary, #1a1a1a)),
+    var(--bg-secondary, #1a1a1a)
+  );
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  border-radius: 10px;
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .dash-stat-label {
   font-size: 10px;

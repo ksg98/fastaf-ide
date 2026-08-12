@@ -7,19 +7,12 @@
 }
 
 .btn {
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  cursor: pointer;
+  composes: iconBtn from "../shared/controls.module.css";
+  /* Detach/reattach/close chrome — override the default 24×24 for the
+     slightly wider tab-strip hit-area (auto width + 4/6 padding) while
+     inheriting hover wash, focus ring, and color from the primitive. */
+  width: auto;
+  height: auto;
   padding: 4px 6px;
-  border-radius: var(--radius-md);
-  display: flex;
-  align-items: center;
-  justify-content: center;
   line-height: 1;
-}
-
-.btn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }

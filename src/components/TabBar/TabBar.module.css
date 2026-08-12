@@ -44,7 +44,8 @@
   display: none; /* Chrome/Safari/WebKit */
 }
 
-/* Scroll arrow buttons */
+/* Scroll arrow buttons — iconBtn-style vocabulary but kept opaque so the
+   underlying scrolling tabs don't bleed through the edge overlay. */
 .scrollArrow {
   position: absolute;
   top: 0;
@@ -55,13 +56,15 @@
   justify-content: center;
   background: var(--bg-secondary);
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   cursor: pointer;
   z-index: 5;
   padding: 0;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .scrollArrow.visible {
@@ -76,15 +79,15 @@
 
 .scrollArrowLeft {
   left: 0;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-subtle);
 }
 
 .scrollArrowRight {
   right: 0;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--border-subtle);
 }
 
-/* Fade gradients to indicate more tabs */
+/* Fade gradients to indicate more tabs — bar background is --bg-secondary */
 .fadeGradient {
   position: absolute;
   top: 0;
@@ -93,7 +96,7 @@
   pointer-events: none;
   z-index: 4;
   opacity: 0;
-  transition: opacity 0.15s;
+  transition: opacity var(--duration-fast) var(--ease-out);
 }
 
 .fadeGradient.visible {
@@ -102,12 +105,12 @@
 
 .fadeLeft {
   left: 24px;
-  background: linear-gradient(to right, var(--bg-secondary), transparent);
+  background: linear-gradient(to right, var(--bg-secondary), rgba(var(--bg-secondary-rgb), 0));
 }
 
 .fadeRight {
   right: 24px;
-  background: linear-gradient(to left, var(--bg-secondary), transparent);
+  background: linear-gradient(to left, var(--bg-secondary), rgba(var(--bg-secondary-rgb), 0));
 }
 
 .tab {
@@ -120,30 +123,37 @@
   background: transparent;
   border-radius: 0;
   cursor: pointer;
-  transition: background 0.1s;
-  border-right: 1px solid var(--border);
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   position: relative;
   overflow: hidden;
 }
 
 @media (hover: hover) {
   .tab:hover {
-    background: var(--bg-highlight);
+    background: var(--surface-hover);
+  }
+  .tab:hover .tabName {
+    color: var(--fg-secondary);
   }
 }
 
+/* Active tab is "connected" to the editor: same bg as editor surface with
+   rounded top corners and a 2px accent bar along the TOP edge (per-type
+   colors override this base color below). */
 .tab.active {
   background: var(--bg-primary);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 
 .tab.active::before {
   content: "";
   position: absolute;
-  bottom: 0;
+  top: 0;
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--accent);
+  background: rgba(var(--accent-rgb), 0.75);
   z-index: 1;
 }
 
@@ -156,11 +166,12 @@
 
 .tabName {
   font-size: var(--font-md);
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 180px;
+  transition: color var(--duration-fast) var(--ease-out);
 }
 
 .tab.active .tabName {
@@ -183,7 +194,7 @@
 .tabClose {
   background: none;
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-lg);
   line-height: 1;
   cursor: pointer;
@@ -193,7 +204,8 @@
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-md);
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   opacity: 0;
   margin-left: auto;
   flex-shrink: 0;
@@ -207,10 +219,13 @@
 
 @media (hover: hover) {
   .tabClose:hover {
+    background: var(--surface-hover);
     color: var(--fg-primary);
   }
 }
 
+/* New-tab button — iconBtn vocabulary; stretches to bar height for row
+   alignment while carrying the same transparent-hover-wash treatment. */
 .newBtn {
   width: 28px;
   min-width: 28px;
@@ -220,15 +235,17 @@
   justify-content: center;
   background: transparent;
   border: none;
-  color: var(--fg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
   font-size: var(--font-xl);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   align-self: stretch;
 }
 
 .newBtn:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -237,15 +254,19 @@
   color: var(--accent);
 }
 
+/* Glass popover recipe — surface-overlay + overlay blur + subtle border +
+   inset sheen + dropdown shadow; collapses to opaque when vibrancy is off. */
 .mvPreview {
   position: fixed;
   z-index: 1000;
   width: 240px;
   padding: 6px;
-  background: var(--bg-primary);
-  border: 1px solid var(--bg-highlight);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   pointer-events: none;
 }
 
@@ -263,7 +284,7 @@
   height: 34px;
   overflow: hidden;
   background: var(--bg-secondary);
-  border: 1px solid var(--bg-highlight);
+  border: 1px solid var(--border-subtle);
   border-left-width: 3px;
   border-radius: var(--radius-sm);
 }
@@ -302,7 +323,7 @@
   padding: 0 2px;
   flex-shrink: 0;
   opacity: 0.8;
-  transition: opacity 0.1s;
+  transition: opacity var(--duration-fast) var(--ease-out);
 }
 
 .globeIcon:hover {
@@ -399,25 +420,13 @@
   background: linear-gradient(to top, color-mix(in srgb, var(--repo-color) 18%, transparent), transparent 60%);
 }
 
+/* Tab-kind identity: per-type flavor comes from the tabIcon color and the
+   muted top accent bar on the active tab. No bottom borders, no gradient
+   fills — the flat surface stays consistent with the connected-editor look. */
+
 /* Diff tabs */
-.tab.diffTab {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.1), rgba(var(--tab-diff-rgb), 0.05));
-  border-bottom: 2px solid rgba(var(--tab-diff-rgb), 0.3);
-}
-
-@media (hover: hover) {
-  .tab.diffTab:hover {
-    background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.15), rgba(var(--tab-diff-rgb), 0.08));
-  }
-}
-
-.tab.diffTab.active {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.25), rgba(var(--tab-diff-rgb), 0.15));
-  border-bottom-color: rgb(var(--tab-diff-rgb));
-}
-
 .tab.diffTab.active::before {
-  display: none;
+  background: rgba(var(--tab-diff-rgb), 0.75);
 }
 
 .tab.diffTab .tabIcon {
@@ -428,102 +437,44 @@
 }
 
 /* Editor tabs */
-.tab.editTab {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.1), rgba(var(--tab-edit-rgb), 0.05));
-  border-bottom: 2px solid rgba(var(--tab-edit-rgb), 0.3);
-}
-
-@media (hover: hover) {
-  .tab.editTab:hover {
-    background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.15), rgba(var(--tab-edit-rgb), 0.08));
-  }
-}
-
-.tab.editTab.active {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.25), rgba(var(--tab-edit-rgb), 0.15));
-  border-bottom-color: var(--accent);
-}
-
 .tab.editTab.active::before {
-  display: none;
+  background: rgba(var(--tab-edit-rgb), 0.75);
 }
 
 .tab.editTab .tabIcon {
-  color: var(--accent);
+  color: rgb(var(--tab-edit-rgb));
   opacity: 0.8;
   display: flex;
   align-items: center;
 }
 
 /* Markdown tabs */
-.tab.mdTab {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.1) 0%, rgba(var(--tab-md-rgb), 0.05) 100%);
-  border-bottom: 2px solid rgba(var(--tab-md-rgb), 0.3);
-}
-
-@media (hover: hover) {
-  .tab.mdTab:hover {
-    background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.15) 0%, rgba(var(--tab-md-rgb), 0.08) 100%);
-    border-bottom-color: rgba(var(--tab-md-rgb), 0.5);
-  }
-}
-
-.tab.mdTab.active {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.2) 0%, rgba(var(--tab-md-rgb), 0.1) 100%);
-  border-bottom-color: var(--success);
-}
-
 .tab.mdTab.active::before {
-  display: none;
+  background: rgba(var(--tab-md-rgb), 0.75);
 }
 
 .tab.mdTab .tabIcon {
-  color: var(--success);
+  color: rgb(var(--tab-md-rgb));
   opacity: 0.8;
   display: flex;
   align-items: center;
 }
 
 /* Panel tabs (non-file md tabs: Claude Usage, plugins, etc.) */
-.tab.panelTab {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.1) 0%, rgba(var(--tab-panel-rgb), 0.05) 100%);
-  border-bottom: 2px solid rgba(var(--tab-panel-rgb), 0.3);
-}
-
-@media (hover: hover) {
-  .tab.panelTab:hover {
-    background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.15) 0%, rgba(var(--tab-panel-rgb), 0.08) 100%);
-    border-bottom-color: rgba(var(--tab-panel-rgb), 0.5);
-  }
-}
-
-.tab.panelTab.active {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.2) 0%, rgba(var(--tab-panel-rgb), 0.1) 100%);
-  border-bottom-color: var(--merged);
-}
-
 .tab.panelTab.active::before {
-  display: none;
+  background: rgba(var(--tab-panel-rgb), 0.75);
 }
 
 .tab.panelTab .tabIcon {
-  color: var(--merged);
+  color: rgb(var(--tab-panel-rgb));
   opacity: 0.8;
   display: flex;
   align-items: center;
 }
 
-/* Remote/PTY tabs — subtle cyan tint */
-.tab.remoteTab {
-  border-bottom: 2px solid rgba(var(--tab-remote-rgb), 0.3);
-}
-
-.tab.remoteTab.active {
-  border-bottom-color: rgb(var(--tab-remote-rgb));
-}
-
+/* Remote/PTY tabs — subtle cyan tint on top bar + icon */
 .tab.remoteTab.active::before {
-  display: none;
+  background: rgba(var(--tab-remote-rgb), 0.75);
 }
 
 .tab.remoteTab:not(.shellBusy):not(.shellIdle):not(.shellUnseen):not(.shellExited) .tabIcon {
@@ -531,9 +482,10 @@
   opacity: 0.8;
 }
 
-/* Detached to floating window — dim name but keep status dot colors */
+/* Detached to floating window — dim name; keep the dashed bottom hint so
+   the state is still legible without stealing the top-edge indicator. */
 .tab.detached {
-  border-bottom: 2px dashed var(--fg-secondary);
+  border-bottom: 2px dashed var(--fg-muted);
 }
 
 .tab.detached .tabName {

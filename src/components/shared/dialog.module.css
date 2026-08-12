@@ -1,33 +1,66 @@
-/* Shared Dialog/Popover styles (RenameBranchDialog, RunCommandDialog, PromptDialog) */
+/* ─────────────────────────────────────────────────────────────────────────
+ * Shared Dialog/Popover styles (RenameBranchDialog, RunCommandDialog,
+ * PromptDialog, CommandPalette, BranchSwitcher, and ~30 other dialogs).
+ *
+ * The .popover surface uses the glass recipe: opaque bg + no blur by
+ * default; when the platform layer flips `html.vibrancy` on (macOS, no
+ * reduce-transparency), the tokens collapse to translucent rgba + real
+ * backdrop-filter blur — components need no branching.
+ *
+ * The overlay scrim is a plain rgba(0,0,0,0.5) — no dedicated --scrim
+ * token exists yet; this keeps behavior unchanged when vibrancy is off.
+ * ───────────────────────────────────────────────────────────────────────── */
+
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.5); /* scrim — no token yet, kept literal */
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
 }
 
 /* Top-anchored modal overlay (CommandPalette, BranchSwitcher) */
 .overlayTop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.5); /* scrim — no token yet, kept literal */
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 80px;
-  z-index: 1000;
+  z-index: var(--z-modal);
+}
+
+@keyframes dialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .popover {
   width: 320px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popup);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   overflow: hidden;
+  animation: dialogIn var(--duration-slow) var(--ease-out);
+}
+
+/* Wide variant for CommandPalette, BranchSwitcher etc. */
+.panelLg {
+  composes: popover;
+  width: 560px;
+  max-width: calc(100vw - 32px);
 }
 
 .header {
@@ -35,8 +68,8 @@
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .headerText {
@@ -72,20 +105,24 @@
   padding: 16px;
 }
 
+/* Align body inputs with the controls .input recipe (focus ring). */
 .body input:not([type="checkbox"]):not([type="radio"]) {
   width: 100%;
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--fg-primary);
-  font-size: var(--font-base);
+  font-size: var(--font-md);
   font-family: var(--font-mono);
+  outline: none;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .body input:not([type="checkbox"]):not([type="radio"]):focus {
-  outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .body input:not([type="checkbox"]):not([type="radio"]):disabled {
@@ -103,19 +140,13 @@
   display: flex;
   gap: 8px;
   padding: 12px 16px;
-  background: var(--bg-tertiary);
-  border-top: 1px solid var(--border);
+  background: transparent;
+  border-top: 1px solid var(--border-subtle);
+  justify-content: flex-end;
 }
 
 .actions button {
-  flex: 1;
-  padding: 8px 16px;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-md);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  min-width: 72px;
 }
 
 .actions button:disabled {
@@ -124,20 +155,9 @@
 }
 
 .cancelBtn {
-  background: var(--bg-highlight);
-  color: var(--fg-secondary);
-}
-
-.cancelBtn:hover:not(:disabled) {
-  background: var(--border);
-  color: var(--fg-primary);
+  composes: btn from "./controls.module.css";
 }
 
 .primaryBtn {
-  background: var(--accent);
-  color: var(--text-on-accent);
-}
-
-.primaryBtn:hover:not(:disabled) {
-  background: var(--accent-hover);
+  composes: btnPrimary from "./controls.module.css";
 }
