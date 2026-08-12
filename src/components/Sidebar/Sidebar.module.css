@@ -10,8 +10,11 @@
   min-width: 200px;
   max-width: 500px;
   flex-shrink: 0;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+  /* Resting chrome: surface-glass collapses to --bg-secondary when vibrancy
+     is off and becomes translucent (with --blur-glass) when vibrancy is on. */
+  background: var(--surface-glass);
+  backdrop-filter: var(--blur-glass);
+  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   position: relative;
@@ -51,22 +54,26 @@
   padding: 0 8px 6px;
 }
 
+/* Aligned to the controls .input recipe: bg-tertiary + border-subtle +
+   radius-md + accent focus ring. Padding is trimmed for the slim strip. */
 .searchInput {
   flex: 1;
   min-width: 0;
   padding: 4px 8px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   color: var(--fg-primary);
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   outline: none;
-  transition: border-color 0.15s;
+  transition: border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .searchInput:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .searchInput::placeholder {
@@ -105,7 +112,7 @@
   height: var(--status-height);
   min-height: var(--status-height);
   padding: 0 6px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -130,7 +137,7 @@
 }
 
 .addRepo:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -160,7 +167,7 @@
 }
 
 .footerAction:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -190,13 +197,23 @@
   margin-bottom: 4px;
 }
 
+/* Repo/group rows are inset from the sidebar edges so hover/selection
+   reads as a floating pill. Keeps ~28px content height (initials 28px
+   tall) inside a slim outer margin. */
 .repoHeader {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px 4px;
+  margin: 0 6px;
+  padding: 2px 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   position: relative;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.repoHeader:hover {
+  background: var(--surface-hover);
 }
 
 .repoInitials {
@@ -217,16 +234,17 @@
 
 .repoInitials:hover {
   transform: scale(1.1);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-dropdown);
 }
 
+/* Section header vocabulary: 11px uppercase muted with tight tracking. */
 .repoName {
   flex: 1;
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--fg-secondary);
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -281,7 +299,7 @@
 }
 
 .repoActionBtn:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -362,15 +380,16 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 12px;
+  margin: 0 6px;
+  padding: 4px 8px;
   cursor: pointer;
   user-select: none;
   border-radius: var(--radius-md);
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .groupHeader:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .groupColorDot {
@@ -380,13 +399,14 @@
   flex-shrink: 0;
 }
 
+/* Section header vocabulary: 11px uppercase muted with tight tracking. */
 .groupName {
   flex: 1;
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg-secondary);
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -443,22 +463,23 @@
   padding: 5px 8px;
   cursor: pointer;
   border-radius: var(--radius-md);
-  margin: 1px 0;
-  transition: background 0.1s;
+  margin: 1px 6px;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   position: relative;
   min-height: 30px;
 }
 
 @media (hover: hover) {
   .branchItem:hover {
-    background: var(--bg-highlight);
+    background: var(--surface-hover);
   }
 }
 
+/* Selection = translucent accent wash — no solid accent fill, no inset stripe. */
 .branchItem.active {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg-highlight));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
-  border-radius: var(--radius-sm);
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--fg-primary);
 }
 
 .branchPreparing {
@@ -571,7 +592,7 @@
 
 @media (hover: hover) {
   .branchGroupExpanded:hover {
-    background: rgba(255, 255, 255, 0.035);
+    background: var(--surface-hover);
   }
 }
 
@@ -630,18 +651,18 @@
 }
 
 .branchTabItem.active {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(var(--accent-rgb), 0.14);
   color: var(--fg-primary);
 }
 
 @media (hover: hover) {
   .branchTabItem:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--surface-hover);
     color: var(--fg-primary);
   }
 
   .branchTabItem.active:hover {
-    background: rgba(255, 255, 255, 0.11);
+    background: rgba(var(--accent-rgb), 0.18);
   }
 }
 
@@ -857,13 +878,13 @@
 }
 
 .globalWorkspaceEntry:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
+/* Selection = translucent accent wash — no left-border stripe. */
 .globalWorkspaceActive {
-  border-left-color: var(--accent);
-  background: var(--bg-highlight);
+  background: rgba(var(--accent-rgb), 0.14);
   color: var(--fg-primary);
 }
 
@@ -888,7 +909,7 @@
   height: var(--status-height);
   min-height: var(--status-height);
   padding: 0 6px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -924,7 +945,7 @@
 }
 
 .gitQuickBtn:hover:not(:disabled) {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -1078,11 +1099,11 @@
   bottom: 0;
   width: 320px;
   background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-subtle);
   z-index: 201;
   display: flex;
   flex-direction: column;
-  box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-2xl);
 }
 
 .remoteOnlyHeader {
@@ -1357,11 +1378,11 @@
   bottom: 0;
   width: 340px;
   background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--border-subtle);
   z-index: 201;
   display: flex;
   flex-direction: column;
-  box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-2xl);
   outline: none;
   -webkit-app-region: no-drag;
 }
@@ -1559,7 +1580,7 @@
 }
 
 .ghIssueOpen {
-  background: rgba(63, 185, 80, 0.12);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
   color: var(--success);
 }
 
@@ -1744,7 +1765,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  background: rgba(248, 81, 73, 0.12);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
   font-size: var(--font-xs);
   font-weight: 600;
@@ -1823,7 +1844,7 @@
 }
 
 .pluginSectionHeader:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-secondary);
 }
 
@@ -1881,7 +1902,7 @@
 }
 
 .pluginItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .pluginItemIcon {

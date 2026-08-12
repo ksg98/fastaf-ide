@@ -1,3 +1,7 @@
+/* Panel splitter — 4px hit area, 1px hairline centered inside.
+   Hover and the `.dragging` state class light the line accent-blue and add a
+   soft glow. The `.dragging` selector is preserved even though the current
+   TSX doesn't apply it yet, so future state-driven styling stays consistent. */
 .handle {
   position: absolute;
   top: 0;
@@ -5,10 +9,28 @@
   width: 4px;
   height: 100%;
   cursor: col-resize;
-  z-index: 10;
+  z-index: var(--z-raised, 10);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  transition: box-shadow var(--duration-fast) var(--ease-out);
 }
 
-.handle:hover {
+.handle::after {
+  content: "";
+  width: 1px;
+  height: 100%;
+  background: var(--border-subtle);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.handle:hover::after,
+.handle.dragging::after {
   background: var(--accent);
-  opacity: 0.5;
+}
+
+.handle:hover,
+.handle.dragging {
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.25);
 }

@@ -300,9 +300,10 @@
   color: var(--bg-primary);
 }
 
+/* Small icon slot inside dashboardBtn — inherits iconBtn hover/focus vocabulary
+   but keeps the 12x12 span-wrapper footprint (this is not a standalone button). */
 .btnIcon {
-  display: inline-flex;
-  align-items: center;
+  composes: iconBtn from "../../shared/controls.module.css";
   width: 12px;
   height: 12px;
 }

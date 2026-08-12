@@ -229,40 +229,15 @@
   gap: 6px;
 }
 
+/* Form action buttons defer to the shared controls vocabulary — see
+   src/components/shared/controls.module.css. No local overrides needed;
+   sizing/color/hover/focus come from controls. */
 .submitBtn {
-  padding: 4px 12px;
-  background: var(--accent);
-  border: none;
-  border-radius: var(--radius-md);
-  color: var(--text-on-accent);
-  font-size: var(--font-xs);
-  font-weight: 500;
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-
-.submitBtn:hover {
-  opacity: 0.85;
-}
-
-.submitBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  composes: btnPrimary from "../shared/controls.module.css";
 }
 
 .cancelBtn {
-  padding: 4px 12px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
-  font-size: var(--font-xs);
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.cancelBtn:hover {
-  background: var(--bg-highlight);
+  composes: btn from "../shared/controls.module.css";
 }
 
 .sessionPicker {

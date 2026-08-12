@@ -17,20 +17,15 @@
 }
 
 .input {
+  composes: input from "../shared/controls.module.css";
+  /* Search field sits inside a slim overlay strip — override the composed
+     defaults for fixed width/height, mono typography, and tight padding
+     while inheriting bg, border, radius, focus ring, and disabled state. */
   width: 200px;
   height: 24px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
+  padding: 0 6px;
   font-family: var(--font-mono);
   font-size: var(--font-sm);
-  padding: 0 6px;
-  outline: none;
-}
-
-.input:focus {
-  border-color: var(--accent);
 }
 
 .counter {
@@ -43,23 +38,11 @@
 }
 
 .btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  composes: iconBtn from "../shared/controls.module.css";
+  /* Search-strip icon slots are 22×22 (not the 24×24 default) — override
+     the composed size while inheriting hover wash, focus ring, and color. */
   width: 22px;
   height: 22px;
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-
-.btn:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .btn svg {
@@ -71,12 +54,16 @@
   composes: btn;
 }
 
-.toggleActive {
+/* Toggle-active state: chain with .toggleBtn so specificity beats the
+   composed .iconBtn:hover:not(:disabled) rule from controls.module.css —
+   otherwise the neutral wash would override the accent fill on hover.
+   State class name preserved (never renamed). */
+.toggleBtn.toggleActive {
   background: var(--accent);
   color: var(--text-on-accent);
 }
 
-.toggleActive:hover {
+.toggleBtn.toggleActive:hover:not(:disabled) {
   background: var(--accent-hover);
   color: var(--text-on-accent);
 }

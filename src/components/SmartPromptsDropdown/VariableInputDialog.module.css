@@ -95,37 +95,13 @@
   border-top: 1px solid var(--border);
 }
 
+/* Buttons delegate to the shared controls vocabulary. Local class names
+   (.cancelBtn / .submitBtn) are preserved because the TSX imports them —
+   .submitBtn is this dialog's primary action, so it composes btnPrimary. */
 .cancelBtn {
-  padding: 5px 14px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  cursor: pointer;
-}
-
-.cancelBtn:hover {
-  background: var(--bg-tertiary);
-  color: var(--fg-primary);
+  composes: btn from "../shared/controls.module.css";
 }
 
 .submitBtn {
-  padding: 5px 14px;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md);
-  color: var(--bg-primary);
-  font-size: var(--font-sm);
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.submitBtn:hover {
-  opacity: 0.9;
-}
-
-.submitBtn:disabled {
-  opacity: 0.4;
-  cursor: default;
+  composes: btnPrimary from "../shared/controls.module.css";
 }

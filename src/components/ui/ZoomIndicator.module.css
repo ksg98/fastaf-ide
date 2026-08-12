@@ -3,5 +3,9 @@
   font-size: var(--font-sm);
   color: var(--fg-muted);
   min-width: 40px;
+  padding: 1px 8px;
   text-align: center;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
 }

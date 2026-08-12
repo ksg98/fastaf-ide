@@ -161,39 +161,16 @@
   border-top: 1px solid var(--border);
 }
 
-.actions button {
-  padding: 7px 14px;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-md);
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.actions button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
+/* Action buttons defer to the shared controls vocabulary — see
+   src/components/shared/controls.module.css. Only the copy button's
+   min-width quirk (keeps Copy/Copied! labels the same width) survives. */
 .copyBtn {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  composes: btnPrimary from "../shared/controls.module.css";
   min-width: 90px;
 }
 
-.copyBtn:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
 .secondaryBtn {
-  background: var(--bg-highlight);
-  color: var(--fg-secondary);
-}
-
-.secondaryBtn:hover:not(:disabled) {
-  background: var(--border);
-  color: var(--fg-primary);
+  composes: btn from "../shared/controls.module.css";
 }
 
 .spacer {

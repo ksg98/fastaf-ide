@@ -57,33 +57,13 @@
 }
 
 .btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-  padding: 2px 8px;
-  cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease;
+  composes: btn from "../shared/controls.module.css";
 }
 
-.btn:hover:not(:disabled) {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
+/* SyncRow ships small icon-only buttons — override the 14x14 wrapper hit-area
+   while inheriting the iconBtn hover/focus vocabulary. */
 .btnIcon {
-  display: inline-flex;
-  align-items: center;
+  composes: iconBtn from "../shared/controls.module.css";
   width: 14px;
   height: 14px;
 }

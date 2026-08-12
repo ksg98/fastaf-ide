@@ -330,59 +330,26 @@
   border-top: 1px solid var(--border);
 }
 
+/* Layout only — visual vocabulary comes from composed controls primitives.
+   Buttons still split the actions row evenly. */
 .popoverActions button {
   flex: 1;
-  padding: 8px 12px;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-md);
-  font-weight: 500;
-  font-family: var(--font-ui);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.popoverActions button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .cancelBtn {
-  background: var(--bg-highlight);
-  color: var(--fg-secondary);
-}
-
-.cancelBtn:hover:not(:disabled) {
-  background: var(--border);
-  color: var(--fg-primary);
+  composes: btn from "../shared/controls.module.css";
 }
 
 .primaryBtn {
-  background: var(--accent);
-  color: var(--text-on-accent);
-}
-
-.primaryBtn:hover:not(:disabled) {
-  background: var(--accent-hover);
+  composes: btnPrimary from "../shared/controls.module.css";
 }
 
 .secondaryBtn {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-  border: 1px solid var(--border) !important;
-}
-
-.secondaryBtn:hover:not(:disabled) {
-  background: var(--border);
+  composes: btn from "../shared/controls.module.css";
 }
 
 .dangerBtn {
-  background: color-mix(in srgb, var(--error) 80%, transparent);
-  color: var(--fg-primary);
-}
-
-.dangerBtn:hover:not(:disabled) {
-  background: var(--error);
+  composes: btnDanger from "../shared/controls.module.css";
 }
 
 /* --- Prefix folding: group header and indented rows --- */

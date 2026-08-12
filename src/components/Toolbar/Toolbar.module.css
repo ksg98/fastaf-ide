@@ -1,9 +1,20 @@
-/* Toolbar */
+/* Toolbar
+ *
+ * Cursor-restyle Stage 1: the bar itself paints transparently over the window
+ * base (vibrancy/glass shows through) and separates from content with a single
+ * hairline. All chrome buttons adopt the shared iconBtn vocabulary — 24×24,
+ * transparent, radius-md, hover surface-hover wash — so the toolbar reads as
+ * one system with the rest of the app. State classes (.filterToggleActive,
+ * .lastItemError/Success/Warn, .notif*, .activityItem*) are preserved by name
+ * and only their declarations are refreshed.
+ *
+ * The 78px macOS traffic-light inset and every -webkit-app-region rule are
+ * load-bearing (Tauri drag region + native window controls) — do not touch. */
 .toolbar {
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   padding: 0 12px;
@@ -55,6 +66,8 @@
   display: block;
 }
 
+/* Reserve room for the native traffic-light buttons on macOS. Never remove:
+   the window controls sit inside the drag region and would overlap chrome. */
 :global(.platform-macos) .left {
   padding-left: 78px;
 }
@@ -79,28 +92,37 @@
   gap: 8px;
 }
 
-/* Sidebar toggle */
+/* Sidebar toggle / filter toggle — iconBtn vocabulary (24×24 transparent) plus
+   the no-drag override so they remain clickable inside the drag region. */
 .sidebarToggle,
 .filterToggle {
-  width: 26px;
-  height: 26px;
-  display: flex;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
   font-size: var(--font-xl);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   -webkit-app-region: no-drag;
 }
 
 .sidebarToggle:hover,
 .filterToggle:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
+}
+
+.sidebarToggle:focus-visible,
+.filterToggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 /* Repo filter icon — loud accent state when "active only" is engaged so it is
@@ -111,24 +133,25 @@
   color: var(--text-on-accent);
 }
 
-/* Branch button */
+/* Branch button — center chip that reads as a subtle glass pill. */
 .branch {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
+  height: 24px;
   padding: 0 10px;
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-family: inherit;
-  transition: background 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
   -webkit-app-region: no-drag;
 }
 
 .branch:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .branchIcon {
@@ -169,32 +192,42 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
+  height: 24px;
   position: relative;
   -webkit-app-region: no-drag;
 }
 
+/* Bell + watcher: iconBtn vocabulary (24×24, transparent, hover wash). Kept
+   position: relative so the .notifCount badge can anchor to them. */
 .bell,
 .watcherBtn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   background: transparent;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-xs);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .bell:hover,
 .watcherBtn:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
+}
+
+.bell:focus-visible,
+.watcherBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
 }
 
 .notifCount {
@@ -223,7 +256,7 @@
   min-width: 240px;
   max-width: 320px;
   background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-dropdown);
   z-index: 100;
@@ -244,7 +277,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .notifTitle {
@@ -266,7 +299,7 @@
 }
 
 .dismissAll:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -275,13 +308,13 @@
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .notifItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .notifItem:last-child {
@@ -341,7 +374,7 @@
   color: var(--fg-primary);
 }
 
-/* Notification type colors */
+/* Notification type colors — status dots on the row icon. */
 .notifMerged .notifIcon { color: var(--merged); }
 .notifClosed .notifIcon { color: var(--fg-muted); }
 .notifBlocked .notifIcon { color: var(--error); }
@@ -355,8 +388,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
-  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--border-subtle);
   margin-top: 2px;
 }
 
@@ -379,7 +412,7 @@
 }
 
 .activityDismissAll:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -399,12 +432,13 @@
   display: flex;
   align-items: center;
   opacity: 0.7;
-  transition: opacity 0.15s;
+  transition: opacity var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
 }
 
 .pluginToggle:hover {
   opacity: 1;
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .pluginToggleOff {
@@ -417,13 +451,13 @@
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .activityItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .activityItem:last-child {
@@ -486,27 +520,32 @@
   color: var(--fg-primary);
 }
 
-/* Last-item shortcut button (inside notifGroup) */
+/* Last-item shortcut pill (inside notifGroup) — a preview of the newest bell
+   notification. Reads as a subtle glass pill; severity variants below tint
+   the border/text for at-a-glance outcome recognition. */
 .lastItemBtn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 26px;
-  padding: 0 8px;
-  background: transparent;
+  height: 24px;
+  padding: 0 10px;
+  background: var(--bg-tertiary);
   color: var(--fg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
   cursor: pointer;
   font-size: var(--font-xs);
   font-family: var(--font-ui);
   white-space: nowrap;
   max-width: 180px;
+  transition: background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   -webkit-app-region: no-drag;
 }
 
 .lastItemBtn:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 /* Severity tints — the pill is a notification, not a neutral button: make the

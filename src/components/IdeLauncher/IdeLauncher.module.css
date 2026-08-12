@@ -8,19 +8,15 @@
 }
 
 .btn {
+  composes: btn from "../shared/controls.module.css";
+  /* Split-button geometry: fixed 26px height, compact padding, and toolbar
+     drag-region opt-out. Composed rules drive color, radius, border, hover
+     wash, and focus ring. */
   -webkit-app-region: no-drag;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
   height: 26px;
   padding: 0 6px;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  color: var(--fg-secondary);
+  gap: 4px;
   font-size: var(--font-xs);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
 .main {
@@ -31,18 +27,15 @@
 .arrowBtn {
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
   padding: 0 5px;
-  border-left: 1px solid var(--border);
+  border-left: 1px solid var(--border-subtle);
 }
 
+/* Hovering anywhere on the split lights both halves — kept as-is so the
+   main and arrow buttons visually connect on hover. */
 .split:hover .btn:not(:disabled) {
   background: var(--bg-highlight);
   color: var(--fg-primary);
   border-color: var(--accent);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .icon {
