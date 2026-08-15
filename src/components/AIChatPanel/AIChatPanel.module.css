@@ -11,6 +11,11 @@
   overflow: hidden;
 }
 
+/* Compound selectors outrank the `display` each target sets on its own — .panel
+   is declared above this rule, .messageList below it, so source order alone
+   would hide one and not the other. */
+.panel.hidden,
+.messageList.hidden,
 .hidden {
   display: none;
 }

@@ -4,6 +4,10 @@
   composes: overlay from "../shared/dialog.module.css";
 }
 
+/* Compound selector: the composed dialog `.overlay` sets `display: flex` from a
+   different file, where injection order (not source order) would decide a
+   single-class tie. `.overlay.hidden` outranks it by specificity regardless. */
+.overlay.hidden,
 .hidden {
   display: none;
 }

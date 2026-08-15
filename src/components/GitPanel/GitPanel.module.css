@@ -12,6 +12,9 @@
   outline: none;
 }
 
+/* Compound selector: `.panel` sets its own `display`, which ties with a bare
+   `.hidden` on specificity and would be decided by rule order alone. */
+.panel.hidden,
 .hidden {
   display: none;
 }
