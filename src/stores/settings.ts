@@ -3,6 +3,7 @@ import { setLocale } from "../i18n";
 import { invoke } from "../invoke";
 import type { IssueFilterMode } from "../types";
 import { runSerializedConfigWrite, updateAppConfig } from "../utils/updateAppConfig";
+import { ZOOM_DEFAULT, ZOOM_MAX, ZOOM_MIN } from "../zoomLevels";
 import { appLogger } from "./appLogger";
 import { toastsStore } from "./toasts";
 
@@ -85,6 +86,7 @@ interface RustAppConfig {
 	terminal_drag_selects?: boolean;
 	import_tools_enabled?: boolean;
 	terminal_scroll_sensitivity?: number;
+	app_zoom?: number;
 }
 
 // Default values
@@ -402,6 +404,8 @@ interface SettingsStoreState {
 	importToolsEnabled: boolean;
 	/** Terminal wheel-scroll sensitivity in percent (100 = raw device delta) */
 	terminalScrollSensitivity: number;
+	/** App-wide webview zoom factor (1 = 100%) */
+	appZoom: number;
 }
 
 const SAVE_DEBOUNCE_MS = 500;
@@ -462,6 +466,7 @@ function createSettingsStore() {
 		terminalDragSelects: true,
 		importToolsEnabled: true,
 		terminalScrollSensitivity: 70,
+		appZoom: ZOOM_DEFAULT,
 	});
 
 	// Cache of the last loaded config, refreshed on hydrate and each persist.
@@ -538,6 +543,7 @@ function createSettingsStore() {
 		config.terminal_drag_selects = state.terminalDragSelects;
 		config.import_tools_enabled = state.importToolsEnabled;
 		config.terminal_scroll_sensitivity = state.terminalScrollSensitivity;
+		config.app_zoom = state.appZoom;
 		return config;
 	}
 
@@ -654,6 +660,7 @@ function createSettingsStore() {
 				setState("terminalDragSelects", config.terminal_drag_selects ?? true);
 				setState("importToolsEnabled", config.import_tools_enabled ?? true);
 				setState("terminalScrollSensitivity", config.terminal_scroll_sensitivity ?? 70);
+				setState("appZoom", config.app_zoom ?? ZOOM_DEFAULT);
 				hydrated = true;
 			} catch (err) {
 				appLogger.error("config", "Failed to hydrate settings — persistence disabled for this session", err);
@@ -940,6 +947,12 @@ function createSettingsStore() {
 		/** Set terminal wheel-scroll sensitivity in percent (clamped 20–200) */
 		setTerminalScrollSensitivity(percent: number): void {
 			setState("terminalScrollSensitivity", Math.min(200, Math.max(20, Math.round(percent))));
+			save();
+		},
+
+		/** Set the app-wide zoom factor (clamped to the zoom ladder's range) */
+		setAppZoom(level: number): void {
+			setState("appZoom", Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, level)));
 			save();
 		},
 

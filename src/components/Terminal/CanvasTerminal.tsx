@@ -41,7 +41,13 @@ import { kittySequenceForKey } from "./kittyKeyboard";
 import { filePathRegex, fileUrlRegex } from "./linkProvider";
 import { createClickDragArbiter } from "./mouseGesture";
 import { continuationRowsAfterSuggest, isSuggestBlock } from "./suggestOverlay";
-import { altSequenceFromCode, cmdSequenceForKey, createCompositionState, keyToSequence } from "./terminalInput";
+import {
+	altSequenceFromCode,
+	cmdSequenceForKey,
+	createCompositionState,
+	isSystemReservedKey,
+	keyToSequence,
+} from "./terminalInput";
 
 // Re-export for external consumers
 export type { CellMetrics, CursorShape, DecodedFrame };
@@ -2092,6 +2098,11 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			}
 			resetBlink();
 
+			// Hand macOS back its own bindings before anything here can consume them.
+			// The terminal holds focus almost all the time, so a preventDefault here
+			// is what stops Mission Control, Spaces and App Exposé from ever firing.
+			if (isSystemReservedKey(e, isMacOS())) return;
+
 			if (e.ctrlKey && e.metaKey && !blockTimestampsVisible) {
 				blockTimestampsVisible = true;
 				fullRepaintNeeded = true;
@@ -2115,8 +2126,11 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				return;
 			}
 
-			// Cmd+Up/Down (macOS) or Ctrl+Up/Down (Win/Linux): navigate between command blocks (OSC 133)
-			if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+			// Cmd+Up/Down (macOS) or Ctrl+Up/Down (Win/Linux): navigate between command blocks (OSC 133).
+			// Platform-gated: an ungated `metaKey || ctrlKey` also claimed Ctrl+Up/Down
+			// on macOS, which is Mission Control / App Exposé.
+			const blockNavMod = isMacOS() ? e.metaKey : e.ctrlKey;
+			if (blockNavMod && !e.altKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
 				const term = terminalsStore.get(props.terminalId);
 				if (term) {
 					const blocks = term.commandBlocks;

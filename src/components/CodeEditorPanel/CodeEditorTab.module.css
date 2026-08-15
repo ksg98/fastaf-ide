@@ -23,7 +23,15 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  /* Override global user-select:none so CodeMirror text selection & copy work */
+}
+
+/* Override global user-select:none so CodeMirror text selection & copy work.
+   The descendant wildcard is load-bearing: `*` in global.css sets none on every
+   element CodeMirror generates (.cm-scroller/.cm-content/.cm-line), and CM's own
+   base theme never sets it back, so styling only the host left a selection that
+   stopped at the first child. */
+.editorContent,
+.editorContent * {
   -webkit-user-select: text;
   user-select: text;
 }

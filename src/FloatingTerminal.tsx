@@ -9,6 +9,7 @@ import { settingsStore } from "./stores/settings";
 import { terminalsStore } from "./stores/terminals";
 import { applyAppTheme, applyFontFamily, listenForThemeChanges, loadThemes, themesLoaded } from "./themes";
 import { syncVibrancy } from "./vibrancy";
+import { syncAppZoom } from "./zoom";
 
 const MIN_FONT_SIZE = 8;
 const MAX_FONT_SIZE = 32;
@@ -67,6 +68,7 @@ export const FloatingTerminal: Component = () => {
 			.catch((e) => appLogger.warn("settings", "Failed to hydrate floating terminal settings", { error: String(e) }));
 		await loadThemes();
 		syncVibrancy();
+		syncAppZoom();
 		void listenForThemeChanges();
 
 		// Set window title

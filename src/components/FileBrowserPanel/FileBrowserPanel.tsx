@@ -30,6 +30,7 @@ import s from "./FileBrowserPanel.module.css";
 import { FileIcon } from "./FileIcon";
 import { fileTooltip, formatSize, getStatusClass } from "./fileUtils";
 import { TreeNode } from "./TreeNode";
+import { revalidateTreeCache } from "./treeRevalidate";
 
 export interface FileBrowserPanelProps {
 	visible: boolean;
@@ -385,17 +386,13 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			appLogger.warn("app", `Dir watcher failed for ${absPath}: ${err}`);
 		});
 
-		// Listen for dir-changed events matching this path
+		// Listen for dir-changed events matching this path. Tree-cache invalidation
+		// is NOT done here: `dir_path` is absolute while treeCache is keyed by
+		// repo-relative paths, and this watcher is non-recursive so it never sees
+		// writes into expanded subfolders anyway. The revalidation effect below
+		// handles the tree off this revision bump.
 		const unlisten = listen<{ dir_path: string }>("dir-changed", (event) => {
-			if (event.payload.dir_path === absPath) {
-				setDirRevision((n) => n + 1);
-				// Invalidate only the changed directory in tree cache
-				setTreeCache((prev) => {
-					const next = new Map(prev);
-					next.delete(event.payload.dir_path);
-					return next;
-				});
-			}
+			if (event.payload.dir_path === absPath) setDirRevision((n) => n + 1);
 		});
 
 		onCleanup(() => {
@@ -403,6 +400,38 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				appLogger.warn("app", `Failed to stop dir watcher for ${absPath}`, err);
 			});
 			unlisten.then((fn) => fn());
+		});
+	});
+
+	// Tree-cache revalidation. TreeNode fetches a folder's children once, on first
+	// expand, and never again while the key stays in treeCache — so re-listing the
+	// root leaves every expanded subfolder frozen at its first read. In-app creates
+	// hid this by wiping the whole cache via refresh(); externally written files
+	// (an agent, the terminal) have no such path and so never appeared in tree view
+	// while flat view — which renders straight off entries() — updated fine.
+	//
+	// Re-list each cached folder and swap in only the ones that actually changed:
+	// wiping the cache instead would collapse every expanded folder to empty for a
+	// frame, and handing back fresh arrays for unchanged folders would repaint the
+	// whole tree on every watcher tick.
+	let treeRevalidateGeneration = 0;
+	createEffect(() => {
+		if (!props.visible || viewMode() !== "tree") return;
+		const fsRoot = root();
+		if (!fsRoot) return;
+		// Both signals: repo-changed is recursive but skips gitignored paths, the
+		// dir watcher is non-recursive but sees them for the current directory.
+		void (props.repoPath ? repositoriesStore.getRevision(props.repoPath) : 0);
+		void dirRevision();
+		void refreshTrigger();
+
+		const cached = untrack(() => treeCache());
+		if (cached.size === 0) return;
+		const gen = ++treeRevalidateGeneration;
+
+		void revalidateTreeCache(cached, (dir) => fb.listDirectory(fsRoot, dir)).then((next) => {
+			if (gen !== treeRevalidateGeneration || next === cached) return;
+			setTreeCache(next);
 		});
 	});
 
