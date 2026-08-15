@@ -946,8 +946,7 @@ const App: Component = () => {
 
 					{/* Status bar */}
 					<StatusBar
-						fontSize={terminalLifecycle.activeFontSize()}
-						defaultFontSize={getDefaultFontSize()}
+						zoomLevel={settingsStore.state.appZoom}
 						statusInfo={statusInfo()}
 						onToggleDiff={() => togglePanel("git")}
 						onToggleMarkdown={() => uiStore.toggleMarkdownPanel()}

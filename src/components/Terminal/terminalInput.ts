@@ -51,6 +51,24 @@ function modifierParam(e: KeyboardEvent): number {
 }
 
 /**
+ * Combos macOS resolves itself, which the terminal must therefore leave alone.
+ *
+ * Control with an arrow or navigation key drives Mission Control, App Exposé and
+ * Spaces switching; `fn` + arrow arrives as Home/End/PageUp/PageDown, so
+ * `fn + ctrl + ←` reaches us as `Home` with ctrlKey set. Encoding any of these
+ * means calling preventDefault, and a prevented keydown never reaches AppKit —
+ * the system binding silently dies for as long as the terminal has focus, which
+ * is most of the time.
+ *
+ * Terminal.app and iTerm behave the same way: the system claims these first, so
+ * passing them through is parity, not a lost capability.
+ */
+export function isSystemReservedKey(e: KeyboardEvent, mac: boolean): boolean {
+	if (!mac || !e.ctrlKey || e.metaKey) return false;
+	return e.key in ARROW_SUFFIX || e.key in NAV_KEYS;
+}
+
+/**
  * Convert a KeyboardEvent to the terminal escape sequence string to send to the PTY.
  * Returns null if the key should not be handled (modifier-only, Meta/Cmd).
  */
@@ -69,9 +87,18 @@ export function keyToSequence(e: KeyboardEvent): string | null {
 	const fKey = F_KEYS[e.key];
 	if (fKey) return fKey;
 
-	// Navigation keys
+	// Navigation keys. Modifiers get encoded rather than dropped: `fn + shift + ←`
+	// arrives as Shift+Home, and returning the bare sequence silently discarded the
+	// Shift, so the PTY saw a plain Home.
 	const navKey = NAV_KEYS[e.key];
-	if (navKey) return navKey;
+	if (navKey) {
+		const mod = modifierParam(e);
+		if (mod === 1) return navKey;
+		// `\x1b[H` / `\x1b[F` take the `1;mod` form; the `\x1b[N~` keys take `N;mod`.
+		const body = navKey.slice(2, -1);
+		const suffix = navKey.slice(-1);
+		return `\x1b[${body === "" ? "1" : body};${mod}${suffix}`;
+	}
 
 	// Simple named keys
 	switch (e.key) {

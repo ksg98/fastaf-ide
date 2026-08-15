@@ -61,7 +61,12 @@ pub fn build_menu(app: &App) -> Result<tauri::menu::Menu<Wry>, tauri::Error> {
         // reaches the focused keyInputRef → CanvasTerminal's `paste` event handler (bracketed
         // paste + image support) with no prompt.
         .item(&PredefinedMenuItem::paste(app, None)?)
-        .item(&PredefinedMenuItem::select_all(app, None)?)
+        // Select All is custom, not predefined: the native `selectAll:` is a
+        // DOM-level selection, and CodeMirror renders only the viewport of its
+        // document — so ⌘A in an editor tab selected just the on-screen lines.
+        // The custom item routes to JS, which asks CodeMirror to select its full
+        // document and falls back to normal DOM behaviour everywhere else.
+        .item(&item!("select-all", "Select All", "CmdOrCtrl+A"))
         .separator()
         .item(&item!("find-in-terminal", "Find in Content", "CmdOrCtrl+F"))
         .separator()

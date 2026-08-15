@@ -6,8 +6,10 @@ import { repositoriesStore } from "../../../stores/repositories";
 import type { FontType } from "../../../stores/settings";
 import { FONT_FAMILIES, settingsStore } from "../../../stores/settings";
 import { uiStore } from "../../../stores/ui";
-import { syncVibrancy } from "../../../vibrancy";
 import { getTerminalTheme, getThemeNames } from "../../../themes";
+import { syncVibrancy } from "../../../vibrancy";
+import { applyAppZoom } from "../../../zoom";
+import { ZOOM_MAX, ZOOM_MIN } from "../../../zoomLevels";
 import { UiLegend } from "../../HelpPanel/UiLegend";
 import { ColorSwatchPicker } from "../../shared/ColorSwatchPicker";
 import { DEFAULT_COLOR_PRESETS } from "../../shared/colorPresets";
@@ -453,6 +455,20 @@ export const AppearanceTab: Component = () => {
 						onChange={(v) => settingsStore.setFont(v as FontType)}
 						options={fontOptions}
 						hint={t("appearance.hint.terminalFont", "Monospace font for terminals")}
+					/>
+
+					<SettingSlider
+						label={t("appearance.label.appZoom", "App Zoom")}
+						value={Math.round(settingsStore.state.appZoom * 100)}
+						onChange={(v) => {
+							settingsStore.setAppZoom(v / 100);
+							void applyAppZoom(settingsStore.state.appZoom);
+						}}
+						min={Math.round(ZOOM_MIN * 100)}
+						max={Math.round(ZOOM_MAX * 100)}
+						step={5}
+						suffix="%"
+						hint={t("appearance.hint.appZoom", "Scales the entire interface, including terminals (Cmd +/-)")}
 					/>
 
 					<SettingSlider

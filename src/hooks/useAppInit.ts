@@ -15,8 +15,9 @@ import { isTauri } from "../transport";
 import type { SavedTerminal } from "../types";
 import { assignTabToActiveGroup } from "../utils/paneTabAssign";
 import { isAbsolutePath, normalizeSep, pathStartsWith, pathStripPrefix } from "../utils/pathUtils";
-import { createRevisionCoalescer } from "./revisionCoalescer";
 import { syncVibrancy } from "../vibrancy";
+import { syncAppZoom } from "../zoom";
+import { createRevisionCoalescer } from "./revisionCoalescer";
 
 /** Track PTY sessions created by the browser client so we only close our own on unload */
 export const browserCreatedSessions = new Set<string>();
@@ -235,6 +236,7 @@ export async function initApp(deps: AppInitDeps) {
 	await loadThemes();
 	applyAppTheme(settingsStore.state.theme);
 	syncVibrancy();
+	syncAppZoom();
 	void listenForThemeChanges();
 
 	// Load .tuic.json local configs for all repos (fire-and-forget, non-blocking)

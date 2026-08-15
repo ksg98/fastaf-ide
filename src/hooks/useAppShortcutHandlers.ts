@@ -26,6 +26,8 @@ import { writeClipboard } from "../utils/clipboard";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { nextWaitingTerminal } from "../utils/nextWaitingTerminal";
 import { isAbsolutePath, joinPath, pathStripPrefix } from "../utils/pathUtils";
+import { applyAppZoom } from "../zoom";
+import { nextZoomStep, ZOOM_DEFAULT } from "../zoomLevels";
 import type { useGitOperations } from "./useGitOperations";
 import type { ShortcutHandlers } from "./useKeyboardShortcuts";
 import type { useQuickSwitcher } from "./useQuickSwitcher";
@@ -79,13 +81,23 @@ function activeFileTabPath(): { abs: string; root: string } | null {
 	return null;
 }
 
+/** Persist a zoom level and push it into this webview. */
+function setAppZoom(level: number): void {
+	settingsStore.setAppZoom(level);
+	void applyAppZoom(settingsStore.state.appZoom);
+}
+
 /** Constructs the shared keyboard, palette, and native-menu action callbacks. */
 export function useAppShortcutHandlers(options: AppShortcutHandlerOptions): ShortcutHandlers {
 	const { terminalLifecycle, gitOps, splitPanes, quickSwitcher } = options;
 	return {
-		zoomIn: () => (mdTabsStore.state.activeId ? mdTabsStore.zoomIn() : terminalLifecycle.zoomIn()),
-		zoomOut: () => (mdTabsStore.state.activeId ? mdTabsStore.zoomOut() : terminalLifecycle.zoomOut()),
-		zoomReset: () => (mdTabsStore.state.activeId ? mdTabsStore.zoomReset() : terminalLifecycle.zoomReset()),
+		// Cmd +/-/0 zoom the whole app, the way Cursor and VS Code do. They used to
+		// resize only the active terminal's (or markdown tab's) font, which left the
+		// rest of the UI fixed. Per-terminal font size is still reachable through
+		// Cmd+Shift +/-/0 below and the Appearance settings.
+		zoomIn: () => setAppZoom(nextZoomStep(settingsStore.state.appZoom, 1)),
+		zoomOut: () => setAppZoom(nextZoomStep(settingsStore.state.appZoom, -1)),
+		zoomReset: () => setAppZoom(ZOOM_DEFAULT),
 		zoomInAll: terminalLifecycle.zoomInAll,
 		zoomOutAll: terminalLifecycle.zoomOutAll,
 		zoomResetAll: terminalLifecycle.zoomResetAll,

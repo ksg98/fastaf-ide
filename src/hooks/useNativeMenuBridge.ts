@@ -15,6 +15,7 @@ import { tunnelPanelStore } from "../stores/tunnelPanel";
 import { uiStore } from "../stores/ui";
 import { updaterStore } from "../stores/updater";
 import { handleOpenUrl } from "../utils/openUrl";
+import { selectAllInFocused } from "../utils/selectAll";
 import type { useGitOperations } from "./useGitOperations";
 import type { ShortcutHandlers } from "./useKeyboardShortcuts";
 import type { useSplitPanes } from "./useSplitPanes";
@@ -76,6 +77,9 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 		}
 		case "copy":
 			terminalLifecycle.copyFromTerminal();
+			break;
+		case "select-all":
+			selectAllInFocused();
 			break;
 		case "clear-terminal":
 			terminalLifecycle.clearTerminal();

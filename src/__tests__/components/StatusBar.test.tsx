@@ -128,8 +128,7 @@ function findToggleByTitle(container: HTMLElement, titlePart: string): HTMLEleme
 
 describe("StatusBar", () => {
 	const defaultProps = {
-		fontSize: 14,
-		defaultFontSize: 14,
+		zoomLevel: 1,
 		statusInfo: "Ready",
 		onToggleDiff: vi.fn(),
 		onToggleMarkdown: vi.fn(),

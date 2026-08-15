@@ -4,6 +4,7 @@ import {
 	cmdSequenceForKey,
 	createCompositionState,
 	DUP_KEYDOWN_WINDOW_MS,
+	isSystemReservedKey,
 	keyToSequence,
 } from "../../components/Terminal/terminalInput";
 
@@ -450,5 +451,77 @@ describe("createCompositionState — dead-key / IME composition", () => {
 		// No compositionend yet — user is mid dead-key sequence
 		expect(state.shouldSuppressKeydown(true)).toBe(true);
 		expect(state.shouldSuppressKeydown(true)).toBe(true);
+	});
+});
+
+describe("isSystemReservedKey", () => {
+	const evt = (key: string, opts: Partial<KeyboardEvent> = {}): KeyboardEvent =>
+		({
+			key,
+			code: "",
+			ctrlKey: false,
+			altKey: false,
+			shiftKey: false,
+			metaKey: false,
+			...opts,
+		}) as unknown as KeyboardEvent;
+
+	// The terminal holds focus nearly all the time, so consuming these means the
+	// macOS binding never fires anywhere in the app.
+	it("leaves Control+arrow to macOS (Mission Control, Spaces, App Expose)", () => {
+		for (const key of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"]) {
+			expect(isSystemReservedKey(evt(key, { ctrlKey: true }), true), key).toBe(true);
+		}
+	});
+
+	it("leaves fn+ctrl+arrow to macOS — fn+arrow arrives as Home/End/PageUp/PageDown", () => {
+		for (const key of ["Home", "End", "PageUp", "PageDown"]) {
+			expect(isSystemReservedKey(evt(key, { ctrlKey: true }), true), key).toBe(true);
+		}
+	});
+
+	it("claims nothing off macOS, where Ctrl+arrow is the terminal's own word motion", () => {
+		expect(isSystemReservedKey(evt("ArrowLeft", { ctrlKey: true }), false)).toBe(false);
+		expect(isSystemReservedKey(evt("Home", { ctrlKey: true }), false)).toBe(false);
+	});
+
+	it("claims nothing without Control, or when Cmd is also held", () => {
+		expect(isSystemReservedKey(evt("ArrowLeft"), true)).toBe(false);
+		expect(isSystemReservedKey(evt("ArrowLeft", { altKey: true }), true)).toBe(false);
+		expect(isSystemReservedKey(evt("ArrowLeft", { ctrlKey: true, metaKey: true }), true)).toBe(false);
+	});
+
+	it("claims nothing for ordinary keys", () => {
+		expect(isSystemReservedKey(evt("a", { ctrlKey: true }), true)).toBe(false);
+		expect(isSystemReservedKey(evt("Enter", { ctrlKey: true }), true)).toBe(false);
+	});
+});
+
+describe("navigation keys carry their modifiers", () => {
+	const evt = (key: string, opts: Partial<KeyboardEvent> = {}): KeyboardEvent =>
+		({
+			key,
+			code: "",
+			ctrlKey: false,
+			altKey: false,
+			shiftKey: false,
+			metaKey: false,
+			...opts,
+		}) as unknown as KeyboardEvent;
+
+	// Modifiers used to be dropped, so Shift+Home reached the PTY as a bare Home.
+	it("encodes Home/End in the 1;mod form", () => {
+		expect(keyToSequence(evt("Home", { shiftKey: true }))).toBe("\x1b[1;2H");
+		expect(keyToSequence(evt("End", { shiftKey: true }))).toBe("\x1b[1;2F");
+	});
+
+	it("encodes tilde-form nav keys in the N;mod form", () => {
+		expect(keyToSequence(evt("PageUp", { shiftKey: true }))).toBe("\x1b[5;2~");
+		expect(keyToSequence(evt("Delete", { altKey: true }))).toBe("\x1b[3;3~");
+	});
+
+	it("still emits the bare sequence with no modifiers", () => {
+		expect(keyToSequence(evt("Home"))).toBe("\x1b[H");
+		expect(keyToSequence(evt("PageDown"))).toBe("\x1b[6~");
 	});
 });

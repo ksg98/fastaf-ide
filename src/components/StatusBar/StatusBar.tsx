@@ -35,8 +35,8 @@ import s from "./StatusBar.module.css";
 import { TickerArea } from "./TickerArea";
 
 export interface StatusBarProps {
-	fontSize: number;
-	defaultFontSize: number;
+	/** App zoom factor, where 1 is 100%. */
+	zoomLevel: number;
 	statusInfo: string;
 	onToggleDiff: () => void;
 	onToggleMarkdown: () => void;
@@ -220,7 +220,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 		<div id="status-bar" class={s.bar}>
 			{/* Left section */}
 			<div class={s.section}>
-				<ZoomIndicator fontSize={props.fontSize} defaultFontSize={props.defaultFontSize} />
+				<ZoomIndicator level={props.zoomLevel} />
 				<Show when={props.statusInfo}>
 					<span
 						class={cx(s.info, infoPulse() && s.infoPulse)}

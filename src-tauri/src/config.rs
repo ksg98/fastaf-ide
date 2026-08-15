@@ -646,10 +646,17 @@ pub(crate) struct AppConfig {
     /// Terminal wheel-scroll sensitivity in percent (100 = raw device delta).
     #[serde(default = "default_scroll_sensitivity")]
     pub(crate) terminal_scroll_sensitivity: u16,
+    /// App-wide zoom factor applied to the webview (1.0 = 100%).
+    #[serde(default = "default_app_zoom")]
+    pub(crate) app_zoom: f64,
 }
 
 fn default_scroll_sensitivity() -> u16 {
     70
+}
+
+fn default_app_zoom() -> f64 {
+    1.0
 }
 
 /// A user-defined launcher for the "Open in" menu. The executable is spawned
@@ -794,6 +801,7 @@ impl Default for AppConfig {
             terminal_drag_selects: true,
             import_tools_enabled: true,
             terminal_scroll_sensitivity: default_scroll_sensitivity(),
+            app_zoom: default_app_zoom(),
         }
     }
 }
@@ -2373,6 +2381,7 @@ mod tests {
             terminal_drag_selects: false,
             import_tools_enabled: false,
             terminal_scroll_sensitivity: 40,
+            app_zoom: 1.25,
         };
         let loaded: AppConfig = round_trip_in_dir(dir.path(), "config.json", &cfg);
         assert_eq!(loaded.shell.as_deref(), Some("/bin/zsh"));
@@ -2413,6 +2422,7 @@ mod tests {
         assert!(!loaded.terminal_drag_selects);
         assert!(!loaded.import_tools_enabled);
         assert_eq!(loaded.terminal_scroll_sensitivity, 40);
+        assert!((loaded.app_zoom - 1.25).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -2452,6 +2462,7 @@ mod tests {
         assert!(loaded.terminal_drag_selects); // defaults to true
         assert!(loaded.import_tools_enabled); // defaults to true
         assert_eq!(loaded.terminal_scroll_sensitivity, 70); // default percent
+        assert!((loaded.app_zoom - 1.0).abs() < f64::EPSILON); // default zoom
     }
 
     #[test]
