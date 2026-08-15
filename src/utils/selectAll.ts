@@ -1,5 +1,3 @@
-import { EditorView } from "@codemirror/view";
-
 /**
  * Select all content in whatever currently has focus.
  *
@@ -12,9 +10,13 @@ import { EditorView } from "@codemirror/view";
  * Routing through here instead lets CodeMirror select its full document via its
  * own state, and leaves every other target on the ordinary DOM behaviour.
  *
- * Returns false when nothing could be selected, so callers can fall back.
+ * CodeMirror is imported dynamically on purpose: it ships in a lazy chunk that
+ * only loads with an editor tab, and a static import here would pull the whole
+ * editor into the initial bundle — which the frontend budget check rejects. By
+ * the time this branch can be reached the chunk is already resolved, so the
+ * await costs nothing.
  */
-export function selectAllInFocused(): boolean {
+export async function selectAllInFocused(): Promise<boolean> {
 	const active = document.activeElement as HTMLElement | null;
 	if (!active) return false;
 
@@ -24,18 +26,20 @@ export function selectAllInFocused(): boolean {
 	}
 
 	const host = active.closest(".cm-editor");
-	const view = host instanceof HTMLElement ? EditorView.findFromDOM(host) : null;
-	if (view) {
-		view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
-		view.focus();
-		return true;
+	if (host instanceof HTMLElement) {
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(host);
+		if (view) {
+			view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+			view.focus();
+			return true;
+		}
 	}
 
-	// Any other editable or plain region: the DOM selection is the whole story.
-	const target = active.isContentEditable ? active : null;
-	if (target) {
+	// Any other editable region: the DOM selection is the whole story.
+	if (active.isContentEditable) {
 		const range = document.createRange();
-		range.selectNodeContents(target);
+		range.selectNodeContents(active);
 		const sel = window.getSelection();
 		if (!sel) return false;
 		sel.removeAllRanges();
