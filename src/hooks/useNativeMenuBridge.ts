@@ -79,7 +79,7 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 			terminalLifecycle.copyFromTerminal();
 			break;
 		case "select-all":
-			selectAllInFocused();
+			void selectAllInFocused();
 			break;
 		case "clear-terminal":
 			terminalLifecycle.clearTerminal();
