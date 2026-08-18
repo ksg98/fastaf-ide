@@ -27,13 +27,16 @@ export async function selectAllInFocused(): Promise<boolean> {
 
 	const host = active.closest(".cm-editor");
 	if (host instanceof HTMLElement) {
-		const { EditorView } = await import("@codemirror/view");
-		const view = EditorView.findFromDOM(host);
+		const view = await findEditorView(host);
 		if (view) {
 			view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
 			view.focus();
 			return true;
 		}
+		// Deliberately no DOM fallback here: a range over `.cm-content` covers only
+		// the rendered viewport, which is the partial selection this function exists
+		// to avoid. Selecting nothing is the honest outcome.
+		return false;
 	}
 
 	// Any other editable region: the DOM selection is the whole story.
@@ -48,4 +51,38 @@ export async function selectAllInFocused(): Promise<boolean> {
 	}
 
 	return false;
+}
+
+/** Resolve the EditorView behind a `.cm-editor` host. Split out so the copy path
+ *  can reuse it, and so the dynamic import stays in one place. */
+async function findEditorView(host: HTMLElement) {
+	const { EditorView } = await import("@codemirror/view");
+	return EditorView.findFromDOM(host);
+}
+
+/**
+ * The text currently selected in the focused editor, read from CodeMirror's
+ * document rather than the DOM.
+ *
+ * Returns `null` when focus is not inside an editor, so callers can fall back to
+ * their own surface, and `""` when an editor is focused with nothing selected.
+ *
+ * This is the other half of the ⌘A story: ⌘A selects the whole document through
+ * `selectAllInFocused`, but a copy that reads `window.getSelection()` sees only
+ * the lines CodeMirror has rendered — so copying after select-all yielded just
+ * the viewport, and yielded *more* after scrolling. Reading the state keeps the
+ * two consistent for files of any size.
+ */
+export async function selectedTextInFocusedEditor(): Promise<string | null> {
+	const active = document.activeElement as HTMLElement | null;
+	const host = active?.closest(".cm-editor");
+	if (!(host instanceof HTMLElement)) return null;
+
+	const view = await findEditorView(host);
+	if (!view) return null;
+
+	return view.state.selection.ranges
+		.filter((range) => !range.empty)
+		.map((range) => view.state.sliceDoc(range.from, range.to))
+		.join("\n");
 }

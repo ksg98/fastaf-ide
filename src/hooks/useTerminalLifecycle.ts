@@ -13,6 +13,7 @@ import { terminalsStore } from "../stores/terminals";
 import { readClipboard, writeClipboard } from "../utils/clipboard";
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { assignTabToActiveGroup } from "../utils/paneTabAssign";
+import { selectedTextInFocusedEditor } from "../utils/selectAll";
 import { filterValidTerminals } from "../utils/terminalFilter";
 
 const MIN_FONT_SIZE = 8;
@@ -414,8 +415,25 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 
 	const copyFromTerminal = async () => {
 		try {
+			// An editor tab keeps its document in a rope and renders only the viewport,
+			// so `window.getSelection()` sees just the on-screen lines: ⌘A selected the
+			// whole file but ⌘C copied a fragment, and copied more after scrolling.
+			// Read the selection out of CodeMirror's state instead. Null means focus is
+			// not in an editor; an empty string means an editor is focused with nothing
+			// selected, which must NOT fall through to a stale terminal selection.
+			const editorSelection = await selectedTextInFocusedEditor();
+			if (editorSelection !== null) {
+				if (editorSelection) {
+					// No per-line trimEnd here — that is a terminal concern (canvas rows are
+					// space-padded); file content must be copied byte-for-byte.
+					await writeClipboard(editorSelection);
+					deps.setStatusInfo("Copied to clipboard");
+				}
+				return;
+			}
+
 			// Prefer xterm's selection (canvas-rendered, invisible to DOM).
-			// Fall back to DOM selection for non-terminal panels (code editor, etc.).
+			// Fall back to DOM selection for non-terminal panels.
 			const active = terminalsStore.getActive();
 			const rawSel = active?.ref?.getSelection() || window.getSelection()?.toString();
 			const selection = rawSel
