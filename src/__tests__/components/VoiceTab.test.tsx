@@ -163,9 +163,7 @@ describe("VoiceTab", () => {
 
 		// Once the file exists, the selected voice is Active and the fetch
 		// button is gone.
-		store.state.voices = store.state.voices.map((v) =>
-			v.id === "af_heart" ? { ...v, downloaded: true } : v,
-		);
+		store.state.voices = store.state.voices.map((v) => (v.id === "af_heart" ? { ...v, downloaded: true } : v));
 		render(() => <VoiceTab />);
 		expect(screen.getByText("Active")).toBeTruthy();
 		expect(screen.getAllByText("Get & use")).toHaveLength(1);

@@ -105,13 +105,7 @@ function drawConnection(ctx: Ctx2D, conn: Connection, colors: readonly string[])
  * lane below (a cell no commit occupies). A short crossbar perpendicular to the
  * lane, visually distinct from the vertical line.
  */
-function drawLaneStartCap(
-	ctx: Ctx2D,
-	col: number,
-	row: number,
-	colorIndex: number,
-	colors: readonly string[],
-): void {
+function drawLaneStartCap(ctx: Ctx2D, col: number, row: number, colorIndex: number, colors: readonly string[]): void {
 	const x = col * LANE_WIDTH + LANE_WIDTH / 2;
 	const y = row * ROW_HEIGHT + ROW_HEIGHT / 2;
 
