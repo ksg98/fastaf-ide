@@ -2,7 +2,9 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { drawSelection, EditorView, keymap } from "@codemirror/view";
 import { createCodeMirror } from "solid-codemirror";
 import { type Accessor, type Component, createEffect, on, onCleanup } from "solid-js";
+import { isMacOS } from "../../platform";
 import { cx } from "../../utils";
+import { passThroughMacSystemKeys } from "../../utils/macSystemKeys";
 import s from "./ComposePanel.module.css";
 
 const composeTheme = EditorView.theme(
@@ -127,7 +129,14 @@ export const ComposePanel: Component<ComposePanelProps> = (props) => {
 
 	return (
 		<div class={cx(s.panel, props.isOpen() && s.panelOpen)} onMouseDown={(e) => e.stopPropagation()}>
-			<div class={s.editor} ref={ref} />
+			<div
+				class={s.editor}
+				ref={(el) => {
+					// Same macOS system-combo yield as the code editor (see macSystemKeys).
+					onCleanup(passThroughMacSystemKeys(el, isMacOS()));
+					ref(el);
+				}}
+			/>
 			<div class={s.statusBar}>
 				<span>Ctrl+Enter to send &middot; Esc to close</span>
 				<button class={s.sendButton} onClick={handleSend} title="Send (Ctrl+Enter)">

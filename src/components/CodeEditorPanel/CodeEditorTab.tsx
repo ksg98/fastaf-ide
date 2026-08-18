@@ -35,6 +35,7 @@ import { settingsStore } from "../../stores/settings";
 import { uiStore } from "../../stores/ui";
 import { writeClipboard } from "../../utils/clipboard";
 import { openFileAction } from "../../utils/filePreview";
+import { passThroughMacSystemKeys } from "../../utils/macSystemKeys";
 import { isAbsolutePath } from "../../utils/pathUtils";
 import { ContextMenu, createContextMenu } from "../ContextMenu";
 import e from "../shared/editor-header.module.css";
@@ -836,6 +837,12 @@ export const CodeEditorTab: Component<CodeEditorTabProps> = (props) => {
 					class={s.editorContent}
 					ref={(el) => {
 						editorDiv = el;
+						// Yield Ctrl+arrow / Ctrl+fn+arrow to macOS (Mission Control, Spaces,
+						// App Exposé) — CodeMirror's default keymap binds them and would
+						// preventDefault, killing the system binding while an editor tab has
+						// focus. See utils/macSystemKeys.ts.
+						const detachSystemKeys = passThroughMacSystemKeys(el, isMacOS());
+						onCleanup(detachSystemKeys);
 						ref(el);
 					}}
 					style={{ display: loading() || error() ? "none" : undefined }}

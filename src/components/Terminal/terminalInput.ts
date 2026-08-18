@@ -1,3 +1,5 @@
+import { isMacSystemReservedKey } from "../../utils/macSystemKeys";
+
 // Terminal keyboard input → escape sequence mapping.
 // Pure function: KeyboardEvent → string (to send to PTY) or null (don't handle).
 
@@ -64,8 +66,7 @@ function modifierParam(e: KeyboardEvent): number {
  * passing them through is parity, not a lost capability.
  */
 export function isSystemReservedKey(e: KeyboardEvent, mac: boolean): boolean {
-	if (!mac || !e.ctrlKey || e.metaKey) return false;
-	return e.key in ARROW_SUFFIX || e.key in NAV_KEYS;
+	return isMacSystemReservedKey(e, mac);
 }
 
 /**
