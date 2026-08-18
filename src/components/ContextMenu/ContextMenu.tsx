@@ -1,4 +1,5 @@
 import { type Component, createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { Portal } from "solid-js/web";
 import { cx } from "../../utils";
 import s from "./ContextMenu.module.css";
 
@@ -251,22 +252,34 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
 		onCleanup(() => cancelAnimationFrame(raf));
 	});
 
+	// Portalled to <body> deliberately. `.menu` is position: fixed and positioned
+	// in client coordinates, but menus are rendered inside their owning panel, and
+	// the glass panels carry `backdrop-filter` — which makes an element the
+	// containing block for fixed descendants (same as `filter`). Left in place, the
+	// menu resolved its coordinates against the panel box instead of the viewport:
+	// in the right-docked file browser that put it ~a panel-width past the right
+	// edge, where the panel's `overflow: hidden` clipped it away entirely, so a
+	// right-click appeared to do nothing at all. The portal keeps the node out of
+	// any filtered subtree; Solid still routes delegated events to the logical
+	// parent, so handlers and click-outside are unaffected.
 	return (
 		<Show when={props.visible}>
-			<div
-				ref={menuRef}
-				class={s.menu}
-				onClick={(e) => e.stopPropagation()}
-				style={{
-					left: `${props.x}px`,
-					top: `${props.y}px`,
-					opacity: "0",
-				}}
-			>
-				<For each={props.items}>
-					{(item, i) => <MenuItem item={item} onClose={props.onClose} isLast={i() === props.items.length - 1} />}
-				</For>
-			</div>
+			<Portal>
+				<div
+					ref={menuRef}
+					class={s.menu}
+					onClick={(e) => e.stopPropagation()}
+					style={{
+						left: `${props.x}px`,
+						top: `${props.y}px`,
+						opacity: "0",
+					}}
+				>
+					<For each={props.items}>
+						{(item, i) => <MenuItem item={item} onClose={props.onClose} isLast={i() === props.items.length - 1} />}
+					</For>
+				</div>
+			</Portal>
 		</Show>
 	);
 };

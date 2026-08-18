@@ -1,4 +1,5 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { Portal } from "solid-js/web";
 import { registerModal } from "../../stores/modalStack";
 import d from "../shared/dialog.module.css";
 
@@ -72,41 +73,49 @@ export const ConfirmDialog: Component<ConfirmDialogProps> = (props) => {
 		onCleanup(() => document.removeEventListener("keydown", handleKeydown));
 	});
 
+	// Portalled to <body>: `.overlay` is position: fixed / inset: 0, but dialogs are
+	// rendered inside their owning panel, and the glass panels carry
+	// `backdrop-filter` — which makes an element the containing block for fixed
+	// descendants. Left in place, the scrim covered only the panel and the panel's
+	// `overflow: hidden` clipped the dialog to a 300px column instead of centering
+	// it on the window. See ContextMenu for the same fix.
 	return (
 		<Show when={props.visible}>
-			<div class={d.overlay} onClick={props.onClose}>
-				<div class={d.popover} onClick={(e) => e.stopPropagation()}>
-					<div class={d.header}>
-						<h4>{props.title}</h4>
-					</div>
-					<div class={d.body}>
-						<p
-							style={{
-								margin: 0,
-								"white-space": "pre-line",
-								color: "var(--fg-secondary)",
-								"font-size": "var(--font-md)",
-							}}
-						>
-							{props.message}
-						</p>
-					</div>
-					<div class={d.actions}>
-						<button class={d.cancelBtn} onClick={props.onClose}>
-							{props.cancelLabel ?? "Cancel"}
-							{remaining() !== null ? ` (${remaining()})` : ""}
-						</button>
-						<Show when={props.discardLabel}>
-							<button class={d.cancelBtn} onClick={() => props.onDiscard?.()}>
-								{props.discardLabel}
+			<Portal>
+				<div class={d.overlay} onClick={props.onClose}>
+					<div class={d.popover} onClick={(e) => e.stopPropagation()}>
+						<div class={d.header}>
+							<h4>{props.title}</h4>
+						</div>
+						<div class={d.body}>
+							<p
+								style={{
+									margin: 0,
+									"white-space": "pre-line",
+									color: "var(--fg-secondary)",
+									"font-size": "var(--font-md)",
+								}}
+							>
+								{props.message}
+							</p>
+						</div>
+						<div class={d.actions}>
+							<button class={d.cancelBtn} onClick={props.onClose}>
+								{props.cancelLabel ?? "Cancel"}
+								{remaining() !== null ? ` (${remaining()})` : ""}
 							</button>
-						</Show>
-						<button class={d.primaryBtn} onClick={props.onConfirm}>
-							{props.confirmLabel ?? "OK"}
-						</button>
+							<Show when={props.discardLabel}>
+								<button class={d.cancelBtn} onClick={() => props.onDiscard?.()}>
+									{props.discardLabel}
+								</button>
+							</Show>
+							<button class={d.primaryBtn} onClick={props.onConfirm}>
+								{props.confirmLabel ?? "OK"}
+							</button>
+						</div>
 					</div>
 				</div>
-			</div>
+			</Portal>
 		</Show>
 	);
 };

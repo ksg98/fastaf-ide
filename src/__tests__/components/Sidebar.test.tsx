@@ -589,7 +589,7 @@ describe("Sidebar", () => {
 			const menuBtn = container.querySelector(".repoActionBtn")!;
 			fireEvent.click(menuBtn);
 
-			const menu = container.querySelector(".menu");
+			const menu = document.querySelector(".menu");
 			expect(menu).not.toBeNull();
 
 			const menuItems = menu!.querySelectorAll(".item");
@@ -610,7 +610,7 @@ describe("Sidebar", () => {
 			fireEvent.click(menuBtn);
 
 			// Click settings
-			const menuItems = container.querySelectorAll(".item");
+			const menuItems = document.querySelectorAll(".item");
 			fireEvent.click(menuItems[0]);
 			expect(onRepoSettings).toHaveBeenCalledWith("/repo1");
 		});
@@ -624,7 +624,7 @@ describe("Sidebar", () => {
 			fireEvent.click(menuBtn);
 
 			// Click remove — index 4 (after "Repo Settings", "Create Worktree", "Move to Group", and "Park Repository")
-			const menuItems = container.querySelectorAll(".item");
+			const menuItems = document.querySelectorAll(".item");
 			fireEvent.click(menuItems[4]);
 			expect(onRemoveRepo).toHaveBeenCalledWith("/repo1");
 		});
@@ -638,7 +638,7 @@ describe("Sidebar", () => {
 			fireEvent.click(menuBtn);
 
 			// Click Create Worktree — index 1
-			const menuItems = container.querySelectorAll(".item");
+			const menuItems = document.querySelectorAll(".item");
 			fireEvent.click(menuItems[1]);
 			expect(onAddWorktree).toHaveBeenCalledWith("/repo1");
 		});
@@ -651,7 +651,7 @@ describe("Sidebar", () => {
 			const menuBtn = container.querySelector(".repoActionBtn")!;
 			fireEvent.click(menuBtn);
 
-			const menu = container.querySelector(".menu");
+			const menu = document.querySelector(".menu");
 			expect(menu).not.toBeNull();
 
 			const menuItems = menu!.querySelectorAll(".item");
@@ -666,14 +666,14 @@ describe("Sidebar", () => {
 			// Open menu
 			const menuBtn = container.querySelector(".repoActionBtn")!;
 			fireEvent.click(menuBtn);
-			expect(container.querySelector(".menu")).not.toBeNull();
+			expect(document.querySelector(".menu")).not.toBeNull();
 
 			// Click settings to close menu
-			const menuItems = container.querySelectorAll(".item");
+			const menuItems = document.querySelectorAll(".item");
 			fireEvent.click(menuItems[0]);
 
 			// Menu should be closed
-			expect(container.querySelector(".menu")).toBeNull();
+			expect(document.querySelector(".menu")).toBeNull();
 		});
 
 		it("repo menu closes on Escape", () => {
@@ -682,11 +682,11 @@ describe("Sidebar", () => {
 			// Open menu
 			const menuBtn = container.querySelector(".repoActionBtn")!;
 			fireEvent.click(menuBtn);
-			expect(container.querySelector(".menu")).not.toBeNull();
+			expect(document.querySelector(".menu")).not.toBeNull();
 
 			// Press Escape
 			fireEvent.keyDown(document, { key: "Escape" });
-			expect(container.querySelector(".menu")).toBeNull();
+			expect(document.querySelector(".menu")).toBeNull();
 		});
 
 		it("repo menu toggles on repeated clicks", () => {
@@ -696,11 +696,11 @@ describe("Sidebar", () => {
 
 			// Open
 			fireEvent.click(menuBtn);
-			expect(container.querySelector(".menu")).not.toBeNull();
+			expect(document.querySelector(".menu")).not.toBeNull();
 
 			// Close
 			fireEvent.click(menuBtn);
-			expect(container.querySelector(".menu")).toBeNull();
+			expect(document.querySelector(".menu")).toBeNull();
 		});
 
 		it("repo header right-click opens context menu with Settings and Remove options", () => {
@@ -708,7 +708,7 @@ describe("Sidebar", () => {
 			const header = container.querySelector(".repoHeader")!;
 			fireEvent.contextMenu(header, { clientX: 100, clientY: 200 });
 
-			const menu = container.querySelector(".menu");
+			const menu = document.querySelector(".menu");
 			expect(menu).not.toBeNull();
 
 			const menuItems = menu!.querySelectorAll(".item");
@@ -743,7 +743,7 @@ describe("Sidebar", () => {
 			)!;
 			fireEvent.contextMenu(branchRow, { clientX: 50, clientY: 50 });
 
-			const copyPath = Array.from(container.querySelectorAll(".menu .item")).find((el) =>
+			const copyPath = Array.from(document.querySelectorAll(".menu .item")).find((el) =>
 				el.textContent?.includes("Copy Path"),
 			)!;
 			expect(copyPath).toBeTruthy();
@@ -1441,7 +1441,7 @@ describe("Sidebar", () => {
 			const btn = container.querySelector('.footerAction[title="Workspaces & sorting"]')!;
 			fireEvent.click(btn);
 
-			const labels = Array.from(container.querySelectorAll(".menu .label")).map((el) => el.textContent);
+			const labels = Array.from(document.querySelectorAll(".menu .label")).map((el) => el.textContent);
 			expect(labels).toContain("✓ All projects");
 			expect(labels).toContain("Save current as workspace…");
 			expect(labels).toContain("✓ Sort: Manual");
@@ -1454,7 +1454,7 @@ describe("Sidebar", () => {
 			const { container } = render(() => <Sidebar {...defaultProps()} />);
 			fireEvent.click(container.querySelector('.footerAction[title="Workspaces & sorting"]')!);
 
-			const item = Array.from(container.querySelectorAll(".menu .item")).find(
+			const item = Array.from(document.querySelectorAll(".menu .item")).find(
 				(el) => el.querySelector(".label")?.textContent === "Sort: Name A–Z",
 			)!;
 			fireEvent.click(item);
@@ -1482,11 +1482,11 @@ describe("Sidebar", () => {
 			// Open menu
 			const menuBtn = container.querySelector(".repoActionBtn")!;
 			fireEvent.click(menuBtn);
-			expect(container.querySelector(".menu")).not.toBeNull();
+			expect(document.querySelector(".menu")).not.toBeNull();
 
 			// Click somewhere outside the menu (on the sidebar itself)
 			fireEvent.mouseDown(container.querySelector("[data-testid='sidebar']")!);
-			expect(container.querySelector(".menu")).toBeNull();
+			expect(document.querySelector(".menu")).toBeNull();
 		});
 	});
 
@@ -1497,7 +1497,7 @@ describe("Sidebar", () => {
 			const branchItem = container.querySelector(".branchItem")!;
 			fireEvent.contextMenu(branchItem, { clientX: 100, clientY: 200 });
 
-			const contextMenu = container.querySelector(".menu");
+			const contextMenu = document.querySelector(".menu");
 			expect(contextMenu).not.toBeNull();
 
 			const items = contextMenu!.querySelectorAll(".item");
@@ -1528,7 +1528,7 @@ describe("Sidebar", () => {
 			const branchItem = container.querySelector(".branchItem")!;
 			fireEvent.contextMenu(branchItem, { clientX: 100, clientY: 200 });
 
-			const contextMenu = container.querySelector(".menu");
+			const contextMenu = document.querySelector(".menu");
 			const items = contextMenu!.querySelectorAll(".item");
 			// Find "Copy Path" item
 			const copyPathItem = Array.from(items).find((i) => i.querySelector(".label")?.textContent === "Copy Path")!;
@@ -1555,7 +1555,7 @@ describe("Sidebar", () => {
 			const branchItem = container.querySelector(".branchItem")!;
 			fireEvent.contextMenu(branchItem, { clientX: 100, clientY: 200 });
 
-			const contextMenu = container.querySelector(".menu");
+			const contextMenu = document.querySelector(".menu");
 			const items = contextMenu!.querySelectorAll(".item");
 			const copyPathItem = Array.from(items).find((i) => i.querySelector(".label")?.textContent === "Copy Path")!;
 			expect(copyPathItem.hasAttribute("disabled")).toBe(true);
@@ -1581,7 +1581,7 @@ describe("Sidebar", () => {
 			const branchItems = container.querySelectorAll(".branchItem");
 			fireEvent.contextMenu(branchItems[1], { clientX: 100, clientY: 200 });
 
-			const contextMenu = container.querySelector(".menu");
+			const contextMenu = document.querySelector(".menu");
 			const items = contextMenu!.querySelectorAll(".item");
 			// Copy Path, Add Terminal, Set Label…, Rename Branch (NO Delete Worktree)
 			expect(items.length).toBe(4);
@@ -1610,7 +1610,7 @@ describe("Sidebar", () => {
 			// feature/x is second (sorted after main)
 			fireEvent.contextMenu(branchItems[1], { clientX: 100, clientY: 200 });
 
-			const contextMenu = container.querySelector(".menu")!;
+			const contextMenu = document.querySelector(".menu")!;
 			// Branch git ops were condensed into a "Branch ›" submenu (commit 37d95eaa),
 			// so top-level is Copy Path, Add Terminal, Set Label, Branch — and
 			// Delete Worktree lives inside the Branch submenu, not at top level.
@@ -1815,7 +1815,7 @@ describe("Sidebar", () => {
 			const { container } = render(() => <Sidebar {...defaultProps()} />);
 			const header = container.querySelector(".groupHeader")!;
 			fireEvent.contextMenu(header, { clientX: 100, clientY: 200 });
-			const menu = container.querySelector(".menu");
+			const menu = document.querySelector(".menu");
 			expect(menu).not.toBeNull();
 			const labels = Array.from(menu!.querySelectorAll(".label")).map((el) => el.textContent);
 			expect(labels).toContain("Rename Group");
@@ -1838,7 +1838,7 @@ describe("Sidebar", () => {
 			const { container } = render(() => <Sidebar {...defaultProps()} />);
 			const header = container.querySelector(".groupHeader")!;
 			fireEvent.contextMenu(header, { clientX: 100, clientY: 200 });
-			const menuItems = container.querySelectorAll(".menu .item");
+			const menuItems = document.querySelectorAll(".menu .item");
 			const deleteItem = Array.from(menuItems).find(
 				(el) => el.querySelector(".label")?.textContent === "Delete Group",
 			)!;
@@ -1861,7 +1861,7 @@ describe("Sidebar", () => {
 			const { container } = render(() => <Sidebar {...defaultProps()} />);
 			const header = container.querySelector(".repoHeader")!;
 			fireEvent.contextMenu(header, { clientX: 100, clientY: 200 });
-			const labels = Array.from(container.querySelectorAll(".label")).map((el) => el.textContent);
+			const labels = Array.from(document.querySelectorAll(".label")).map((el) => el.textContent);
 			expect(labels).toContain("Move to Group");
 		});
 
