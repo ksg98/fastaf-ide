@@ -403,10 +403,7 @@ export const UpstreamMcpPanel: Component = () => {
 
 			{/* Add upstream form */}
 			<Show when={showAdd()}>
-				<div
-					class={s.group}
-					style={{ background: "var(--bg-secondary)", padding: "12px", "border-radius": "6px" }}
-				>
+				<div class={s.group} style={{ background: "var(--bg-secondary)", padding: "12px", "border-radius": "6px" }}>
 					<div style={{ display: "grid", gap: "8px" }}>
 						<input
 							type="text"
@@ -575,8 +572,8 @@ export const UpstreamMcpPanel: Component = () => {
 												"border-radius": "3px",
 												background:
 													server.transport.type === "http"
-															? "rgba(var(--accent-rgb), 0.15)"
-															: "color-mix(in srgb, var(--success) 15%, transparent)",
+														? "rgba(var(--accent-rgb), 0.15)"
+														: "color-mix(in srgb, var(--success) 15%, transparent)",
 												color: server.transport.type === "http" ? "var(--accent)" : "var(--success)",
 											}}
 										>

@@ -13,8 +13,7 @@
  */
 import { settingsStore } from "./stores/settings";
 
-const isMac = (): boolean =>
-	typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
+const isMac = (): boolean => typeof navigator !== "undefined" && /Mac/.test(navigator.platform);
 
 /** Apply the current vibrancy state; call once per webview after settings load. */
 export function syncVibrancy(): void {
