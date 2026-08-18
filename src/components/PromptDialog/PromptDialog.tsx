@@ -1,4 +1,5 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { Portal } from "solid-js/web";
 import { t } from "../../i18n";
 import { registerModal } from "../../stores/modalStack";
 import d from "../shared/dialog.module.css";
@@ -54,50 +55,58 @@ export const PromptDialog: Component<PromptDialogProps> = (props) => {
 		onCleanup(() => document.removeEventListener("keydown", handleKeydown));
 	});
 
+	// Portalled to <body>: `.overlay` is position: fixed / inset: 0, but dialogs are
+	// rendered inside their owning panel, and the glass panels carry
+	// `backdrop-filter` — which makes an element the containing block for fixed
+	// descendants. Left in place, the scrim covered only the panel and the panel's
+	// `overflow: hidden` clipped the dialog to a 300px column instead of centering
+	// it on the window. See ContextMenu for the same fix.
 	return (
 		<Show when={props.visible}>
-			<div class={d.overlay} onClick={props.onClose}>
-				<div class={d.popover} onClick={(e) => e.stopPropagation()}>
-					<div class={d.header}>
-						<div class={d.headerText}>
-							<h4>{props.title}</h4>
-							<Show when={props.subtitle}>
-								<p class={d.subtitle}>{props.subtitle}</p>
-							</Show>
+			<Portal>
+				<div class={d.overlay} onClick={props.onClose}>
+					<div class={d.popover} onClick={(e) => e.stopPropagation()}>
+						<div class={d.header}>
+							<div class={d.headerText}>
+								<h4>{props.title}</h4>
+								<Show when={props.subtitle}>
+									<p class={d.subtitle}>{props.subtitle}</p>
+								</Show>
+							</div>
+						</div>
+						<div class={d.body}>
+							<input
+								ref={inputRef}
+								type="text"
+								value={value()}
+								onInput={(e) => setValue((e.target as HTMLInputElement).value)}
+								placeholder={props.placeholder ?? ""}
+								maxLength={props.maxLength}
+								autocomplete="off"
+								autocorrect="off"
+								spellcheck={false}
+							/>
+						</div>
+						<div class={d.actions}>
+							<button class={d.cancelBtn} onClick={props.onClose}>
+								{t("promptDialog.cancel", "Cancel")}
+							</button>
+							<button
+								class={d.primaryBtn}
+								onClick={() => {
+									if (value().trim()) {
+										props.onConfirm(value().trim());
+										props.onClose();
+									}
+								}}
+								disabled={!value().trim()}
+							>
+								{props.confirmLabel ?? t("promptDialog.ok", "OK")}
+							</button>
 						</div>
 					</div>
-					<div class={d.body}>
-						<input
-							ref={inputRef}
-							type="text"
-							value={value()}
-							onInput={(e) => setValue((e.target as HTMLInputElement).value)}
-							placeholder={props.placeholder ?? ""}
-							maxLength={props.maxLength}
-							autocomplete="off"
-							autocorrect="off"
-							spellcheck={false}
-						/>
-					</div>
-					<div class={d.actions}>
-						<button class={d.cancelBtn} onClick={props.onClose}>
-							{t("promptDialog.cancel", "Cancel")}
-						</button>
-						<button
-							class={d.primaryBtn}
-							onClick={() => {
-								if (value().trim()) {
-									props.onConfirm(value().trim());
-									props.onClose();
-								}
-							}}
-							disabled={!value().trim()}
-						>
-							{props.confirmLabel ?? t("promptDialog.ok", "OK")}
-						</button>
-					</div>
 				</div>
-			</div>
+			</Portal>
 		</Show>
 	);
 };

@@ -131,7 +131,7 @@ describe("TabBar", () => {
 			toJSON: () => {},
 		} as DOMRect);
 		fireEvent.contextMenu(btn);
-		const menus = container.querySelectorAll(".menu");
+		const menus = document.querySelectorAll(".menu");
 		expect(menus.length).toBeGreaterThan(0);
 		const labels = Array.from(menus[menus.length - 1].querySelectorAll(".label"));
 		const labelTexts = labels.map((l) => l.textContent);
@@ -887,7 +887,7 @@ describe("TabBar", () => {
 			));
 			const tab = container.querySelector(".tab")!;
 			fireEvent.contextMenu(tab);
-			const menu = container.querySelector(".menu");
+			const menu = document.querySelector(".menu");
 			expect(menu).not.toBeNull();
 		});
 	});
@@ -921,7 +921,7 @@ describe("TabBar", () => {
 				toJSON: () => {},
 			} as DOMRect);
 			fireEvent.contextMenu(btn);
-			const menus = container.querySelectorAll(".menu");
+			const menus = document.querySelectorAll(".menu");
 			const menu = menus[menus.length - 1];
 			const items = Array.from(menu.querySelectorAll(".item"));
 			const splitV = items.find((i) => i.textContent?.includes("Split Vertically"));
@@ -960,7 +960,7 @@ describe("TabBar", () => {
 				toJSON: () => {},
 			} as DOMRect);
 			fireEvent.contextMenu(btn);
-			const menus = container.querySelectorAll(".menu");
+			const menus = document.querySelectorAll(".menu");
 			const menu = menus[menus.length - 1];
 			const splitBtn = Array.from(menu.querySelectorAll(".item")).find((i) =>
 				i.textContent?.includes("Split Vertically"),
@@ -1085,7 +1085,7 @@ describe("TabBar", () => {
 			const tab = container.querySelector(".tab")!;
 			fireEvent.contextMenu(tab);
 
-			const menuItems = container.querySelectorAll(".menu .item");
+			const menuItems = document.querySelectorAll(".menu .item");
 			const moveItem = Array.from(menuItems).find((i) => i.textContent?.includes("Move to Worktree"));
 			expect(moveItem).not.toBeNull();
 		});
@@ -1113,7 +1113,7 @@ describe("TabBar", () => {
 			const tab = container.querySelector(".tab")!;
 			fireEvent.contextMenu(tab);
 
-			const menuItems = container.querySelectorAll(".menu .item");
+			const menuItems = document.querySelectorAll(".menu .item");
 			const moveItem = Array.from(menuItems).find((i) => i.textContent?.includes("Move to Worktree"));
 			expect(moveItem).toBeUndefined();
 		});
@@ -1141,7 +1141,7 @@ describe("TabBar", () => {
 			fireEvent.contextMenu(tab);
 
 			// Find the "Move to Worktree" parent item and hover to open submenu
-			const menuItems = container.querySelectorAll(".menu .itemWrap");
+			const menuItems = document.querySelectorAll(".menu .itemWrap");
 			const moveWrap = Array.from(menuItems).find((i) => i.textContent?.includes("Move to Worktree"));
 			expect(moveWrap).not.toBeNull();
 			fireEvent.mouseEnter(moveWrap!);

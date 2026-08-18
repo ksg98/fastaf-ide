@@ -12,36 +12,36 @@ const sampleItems: ContextMenuItem[] = [
 
 describe("ContextMenu", () => {
 	it("renders nothing when not visible", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ContextMenu items={sampleItems} x={100} y={200} visible={false} onClose={() => {}} />
 		));
-		const menu = container.querySelector(".menu");
+		const menu = baseElement.querySelector(".menu");
 		expect(menu).toBeNull();
 	});
 
 	it("renders menu items when visible", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ContextMenu items={sampleItems} x={100} y={200} visible={true} onClose={() => {}} />
 		));
-		const items = container.querySelectorAll(".item");
+		const items = baseElement.querySelectorAll(".item");
 		expect(items.length).toBe(3);
 	});
 
 	it("renders labels correctly", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ContextMenu items={sampleItems} x={0} y={0} visible={true} onClose={() => {}} />
 		));
-		const labels = container.querySelectorAll(".label");
+		const labels = baseElement.querySelectorAll(".label");
 		expect(labels[0].textContent).toBe("Copy");
 		expect(labels[1].textContent).toBe("Paste");
 		expect(labels[2].textContent).toBe("Delete");
 	});
 
 	it("renders shortcuts when provided", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ContextMenu items={sampleItems} x={0} y={0} visible={true} onClose={() => {}} />
 		));
-		const shortcuts = container.querySelectorAll(".shortcut");
+		const shortcuts = baseElement.querySelectorAll(".shortcut");
 		expect(shortcuts.length).toBe(2); // Copy and Paste have shortcuts
 		expect(shortcuts[0].textContent).toBe("\u2318C");
 	});
@@ -50,8 +50,10 @@ describe("ContextMenu", () => {
 		const action = vi.fn();
 		const handleClose = vi.fn();
 		const items: ContextMenuItem[] = [{ label: "Run", action }];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={handleClose} />);
-		const btn = container.querySelector(".item")!;
+		const { baseElement } = render(() => (
+			<ContextMenu items={items} x={0} y={0} visible={true} onClose={handleClose} />
+		));
+		const btn = baseElement.querySelector(".item")!;
 		fireEvent.click(btn);
 		expect(action).toHaveBeenCalledOnce();
 		expect(handleClose).toHaveBeenCalledOnce();
@@ -60,8 +62,8 @@ describe("ContextMenu", () => {
 	it("does not fire action on disabled item click", () => {
 		const action = vi.fn();
 		const items: ContextMenuItem[] = [{ label: "Disabled", action, disabled: true }];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		const btn = container.querySelector(".item")!;
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const btn = baseElement.querySelector(".item")!;
 		fireEvent.click(btn);
 		expect(action).not.toHaveBeenCalled();
 	});
@@ -71,12 +73,12 @@ describe("ContextMenu", () => {
 			{ label: "Above", action: vi.fn(), separator: true },
 			{ label: "Below", action: vi.fn() },
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
 		// `separator` on a real item is a trailing-divider MODIFIER — "Above"
 		// must still render its button, not be replaced by the divider.
-		const labels = Array.from(container.querySelectorAll(".label")).map((el) => el.textContent);
+		const labels = Array.from(baseElement.querySelectorAll(".label")).map((el) => el.textContent);
 		expect(labels).toEqual(["Above", "Below"]);
-		expect(container.querySelectorAll(".separator").length).toBe(1);
+		expect(baseElement.querySelectorAll(".separator").length).toBe(1);
 	});
 
 	it("separator renders only a divider — no selectable button row", () => {
@@ -85,11 +87,11 @@ describe("ContextMenu", () => {
 			{ label: "", action: vi.fn(), separator: true },
 			{ label: "Bottom", action: vi.fn() },
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
 		// Two real items only — the separator must NOT produce a hoverable .item button.
-		expect(container.querySelectorAll(".item").length).toBe(2);
-		expect(container.querySelectorAll(".itemWrap").length).toBe(2);
-		expect(container.querySelectorAll(".separator").length).toBe(1);
+		expect(baseElement.querySelectorAll(".item").length).toBe(2);
+		expect(baseElement.querySelectorAll(".itemWrap").length).toBe(2);
+		expect(baseElement.querySelectorAll(".separator").length).toBe(1);
 	});
 
 	it("a real item with separator renders its label plus a trailing divider", () => {
@@ -101,10 +103,10 @@ describe("ContextMenu", () => {
 			{ label: "Delete", action: vi.fn(), separator: true },
 			{ label: "Reveal", action: vi.fn() },
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		const labels = Array.from(container.querySelectorAll(".label")).map((el) => el.textContent);
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const labels = Array.from(baseElement.querySelectorAll(".label")).map((el) => el.textContent);
 		expect(labels).toEqual(["Delete", "Reveal"]);
-		expect(container.querySelectorAll(".separator").length).toBe(1);
+		expect(baseElement.querySelectorAll(".separator").length).toBe(1);
 	});
 
 	it("suppresses a trailing separator on the LAST item (no dangling divider)", () => {
@@ -114,10 +116,10 @@ describe("ContextMenu", () => {
 			{ label: "First", action: vi.fn() },
 			{ label: "Last", action: vi.fn(), separator: true },
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		const labels = Array.from(container.querySelectorAll(".label")).map((el) => el.textContent);
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const labels = Array.from(baseElement.querySelectorAll(".label")).map((el) => el.textContent);
 		expect(labels).toEqual(["First", "Last"]);
-		expect(container.querySelectorAll(".separator").length).toBe(0);
+		expect(baseElement.querySelectorAll(".separator").length).toBe(0);
 	});
 
 	it("suppresses a pure separator row when it is the LAST item", () => {
@@ -125,9 +127,9 @@ describe("ContextMenu", () => {
 			{ label: "Only", action: vi.fn() },
 			{ label: "", action: vi.fn(), separator: true },
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		expect(container.querySelectorAll(".item").length).toBe(1);
-		expect(container.querySelectorAll(".separator").length).toBe(0);
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		expect(baseElement.querySelectorAll(".item").length).toBe(1);
+		expect(baseElement.querySelectorAll(".separator").length).toBe(0);
 	});
 
 	it("closes on Escape key", () => {
@@ -154,12 +156,12 @@ describe("ContextMenu", () => {
 		Object.defineProperty(window, "innerWidth", { value: 200, writable: true, configurable: true });
 		Object.defineProperty(window, "innerHeight", { value: 100, writable: true, configurable: true });
 
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ContextMenu items={[{ label: "Test", action: vi.fn() }]} x={190} y={90} visible={true} onClose={() => {}} />
 		));
 		// Position is adjusted after a requestAnimationFrame
 		await new Promise((r) => requestAnimationFrame(r));
-		const menu = container.querySelector(".menu") as HTMLElement;
+		const menu = baseElement.querySelector(".menu") as HTMLElement;
 		// x should be clamped: 200 - 180 - 8 = 12
 		expect(parseInt(menu.style.left, 10)).toBeLessThan(190);
 		// y should be clamped (menu grows upward from click point)
@@ -179,12 +181,12 @@ describe("ContextMenu", () => {
 				label: `Item ${i}`,
 				action: vi.fn(),
 			}));
-			const { container } = render(() => (
+			const { baseElement } = render(() => (
 				<ContextMenu items={items} x={110} y={70} visible={true} onClose={() => {}} />
 			));
 
 			await new Promise((r) => requestAnimationFrame(r));
-			const menu = container.querySelector(".menu") as HTMLElement;
+			const menu = baseElement.querySelector(".menu") as HTMLElement;
 
 			expect(menu.style.left).toBe("8px");
 			expect(menu.style.top).toBe("8px");
@@ -196,11 +198,27 @@ describe("ContextMenu", () => {
 		}
 	});
 
+	// A `backdrop-filter` ancestor becomes the containing block for position: fixed
+	// descendants (same as `filter`), so a menu left inside a glass panel resolved
+	// its client coordinates against the panel box and was then clipped away by the
+	// panel's `overflow: hidden` — right-click looked dead in the file browser.
+	it("escapes a filtered ancestor so fixed positioning stays viewport-relative", () => {
+		let panel!: HTMLDivElement;
+		const { baseElement } = render(() => (
+			<div ref={panel} style={{ "backdrop-filter": "blur(24px)", overflow: "hidden" }}>
+				<ContextMenu items={sampleItems} x={100} y={200} visible={true} onClose={() => {}} />
+			</div>
+		));
+		const menu = baseElement.querySelector(".menu");
+		expect(menu).not.toBeNull();
+		expect(panel.contains(menu)).toBe(false);
+	});
+
 	it("positions menu at x,y coordinates", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ContextMenu items={[{ label: "Test", action: vi.fn() }]} x={150} y={250} visible={true} onClose={() => {}} />
 		));
-		const menu = container.querySelector(".menu") as HTMLElement;
+		const menu = baseElement.querySelector(".menu") as HTMLElement;
 		expect(menu.style.left).toBe("150px");
 		expect(menu.style.top).toBe("250px");
 	});
@@ -219,8 +237,8 @@ describe("ContextMenu submenus", () => {
 				],
 			},
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		const arrows = container.querySelectorAll(".arrow");
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const arrows = baseElement.querySelectorAll(".arrow");
 		expect(arrows.length).toBe(1);
 	});
 
@@ -232,10 +250,10 @@ describe("ContextMenu submenus", () => {
 				children: [{ label: "Work", action: vi.fn() }],
 			},
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		const parentWrap = container.querySelector(".itemWrap")!;
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const parentWrap = baseElement.querySelector(".itemWrap")!;
 		fireEvent.mouseEnter(parentWrap);
-		const submenu = container.querySelector(".submenu");
+		const submenu = baseElement.querySelector(".submenu");
 		expect(submenu).not.toBeNull();
 	});
 
@@ -249,12 +267,14 @@ describe("ContextMenu submenus", () => {
 				children: [{ label: "Work", action: childAction }],
 			},
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={handleClose} />);
+		const { baseElement } = render(() => (
+			<ContextMenu items={items} x={0} y={0} visible={true} onClose={handleClose} />
+		));
 		// Show submenu
-		const parentWrap = container.querySelector(".itemWrap")!;
+		const parentWrap = baseElement.querySelector(".itemWrap")!;
 		fireEvent.mouseEnter(parentWrap);
 		// Click submenu item
-		const submenuItem = container.querySelector(".submenu .item")!;
+		const submenuItem = baseElement.querySelector(".submenu .item")!;
 		fireEvent.click(submenuItem);
 		expect(childAction).toHaveBeenCalledOnce();
 		expect(handleClose).toHaveBeenCalledOnce();
@@ -269,10 +289,10 @@ describe("ContextMenu submenus", () => {
 				children: [{ label: "Claude Code", action: vi.fn() }],
 			},
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		const parentWrap = container.querySelector(".itemWrap")!;
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const parentWrap = baseElement.querySelector(".itemWrap")!;
 		fireEvent.mouseEnter(parentWrap);
-		const submenu = container.querySelector(".submenu");
+		const submenu = baseElement.querySelector(".submenu");
 		expect(submenu).toBeNull();
 	});
 
@@ -285,8 +305,8 @@ describe("ContextMenu submenus", () => {
 				children: [{ label: "Work", action: vi.fn() }],
 			},
 		];
-		const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-		const parentItem = container.querySelector(".item")!;
+		const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+		const parentItem = baseElement.querySelector(".item")!;
 		fireEvent.click(parentItem);
 		expect(parentAction).not.toHaveBeenCalled();
 	});
@@ -334,11 +354,11 @@ describe("ContextMenu submenus", () => {
 					children: Array.from({ length: 20 }, (_, i) => ({ label: `Group ${i}`, action: vi.fn() })),
 				},
 			];
-			const { container } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
-			fireEvent.mouseEnter(container.querySelector(".itemWrap")!);
+			const { baseElement } = render(() => <ContextMenu items={items} x={0} y={0} visible={true} onClose={() => {}} />);
+			fireEvent.mouseEnter(baseElement.querySelector(".itemWrap")!);
 			await new Promise((r) => requestAnimationFrame(r));
 
-			const submenu = container.querySelector(".submenu") as HTMLElement;
+			const submenu = baseElement.querySelector(".submenu") as HTMLElement;
 			expect(submenu.style.left).toBe("8px");
 			expect(submenu.style.top).toBe("8px");
 			expect(submenu.style.maxWidth).toBe("164px");

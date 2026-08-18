@@ -1,4 +1,5 @@
 import { type Component, createEffect, Show } from "solid-js";
+import { Portal } from "solid-js/web";
 import { t } from "../../i18n";
 import { registerModal } from "../../stores/modalStack";
 import { ColorSwatchPicker } from "./ColorSwatchPicker";
@@ -27,23 +28,28 @@ export const ColorPickerDialog: Component<ColorPickerDialogProps> = (props) => {
 		props.onClose();
 	};
 
+	// Portalled to <body> — see ContextMenu: a `backdrop-filter` ancestor (the glass
+	// sidebar this is rendered from) becomes the containing block for fixed
+	// descendants, so `.overlay` covered only the panel and was clipped by it.
 	return (
 		<Show when={props.visible}>
-			<div class={d.overlay} onClick={props.onClose}>
-				<div class={d.popover} onClick={(e) => e.stopPropagation()}>
-					<div class={d.header}>
-						<h4>{props.title}</h4>
-					</div>
-					<div class={d.body}>
-						<ColorSwatchPicker color={props.currentColor} presets={DEFAULT_COLOR_PRESETS} onChange={handleChange} />
-					</div>
-					<div class={d.actions}>
-						<button class={d.cancelBtn} onClick={props.onClose}>
-							{t("colorPickerDialog.cancel", "Cancel")}
-						</button>
+			<Portal>
+				<div class={d.overlay} onClick={props.onClose}>
+					<div class={d.popover} onClick={(e) => e.stopPropagation()}>
+						<div class={d.header}>
+							<h4>{props.title}</h4>
+						</div>
+						<div class={d.body}>
+							<ColorSwatchPicker color={props.currentColor} presets={DEFAULT_COLOR_PRESETS} onChange={handleChange} />
+						</div>
+						<div class={d.actions}>
+							<button class={d.cancelBtn} onClick={props.onClose}>
+								{t("colorPickerDialog.cancel", "Cancel")}
+							</button>
+						</div>
 					</div>
 				</div>
-			</div>
+			</Portal>
 		</Show>
 	);
 };

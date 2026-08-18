@@ -32,48 +32,48 @@ describe("ColorPickerDialog", () => {
 	});
 
 	it("does not render when visible is false", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={false} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		expect(container.querySelector(".overlay")).toBeNull();
+		expect(baseElement.querySelector(".overlay")).toBeNull();
 	});
 
 	it("renders overlay and popover when visible", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		expect(container.querySelector(".overlay")).not.toBeNull();
-		expect(container.querySelector(".popover")).not.toBeNull();
+		expect(baseElement.querySelector(".overlay")).not.toBeNull();
+		expect(baseElement.querySelector(".popover")).not.toBeNull();
 	});
 
 	it("renders title in header", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		const header = container.querySelector("h4");
+		const header = baseElement.querySelector("h4");
 		expect(header?.textContent).toBe("Group Color");
 	});
 
 	it("contains color swatches", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		const swatches = container.querySelectorAll(".colorSwatch");
+		const swatches = baseElement.querySelectorAll(".colorSwatch");
 		expect(swatches.length).toBe(10);
 	});
 
 	it("clicking a preset swatch calls onConfirm and onClose", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		const firstSwatch = container.querySelector(".colorSwatch")!;
+		const firstSwatch = baseElement.querySelector(".colorSwatch")!;
 		fireEvent.click(firstSwatch);
 		expect(onConfirm).toHaveBeenCalledWith(PRESET_COLORS[0].hex);
 		expect(onClose).toHaveBeenCalled();
 	});
 
 	it("clicking clear calls onConfirm with empty string and closes", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog
 				visible={true}
 				title="Group Color"
@@ -82,17 +82,17 @@ describe("ColorPickerDialog", () => {
 				onConfirm={onConfirm}
 			/>
 		));
-		const clearBtn = container.querySelector(".colorSwatchClear")!;
+		const clearBtn = baseElement.querySelector(".colorSwatchClear")!;
 		fireEvent.click(clearBtn);
 		expect(onConfirm).toHaveBeenCalledWith("");
 		expect(onClose).toHaveBeenCalled();
 	});
 
 	it("clicking overlay backdrop calls onClose", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		const overlay = container.querySelector(".overlay")!;
+		const overlay = baseElement.querySelector(".overlay")!;
 		fireEvent.click(overlay);
 		expect(onClose).toHaveBeenCalled();
 	});
@@ -106,10 +106,10 @@ describe("ColorPickerDialog", () => {
 	});
 
 	it("Cancel button calls onClose", () => {
-		const { container } = render(() => (
+		const { baseElement } = render(() => (
 			<ColorPickerDialog visible={true} title="Group Color" currentColor="" onClose={onClose} onConfirm={onConfirm} />
 		));
-		const cancelBtn = container.querySelector(".cancelBtn")!;
+		const cancelBtn = baseElement.querySelector(".cancelBtn")!;
 		fireEvent.click(cancelBtn);
 		expect(onClose).toHaveBeenCalled();
 	});
