@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-08-20
+
+### Fixed
+
+- **Right-click in the file browser works again** — The glass restyle put a backdrop blur on the side panels, and a blurred element becomes the positioning root for anything `position: fixed` inside it. Context menus are rendered inside the panel they belong to, so the file browser's menu was placed a full panel-width past the right edge of the window and then clipped by the panel — right-click looked dead. Menus, and the dialogs they open (Rename, Delete, New File/Folder, Change Color), now render at the top level of the page, where their coordinates mean what they say.
+- **⌘C copies the whole selection in the editor** — ⌘A did select the entire file, but copy read the browser's own selection, and the editor only keeps the lines currently on screen in the page — so select-all-then-copy produced a fragment that grew as you scrolled. Copy now reads the editor's document directly, and an editor with nothing selected no longer falls back to whatever the terminal last had selected.
+- **Mission Control and Spaces shortcuts work with an editor focused** — 1.7.3 made the terminal hand Ctrl+arrow (and fn+Ctrl+arrow) back to macOS, but the code editor still consumed them for word-wise cursor movement, and an editor has focus most of the time once files are open beside the terminal. Every editor surface now passes those combos through to the system, matching Terminal.app and VS Code.
+
+## [1.7.3] - 2026-08-15
+
+### Fixed
+
+- **macOS system shortcuts from the terminal** — Control with an arrow or navigation key (Mission Control, Spaces, App Exposé and their fn forms) was swallowed by the terminal whenever it had focus; these now pass through to the system. Shift/Ctrl-modified navigation keys also reach the shell with their modifiers instead of arriving bare.
+- **⌘+ / ⌘− / ⌘0 zoom the whole app** — Previously only the active terminal's font changed; the entire window now scales through the webview's page zoom and the level persists across restarts. Per-terminal font zoom moved to ⌘⇧+ / ⌘⇧− / ⌘⇧0.
+- **⌘A in an editor tab selects the full document** — The native Select All only reached the lines on screen; a custom menu item now asks the editor for its whole document.
+- **Files created outside the app appear in tree view** — Expanded folders were fetched once and never refreshed; they now revalidate on watcher events, swapping in only what actually changed.
+
 ## [1.7.2] - 2026-08-08
 
 ### Fixed
