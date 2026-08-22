@@ -432,10 +432,16 @@ export function useTerminalLifecycle(deps: TerminalLifecycleDeps) {
 				return;
 			}
 
-			// Prefer xterm's selection (canvas-rendered, invisible to DOM).
-			// Fall back to DOM selection for non-terminal panels.
-			const active = terminalsStore.getActive();
-			const rawSel = active?.ref?.getSelection() || window.getSelection()?.toString();
+			// The terminal's selection is canvas-rendered and invisible to the DOM, so it
+			// has to be asked directly — but only when focus is actually in a terminal.
+			// It survives losing focus (`cachedText`), so consulting it unconditionally
+			// meant a selection made in the markdown preview lost to whatever had been
+			// selected in a terminal earlier, and ⌘C copied that instead.
+			const focusedInTerminal = Boolean(
+				(document.activeElement as HTMLElement | null)?.closest('[data-focus-target="terminal"]'),
+			);
+			const terminalSel = focusedInTerminal ? terminalsStore.getActive()?.ref?.getSelection() : "";
+			const rawSel = terminalSel || window.getSelection()?.toString();
 			const selection = rawSel
 				? rawSel
 						.split("\n")

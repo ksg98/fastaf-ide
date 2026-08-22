@@ -57,6 +57,9 @@ export interface CanvasTerminalRef {
 	refresh: () => void;
 	resubscribe: () => Promise<void>;
 	getSelectionText: () => string;
+	/** Select the whole buffer (scrollback included). Resolves false when no frame
+	 *  has arrived yet, i.e. there is nothing to select. */
+	selectAll: () => Promise<boolean>;
 	searchFind: (query: string, blockScope?: boolean) => Promise<{ index: number; count: number }>;
 	searchNext: () => { index: number; count: number };
 	searchPrev: () => { index: number; count: number };
@@ -658,7 +661,17 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 		octx.fillStyle = chromeTint(cachedAccentRgb, 0.35);
 
-		for (let absRi = absStartRow; absRi <= absEndRow; absRi++) {
+		// Clamp to the visible window before iterating. A drag-selection is bounded by
+		// the viewport, but select-all spans the entire scrollback — walking every
+		// history row on each repaint (only to have absRowToViewport reject it) would
+		// cost far more than the paint itself on a long buffer.
+		const offset = overlayScrollOffset ?? currentFrame?.displayOffset ?? 0;
+		const viewportTop = (currentFrame?.historySize ?? 0) - offset;
+		const screenRows = currentFrame?.screenRows || lastResizeRows || 24;
+		const firstVisible = Math.max(absStartRow, viewportTop);
+		const lastVisible = Math.min(absEndRow, viewportTop + screenRows - 1);
+
+		for (let absRi = firstVisible; absRi <= lastVisible; absRi++) {
 			const vpRow = absRowToViewport(absRi);
 			if (vpRow === null) continue;
 			// During a gesture rows come from the cache (keyed by the eviction-stable
@@ -2920,6 +2933,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		props.onRef?.({
 			focus: () => keyInputRef.focus({ preventScroll: true }),
 			getSelectionText: () => selection.cachedText,
+			selectAll: () => selectAllBuffer(),
 			refresh: () => {
 				rowMap.clear();
 				clearDetectedLinks();
@@ -3053,32 +3067,74 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		remeasure();
 	});
 
+	/** Text under the current selection coordinates.
+	 *
+	 *  Always prefers the Rust path: it unwraps soft-wrapped logical lines via the
+	 *  WRAPLINE flag (grid_get_selection_text), so copying a line the terminal merely
+	 *  wrapped for width doesn't insert a spurious newline. The JS fallback has no
+	 *  wrap info (see getLocalSelectionText DEFERRED) and only runs when invoke or the
+	 *  selection coords are unavailable — and it can only see rows still in `rowMap`,
+	 *  i.e. the viewport. Errors propagate; callers decide what a failed read means. */
+	async function readSelectionText(): Promise<string> {
+		if (invokeRef && selection.start && selection.end) {
+			const text = (await invokeRef("terminal_get_selection_text", {
+				sessionId: props.sessionId,
+				startRow: selection.start.row,
+				startCol: selection.start.col,
+				endRow: selection.end.row,
+				endCol: selection.end.col,
+			})) as string;
+			// Fall back to the local read if the IPC path yields nothing (transient error,
+			// grid not ready). Loses wrap-unwrapping, but a wrapped copy beats a silent
+			// no-op — the onscreen path could always satisfy a copy before this routing.
+			if (text) return text;
+		}
+		return getLocalSelectionText();
+	}
+
+	/**
+	 * Select the whole buffer — scrollback and screen.
+	 *
+	 * Grid-relative absolute row 0 is the top of history: `viewportRowToAbs` reads
+	 * `historySize - displayOffset + viewportRow`, so the full buffer is
+	 * `[0, historySize + screenRows)`. That is the same coordinate space
+	 * `terminal_get_selection_text` takes, so the text read below covers rows that
+	 * were never rendered — which is the entire point, since the canvas only ever
+	 * holds a viewport's worth of DOM-invisible pixels.
+	 *
+	 * `cachedText` is filled here rather than at copy time because ⌘C reads
+	 * `getSelectionText()` (the cache) and nothing else populates it outside an
+	 * actual copy gesture.
+	 */
+	async function selectAllBuffer(): Promise<boolean> {
+		if (!currentFrame) return false;
+		const m = metrics();
+		const screenRows = currentFrame.screenRows || lastResizeRows || 24;
+		const lastRow = currentFrame.historySize + screenRows - 1;
+		if (lastRow < 0) return false;
+		const maxCol = m ? Math.max(0, Math.floor(canvasRef.getBoundingClientRect().width / m.cellWidth) - 1) : 79;
+
+		selection.selecting = false;
+		selection.start = { col: 0, row: 0 };
+		selection.end = { col: maxCol, row: lastRow };
+		fullRepaintNeeded = true;
+		scheduleRepaint();
+
+		try {
+			selection.cachedText = await readSelectionText();
+		} catch (e) {
+			appLogger.warn("terminal", "Select-all text read failed", { error: e });
+			selection.cachedText = getLocalSelectionText();
+		}
+		return true;
+	}
+
 	async function copySelection() {
 		const setStatus = (window as unknown as Record<string, unknown>).__tuic_setStatusInfo as
 			| ((msg: string) => void)
 			| undefined;
 		try {
-			let text: string;
-			// Always prefer the Rust path: it unwraps soft-wrapped logical lines via the
-			// WRAPLINE flag (grid_get_selection_text), so copying a line the terminal merely
-			// wrapped for width doesn't insert a spurious newline. The JS fallback below has
-			// no wrap info (see getLocalSelectionText DEFERRED) and only runs when invoke or
-			// the selection coords are unavailable.
-			if (invokeRef && selection.start && selection.end) {
-				text = (await invokeRef("terminal_get_selection_text", {
-					sessionId: props.sessionId,
-					startRow: selection.start.row,
-					startCol: selection.start.col,
-					endRow: selection.end.row,
-					endCol: selection.end.col,
-				})) as string;
-				// Fall back to the local read if the IPC path yields nothing (transient error,
-				// grid not ready). Loses wrap-unwrapping, but a wrapped copy beats a silent
-				// no-op — the onscreen path could always satisfy a copy before this routing.
-				if (!text) text = getLocalSelectionText();
-			} else {
-				text = getLocalSelectionText();
-			}
+			const text = await readSelectionText();
 			if (text) {
 				selection.cachedText = text;
 				await writeClipboard(text);

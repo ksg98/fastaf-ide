@@ -79,7 +79,9 @@ export function dispatchNativeMenuAction(action: string, options: NativeMenuBrid
 			terminalLifecycle.copyFromTerminal();
 			break;
 		case "select-all":
-			void selectAllInFocused();
+			void selectAllInFocused({
+				selectAllInTerminal: () => terminalsStore.getActive()?.ref?.selectAll() ?? false,
+			});
 			break;
 		case "clear-terminal":
 			terminalLifecycle.clearTerminal();

@@ -16,9 +16,24 @@
  * the time this branch can be reached the chunk is already resolved, so the
  * await costs nothing.
  */
-export async function selectAllInFocused(): Promise<boolean> {
+export interface SelectAllHooks {
+	/** Select the whole terminal buffer. Supplied by the caller so this module stays
+	 *  free of store imports; returns false when there is nothing to select. */
+	selectAllInTerminal?: () => Promise<boolean> | boolean;
+}
+
+export async function selectAllInFocused(hooks: SelectAllHooks = {}): Promise<boolean> {
 	const active = document.activeElement as HTMLElement | null;
 	if (!active) return false;
+
+	// The terminal must be tested before the input branch below: keyboard input is
+	// routed through a hidden <input> parked over the canvas, so `active.select()`
+	// would "succeed" on an off-screen one-character buffer and ⌘A would look dead.
+	// The buffer itself is canvas-rendered and has no DOM text at all, so only the
+	// terminal's own selection model can answer this.
+	if (active.closest('[data-focus-target="terminal"]')) {
+		return hooks.selectAllInTerminal ? await hooks.selectAllInTerminal() : false;
+	}
 
 	if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
 		active.select();
@@ -40,17 +55,36 @@ export async function selectAllInFocused(): Promise<boolean> {
 	}
 
 	// Any other editable region: the DOM selection is the whole story.
-	if (active.isContentEditable) {
-		const range = document.createRange();
-		range.selectNodeContents(active);
-		const sel = window.getSelection();
-		if (!sel) return false;
-		sel.removeAllRanges();
-		sel.addRange(range);
-		return true;
-	}
+	if (active.isContentEditable) return selectNodeContents(active);
+
+	// Read-only rendered content — the markdown preview above all, whose focus sits
+	// on a plain wrapper div that is neither editable nor an editor. Nothing below
+	// the input branches used to match it, so ⌘A did nothing at all there: the menu
+	// item is custom, so declining to handle it does not fall back to the native
+	// `selectAll:` either. Panels opt in by marking the region worth selecting; the
+	// scope excludes the tab header, so ⌘A does not sweep up the filename and
+	// toolbar buttons along with the document.
+	const scope = active.closest<HTMLElement>("[data-select-all-scope]") ?? findScopeWithin(active);
+	if (scope) return selectNodeContents(scope);
 
 	return false;
+}
+
+/** The single select-all scope inside `root`, when it has exactly one — a focused
+ *  panel wrapper holds its content region as a descendant, not an ancestor. */
+function findScopeWithin(root: HTMLElement): HTMLElement | null {
+	const found = root.querySelectorAll<HTMLElement>("[data-select-all-scope]");
+	return found.length === 1 ? found[0] : null;
+}
+
+function selectNodeContents(el: HTMLElement): boolean {
+	const sel = window.getSelection();
+	if (!sel) return false;
+	const range = document.createRange();
+	range.selectNodeContents(el);
+	sel.removeAllRanges();
+	sel.addRange(range);
+	return true;
 }
 
 /** Resolve the EditorView behind a `.cm-editor` host. Split out so the copy path
