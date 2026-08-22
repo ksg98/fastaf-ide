@@ -146,6 +146,9 @@ export interface TerminalRef {
 	/** Scroll to an absolute buffer line index (centered in viewport) */
 	scrollToLine: (lineIndex: number) => void;
 	getSelection: () => string;
+	/** Select the entire buffer, scrollback included, and cache its text so a
+	 *  following copy reads the whole selection rather than the rendered viewport. */
+	selectAll: () => Promise<boolean>;
 	scrollToTop: () => void;
 	scrollToBottom: () => void;
 	scrollPages: (pages: number) => void;

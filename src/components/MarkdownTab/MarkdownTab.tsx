@@ -57,6 +57,8 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 	const [matchCount, setMatchCount] = createSignal(0);
 	const [overviewFractions, setOverviewFractions] = createSignal<number[]>([]);
 	const [scrollEl, setScrollEl] = createSignal<HTMLElement>();
+	const [copied, setCopied] = createSignal(false);
+	let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 	const repo = useRepository();
 	const contextMenu = createContextMenu();
 	let wrapperRef: HTMLDivElement | undefined;
@@ -389,6 +391,31 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 		writeClipboard(shortenHomePath(path)).catch((err) => appLogger.error("app", "Failed to copy path", err));
 	};
 
+	/** Copy the whole document as markdown — the raw source, not the rendered text.
+	 *  `content()` is the file exactly as read from disk, so what lands on the
+	 *  clipboard round-trips: headings, links, tables and code fences survive, which
+	 *  a DOM-text copy of the preview flattens away. Tweak comments are part of the
+	 *  source and so are copied with it, same as opening the file in the editor. */
+	const handleCopyAll = async () => {
+		const md = content();
+		if (!md) return;
+		try {
+			await writeClipboard(md);
+			setCopied(true);
+			clearTimeout(copiedTimer);
+			copiedTimer = setTimeout(() => setCopied(false), 1500);
+		} catch (err) {
+			appLogger.error("app", "Failed to copy markdown", err);
+			toastsStore.add(
+				t("markdownTab.copyFailed", "Couldn't copy"),
+				t("markdownTab.copyFailedMsg", "The clipboard is unavailable."),
+				"error",
+			);
+		}
+	};
+
+	onCleanup(() => clearTimeout(copiedTimer));
+
 	const handleHeaderContextMenu = (ev: MouseEvent) => {
 		if (!fullPath()) return;
 		ev.preventDefault();
@@ -401,6 +428,29 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 				<span class={e.filename} title={displayPath()}>
 					{displayPath()}
 				</span>
+				<button
+					class={e.btn}
+					onClick={() => {
+						void handleCopyAll();
+					}}
+					disabled={!content()}
+					title={t("markdownTab.copyAll", "Copy all as markdown")}
+				>
+					<Show
+						when={copied()}
+						fallback={
+							<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+								<path d="M5 1.5A1.5 1.5 0 0 1 6.5 0h5A1.5 1.5 0 0 1 13 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 5 9.5v-8Zm1.5-.5a.5.5 0 0 0-.5.5v8a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 .5-.5v-8a.5.5 0 0 0-.5-.5h-5Z" />
+								<path d="M3 4.5a1.5 1.5 0 0 1 1-1.415V12.5a1.5 1.5 0 0 0 1.5 1.5h5.415A1.5 1.5 0 0 1 9.5 15h-5A1.5 1.5 0 0 1 3 13.5v-9Z" />
+							</svg>
+						}
+					>
+						<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+							<path d="M3 8.5l3.5 3.5L13 4.5" stroke-linecap="round" stroke-linejoin="round" />
+						</svg>
+					</Show>
+					{copied() ? t("markdownTab.copiedBtn", "Copied") : t("markdownTab.copyBtn", "Copy")}
+				</button>
 				<Show when={props.tab.type === "file"}>
 					<button class={e.btn} onClick={handleEdit} title={t("markdownTab.edit", "Edit file")}>
 						<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
@@ -444,7 +494,10 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 				matchCount={matchCount()}
 			/>
 
-			<div class={s.content} ref={(el) => setScrollEl(el)}>
+			{/* `data-select-all-scope` keeps ⌘A to the document: focus lives on the
+			    wrapper (which also holds the header), and the preview is plain rendered
+			    DOM, so without a scope the native select-all had nothing to bind to. */}
+			<div class={s.content} data-select-all-scope ref={(el) => setScrollEl(el)}>
 				<Show when={searchVisible()}>
 					<DomSearchOverview scrollEl={scrollEl} fractions={overviewFractions} />
 				</Show>

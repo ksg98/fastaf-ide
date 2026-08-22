@@ -1,6 +1,6 @@
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { selectAllInFocused, selectedTextInFocusedEditor } from "../../utils/selectAll";
 
 /** A real CodeMirror view — the bug being pinned here is precisely that its
@@ -84,5 +84,105 @@ describe("selectedTextInFocusedEditor", () => {
 		expect(await selectedTextInFocusedEditor()).toBe("");
 
 		view.destroy();
+	});
+});
+
+describe("selectAllInFocused: the terminal", () => {
+	/** Focus is parked on a hidden <input> over the canvas — the shape that made ⌘A
+	 *  silently "succeed" on an off-screen buffer instead of selecting the terminal. */
+	function mountTerminal() {
+		const wrapper = document.createElement("div");
+		wrapper.setAttribute("data-focus-target", "terminal");
+		const keyInput = document.createElement("input");
+		keyInput.value = "x";
+		wrapper.appendChild(keyInput);
+		document.body.appendChild(wrapper);
+		keyInput.focus();
+		return keyInput;
+	}
+
+	it("delegates to the terminal instead of selecting the hidden key input", async () => {
+		const keyInput = mountTerminal();
+		const selectAllInTerminal = vi.fn(async () => true);
+		const select = vi.spyOn(keyInput, "select");
+
+		expect(await selectAllInFocused({ selectAllInTerminal })).toBe(true);
+
+		expect(selectAllInTerminal).toHaveBeenCalledOnce();
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("reports the terminal's own answer when it has nothing to select", async () => {
+		mountTerminal();
+		expect(await selectAllInFocused({ selectAllInTerminal: async () => false })).toBe(false);
+	});
+
+	it("does not fall through to the input branch when no hook is supplied", async () => {
+		const keyInput = mountTerminal();
+		const select = vi.spyOn(keyInput, "select");
+
+		expect(await selectAllInFocused()).toBe(false);
+		expect(select).not.toHaveBeenCalled();
+	});
+});
+
+describe("selectAllInFocused: rendered read-only content", () => {
+	/** The markdown tab's shape: focus on a wrapper that also holds the header, with
+	 *  the document itself in a marked-up region below it. */
+	function mountPreview() {
+		const wrapper = document.createElement("div");
+		wrapper.tabIndex = -1;
+		const header = document.createElement("div");
+		header.textContent = "README.md";
+		const content = document.createElement("div");
+		content.setAttribute("data-select-all-scope", "");
+		content.innerHTML = "<h1>Title</h1><p>Body text</p>";
+		wrapper.append(header, content);
+		document.body.appendChild(wrapper);
+		wrapper.focus();
+		return { wrapper, content };
+	}
+
+	it("selects the document region when focus sits on its wrapper", async () => {
+		const { content } = mountPreview();
+
+		expect(await selectAllInFocused()).toBe(true);
+
+		const range = window.getSelection()?.getRangeAt(0);
+		expect(range?.commonAncestorContainer).toBe(content);
+	});
+
+	it("leaves the header out of the selection", async () => {
+		mountPreview();
+
+		await selectAllInFocused();
+
+		const text = window.getSelection()?.toString() ?? "";
+		expect(text).toContain("Body text");
+		expect(text).not.toContain("README.md");
+	});
+
+	it("selects the region when focus is already inside it", async () => {
+		const { content } = mountPreview();
+		const inner = content.querySelector("p") as HTMLElement;
+		inner.tabIndex = -1;
+		inner.focus();
+
+		expect(await selectAllInFocused()).toBe(true);
+		expect(window.getSelection()?.getRangeAt(0).commonAncestorContainer).toBe(content);
+	});
+
+	it("declines when a focused wrapper holds no single unambiguous region", async () => {
+		const wrapper = document.createElement("div");
+		wrapper.tabIndex = -1;
+		for (const _ of [0, 1]) {
+			const region = document.createElement("div");
+			region.setAttribute("data-select-all-scope", "");
+			wrapper.appendChild(region);
+		}
+		document.body.appendChild(wrapper);
+		wrapper.focus();
+
+		expect(await selectAllInFocused()).toBe(false);
 	});
 });

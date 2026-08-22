@@ -1044,6 +1044,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			}
 		},
 		getSelection: () => canvasTerminalRef()?.getSelectionText() ?? "",
+		selectAll: async () => (await canvasTerminalRef()?.selectAll()) ?? false,
 		getBufferLines: (startLine: number, endLine: number) => {
 			if (!sessionId) return [];
 			return invoke("terminal_get_lines", { sessionId, start: startLine, end: endLine }) as Promise<string[]>;
