@@ -1895,6 +1895,7 @@ export const INTENTIONALLY_UNMAPPED: ReadonlySet<string> = new Set<string>([
 	"voice_unload_engine",
 	"voice_start",
 	"voice_stop",
+	"voice_set_muted",
 	"voice_speak",
 	"voice_cancel_speech",
 	"voice_get_config",

@@ -32,6 +32,7 @@ interface VoiceStatus {
 	engine_state: string;
 	loaded_model: string | null;
 	session_active: boolean;
+	muted: boolean;
 	speaking: boolean;
 	audio_level: number;
 }
@@ -45,7 +46,15 @@ interface AudioOutputDevice {
  * What the agent is doing right now. `thinking` and `speaking` are driven from
  * the frontend (the chat stream and the TTS queue), the rest from Rust.
  */
-export type VoiceAgentState = "idle" | "starting" | "listening" | "transcribing" | "thinking" | "speaking" | "error";
+export type VoiceAgentState =
+	| "idle"
+	| "starting"
+	| "listening"
+	| "transcribing"
+	| "muted"
+	| "thinking"
+	| "speaking"
+	| "error";
 
 interface VoiceStoreState {
 	config: VoiceConfig;
@@ -55,6 +64,8 @@ interface VoiceStoreState {
 	engineState: string;
 	loadedModel: string | null;
 	sessionActive: boolean;
+	/** Microphone muted for the running session — the session itself stays up. */
+	muted: boolean;
 	agentState: VoiceAgentState;
 	audioLevel: number;
 	/** Which asset id is downloading, so only its row shows a bar. */
@@ -86,6 +97,7 @@ function createVoiceStore() {
 		engineState: "stopped",
 		loadedModel: null,
 		sessionActive: false,
+		muted: false,
 		agentState: "idle",
 		audioLevel: 0,
 		downloading: null,
@@ -122,7 +134,10 @@ function createVoiceStore() {
 		levelTimer = setInterval(() => {
 			void invoke<VoiceStatus>("voice_status")
 				.then((status) => {
-					setState("audioLevel", normalizeLevel(status.audio_level));
+					// Rust reports 0 while muted even though the capture is still
+					// running, so the meter goes flat rather than dancing to audio
+					// that is being thrown away.
+					setState({ audioLevel: normalizeLevel(status.audio_level), muted: status.muted });
 					// Rust knows when the speaker actually goes quiet; the reply
 					// stream finishes well before the audio queue drains, so
 					// without this the label would read "Listening…" over the
@@ -130,7 +145,8 @@ function createVoiceStore() {
 					if (status.speaking) {
 						setState("agentState", "speaking");
 					} else if (state.agentState === "speaking") {
-						setState("agentState", "listening");
+						// A muted session is not listening once it stops talking.
+						setState("agentState", status.muted ? "muted" : "listening");
 					}
 				})
 				.catch(() => stopLevelPolling());
@@ -171,6 +187,7 @@ function createVoiceStore() {
 					engineState: status.engine_state,
 					loadedModel: status.loaded_model,
 					sessionActive: status.session_active,
+					muted: status.muted,
 				});
 			} catch (err) {
 				appLogger.error("voice", "Failed to get voice status", err);
@@ -268,10 +285,10 @@ function createVoiceStore() {
 
 		/** Begin a hands-free session. Throws so the caller can surface why. */
 		async startSession(): Promise<void> {
-			setState({ error: "", agentState: "starting" });
+			setState({ error: "", agentState: "starting", muted: false });
 			try {
 				await invoke("voice_start");
-				setState({ sessionActive: true, agentState: "listening" });
+				setState({ sessionActive: true, muted: false, agentState: "listening" });
 				startLevelPolling();
 				await actions.refreshStatus();
 			} catch (err) {
@@ -285,7 +302,7 @@ function createVoiceStore() {
 
 		async stopSession(): Promise<void> {
 			stopLevelPolling();
-			setState({ sessionActive: false, agentState: "idle" });
+			setState({ sessionActive: false, muted: false, agentState: "idle" });
 			try {
 				await invoke("voice_stop");
 			} catch (err) {
@@ -302,6 +319,29 @@ function createVoiceStore() {
 
 		cancelSpeech(): void {
 			void invoke("voice_cancel_speech").catch(() => {});
+		},
+
+		/**
+		 * Mute or unmute the microphone without ending the session.
+		 *
+		 * Rust keeps the capture device open and drops the samples, so this is
+		 * instant and cannot fail the way a restart could — but it also means the
+		 * mute is only as real as the flag, hence the optimistic update: the state
+		 * is set here and reconciled by the next status poll.
+		 */
+		async setMuted(muted: boolean): Promise<void> {
+			if (!state.sessionActive) return;
+			setState({ muted, agentState: muted ? "muted" : "listening" });
+			try {
+				await invoke("voice_set_muted", { muted });
+			} catch (err) {
+				setState("muted", !muted);
+				appLogger.error("voice", "Failed to change microphone mute", err);
+			}
+		},
+
+		toggleMuted(): void {
+			void actions.setMuted(!state.muted);
 		},
 
 		setAgentState(next: VoiceAgentState): void {

@@ -88,6 +88,14 @@ pub struct VoiceState {
     /// Mirrors `session.is_some()` without taking the lock, so dictation can
     /// cheaply refuse to start while voice owns the microphone.
     pub active: AtomicBool,
+    /// Microphone muted for the running session.
+    ///
+    /// Shared with the listening thread rather than stopping the capture: the
+    /// device stays open, so unmuting is instant and cannot fail, and the mic
+    /// permission is not re-checked mid-conversation. The thread throws the
+    /// samples away, so nothing muted can be detected, transcribed or sent —
+    /// the same discipline half-duplex already applies while the agent speaks.
+    pub muted: Arc<AtomicBool>,
 }
 
 impl VoiceState {
@@ -100,6 +108,7 @@ impl VoiceState {
             audio: Mutex::new(None),
             session: Mutex::new(None),
             active: AtomicBool::new(false),
+            muted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -123,6 +132,8 @@ impl VoiceState {
         *self.session.lock() = None;
         self.active
             .store(false, std::sync::atomic::Ordering::Release);
+        self.muted
+            .store(false, std::sync::atomic::Ordering::Release);
         *self.audio.lock() = None;
         if let Some(playback) = self.playback.lock().take() {
             playback.stop_all();
@@ -135,5 +146,28 @@ impl VoiceState {
 impl Default for VoiceState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// A mute that outlived its session would present as a dead microphone with
+    /// no visible cause — `voice_start` and `voice_stop` clear it, and so must
+    /// the shutdown path they share.
+    #[test]
+    fn a_session_never_inherits_the_last_ones_mute() {
+        let state = VoiceState::new();
+        assert!(
+            !state.muted.load(Ordering::Acquire),
+            "a fresh state listens"
+        );
+
+        state.muted.store(true, Ordering::Release);
+        state.shutdown();
+
+        assert!(!state.muted.load(Ordering::Acquire));
     }
 }

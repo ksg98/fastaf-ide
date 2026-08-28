@@ -32,6 +32,7 @@ const PLAYBACK_SETTLE_MS: u64 = 150;
 /// Emitted on `voice-state` so the UI can show what the agent is doing.
 pub const STATE_LISTENING: &str = "listening";
 pub const STATE_TRANSCRIBING: &str = "transcribing";
+pub const STATE_MUTED: &str = "muted";
 pub const STATE_ERROR: &str = "error";
 
 /// A running voice session. Dropping it stops the thread and releases the mic.
@@ -48,20 +49,33 @@ impl Session {
     ///
     /// Takes only the shared sample buffer, not the capture itself — the
     /// caller keeps that in `VoiceState` so `voice_status` can read its level
-    /// meter while this thread is draining it.
+    /// meter while this thread is draining it. `muted` is likewise owned by
+    /// `VoiceState`, so the mute command can flip it without reaching into the
+    /// running session.
     pub fn start(
         app: AppHandle,
         playback: Playback,
         buffer: Arc<Mutex<VecDeque<f32>>>,
         barge_in: bool,
         os_aec: bool,
+        muted: Arc<AtomicBool>,
     ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
 
         let handle = std::thread::Builder::new()
             .name("voice-session".into())
-            .spawn(move || listen_loop(&app, &buffer, &playback, &stop_thread, barge_in, os_aec))
+            .spawn(move || {
+                listen_loop(
+                    &app,
+                    &buffer,
+                    &playback,
+                    &stop_thread,
+                    barge_in,
+                    os_aec,
+                    &muted,
+                );
+            })
             .map_err(|e| format!("Failed to spawn voice session thread: {e}"))?;
 
         Ok(Self {
@@ -121,6 +135,7 @@ fn listen_loop(
     stop: &AtomicBool,
     barge_in: bool,
     os_aec: bool,
+    muted: &AtomicBool,
 ) {
     let mut detector = match TurnDetector::new(TurnConfig::default()) {
         Ok(detector) => detector,
@@ -159,6 +174,7 @@ fn listen_loop(
     // Software path only: a detection fired over our own playback, now ducked
     // and waiting for its transcript to prove it contains words.
     let mut pending_barge = false;
+    let mut was_muted = false;
     let mut cleaned: Vec<f32> = Vec::with_capacity(FRAME * 4);
     let mut playback_generation = playback.generation();
 
@@ -170,6 +186,33 @@ fn listen_loop(
 
     while !stop.load(Ordering::Acquire) {
         std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+
+        // Muted: discard the microphone entirely. The capture stays open — the
+        // level meter and an instant unmute both depend on it — but no sample
+        // reaches the detector, so nothing said while muted can be transcribed
+        // or sent. The half-time turn in progress is dropped with the detector
+        // reset rather than resumed on unmute, which would splice two halves of
+        // different sentences into one utterance.
+        if muted.load(Ordering::Acquire) {
+            if !was_muted {
+                was_muted = true;
+                detector.reset();
+                pending_barge = false;
+                emit_state(app, STATE_MUTED);
+                tracing::info!(source = "voice", "Microphone muted");
+            }
+            buffer.lock().clear();
+            pending.clear();
+            continue;
+        }
+        if was_muted {
+            was_muted = false;
+            buffer.lock().clear();
+            detector.reset();
+            emit_state(app, STATE_LISTENING);
+            tracing::info!(source = "voice", "Microphone unmuted");
+            continue;
+        }
 
         // Half-duplex: while the agent is talking, throw the microphone away
         // rather than letting the detector hear it. Resetting on the way out

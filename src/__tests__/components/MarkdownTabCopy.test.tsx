@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { writeClipboard, SOURCE } = vi.hoisted(() => ({
-	writeClipboard: vi.fn(async () => {}),
+	writeClipboard: vi.fn(async (_text: string) => {}),
 	SOURCE: ["# Title", "", "Some **bold** body and a [link](https://example.com).", "", "- one", "- two"].join("\n"),
 }));
 

@@ -831,10 +831,27 @@
   animation: micPulse 1s ease-in-out infinite;
   flex-shrink: 0;
 }
-/* Interrupt, in the voice strip. Pushed to the trailing edge so it sits clear
-   of the meter and does not shift as the status text changes length. */
-.micStopBtn {
+/* Muted: the dot stops pulsing, because nothing is being heard. */
+.micDotMuted {
+  composes: micDot;
+  background: var(--fg-muted);
+  animation: none;
+}
+
+/* Voice-strip controls, pinned to the trailing edge so they sit clear of the
+   meter and do not shift as the status text changes length. */
+.micActions {
   margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.micStopBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
   padding: 2px 8px;
   border: 1px solid var(--border-subtle);
@@ -847,6 +864,19 @@
 .micStopBtn:hover {
   color: var(--fg-primary);
   border-color: var(--accent);
+}
+
+/* Muted is a state the user has to be able to spot without reading the label —
+   a chat that has stopped answering looks the same as one that cannot hear. */
+.micMuteBtnActive {
+  composes: micStopBtn;
+  background: color-mix(in srgb, var(--error) 18%, var(--bg-tertiary));
+  border-color: var(--error);
+  color: var(--fg-primary);
+}
+.micMuteBtnActive:hover {
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 28%, var(--bg-tertiary));
 }
 
 @keyframes micPulse {

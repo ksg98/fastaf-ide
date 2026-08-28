@@ -1,5 +1,6 @@
 //! Tauri commands for the voice agent.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use serde::Serialize;
@@ -38,6 +39,8 @@ pub struct VoiceStatus {
     pub loaded_model: Option<String>,
     /// A listening session is running.
     pub session_active: bool,
+    /// The microphone is muted for that session.
+    pub muted: bool,
     /// The agent is currently speaking.
     pub speaking: bool,
     /// Live microphone level, for the meter.
@@ -50,17 +53,38 @@ pub fn voice_status(voice: State<'_, VoiceState>, dictation: State<'_, Dictation
     // polled every 75 ms for the level meter, and the engine lock is held for
     // the length of a synthesis pass.
     let loaded_model = voice.loaded_model.lock().clone();
+    let muted = voice.muted.load(Ordering::Acquire);
     VoiceStatus {
         engine_state: if loaded_model.is_some() { "ready" } else { "stopped" }.to_string(),
         loaded_model,
         session_active: voice.active.load(Ordering::Acquire),
+        muted,
         speaking: voice
             .playback
             .lock()
             .as_ref()
             .is_some_and(Playback::is_speaking),
-        audio_level: current_audio_level(&voice, &dictation),
+        // Report silence while muted rather than the true input level. The
+        // capture is still running (see VoiceState::muted), so the meter would
+        // otherwise keep dancing to a microphone whose audio is being thrown
+        // away — the one reading that must never look live is this one.
+        audio_level: if muted {
+            0.0
+        } else {
+            current_audio_level(&voice, &dictation)
+        },
     }
+}
+
+/// Mute or unmute the microphone for the running session.
+///
+/// Separate from `voice_stop` on purpose: stopping tears down the engine, the
+/// speaker and the mic and costs a second or more to bring back, which is too
+/// much for "hold on a moment" mid-conversation. Muting leaves the session and
+/// the agent's own speech untouched.
+#[tauri::command]
+pub fn voice_set_muted(voice: State<'_, VoiceState>, muted: bool) {
+    voice.muted.store(muted, Ordering::Release);
 }
 
 /// Live microphone level from whichever side owns the capture.
@@ -304,15 +328,19 @@ pub async fn voice_start(app: AppHandle) -> Result<(), String> {
         .device
         .filter(|d| !d.is_empty());
     let (capture, os_aec) = open_voice_capture(config.barge_in, input_device.as_deref())?;
+    let state = app.state::<VoiceState>();
+    // Every session starts live: a mute left over from the last conversation
+    // would look like a broken microphone.
+    state.muted.store(false, Ordering::Release);
     let session = Session::start(
         app.clone(),
         playback.clone(),
         capture.buffer_handle(),
         config.barge_in,
         os_aec,
+        Arc::clone(&state.muted),
     )?;
 
-    let state = app.state::<VoiceState>();
     *state.playback.lock() = Some(playback);
     *state.audio.lock() = Some(capture);
     *state.session.lock() = Some(session);
@@ -326,6 +354,7 @@ pub fn voice_stop(voice: State<'_, VoiceState>) {
     // the capture it was draining and the player it was watching.
     *voice.session.lock() = None;
     voice.active.store(false, Ordering::Release);
+    voice.muted.store(false, Ordering::Release);
     *voice.audio.lock() = None;
     if let Some(playback) = voice.playback.lock().take() {
         playback.stop_all();
