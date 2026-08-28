@@ -34,7 +34,8 @@ const {
 			engineState: "stopped",
 			loadedModel: null,
 			sessionActive: false,
-			agentState: "idle" as const,
+			muted: false,
+			agentState: "idle" as string,
 			audioLevel: 0,
 			downloading: null,
 			downloadPercent: 0,
@@ -46,6 +47,8 @@ const {
 		speak: vi.fn(),
 		cancelSpeech: vi.fn(),
 		setAgentState: vi.fn(),
+		setMuted: vi.fn().mockResolvedValue(undefined),
+		toggleMuted: vi.fn(),
 	},
 }));
 
@@ -353,5 +356,57 @@ describe("AIChatPanel dictation", () => {
 
 		expect((await findByTestId("chat-mic-error")).textContent).toContain("too short");
 		expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+	});
+});
+
+describe("AIChatPanel voice mute", () => {
+	beforeEach(() => {
+		mockVoiceStore.state.muted = false;
+		mockVoiceStore.state.agentState = "listening";
+		mockVoiceStore.toggleMuted.mockClear();
+		// The previous test's unmount stops its session; only calls made by this
+		// one should count.
+		mockVoiceStore.stopSession.mockClear();
+	});
+
+	/** Start a voice session the way the user does, and wait for its strip. */
+	async function startVoice() {
+		const view = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		view.getByTestId("chat-voice-btn").click();
+		await view.findByTestId("chat-voice-live");
+		return view;
+	}
+
+	it("offers mute for the whole session, not only while the agent speaks", async () => {
+		const view = await startVoice();
+		expect(view.getByTestId("chat-voice-mute-btn")).toBeTruthy();
+		// The interrupt button is the state-dependent one; mute must not come and
+		// go with it, or it moves out from under the cursor mid-sentence.
+		expect(view.queryByTestId("chat-voice-interrupt-btn")).toBeNull();
+	});
+
+	it("is absent until a session is running", () => {
+		const view = render(() => <AIChatPanel visible={true} onClose={() => {}} />);
+		expect(view.queryByTestId("chat-voice-mute-btn")).toBeNull();
+	});
+
+	it("toggles the microphone without ending the session", async () => {
+		const view = await startVoice();
+
+		view.getByTestId("chat-voice-mute-btn").click();
+
+		expect(mockVoiceStore.toggleMuted).toHaveBeenCalledOnce();
+		expect(mockVoiceStore.stopSession).not.toHaveBeenCalled();
+	});
+
+	it("reads as unmute, and as pressed, once muted", async () => {
+		mockVoiceStore.state.muted = true;
+		mockVoiceStore.state.agentState = "muted";
+		const view = await startVoice();
+
+		const button = view.getByTestId("chat-voice-mute-btn");
+		expect(button.textContent).toContain("Unmute");
+		expect(button.getAttribute("aria-pressed")).toBe("true");
+		expect(view.getByTestId("chat-voice-live").textContent).toContain("Muted");
 	});
 });

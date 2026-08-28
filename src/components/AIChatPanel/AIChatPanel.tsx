@@ -107,6 +107,17 @@ const IconVoice = () => (
 	</svg>
 );
 
+// The same mic as IconMic with a slash through it — the mute state of a running
+// voice session, not a second way to start one.
+const IconMicMuted = () => (
+	<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+		<rect x="6" y="1.75" width="4" height="7.5" rx="2" fill="currentColor" stroke="none" />
+		<path d="M3.75 7.25v.75a4.25 4.25 0 008.5 0v-.75" stroke-linecap="round" />
+		<path d="M8 12.25v2" stroke-linecap="round" />
+		<path d="M2 14L14 2" stroke-linecap="round" stroke-width="1.6" />
+	</svg>
+);
+
 const IconTrash = () => (
 	<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
 		<path d="M2.5 4h9M5 4V2.5h4V4M3.5 4v7.5a1 1 0 001 1h5a1 1 0 001-1V4" />
@@ -452,6 +463,8 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 				return "Starting…";
 			case "transcribing":
 				return "Transcribing…";
+			case "muted":
+				return "Muted — the agent can't hear you";
 			case "thinking":
 				return "Thinking…";
 			case "speaking":
@@ -957,22 +970,42 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 			</Show>
 
 			{/* Voice session strip. The meter goes flat while the agent speaks —
-			    in half-duplex mode the microphone really is muted then. */}
+			    in half-duplex mode the microphone really is muted then — and while
+			    muted, where Rust reports a level of zero rather than the live one. */}
 			<Show when={voice.active()}>
 				<div class={s.micLive} data-testid="chat-voice-live">
-					<span class={s.micDot} />
+					<span class={voiceStore.state.muted ? s.micDotMuted : s.micDot} />
 					<MicMeter level={voiceStore.state.audioLevel} barCount={11} maxPx={14} />
 					<span class={s.micLabel}>{voiceStatusLabel()}</span>
-					<Show when={voiceStore.state.agentState === "speaking"}>
+					<div class={s.micActions}>
+						<Show when={voiceStore.state.agentState === "speaking"}>
+							<button
+								class={s.micStopBtn}
+								data-testid="chat-voice-interrupt-btn"
+								onClick={() => voice.bargeIn()}
+								title="Stop speaking and cancel this turn"
+							>
+								Interrupt
+							</button>
+						</Show>
+						{/* Stays mounted through every agent state: needing it most while
+						    the agent is mid-sentence is exactly when it must not move. */}
 						<button
-							class={s.micStopBtn}
-							data-testid="chat-voice-interrupt-btn"
-							onClick={() => voice.bargeIn()}
-							title="Stop speaking and cancel this turn"
+							class={voiceStore.state.muted ? s.micMuteBtnActive : s.micStopBtn}
+							data-testid="chat-voice-mute-btn"
+							onClick={() => voiceStore.toggleMuted()}
+							title={
+								voiceStore.state.muted
+									? "Unmute the microphone"
+									: "Mute the microphone — the session stays open and the agent keeps speaking"
+							}
+							aria-label={voiceStore.state.muted ? "Unmute microphone" : "Mute microphone"}
+							aria-pressed={voiceStore.state.muted}
 						>
-							Interrupt
+							<IconMicMuted />
+							{voiceStore.state.muted ? "Unmute" : "Mute"}
 						</button>
-					</Show>
+					</div>
 				</div>
 			</Show>
 

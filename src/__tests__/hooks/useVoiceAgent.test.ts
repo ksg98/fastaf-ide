@@ -27,7 +27,7 @@ const { mockListen, mockConversationStore, mockVoiceStore, listeners, replyObser
 			}),
 		},
 		mockVoiceStore: {
-			state: { agentState: "idle", error: "" },
+			state: { agentState: "idle", error: "", muted: false },
 			startSession: vi.fn().mockResolvedValue(undefined),
 			stopSession: vi.fn().mockResolvedValue(undefined),
 			speak: vi.fn(),
@@ -77,6 +77,7 @@ beforeEach(() => {
 	mockConversationStore.isStreaming.mockReturnValue(false);
 	mockConversationStore.agentState.mockReturnValue("idle");
 	mockVoiceStore.state.agentState = "idle";
+	mockVoiceStore.state.muted = false;
 });
 
 describe("useVoiceAgent", () => {
@@ -263,5 +264,47 @@ describe("useVoiceAgent", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("useVoiceAgent while muted", () => {
+	it("drops an utterance that lands after the mute", async () => {
+		const { api, dispose } = mount();
+		await api.start();
+		mockVoiceStore.state.muted = true;
+
+		// Rust stops feeding the detector the moment the flag flips, but a turn
+		// that already finished transcribing is on its way here regardless.
+		listeners.get("voice-utterance")?.({ payload: { text: "thinking out loud" } });
+		await Promise.resolve();
+
+		expect(mockConversationStore.sendMessage).not.toHaveBeenCalled();
+		dispose();
+	});
+
+	it("resumes sending once unmuted", async () => {
+		const { api, dispose } = mount();
+		await api.start();
+		mockVoiceStore.state.muted = true;
+		listeners.get("voice-utterance")?.({ payload: { text: "dropped" } });
+		await Promise.resolve();
+
+		mockVoiceStore.state.muted = false;
+		await speakToAgent("heard");
+
+		expect(mockConversationStore.sendMessage).toHaveBeenCalledOnce();
+		expect(mockConversationStore.sendMessage).toHaveBeenCalledWith("heard", "sess-1", expect.anything());
+		dispose();
+	});
+
+	it("keeps speaking the reply — mute is the microphone, not the agent", async () => {
+		const { api, dispose } = mount();
+		await api.start();
+		mockVoiceStore.state.muted = true;
+
+		replyObserver.current?.onDelta?.("Here is the answer. ");
+
+		expect(mockVoiceStore.speak).toHaveBeenCalledWith("Here is the answer.");
+		dispose();
 	});
 });

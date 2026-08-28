@@ -1743,6 +1743,7 @@ pub fn run() {
             voice::commands::voice_unload_engine,
             voice::commands::voice_start,
             voice::commands::voice_stop,
+            voice::commands::voice_set_muted,
             voice::commands::voice_speak,
             voice::commands::voice_cancel_speech,
             voice::commands::voice_get_config,

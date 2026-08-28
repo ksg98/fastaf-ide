@@ -60,9 +60,13 @@ export function useVoiceAgent(deps: VoiceAgentDeps) {
 	};
 
 	const sendUtterance = async (text: string) => {
-		if (!active()) return;
+		// Muting drops the microphone in Rust, but a turn that finished
+		// transcribing just before the mute lands is already on its way here.
+		// Muting mid-sentence means "don't send that", so drop it — including
+		// after the wait below, which can hold an utterance for seconds.
+		if (!active() || voiceStore.state.muted) return;
 		const idle = await waitForIdle(BUSY_WAIT_MS);
-		if (!idle || !active()) {
+		if (!idle || !active() || voiceStore.state.muted) {
 			// Length only — transcripts never reach the log.
 			appLogger.warn("voice", `Dropped a ${text.length}-char utterance; chat still busy`);
 			return;
