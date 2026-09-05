@@ -170,11 +170,11 @@ describe("SettingsPanel", () => {
 		expect(labels).toContain("Beta");
 	});
 
-	it("shows REPOSITORIES section label above repo items", () => {
+	it("shows the Repositories section label above repo items", () => {
 		const { container } = render(() => <SettingsPanel visible={true} onClose={() => {}} />);
 		const label = container.querySelector(".navLabel");
 		expect(label).not.toBeNull();
-		expect(label!.textContent).toBe("REPOSITORIES");
+		expect(label!.textContent).toBe("Repositories");
 	});
 
 	it("opens on General when no context given", () => {

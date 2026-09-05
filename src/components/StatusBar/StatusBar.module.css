@@ -3,16 +3,17 @@
   50% { opacity: 1; }
 }
 
-/* StatusBar — transparent over the app veil, single hairline separator on top. */
+/* StatusBar — part of the frame. 28px, 12px type, no hairline: the content
+   well above already ends with its own soft edge. */
 .bar {
   height: var(--status-height);
   min-height: var(--status-height);
   background: transparent;
-  border-top: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
-  padding: 0 12px;
+  padding: 0 8px 0 12px;
   font-size: var(--font-sm);
+  color: var(--fg-secondary);
   gap: 8px;
 }
 
@@ -28,7 +29,7 @@
 .controls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   margin-left: auto;
   flex: 0 0 auto;
   overflow: visible;
@@ -38,8 +39,8 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-left: 12px;
-  padding-left: 12px;
+  margin-left: 8px;
+  padding-left: 10px;
   border-left: 1px solid var(--border-subtle);
   flex-shrink: 1;
   min-width: 0;
@@ -58,7 +59,6 @@
   color: var(--accent);
   transition: color 600ms ease-out;
 }
-
 
 /* Pendulum ticker for overflowing notifications */
 .infoTicker {
@@ -83,37 +83,42 @@
 }
 
 .cwd {
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-family: var(--font-ui);
   font-size: var(--font-sm);
   cursor: pointer;
-  padding: 1px 6px;
+  padding: 2px 6px;
   border-radius: var(--radius-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 0 10 auto;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .cwd:hover {
-  color: var(--fg-secondary);
+  color: var(--fg-primary);
   background: var(--surface-hover);
 }
 
 .cwdRoot {
-  opacity: 0.5;
+  opacity: 0.6;
 }
 
 .cwdSub {
-  color: var(--fg-primary);
+  color: var(--fg-secondary);
 }
 
 .agentBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-family: var(--font-ui);
   font-size: var(--font-sm);
   font-weight: 500;
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  border-radius: var(--radius-md);
   background: var(--bg-tertiary);
   white-space: nowrap;
   flex-shrink: 0;
@@ -139,12 +144,12 @@
 
 .toggleBadge {
   position: absolute;
-  top: -3px;
-  right: -3px;
-  min-width: 12px;
-  height: 12px;
-  padding: 0 2px;
-  border-radius: var(--radius-sm);
+  top: -2px;
+  right: -2px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--text-on-accent);
   font-size: 9px;
@@ -154,12 +159,13 @@
   justify-content: center;
   pointer-events: none;
   line-height: 1;
+  box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 
 .tickerMessage {
   font-family: var(--font-ui);
   font-size: var(--font-sm);
-  padding: 1px 6px;
+  padding: 2px 6px;
   border-radius: var(--radius-sm);
   color: var(--fg-muted);
   white-space: nowrap;
@@ -174,13 +180,13 @@
 }
 
 .tickerClickable:hover {
-  color: var(--fg-secondary);
+  color: var(--fg-primary);
   background: var(--surface-hover);
 }
 
 .tickerWarning {
   color: var(--urgent);
-  background: color-mix(in srgb, var(--urgent) 10%, transparent);
+  background: color-mix(in srgb, var(--urgent) 12%, transparent);
 }
 
 .tickerIcon {
@@ -215,19 +221,20 @@
 
 .tickerBadge {
   margin-left: 6px;
-  padding: 0 4px;
+  padding: 1px 5px;
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
   color: var(--fg-secondary);
   font-size: var(--font-2xs);
+  font-weight: 600;
   cursor: pointer;
   flex-shrink: 0;
   white-space: nowrap;
 }
 
 .tickerBadge:hover {
-  background: var(--surface-hover);
-  color: var(--fg-secondary);
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
 }
 
 /* Ticker popover (right-click) */
@@ -243,10 +250,12 @@
   right: 12px;
   width: 340px;
   max-height: 300px;
-  background: var(--bg-secondary);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-bottom-anchor);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 1001;
   display: flex;
   flex-direction: column;
@@ -257,7 +266,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  padding: 8px 12px;
   font-size: var(--font-sm);
   font-weight: 600;
   color: var(--fg-secondary);
@@ -268,7 +277,7 @@
 .tickerPopoverClose {
   background: none;
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-lg);
   cursor: pointer;
   padding: 0 4px;
@@ -289,7 +298,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
+  padding: 5px 8px;
   border-radius: var(--radius-md);
   font-size: var(--font-sm);
   color: var(--fg-muted);
@@ -324,7 +333,7 @@
 .tickerPopoverUrgentBadge {
   font-size: var(--font-2xs);
   font-weight: 700;
-  padding: 1px 4px;
+  padding: 1px 5px;
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--urgent) 15%, transparent);
   color: var(--urgent);
@@ -351,10 +360,12 @@
   left: 12px;
   max-width: 480px;
   padding: 8px 12px;
-  background: var(--bg-secondary);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow-bottom-anchor);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   color: var(--fg-secondary);
   font-size: var(--font-sm);
   white-space: pre-wrap;
@@ -366,17 +377,17 @@
   font-family: var(--font-ui);
   font-size: var(--font-sm);
   font-weight: 500;
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  border-radius: var(--radius-md);
   color: var(--success);
-  background: color-mix(in srgb, var(--success) 15%, transparent);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
   white-space: nowrap;
   flex-shrink: 0;
   cursor: pointer;
 }
 
 .updateBadge:hover {
-  background: color-mix(in srgb, var(--success) 25%, transparent);
+  background: color-mix(in srgb, var(--success) 22%, transparent);
 }
 
 .downloading {
@@ -384,32 +395,40 @@
   animation: pulse-opacity 2s ease-in-out infinite;
 }
 
+/* Panel toggles — ghost icon buttons; an open panel lights its toggle. */
 .toggleBtn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
-  color: var(--fg-secondary);
-  padding: 2px 8px;
+  width: 26px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: var(--fg-muted);
+  padding: 0;
   border-radius: var(--radius-md);
   font-size: var(--font-xs);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
+    color var(--duration-fast) var(--ease-out);
   overflow: visible;
 }
 
 .toggleBtn:focus-visible {
   outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
 }
 
 .toggleBtn:hover {
   background: var(--surface-hover);
-  border-color: var(--accent);
   color: var(--fg-primary);
+}
+
+.toggleActive,
+.toggleActive:hover {
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 .micIcon {

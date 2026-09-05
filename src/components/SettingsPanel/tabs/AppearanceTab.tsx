@@ -397,7 +397,7 @@ export const AppearanceTab: Component = () => {
 					label={t("appearance.label.reduceTransparency", "Reduce Transparency")}
 					hint={t(
 						"appearance.hint.reduceTransparency",
-						"Render surfaces opaque instead of showing the desktop blurred through the window",
+						"Keep the window opaque instead of letting the desktop show through the frame",
 					)}
 				/>
 			</Show>

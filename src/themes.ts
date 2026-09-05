@@ -158,30 +158,30 @@ let themes: Map<string, LoadedTheme> = new Map();
 let loaded = false;
 
 const FALLBACK_TERMINAL: TerminalTheme = {
-	background: "#1e1e1e",
-	foreground: "#cccccc",
-	cursor: "#cccccc",
+	background: "#050505",
+	foreground: "#e4e4e7",
+	cursor: "#e4e4e7",
 };
 
 // Mirrors cursor-dark.json / the :root seed, so the rare no-theme-loaded path
 // looks like the default instead of a ghost of the pre-restyle palette.
 const FALLBACK_APP: IAppTheme = {
-	bgPrimary: "#141414",
-	bgSecondary: "#1a1a1a",
-	bgTertiary: "#202020",
-	bgHighlight: "#282828",
-	fgPrimary: "#e0e0e0",
-	fgSecondary: "#c2c2c2",
-	fgMuted: "#8c8c8c",
-	accent: "#4c9df3",
-	accentHover: "#66aefa",
-	border: "#2a2a2a",
+	bgPrimary: "#050505",
+	bgSecondary: "#0c0c0c",
+	bgTertiary: "#161616",
+	bgHighlight: "#222222",
+	fgPrimary: "#f0f0f0",
+	fgSecondary: "#a6a6a6",
+	fgMuted: "#808080",
+	accent: "#5aa0f8",
+	accentHover: "#79b3fa",
+	border: "#1f1f1f",
 	success: "#4ade80",
-	warning: "#dcdcaa",
-	error: "#ef4444",
-	textOnAccent: "#000000",
-	textOnError: "#000000",
-	textOnSuccess: "#000000",
+	warning: "#fbbf24",
+	error: "#f87171",
+	textOnAccent: "#0b1220",
+	textOnError: "#1c0606",
+	textOnSuccess: "#052e16",
 };
 
 /** Load themes from Rust backend. Must be called before applyAppTheme(). */
@@ -322,13 +322,25 @@ export function applyAppTheme(key: string): void {
 	// Gloss borders/washes need polarity flipped on light themes (dark borders
 	// on light surfaces, white sheen stronger to stay visible).
 	const light = relativeLuminance(theme.bgPrimary) > 0.5;
-	root.setProperty("--border-subtle", light ? "rgba(0, 0, 0, 0.08)" : "rgba(255, 255, 255, 0.06)");
-	root.setProperty("--border-strong", light ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.12)");
-	root.setProperty("--surface-hover", light ? "rgba(0, 0, 0, 0.05)" : "rgba(255, 255, 255, 0.05)");
+	root.setProperty("--border-subtle", light ? "rgba(0, 0, 0, 0.08)" : "rgba(255, 255, 255, 0.08)");
+	root.setProperty("--border-strong", light ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.16)");
+	root.setProperty("--surface-hover", light ? "rgba(0, 0, 0, 0.05)" : "rgba(255, 255, 255, 0.07)");
 	root.setProperty(
 		"--highlight-inset",
-		light ? "inset 0 1px 0 rgba(255, 255, 255, 0.65)" : "inset 0 1px 0 rgba(255, 255, 255, 0.05)",
+		light ? "inset 0 1px 0 rgba(255, 255, 255, 0.65)" : "inset 0 1px 0 rgba(255, 255, 255, 0.09)",
 	);
+	root.setProperty(
+		"--inset-well",
+		light
+			? "inset 0 1px 2px rgba(0, 0, 0, 0.08), 0 1px 0 rgba(255, 255, 255, 0.6)"
+			: "inset 0 1px 2px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.035)",
+	);
+	root.setProperty("--scrim", light ? "rgba(0, 0, 0, 0.35)" : "rgba(0, 0, 0, 0.6)");
+	root.setProperty("--wash-0", light ? "rgba(0, 0, 0, 0.025)" : "rgba(255, 255, 255, 0.04)");
+	root.setProperty("--wash-1", light ? "rgba(0, 0, 0, 0.05)" : "rgba(255, 255, 255, 0.07)");
+	root.setProperty("--wash-2", light ? "rgba(0, 0, 0, 0.09)" : "rgba(255, 255, 255, 0.12)");
+	root.setProperty("--scrollbar-thumb", light ? "rgba(0, 0, 0, 0.18)" : "rgba(255, 255, 255, 0.14)");
+	root.setProperty("--scrollbar-thumb-hover", light ? "rgba(0, 0, 0, 0.3)" : "rgba(255, 255, 255, 0.24)");
 	const termTheme = getTerminalTheme(key);
 	const ansiRgb: [number, number, number][] = [];
 	for (const k of ANSI_KEYS) {

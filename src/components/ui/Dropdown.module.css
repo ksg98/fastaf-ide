@@ -1,13 +1,13 @@
-/* Dropdown follows the glass overlay recipe. Unlike ContextMenu it KEEPS a
- * solid-accent .selected row — the macOS menu convention for pickers where
- * the currently-active option needs a strong visual anchor. */
+/* Dropdown — overlay recipe. The .selected row keeps an accent wash (not a
+ * solid fill) so the current option anchors the eye without shouting. */
 
 .dropdown {
   position: absolute;
   top: 100%;
   right: 0;
   margin-top: 4px;
-  min-width: 140px;
+  min-width: 160px;
+  padding: 4px;
   z-index: var(--z-dropdown);
   overflow: hidden;
   background: var(--surface-overlay);
@@ -52,10 +52,10 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 4px;
-  padding: 6px 10px;
+  min-height: 28px;
+  padding: 0 10px;
   font-size: var(--font-md);
-  color: var(--fg-secondary);
+  color: var(--fg-primary);
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
@@ -68,17 +68,17 @@
 }
 
 .selected {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--fg-primary);
 }
 
 .selected:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.2);
+  color: var(--fg-primary);
 }
 
 .divider {
   height: 1px;
   background: var(--border-subtle);
-  margin: 4px 0;
+  margin: 4px 6px;
 }

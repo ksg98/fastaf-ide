@@ -1,28 +1,27 @@
 .container {
   position: fixed;
-  bottom: calc(var(--status-bar-height, 24px) + 8px);
+  bottom: calc(var(--status-height, 28px) + 12px);
   right: 16px;
   z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   pointer-events: none;
 }
 
-/* Glass pill — --surface-overlay + --blur-overlay collapse to opaque when
- * vibrancy is off, so the same recipe works everywhere. */
+/* Toast — overlay surface with a coloured level dot; warn/error tint the edge. */
 .toast {
   pointer-events: auto;
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
   padding: 10px 14px;
   max-width: 420px;
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
   -webkit-backdrop-filter: var(--blur-overlay);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   font-family: var(--font-ui);
   font-size: var(--font-md);
@@ -32,11 +31,11 @@
 }
 
 .toast[data-level="warn"] {
-  border-color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
 }
 
 .toast[data-level="error"] {
-  border-color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
 }
 
 .level {
@@ -44,15 +43,13 @@
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
-  /* Nudge down so the dot aligns with the first line of the title, now that
-     the toast anchors its children to the top for multi-line messages. */
   margin-top: 6px;
 }
 
 .body {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -74,26 +71,25 @@
 
 .message {
   color: var(--fg-secondary);
-  /* Wrap long messages (e.g. CI-heal failures naming external providers)
-     across lines instead of truncating to an unreadable single line. */
   white-space: normal;
   overflow-wrap: anywhere;
-  line-height: 1.35;
+  line-height: 1.4;
 }
 
 .action {
   flex-shrink: 0;
   margin-top: 2px;
   margin-left: auto;
-  padding: 2px 8px;
+  height: 24px;
+  padding: 0 10px;
   font-size: var(--font-sm);
+  font-family: inherit;
   background: var(--accent);
   color: var(--text-on-accent);
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-weight: 600;
-  box-shadow: var(--highlight-inset);
   transition: background var(--duration-fast) var(--ease-out);
 }
 
@@ -104,10 +100,10 @@
 @keyframes slideIn {
   from {
     opacity: 0;
-    transform: translateX(16px);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateX(0);
+    transform: translateY(0);
   }
 }

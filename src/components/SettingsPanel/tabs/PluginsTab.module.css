@@ -115,8 +115,6 @@
 .updateBadge {
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   background: rgba(88, 166, 255, 0.15);
@@ -126,8 +124,6 @@
 .installedBadge {
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   background: var(--bg-tertiary);
@@ -182,8 +178,6 @@
 .badge {
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
 }
@@ -351,7 +345,6 @@
 .logLevel {
   flex-shrink: 0;
   width: 40px;
-  text-transform: uppercase;
   font-weight: 600;
 }
 

@@ -343,10 +343,16 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
 /// `seed_builtin_themes` distinguish "stale but never touched" (safe to
 /// upgrade) from "edited by the user" (must be preserved). When retuning a
 /// builtin, copy its old file into `themes/legacy/` and register it here.
-const SUPERSEDED_BUILTIN_THEMES: &[(&str, &str)] = &[(
-    "cursor-dark.json",
-    include_str!("themes/legacy/cursor-dark-v1.json"),
-)];
+const SUPERSEDED_BUILTIN_THEMES: &[(&str, &str)] = &[
+    (
+        "cursor-dark.json",
+        include_str!("themes/legacy/cursor-dark-v1.json"),
+    ),
+    (
+        "cursor-dark.json",
+        include_str!("themes/legacy/cursor-dark-v2.json"),
+    ),
+];
 
 /// Seed the themes directory with built-in themes.
 pub(crate) fn seed_builtin_themes(dir: &Path) -> std::io::Result<()> {

@@ -134,8 +134,6 @@
   font-size: var(--font-xs);
   font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   user-select: none;
 }
 

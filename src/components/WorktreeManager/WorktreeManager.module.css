@@ -5,7 +5,7 @@
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5); /* scrim — kept literal, app-wide choice */
+  background: var(--scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -196,8 +196,6 @@
   font-size: var(--font-2xs);
   font-family: var(--font-ui);
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);

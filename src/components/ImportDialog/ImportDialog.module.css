@@ -112,8 +112,6 @@
   border-radius: 8px;
   background: rgba(var(--accent-rgb), 0.15);
   color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   white-space: nowrap;
 }
 

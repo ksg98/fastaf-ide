@@ -158,8 +158,6 @@
   padding: 1px 6px;
   border-radius: var(--radius-pill);
   flex-shrink: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
 }
 
 .relevanceHigh {

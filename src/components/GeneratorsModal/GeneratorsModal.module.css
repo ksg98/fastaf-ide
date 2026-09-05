@@ -149,8 +149,6 @@
   font-size: 11px;
   color: var(--fg-muted);
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .actions {

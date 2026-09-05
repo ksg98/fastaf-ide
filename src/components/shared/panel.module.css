@@ -1,9 +1,13 @@
-/* Shared Panel Styles (DiffPanel, MarkdownPanel, FileBrowserPanel, etc.) */
+/* Shared Panel Styles (DiffPanel, MarkdownPanel, FileBrowserPanel, etc.)
+   Side panels are part of the frame: same surface, 36px header, 13px/600
+   title, icon buttons on the right. */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 6px 0 12px;
   background: transparent;
   border-bottom: 1px solid var(--border-subtle);
   font-size: var(--font-md);
@@ -13,26 +17,26 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .headerRight {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
 .headerBtn {
   composes: iconBtn from "./controls.module.css";
-  /* Panel headers historically use a slightly tighter hit area than
-     the 24×24 default; keep the auto width but let the composed rules
-     drive color, radius, hover wash, and focus ring. */
   width: auto;
-  padding: 2px 6px;
+  min-width: 26px;
+  padding: 0 6px;
+  font-size: var(--font-sm);
 }
 
 .title {
-  color: var(--fg-secondary);
-  font-weight: 500;
+  color: var(--fg-primary);
+  font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -40,19 +44,14 @@
 .headerSep {
   width: 1px;
   height: 14px;
-  background: var(--fg-muted);
-  opacity: 0.4;
+  background: var(--border-strong);
   flex-shrink: 0;
 }
 
 .close {
   composes: iconBtn from "./controls.module.css";
-  /* Panel close buttons render an oversized glyph — keep the enlarged
-     font, auto width, and slim padding while inheriting hover/focus. */
-  width: auto;
-  padding: 2px 6px;
-  font-size: var(--font-xl);
-  color: var(--fg-secondary);
+  font-size: var(--font-lg);
+  color: var(--fg-muted);
 }
 
 .content {
@@ -63,31 +62,29 @@
 .search {
   display: flex;
   align-items: center;
-  padding: 4px 8px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .searchInput {
   composes: input from "./controls.module.css";
-  /* Search rows sit inside a slim strip — override the composed
-     defaults for width/padding/typography while keeping the input
-     background, border, focus ring, and disabled treatment. */
   flex: 1;
   width: auto;
-  padding: 3px 6px;
+  min-height: 26px;
+  padding: 3px 8px;
   font-size: var(--font-sm);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
 }
 
 .searchInput::placeholder {
   color: var(--fg-muted);
-  opacity: 0.5;
+  opacity: 0.7;
 }
 
 .searchClear {
   background: none;
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-md);
   cursor: pointer;
   padding: 0 4px;
@@ -102,15 +99,16 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 16px;
-  height: 15px;
-  padding: 0 4px;
-  background: var(--accent);
-  color: var(--text-on-accent);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
   border-radius: var(--radius-pill);
-  font-size: var(--font-2xs);
+  font-size: var(--font-xs);
   font-weight: 600;
   line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 /* File List */
@@ -118,20 +116,23 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  padding: 4px 0;
 }
 
 .fileItem {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  margin: 0 6px;
+  padding: 0 8px;
+  height: var(--row-h);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  border-bottom: 1px solid var(--border);
-  transition: background 0.15s ease;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .fileItem:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
 }
 
 .fileItem:active {
@@ -146,42 +147,42 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: var(--radius-sm);
-  font-size: var(--font-xs);
+  font-size: var(--font-2xs);
   font-weight: 700;
   font-family: var(--font-ui);
 }
 
 .statusModified {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--accent);
 }
 
 .statusAdded {
-  background: color-mix(in srgb, var(--success) 20%, transparent);
+  background: color-mix(in srgb, var(--success) 18%, transparent);
   color: var(--success);
 }
 
 .statusDeleted {
-  background: color-mix(in srgb, var(--error) 20%, transparent);
+  background: color-mix(in srgb, var(--error) 18%, transparent);
   color: var(--error);
 }
 
 .statusRenamed {
-  background: color-mix(in srgb, var(--merged) 20%, transparent);
+  background: color-mix(in srgb, var(--merged) 18%, transparent);
   color: var(--merged);
 }
 
 .statusUnknown {
-  background: color-mix(in srgb, var(--fg-muted) 20%, transparent);
+  background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
   color: var(--fg-muted);
 }
 
 .fileName {
   flex: 1;
-  font-size: var(--font-base);
+  font-size: var(--font-md);
   font-family: var(--font-ui);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -190,7 +191,8 @@
 
 .fileStats {
   flex-shrink: 0;
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
   color: var(--fg-muted);
 }

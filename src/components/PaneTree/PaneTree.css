@@ -82,8 +82,9 @@
   min-height: 0;
 }
 
+/* Active pane in a split: a soft accent outline, not a stripe. */
 .pane-group-active {
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
 }
 
 .pane-drop-hover {
@@ -92,7 +93,7 @@
 }
 
 .pane-branch-horizontal > .pane-slot > .pane-group.pane-group-active {
-  box-shadow: inset 0 2px 0 var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
 }
 
 .pane-content {
@@ -103,17 +104,19 @@
   position: relative;
 }
 
-/* ---- Mini Tab Bar (auto-show when 2+ tabs) ---- */
+/* ---- Mini Tab Bar (auto-show when 2+ tabs) ----
+   Lives inside the dark well, so it is a quieter echo of the main strip. */
 
 .pane-tab-bar {
   display: flex;
-  gap: 1px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+  gap: 2px;
+  background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
   overflow-x: auto;
   flex-shrink: 0;
-  height: 28px;
-  align-items: stretch;
+  height: 30px;
+  padding: 0 4px;
+  align-items: center;
 }
 
 .pane-tab-bar::-webkit-scrollbar {
@@ -123,26 +126,31 @@
 .pane-tab {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+  height: 22px;
   padding: 0 8px;
   background: transparent;
   border: none;
-  color: var(--fg-secondary);
-  font-size: 11px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
   cursor: pointer;
   white-space: nowrap;
   min-width: 0;
-  max-width: 150px;
+  max-width: 160px;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .pane-tab:hover {
-  background: var(--bg-highlight);
+  background: var(--wash-1);
+  color: var(--fg-secondary);
 }
 
 .pane-tab-active {
   color: var(--fg-primary);
-  background: var(--bg-primary);
-  border-bottom: 2px solid var(--accent);
+  background: var(--wash-2);
+  border-bottom: none;
 }
 
 .pane-tab-repo-badge {
@@ -217,7 +225,7 @@
   font-size: 14px;
   line-height: 1;
   padding: 0 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
   flex-shrink: 0;
 }
 
@@ -227,59 +235,27 @@
 
 .pane-tab-close:hover {
   opacity: 1 !important;
-  background: var(--bg-highlight);
+  background: var(--wash-2);
 }
 
 /* ---- Tab type coloring (mirrors main TabBar) ----
-   Muted to keep pane tabs quieter than the main TabBar: surface tints halved,
-   active border-color lands on rgba(var(--tab-*-rgb), .75) per the Cursor plan. */
+   Type is expressed by a soft tint on the active tab only; resting tabs
+   stay neutral so a crowded split doesn't turn into a colour chart. */
 
-.pane-tab-diff {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.05), rgba(var(--tab-diff-rgb), 0.025));
-  border-bottom: 2px solid rgba(var(--tab-diff-rgb), 0.2);
-}
-.pane-tab-diff:hover {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.08), rgba(var(--tab-diff-rgb), 0.04));
-}
 .pane-tab-diff.pane-tab-active {
-  background: linear-gradient(to bottom, rgba(var(--tab-diff-rgb), 0.12), rgba(var(--tab-diff-rgb), 0.06));
-  border-bottom-color: rgba(var(--tab-diff-rgb), 0.75);
+  background: rgba(var(--tab-diff-rgb), 0.14);
 }
 
-.pane-tab-edit {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.05), rgba(var(--tab-edit-rgb), 0.025));
-  border-bottom: 2px solid rgba(var(--tab-edit-rgb), 0.2);
-}
-.pane-tab-edit:hover {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.08), rgba(var(--tab-edit-rgb), 0.04));
-}
 .pane-tab-edit.pane-tab-active {
-  background: linear-gradient(to bottom, rgba(var(--tab-edit-rgb), 0.12), rgba(var(--tab-edit-rgb), 0.06));
-  border-bottom-color: rgba(var(--accent-rgb), 0.75);
+  background: rgba(var(--tab-edit-rgb), 0.14);
 }
 
-.pane-tab-md {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.05), rgba(var(--tab-md-rgb), 0.025));
-  border-bottom: 2px solid rgba(var(--tab-md-rgb), 0.2);
-}
-.pane-tab-md:hover {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.08), rgba(var(--tab-md-rgb), 0.04));
-}
 .pane-tab-md.pane-tab-active {
-  background: linear-gradient(135deg, rgba(var(--tab-md-rgb), 0.1), rgba(var(--tab-md-rgb), 0.05));
-  border-bottom-color: rgba(var(--tab-md-rgb), 0.75);
+  background: rgba(var(--tab-md-rgb), 0.14);
 }
 
-.pane-tab-panel {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.05), rgba(var(--tab-panel-rgb), 0.025));
-  border-bottom: 2px solid rgba(var(--tab-panel-rgb), 0.2);
-}
-.pane-tab-panel:hover {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.08), rgba(var(--tab-panel-rgb), 0.04));
-}
 .pane-tab-panel.pane-tab-active {
-  background: linear-gradient(135deg, rgba(var(--tab-panel-rgb), 0.1), rgba(var(--tab-panel-rgb), 0.05));
-  border-bottom-color: rgba(var(--tab-panel-rgb), 0.75);
+  background: rgba(var(--tab-panel-rgb), 0.14);
 }
 
 /* ---- Tab Content (mount all, show active) ---- */
@@ -303,7 +279,6 @@
   justify-content: center;
   width: 100%;
   height: 100%;
-  color: var(--fg-secondary);
-  font-size: 13px;
-  opacity: 0.5;
+  color: var(--fg-muted);
+  font-size: var(--font-md);
 }

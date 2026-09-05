@@ -58,8 +58,6 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -218,8 +216,6 @@
 .insightLabel {
   font-size: 11px;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .insightValue {
@@ -288,8 +284,6 @@
   color: var(--fg-muted);
   font-weight: 600;
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .modelTable td {
@@ -410,8 +404,6 @@
 
 .planLabel {
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   color: var(--fg-muted);
 }
 
@@ -548,8 +540,6 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .extraInUse {
@@ -587,8 +577,6 @@
 
 .extraOff {
   font-size: var(--font-2xs);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   color: var(--fg-muted);
   background: var(--surface-hover);
   border: 1px solid var(--border-subtle);

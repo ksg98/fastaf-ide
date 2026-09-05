@@ -5,7 +5,7 @@
 <h1 align="center">FastAF</h1>
 
 <p align="center">
-  <strong>The multi-terminal, AI-native IDE that doesn't eat your RAM.<br>Run parallel agents on isolated branches, watch every session in one grid.</strong>
+  <strong>The multi-terminal, AI-native IDE that doesn't eat your RAM.<br>Watch up to 9 agents at once in one auto-adjusting 3&times;3 grid.</strong>
 </p>
 
 <p align="center">
@@ -46,9 +46,16 @@ Most AI editors are Electron apps wearing a trench coat — every window is a fu
 
 > Figures are measured idle-ish RSS with several repos/sessions open on this machine — exact numbers vary by OS and workload, but the order-of-magnitude gap is the whole point.
 
-## Multi-terminal, one grid
+## Multiview — a 3×3 wall of live terminals
 
-Stop hopping terminal-by-terminal, project-by-project. **Multiview** (`Cmd+Alt+M`) tiles every live terminal — across every repo and branch — into one auto-adjusting grid, up to 9 at once with a "+N more" overflow pill. Click a tile to type in place, double-click to jump full-size, drag the split bars to resize. It's not a new terminal engine bolted on: every session is already permanently mounted, so the grid is just an honest visibility flip — no duplicate PTYs, no extra memory per tile.
+Stop hopping terminal-by-terminal, project-by-project. **Multiview** (`Cmd+Alt+M`) tiles every live terminal — across every repo and branch — into one auto-adjusting grid: **up to 9 sessions in a 3×3 layout**, with a "+N more" overflow pill once you're running more than that.
+
+- Click a tile to type in it in place — no need to fully switch
+- Double-click a tile's header to snap it back to full-size
+- Drag the split bars between tiles to resize them
+- The grid reflows automatically as you add or close terminals (1 → 1×1, 4 → 2×2, 9 → 3×3, and everything in between)
+
+It's not a second terminal engine bolted on top: every session is already permanently mounted in the background, so the grid is just an honest visibility flip — no duplicate PTYs spun up, no extra memory per tile you're watching.
 
 ## The problem
 
@@ -188,7 +195,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 |---|---|---|---|---|---|
 | Idle memory | ~50–150 MB | ~300–600 MB | 2–3 GB | 1–2 GB | **~300 MB** |
 | Terminal sessions | Yes | Yes | Yes | No | Yes (50) |
-| Multi-terminal grid view | No | No | No | No | **Multiview — all repos at once** |
+| Multi-terminal grid view | No | No | No | No | **Multiview — 3×3, all repos at once** |
 | AI coding agents | No | Partial | Built-in | Built-in | Any agent (10 detected) |
 | Parallel agents | No | No | Limited | No | Unlimited |
 | Git worktree orchestration | No | No | No | No | Automatic |

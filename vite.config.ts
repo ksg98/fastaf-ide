@@ -9,6 +9,8 @@ import { Features } from "lightningcss";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+// @ts-expect-error process is a nodejs global
+const devBackend = process.env.TUIC_DEV_BACKEND;
 const typescriptWatchApi = import.meta.resolve("@typescript/typescript6");
 
 // Read app version from tauri.conf.json
@@ -110,6 +112,22 @@ export default defineConfig(async ({ command }) => ({
     port: 1421,
     strictPort: true,
     host: host || "127.0.0.1",
+    // Browser-mode dev against a running backend:
+    //   TUIC_DEV_BACKEND=http://127.0.0.1:9876 pnpm dev
+    // forwards every API / SSE / WebSocket route to that instance, so the
+    // Vite-served frontend (HMR included) runs as a real web client without
+    // rebuilding the Rust side. Unset (the Tauri dev flow) → no proxy.
+    proxy: devBackend
+      ? Object.fromEntries(
+          [
+            "active", "agent-keys", "agents", "ai", "api", "audit", "claude",
+            "config", "debug", "events", "fs", "github", "health", "mcp",
+            "metrics", "plugins", "process", "profiles", "prompt", "repo",
+            "sessions", "ssh-hosts", "start", "stats", "status", "stop",
+            "system", "tunnels",
+          ].map((prefix) => [`/${prefix}`, { target: devBackend, changeOrigin: true, ws: true }]),
+        )
+      : undefined,
     hmr: host
       ? {
           protocol: "ws",

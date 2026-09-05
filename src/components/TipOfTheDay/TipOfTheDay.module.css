@@ -27,8 +27,6 @@
   font-family: var(--font-ui);
   font-size: var(--font-xs);
   font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   color: var(--fg-secondary);
 }
 

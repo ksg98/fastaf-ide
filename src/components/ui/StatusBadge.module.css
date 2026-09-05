@@ -1,41 +1,44 @@
-/* StatusBadge — pill vocabulary */
+/* StatusBadge — tinted pill vocabulary: 12–16 % colour wash + coloured text. */
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
+  height: 18px;
+  padding: 0 7px;
   border-radius: var(--radius-pill);
   font-size: var(--font-xs);
-  font-family: var(--font-mono);
+  font-weight: 500;
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .branch {
-  background: var(--bg-tertiary);
+  background: var(--wash-1);
   color: var(--fg-secondary);
   flex-shrink: 1;
   min-width: 0;
 }
 
 .pr {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 .merged {
-  background: var(--merged);
-  color: var(--text-on-accent);
+  background: color-mix(in srgb, var(--merged) 18%, transparent);
+  color: var(--merged);
 }
 
 .closed {
-  background: var(--error);
-  color: var(--text-on-error);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
 }
 
 .ci {
-  background: var(--bg-tertiary);
+  background: var(--wash-1);
   color: var(--fg-secondary);
 }
 
@@ -45,16 +48,16 @@
 }
 
 .success {
-  background: color-mix(in srgb, var(--success) 20%, transparent);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
   color: var(--success);
 }
 
 .error {
-  background: color-mix(in srgb, var(--error) 20%, transparent);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
   color: var(--error);
 }
 
 .warning {
-  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
   color: var(--warning);
 }

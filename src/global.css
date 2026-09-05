@@ -194,59 +194,71 @@
 }
 
 :root {
-  /* Cursor Dark seed — kept in lockstep with cursor-dark.json appChrome */
-  --bg-primary: #141414;      /* window base / editor / terminal */
-  --bg-secondary: #1a1a1a;    /* sidebar, toolbars, resting chrome */
-  --bg-tertiary: #202020;     /* elevated: menus, popovers, cards */
-  --bg-highlight: #282828;    /* hover / selection fill */
-  --fg-primary: #e0e0e0;
-  --fg-secondary: #c2c2c2;
-  --fg-muted: #8c8c8c;
-  --accent: #4c9df3;
-  --accent-hover: #66aefa;
-  --activity: #59a8dd;  /* semantic: always blue, not overridden by themes */
-  --border: #2a2a2a;          /* ~ white 8.6% on #141414 */
+  /* ── Surfaces ──────────────────────────────────────────────────────────
+     Cursor Dark seed — kept in lockstep with cursor-dark.json appChrome.
+     Obsidian glass: everything near-black. The frame (toolbar, sidebar,
+     status bar, side panels) is smoked glass lit from the top edge; content
+     (terminal, editor, diff) sits in a matte black well. Edges come from a
+     1px rim light and a top sheen, not from tone steps. */
+  --bg-primary: #050505;      /* content well */
+  --bg-secondary: #0c0c0c;    /* frame / resting chrome */
+  --bg-tertiary: #161616;     /* raised: inputs, chips, menus, cards */
+  --bg-highlight: #222222;    /* hover / selection fill */
+  --fg-primary: #f0f0f0;
+  --fg-secondary: #a6a6a6;
+  --fg-muted: #808080;
+  --accent: #5aa0f8;
+  --accent-hover: #79b3fa;
+  --activity: #5aa0f8;        /* semantic: always blue, not overridden by themes */
+  --border: #1f1f1f;
 
   /* Static RGB triples — FOUC guard before applyAppTheme emits runtime ones */
-  --bg-primary-rgb: 20, 20, 20;
-  --bg-secondary-rgb: 26, 26, 26;
-  --bg-tertiary-rgb: 32, 32, 32;
-  --bg-highlight-rgb: 40, 40, 40;
-  --accent-rgb: 76, 157, 243;
-  --success: #3dd68c;
-  --warning: #f5a623;
-  --attention: #e8984c;
-  --error: #ff5555;
-  --changes: #d29922;
-  --urgent: #ffd700;
-  --merged: #a371f7;
+  --bg-primary-rgb: 5, 5, 5;
+  --bg-secondary-rgb: 12, 12, 12;
+  --bg-tertiary-rgb: 22, 22, 22;
+  --bg-highlight-rgb: 34, 34, 34;
+  --accent-rgb: 90, 160, 248;
+
+  /* ── Semantic ──────────────────────────────────────────────────────────
+     One pastel family (Tailwind 400 hues). Used as text, dots and 12 %
+     tints — never as solid fills behind black text. */
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --attention: #fb923c;
+  --error: #f87171;
+  --changes: #e3b341;
+  --urgent: #facc15;
+  --merged: #a78bfa;
   --unseen: #c084fc;
-  --text-on-accent: #ffffff;
-  --text-on-error: #ffffff;
-  --text-on-success: #000000;
-  --search-match: #ffff0040;
-  --search-match-active: #ff8c00b0;
-  --search-match-border: #ff8c00;
-  --tweak-highlight: #f5a623;
+  --text-on-accent: #0b1220;
+  --text-on-error: #1c0606;
+  --text-on-success: #052e16;
+  --search-match: #facc1540;
+  --search-match-active: #fb923cb0;
+  --search-match-border: #fb923c;
+  --tweak-highlight: #fbbf24;
 
   /* Tab-type colors (shared between TabBar and PaneTree) */
-  --tab-diff-rgb: 239, 68, 68;       /* red */
-  --tab-edit-rgb: 122, 162, 247;     /* blue */
-  --tab-md-rgb: 34, 197, 94;         /* green */
-  --tab-panel-rgb: 167, 139, 250;    /* purple */
+  --tab-diff-rgb: 248, 113, 113;     /* red */
+  --tab-edit-rgb: 96, 165, 250;      /* blue */
+  --tab-md-rgb: 74, 222, 128;        /* green */
+  --tab-panel-rgb: 167, 139, 250;    /* violet */
   --tab-html-rgb: 251, 191, 36;      /* amber */
   --tab-remote-rgb: 34, 211, 238;    /* cyan — remote/network */
 
-  /* Border radius scale */
+  /* ── Shape ─────────────────────────────────────────────────────────── */
   --radius-xs: 3px;
   --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
-  --radius-xl: 12px;
-  --radius-pill: 12px;
+  --radius-md: 6px;      /* rows, controls, chips */
+  --radius-lg: 8px;      /* menus, popovers, cards */
+  --radius-xl: 10px;
+  --radius-pill: 999px;
   --radius-full: 50%;
-  --radius-panel: 12px;  /* floating panels/modals — independent of the scale so
-                            panels can diverge later */
+  --radius-panel: 12px;  /* dialogs, floating panels */
+
+  /* Content well — the recessed dark area that hosts terminals/editors */
+  --well-gap: 8px;
+  --well-radius: 10px;
 
   /* Spacing — 4px grid, numeric suffix = multiples of 4 */
   --space-half: 2px;
@@ -278,20 +290,38 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
 
-  /* Gloss — opaque by default; html.vibrancy swaps in the translucent values,
-     so components can use these tokens unconditionally and collapse to
-     opaque/no-op on non-macOS or when transparency is reduced. */
-  --bg-app: var(--bg-primary);            /* body paint */
-  --surface-glass: var(--bg-secondary);   /* resting chrome (sidebar, toolbars) */
-  --surface-overlay: var(--bg-tertiary);  /* transient overlays (menus, palettes, modals) */
-  --blur-glass: none;                     /* backdrop-filter: var(--blur-glass) no-ops when none */
-  --blur-overlay: none;
-  --surface-hover: rgba(255, 255, 255, 0.05);  /* hover wash over any surface */
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-strong: rgba(255, 255, 255, 0.12);
-  --highlight-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);  /* 1px top sheen */
+  /* Gloss — the glass recipe. Every raised or floating surface is a tinted
+     pane with a top-down sheen and a 1px top rim light; overlays frost the
+     content beneath them (backdrop blur) on every platform. The body carries
+     one cool key light at its top edge. html.vibrancy (macOS, transparency
+     not reduced) additionally lets the desktop show through the frame.
+     Surface tokens are full `background` values (sheen layer + tint), so
+     use them with `background:`, never `background-color:`. */
+  --gloss-rgb: 190, 205, 255;                      /* cool key light */
+  --app-gloss: radial-gradient(90% 40% at 50% 0%, rgba(var(--gloss-rgb), 0.1), transparent 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0) 30%);
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.012) 45%, rgba(255, 255, 255, 0));
+  --sheen-strong: linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.035));
+  --bg-app: var(--bg-secondary);                                        /* body paint = the frame */
+  --surface-glass: var(--sheen), rgba(var(--bg-secondary-rgb), 0.6);    /* resting chrome (sidebar, side panels) */
+  --surface-overlay: var(--sheen), rgba(var(--bg-tertiary-rgb), 0.82);  /* transient overlays (menus, palettes, modals) */
+  --blur-glass: none;                       /* frame blur only matters once the desktop shows through */
+  --blur-overlay: blur(22px) saturate(1.4); /* frosted glass over content */
+  --surface-hover: rgba(255, 255, 255, 0.07);   /* hover wash over any surface */
+  --wash-0: rgba(255, 255, 255, 0.04);   /* barely-there fill (grouped rows) */
+  --wash-1: rgba(255, 255, 255, 0.07);   /* neutral chips, counts, kbd */
+  --wash-2: rgba(255, 255, 255, 0.12);   /* pressed / stronger chip */
+  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.24);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --highlight-inset: inset 0 1px 0 rgba(255, 255, 255, 0.09);  /* 1px top rim light */
+  --inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.5), 0 1px 0 rgba(255, 255, 255, 0.035); /* recessed inputs */
+  --scrim: rgba(0, 0, 0, 0.6);
 
-  /* Font size scale */
+  /* ── Type ──────────────────────────────────────────────────────────────
+     Chrome reads at 13px; 12px for secondary/meta; 11px only for badges.
+     Mono is reserved for terminal, code, paths and hashes. */
   --font-3xs: 8px;
   --font-2xs: 10px;
   --font-xs: 11px;
@@ -303,53 +333,61 @@
   --font-2xl: 20px;
   --font-3xl: 24px;
 
-  /* Elevation */
-  --shadow-popup: 0 16px 48px rgba(0, 0, 0, 0.55);
-  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.4);
+  /* List-row rhythm — shared by every tree/list panel (sidebar branches, file
+     browser, …). Text always starts at: tree-indent*depth + row-pad-x +
+     row-icon + row-gap. */
+  --row-pad-x: 8px;
+  --row-icon: 16px;
+  --row-gap: 8px;
+  --row-h: 28px;
+  --tree-indent: 12px;
+
+  /* Elevation — reserved for things that float (menus, dialogs, toasts). */
+  --shadow-popup: 0 16px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.3);
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(0, 0, 0, 0.3);
   --shadow-bottom-anchor: 0 -8px 28px rgba(0, 0, 0, 0.45);
-  --shadow-2xl: 0 24px 64px rgba(0, 0, 0, 0.6);  /* detached/floating panels */
+  --shadow-2xl: 0 28px 70px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.35);
 
   --sidebar-width: 300px;
   --toolbar-height: 32px;
-  --tab-bar-height: 32px;
-  --status-height: 32px;
+  --tab-bar-height: 36px;
+  --status-height: 28px;
   --font-mono: "JetBrains Mono", "Fira Code", "Hack", "Cascadia Code", "Source Code Pro", "DejaVu Sans Mono", monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Liberation Sans", sans-serif;
 
   /* ANSI terminal palette (matches the cursor-dark default theme) */
-  --ansi-black: #2a2a2a;
-  --ansi-red: #bf616a;
-  --ansi-green: #a3be8c;
-  --ansi-yellow: #ebcb8b;
-  --ansi-blue: #81a1c1;
-  --ansi-magenta: #b48ead;
-  --ansi-cyan: #88c0d0;
-  --ansi-white: #ffffff;
-  --ansi-bright-black: #505050;
-  --ansi-bright-red: #bf616a;
-  --ansi-bright-green: #a3be8c;
-  --ansi-bright-yellow: #ebcb8b;
-  --ansi-bright-blue: #81a1c1;
-  --ansi-bright-magenta: #b48ead;
-  --ansi-bright-cyan: #88c0d0;
-  --ansi-bright-white: #ffffff;
+  --ansi-black: #3f3f46;
+  --ansi-red: #f87171;
+  --ansi-green: #4ade80;
+  --ansi-yellow: #facc15;
+  --ansi-blue: #60a5fa;
+  --ansi-magenta: #c084fc;
+  --ansi-cyan: #22d3ee;
+  --ansi-white: #e4e4e7;
+  --ansi-bright-black: #71717a;
+  --ansi-bright-red: #fca5a5;
+  --ansi-bright-green: #86efac;
+  --ansi-bright-yellow: #fde047;
+  --ansi-bright-blue: #93c5fd;
+  --ansi-bright-magenta: #d8b4fe;
+  --ansi-bright-cyan: #67e8f9;
+  --ansi-bright-white: #fafafa;
 }
 
-/* Vibrancy opt-in — added to <html> at boot on macOS unless transparency is
-   reduced. Swapping token values here (rather than styling per-component)
-   keeps every consumer's CSS unconditional. */
 html.vibrancy {
-  --bg-app: rgba(var(--bg-primary-rgb), 0.62);
-  --surface-glass: rgba(var(--bg-secondary-rgb), 0.55);
-  --surface-overlay: rgba(var(--bg-tertiary-rgb), 0.86);
-  --blur-glass: blur(24px) saturate(1.35);
-  --blur-overlay: blur(16px) saturate(1.2);
+  --bg-app: rgba(var(--bg-secondary-rgb), 0.72);
+  --surface-glass: var(--sheen), rgba(var(--bg-secondary-rgb), 0.3);
+  --surface-overlay: var(--sheen), rgba(var(--bg-tertiary-rgb), 0.78);
+  --blur-glass: blur(28px) saturate(1.4);
+  --blur-overlay: blur(22px) saturate(1.4);
 }
 
-/* OS-level "Reduce transparency" wins even if the class was applied */
+/* OS-level "reduce transparency": collapse every pane to opaque, in-app
+   frosting included. */
 @media (prefers-reduced-transparency: reduce) {
+  :root,
   html.vibrancy {
-    --bg-app: var(--bg-primary);
+    --bg-app: var(--bg-secondary);
     --surface-glass: var(--bg-secondary);
     --surface-overlay: var(--bg-tertiary);
     --blur-glass: none;
@@ -362,7 +400,10 @@ html, body {
   overflow: hidden;
   color: var(--fg-primary);
   font-family: var(--font-ui);
-  font-size: var(--font-base);
+  font-size: var(--font-md);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
   /* Dark app: make native controls (number-input spinners, selects, pickers)
      render their affordances light instead of the default black-on-dark. */
   color-scheme: dark;
@@ -376,7 +417,7 @@ html {
 }
 
 body {
-  background: var(--bg-app);
+  background: var(--app-gloss), var(--bg-app);
 }
 
 #app {
@@ -392,12 +433,17 @@ body {
   min-height: 0;
 }
 
-/* Scrollbar styling — base look for the whole app chrome (sidebar, side panels
-   like Git/Notes/Outline, lists, toolbars). Thin 8px. The wide 14px "terminal"
-   look is scoped to central pane content (.pane-content) below — see that rule. */
+/* Every inline icon shares one optical size; buttons hand it the colour. */
+button > svg,
+button > span > svg {
+  flex-shrink: 0;
+}
+
+/* ── Scrollbars — thin overlay-style thumbs, no track paint. The wide 14px
+   "terminal" look is scoped to central pane content (.pane-content) below. */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
@@ -405,39 +451,34 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-highlight);
-  border-radius: var(--radius-md);
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 8px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--fg-muted);
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* Central pane content (terminal area, code editor, diff, markdown preview) —
-   the wide 14px scrollbar that matches the terminal's custom DOM scrollbar
-   (SCROLLBAR_PX). Scoped to .pane-content so the sidebar and docked side panels
-   (Git, Notes, …) keep the thin 8px base above. 10px thumb via a 2px transparent
-   border + padding-box clip; darker, subtle hover. */
+   14px gutter that matches the terminal's custom DOM scrollbar (SCROLLBAR_PX). */
 .pane-content ::-webkit-scrollbar {
   width: 14px;
   height: 14px;
 }
 
 .pane-content ::-webkit-scrollbar-thumb {
-  border-radius: 5px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
+  border-width: 4px;
+  border-radius: 8px;
 }
 
-.pane-content ::-webkit-scrollbar-thumb:hover {
-  background: rgba(204, 204, 204, 0.3);
-  background-clip: padding-box;
-}
-
-/* Touch device: eliminate double-tap-to-activate caused by sticky :hover.
- * touch-action: manipulation disables double-tap-to-zoom, removing the
- * 300ms click delay that causes the browser to use first tap for :hover
- * and second tap for click. Desktop behavior is unaffected. */
+/* Touch device: eliminate double-tap-to-activate caused by sticky :hover. */
 @media (hover: none) {
   *, *::before, *::after {
     touch-action: manipulation;
@@ -445,10 +486,12 @@ body {
   }
 }
 
-/* Focus styles */
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* Focus — one visible ring, only for keyboard users. */
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible {
+  outline: 2px solid rgba(var(--accent-rgb), 0.7);
+  outline-offset: 1px;
 }
 
 /* Reduce compositor work for users who prefer reduced motion */
@@ -481,18 +524,20 @@ button:focus-visible {
   z-index: 10000;
   width: max-content;
   max-width: 240px;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: var(--bg-highlight);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   color: var(--fg-primary);
   font-family: var(--font-ui);
-  font-size: var(--font-2xs);
-  font-weight: 400;
+  font-size: var(--font-xs);
+  font-weight: 500;
   line-height: 1.35;
   white-space: normal;
   text-align: left;
-  box-shadow: var(--shadow-dropdown);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s ease;

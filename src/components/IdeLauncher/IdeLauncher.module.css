@@ -62,7 +62,7 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 100;
   overflow: hidden;
 }
@@ -75,9 +75,7 @@
   padding: 3px 10px;
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
   color: var(--fg-muted);
-  letter-spacing: 0.05em;
 }
 
 .item {

@@ -26,8 +26,6 @@
   margin: 14px 0 6px;
   font-size: var(--font-sm);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   color: var(--fg-muted);
 }
 

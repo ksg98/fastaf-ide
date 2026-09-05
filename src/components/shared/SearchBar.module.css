@@ -11,7 +11,7 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   font-family: var(--font-ui);
   font-size: var(--font-md);
 }

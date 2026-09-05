@@ -164,8 +164,8 @@ describe("themes", () => {
 		it("returns hardcoded fallback when themes not loaded", async () => {
 			const { getTerminalTheme } = await import("../themes");
 			const theme = getTerminalTheme("dracula");
-			expect(theme.background).toBe("#1e1e1e");
-			expect(theme.foreground).toBe("#cccccc");
+			expect(theme.background).toBe("#050505");
+			expect(theme.foreground).toBe("#e4e4e7");
 		});
 	});
 
@@ -191,8 +191,8 @@ describe("themes", () => {
 		it("returns hardcoded fallback when themes not loaded", async () => {
 			const { getAppTheme } = await import("../themes");
 			const theme = getAppTheme("anything");
-			expect(theme.bgPrimary).toBe("#141414");
-			expect(theme.accent).toBe("#4c9df3");
+			expect(theme.bgPrimary).toBe("#050505");
+			expect(theme.accent).toBe("#5aa0f8");
 		});
 	});
 

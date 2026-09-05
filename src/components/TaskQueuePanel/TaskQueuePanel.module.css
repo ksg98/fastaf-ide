@@ -80,10 +80,8 @@
 .sectionTitle {
   font-size: var(--font-xs);
   font-weight: 600;
-  text-transform: uppercase;
   color: var(--fg-muted);
   margin-bottom: 8px;
-  letter-spacing: 0.5px;
 }
 
 .empty {

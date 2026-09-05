@@ -1,11 +1,12 @@
-/* Git Panel — tabbed container for git operations */
+/* Git Panel — tabbed container for git operations. Part of the frame. */
 .panel {
   position: relative;
   width: 380px;
   min-width: 300px;
   max-width: 50%;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
+  background: var(--surface-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -25,20 +26,16 @@
   border-left: none;
 }
 
+/* Tab strip — segmented text tabs; the active one is a raised pill. */
 .tabs {
   display: flex;
-  gap: 0;
+  align-items: center;
+  gap: 2px;
   overflow-x: auto;
   flex: 1;
   min-width: 0;
-  /* Breathing room so the last tab never butts against the window controls. */
+  height: 100%;
   margin-right: 6px;
-  /* Hide the overflow scrollbar entirely — the GitPanel.tsx onWheel handler maps
-     vertical wheel/trackpad to horizontal scroll instead. The app's global
-     ::-webkit-scrollbar forces *reserved* (space-taking) scrollbars, so a visible
-     bar here would reserve height: inflating this row above the window controls
-     (misaligned icons) and leaving dead space below. VSCode/Zed tab strips scroll
-     without a visible bar for the same reason. */
   scrollbar-width: none;
 }
 
@@ -48,13 +45,15 @@
 
 .tab {
   position: relative;
+  height: 24px;
   background: none;
   border: none;
+  border-radius: var(--radius-md);
   color: var(--fg-muted);
   font-size: var(--font-sm);
+  font-weight: 500;
   font-family: var(--font-ui);
-  /* Tighter horizontal padding so all four labels fit before scrolling kicks in. */
-  padding: 6px 8px;
+  padding: 0 9px;
   cursor: pointer;
   white-space: nowrap;
   transition: color var(--duration-fast) var(--ease-out),
@@ -66,21 +65,14 @@
   background: var(--surface-hover);
 }
 
-/* Active tab: text hits full-primary; a 2px accent bar rides the TOP edge
-   (matches TabBar's connected-to-editor look). */
 .tabActive {
   color: var(--fg-primary);
+  background: var(--bg-tertiary);
+  box-shadow: 0 0 0 1px var(--border-subtle);
 }
 
 .tabActive::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: rgba(var(--accent-rgb), 0.75);
-  z-index: 1;
+  content: none;
 }
 
 /* Tab content area — fills remaining space above sub-panels */
@@ -90,8 +82,7 @@
   overflow: hidden;
 }
 
-/* Sub-panels (History, Blame) — collapsible sections at bottom.
-   Shares vertical space with tabContent via flex; shrinks if needed. */
+/* Sub-panels (History, Blame) — collapsible sections at bottom. */
 .subPanels {
   flex-shrink: 1;
   min-height: 0;
@@ -103,14 +94,15 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 12px;
+  height: 30px;
+  padding: 0 12px;
   cursor: pointer;
   user-select: none;
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   font-weight: 600;
-  color: var(--fg-muted);
-  background: var(--bg-tertiary);
+  color: var(--fg-secondary);
+  background: transparent;
   border-bottom: 1px solid var(--border-subtle);
   transition: background var(--duration-fast) var(--ease-out);
 }
@@ -120,7 +112,8 @@
 }
 
 .subChevron {
-  font-size: var(--font-xs);
+  font-size: var(--font-2xs);
+  color: var(--fg-muted);
   transition: transform var(--duration-base) var(--ease-out);
   flex-shrink: 0;
 }
@@ -136,6 +129,7 @@
 .subPanelFile {
   font-size: var(--font-xs);
   font-family: var(--font-ui);
+  font-weight: 400;
   color: var(--fg-muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -151,7 +145,7 @@
 }
 
 .placeholder {
-  padding: 20px;
+  padding: 24px;
   text-align: center;
   color: var(--fg-muted);
   font-size: var(--font-sm);

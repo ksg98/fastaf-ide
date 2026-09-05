@@ -4,611 +4,222 @@ Reference for all UI/CSS/layout work. Every visual change MUST follow this guide
 
 ## Design Philosophy
 
-**VS Code Dark theme** adapted for a terminal-first, developer-focused interface. The UI is a frame for terminal content — chrome recedes, content dominates. No bright whites. Muted UI elements, vivid status colors. Everything monospace except UI labels.
+**Quiet instrument.** The app is a frame around live terminals. The frame
+(toolbar, sidebar, status bar, side panels) is one continuous surface; the
+content (terminals, editors, diffs) sits in a recessed, darker **well** with a
+soft rounded edge. Tone separates regions, so hairlines are rare. Type carries
+hierarchy (weight and size, never uppercase tracking). Icons are monochrome and
+say *what kind*; a coloured dot says *what state*. Colour is spent only on
+things that need a glance.
 
 ## Application Layout
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ #toolbar (38px macOS / 32px Win+Linux, --bg-primary, drag region)  │
-│ ┌──────────────┬────────────────────────────────────┬────────────┐ │
-│ │ toolbar-left │ toolbar-center (tab bar)            │toolbar-right│ │
-│ │ (sidebar w)  │ [Tab1] [Tab2] [Tab3] [+]           │ [IDE btns] │ │
-│ └──────────────┴────────────────────────────────────┴────────────┘ │
-├─────────────────────────────────────────────────────────────────────┤
-│ #app-body (flex: 1, flex-direction: row)                           │
-│ ┌──────────┬─────────────────────────────────┬───────────────────┐ │
-│ │ #sidebar │ #main                            │ Side panels      │ │
-│ │ 300px    │ (flex: 1)                        │ (400px, optional)│ │
-│ │ --bg-    │                                  │                  │ │
-│ │ secondary│ ┌──────────────────────────────┐ │ ┌──────────────┐ │ │
-│ │          │ │ #terminal-container          │ │ │ Diff or      │ │ │
-│ │ REPOS    │ │ (flex: 1, --bg-primary)      │ │ │ Markdown or  │ │ │
-│ │  section │ │                              │ │ │ Notes/Ideas  │ │ │
-│ │  title   │ │  terminal fills this          │ │ │ panel        │ │ │
-│ │  repo    │ │  entire area                 │ │ │              │ │ │
-│ │   header │ │                              │ │ │ panel-header │ │ │
-│ │   branch │ │                              │ │ │ panel-content│ │ │
-│ │   branch │ │                              │ │ │              │ │ │
-│ │          │ │                              │ │ └──────────────┘ │ │
-│ │ FOOTER   │ │                              │ │                  │ │
-│ │ [+ Add]  │ └──────────────────────────────┘ │                  │ │
-│ │ [icons]  │                                  │                  │ │
-│ └──────────┴─────────────────────────────────┴───────────────────┘ │
-├─────────────────────────────────────────────────────────────────────┤
-│ #status-bar (28px, --bg-secondary, border-top)                     │
-│ [zoom][sessions]  [branch ↑2][PR #42][CI ✓]  [toggles][💡][⚙][?] │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ #toolbar (32px, transparent over the frame, drag region, no hairline)    │
+│ [AF] [filter][sidebar]   repo / branch chip          [⚡][bell][search] │
+├──────────────────────────────────────────────────────────────────────────┤
+│ #app-body (flex row)                                                     │
+│ ┌───────────┬───────────────────────────────────────┬──────────────────┐ │
+│ │ #sidebar  │ #main                                  │ side panel       │ │
+│ │ frame     │  #tab-bar (36px, pill tabs, no line)   │ frame surface    │ │
+│ │ surface   │  ┌─ #terminal-container ────────────┐  │ 36px header      │ │
+│ │           │  │  the WELL: --bg-primary,          │  │ 28px rows        │ │
+│ │ repo rows │  │  radius 10px, 8px gap on the      │  │                  │ │
+│ │ branch    │  │  right/bottom/left, 1px soft edge │  │                  │ │
+│ │ rows      │  │                                    │  │                  │ │
+│ │           │  └────────────────────────────────────┘  │                  │ │
+│ │ git row   │                                        │                  │ │
+│ │ footer    │                                        │                  │ │
+│ └───────────┴───────────────────────────────────────┴──────────────────┘ │
+├──────────────────────────────────────────────────────────────────────────┤
+│ #status-bar (28px, transparent, 12px type, ghost icon toggles)           │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key structural rules:**
-- `#app` is `flex-direction: column`, fills 100vh × 100vw.
+- `#app` is `flex-direction: column`, fills 100vh × 100vw. `body` paints the frame (`--bg-app`).
 - `#app-body` is `flex-direction: row`, `flex: 1`, `min-height: 0`.
-- Sidebar is fixed-width (resizable 200–500px), main area fills remaining space.
-- Side panels (Diff, Markdown, Notes) appear right of `#main`, width 400px, max 50vw.
+- The sidebar is fixed-width (resizable 200–500px) and has **no right border**; the well's edge does the separating.
+- `#terminal-container` is the well: `margin: 0 var(--well-gap) var(--well-gap)`, `border-radius: var(--well-radius)`, `box-shadow: 0 0 0 1px var(--border-subtle)`. In focus mode it also gets a top gap.
+- Side panels (Files, Git, Ideas, AI Chat) are frame-coloured, no left border, 36px header.
 - All sections have `overflow: hidden` — scrolling is on inner content areas only.
-- Status bar is always at the bottom, never scrolls.
 
 ## Color Palette
 
-Values shown are the **vscode-dark** theme defaults (defined in `:root` of `global.css`). The app supports **11 themes** — all core colors are CSS custom properties overridden at runtime by `applyAppTheme()` in `themes.ts`. When writing CSS, always use variables, never hardcode core palette values.
+Values shown are the **cursor-dark** defaults (defined in `:root` of `global.css`
+and mirrored in `src-tauri/src/themes/cursor-dark.json`). Every theme overrides
+the core keys at runtime via `applyAppTheme()` in `themes.ts`, which also emits
+the derived tokens (`--border-subtle`, `--surface-hover`, `--wash-*`, `--scrim`,
+scrollbar colours) with the right polarity for light themes. Always use
+variables, never hardcode core palette values.
 
-### CSS Variables (`:root` in `global.css`)
+### Surfaces
 
-| Variable | Default (vscode-dark) | Usage |
+| Variable | Default | Usage |
+|----------|---------|-------|
+| `--bg-primary` | `#050505` | The well: terminals, editors, diffs, recessed inputs |
+| `--bg-secondary` | `#0c0c0c` | The frame: toolbar, sidebar, status bar, side panels |
+| `--bg-tertiary` | `#161616` | Raised: chips, menus, popovers, active tab pill |
+| `--bg-highlight` | `#222222` | Strong hover / pressed fill |
+| `--surface-hover` | white 7 % | Hover wash over any surface |
+| `--wash-0/1/2` | white 4 / 7 / 12 % | Barely-there fills, neutral chips, pressed chips |
+| `--border-subtle` | white 8 % | The only hairline you normally need |
+| `--border-strong` | white 16 % | Hovered/focused hairline |
+| `--highlight-inset` | white 9 % top rim | The 1px rim light on anything raised or floating |
+| `--inset-well` | black 50 % inner + white 3.5 % below | Recessed inputs |
+| `--scrim` | black 60 % | Modal backdrop |
+
+### Glass
+
+| Variable | Value | Usage |
 |----------|-------|-------|
-| `--bg-primary` | `#1e1e1e` | Main canvas — terminals, panel bodies |
-| `--bg-secondary` | `#252526` | Sidebar, tab bar, status bar |
-| `--bg-tertiary` | `#2d2d30` | Inputs, settings rows, button defaults |
-| `--bg-highlight` | `#37373d` | Hover states, active branch bg |
-| `--fg-primary` | `#cccccc` | Primary text (max brightness for text) |
-| `--fg-secondary` | `#a0a0a0` | Labels, secondary text |
-| `--fg-muted` | `#9aa1a9` | Section titles, tertiary text |
-| `--accent` | `#59a8dd` | Primary actions, active indicators, links (theme-dependent) |
-| `--accent-hover` | `#7abde5` | Hover on accent elements (theme-dependent) |
-| `--activity` | `#59a8dd` | Busy/activity pulse indicators (fixed in `global.css`, not overridden by themes) |
-| `--success` | `#4ec9b0` | Positive states, open PRs (teal) |
-| `--warning` | `#dcdcaa` | Caution, pending, main branch icon (yellow) |
-| `--attention` | `#e8984c` | Actionable alerts, confirmation prompts (orange) |
-| `--error` | `#f48771` | Errors, failures, closed PRs (coral) |
-| `--merged` | `#a371f7` | PR merged badge (purple) |
-| `--unseen` | `#c084fc` | Terminal completed while user wasn't viewing (purple, clears on view) |
-| `--border` | `#3e3e42` | All borders and dividers |
-| `--text-on-accent` | `#000000` | Black text on colored badge backgrounds |
-| `--text-on-error` | `#000000` | Black text on error backgrounds |
-| `--text-on-success` | `#000000` | Black text on success backgrounds |
+| `--app-gloss` | cool radial key light + 2.5 % top fade | Layered over `--bg-app` by `body` — the window's single light source |
+| `--sheen` | white 5 % → 0 top-down gradient | First layer of every glass surface token |
+| `--sheen-strong` | white 11 % → 3.5 % | Raised controls: `.btn`, active tab, chips |
+| `--surface-glass` | `--sheen`, frame at 60 % | Sidebar and side panels (`backdrop-filter: var(--blur-glass)`) |
+| `--surface-overlay` | `--sheen`, raised at 82 % | Menus, palettes, dialogs, toasts, tooltips (`backdrop-filter: var(--blur-overlay)`) |
+| `--blur-overlay` | `blur(22px) saturate(1.4)` | Always on — overlays frost the content beneath |
+| `--blur-glass` | none / `blur(28px)` under vibrancy | Frame blur only matters once the desktop shows through |
 
-### Extended Palette (hardcoded, contextual only)
+The surface tokens are full `background` values (a gradient layer plus a tint):
+use them with `background:`, never `background-color:`.
 
-| Color | Context |
-|-------|---------|
-| `#d29922` | Changes requested / review required (orange) |
-| `#e3b341` | CI pending (golden) |
-| `#ffd700` | Rate limit, question icon (gold) |
-| `rgba(122, 162, 247, *)` | Branch ahead/behind tint, pulse glow |
-| `rgba(158, 206, 106, *)` | Diff additions bg, CI success tint |
-| `rgba(247, 118, 142, *)` | Diff deletions bg, CI failure tint |
+### Text
 
-### Background Stacking Order (darkest → lightest)
+| Variable | Default | Usage |
+|----------|---------|-------|
+| `--fg-primary` | `#f0f0f0` | Names, values, body |
+| `--fg-secondary` | `#a6a6a6` | Labels, secondary text |
+| `--fg-muted` | `#808080` | Meta, placeholders, resting icons (5:1 on the frame) |
 
-```
-#1e1e1e  --bg-primary    Terminal canvas, main area
-#252526  --bg-secondary   Sidebar, tab bar, status bar, modals
-#2d2d30  --bg-tertiary    Buttons, inputs, settings rows, panel headers
-#37373d  --bg-highlight   Hover, active branch, selected items
-```
+### Accent and semantic
 
-Every surface uses exactly one of these four levels. Elevation = lighter.
+| Variable | Default | Usage |
+|----------|---------|-------|
+| `--accent` / `--accent-hover` | `#5aa0f8` / `#79b3fa` | Selection wash (13 %), active toggles, primary buttons, links |
+| `--text-on-accent` | `#0b1220` | Dark text on the accent (accessible on a light-blue accent) |
+| `--activity` | `#5aa0f8` | Busy pulse — fixed, not themed |
+| `--success` | `#4ade80` | Done, additions, open PRs |
+| `--warning` | `#fbbf24` | Caution, usage ≥ 70 % |
+| `--attention` | `#fb923c` | Agent needs input |
+| `--error` | `#f87171` | Errors, deletions, failed CI |
+| `--changes` | `#e3b341` | Changes requested / review required |
+| `--merged` / `--unseen` | `#a78bfa` / `#c084fc` | Merged PRs / completed while unseen |
+
+Semantic colours are one pastel family (Tailwind 400 hues). They are used as
+**text, dots and 12–16 % tints** (`color-mix(in srgb, var(--success) 16%, transparent)`),
+never as solid fills behind black text. Terminal ANSI colours use the same family.
 
 ## Typography
 
 | Variable | Stack | Usage |
 |----------|-------|-------|
-| `--font-mono` | JetBrains Mono, Fira Code, Hack, Cascadia Code, Source Code Pro, DejaVu Sans Mono, monospace | Terminals, branch names, stats badges, PR badges, code |
-| `--font-ui` | -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Noto Sans, Liberation Sans, sans-serif | UI labels, buttons, headings, descriptions, settings |
+| `--font-ui` | -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, … | Everything in the chrome |
+| `--font-mono` | JetBrains Mono, Fira Code, … | Terminals, code, diffs, hashes, paths inside code |
 
-### Size Scale
+- Chrome reads at **13px** (`--font-md`): rows, inputs, buttons, tab labels.
+- **12px** (`--font-sm`) for secondary/meta text, the status bar, section labels.
+- **11px** (`--font-xs`) only for badges, counts and keyboard hints.
+- Weights: 400 body, 500 emphasis/buttons, 600 titles and repo names. Never 700 in chrome.
+- **No uppercase tracking.** Section labels are sentence case, 12px/600, `--fg-secondary`.
+- Numbers that line up (diff stats, sizes, counts) use `font-variant-numeric: tabular-nums`.
 
-| Variable | Size | Where |
-|----------|------|-------|
-| `--font-3xs` | 8px | Micro labels, pixel-level detail |
-| `--font-2xs` | 10px | Smallest visible labels |
-| `--font-xs` | 11px | Badge text, hotkey hints, metadata |
-| `--font-sm` | 12px | Section titles (REPOS), secondary labels |
-| `--font-md` | 13px | Branch names, tab names, settings labels — **default for UI** |
-| `--font-base` | 14px | Body text, document default |
-| `--font-lg` | 15px | Panel headings, chevrons |
-| `--font-xl` | 17px | Dialog titles |
-| `--font-2xl` | 20px | Large headings |
-| `--font-3xl` | 24px | Hero text, splash screens |
-
-Font weight: 400 normal, 500 medium (branch names), 600 semibold (repo names, badges), 700 bold (headings only).
-
-## Spacing
-
-### Fixed Dimensions
+## Spacing and rhythm
 
 | Variable | Value |
 |----------|-------|
-| `--sidebar-width` | 300px (resizable: min 200px, max 500px) |
-| `--toolbar-height` | 38px macOS / 32px Win+Linux |
-| `--tab-bar-height` | 32px |
+| `--row-h` | 28px — sidebar rows, list rows, menu items |
+| `--well-gap` / `--well-radius` | 8px / 10px |
+| `--toolbar-height` | 32px |
+| `--tab-bar-height` | 36px (26px pill tabs inside) |
 | `--status-height` | 28px |
+| `--space-1 … --space-10` | 4px grid |
 
-### Spacing Scale
+Use `gap` on flex containers, not margins between children. Rows are inset 6px
+from the panel edge so hover/selection washes read as rounded pills.
 
-| Size | Usage |
-|------|-------|
-| 1–2px | Branch item vertical margin, micro separation |
-| 4px | Sidebar content top padding, compact flex gaps, micro padding |
-| 6px | Icon-to-text gaps, sidebar footer gaps, repo header padding |
-| 8px | Button padding, form gaps, sidebar footer padding, standard gap |
-| 12px | Branch item horizontal padding, panel header padding, medium padding |
-| 16px | Sidebar section margin, branch list left indent, modal padding |
-| 20px | Dialog content padding, sidebar empty state padding |
-
-Use `gap` on flex containers, not margins between children.
-
-## Border Radius
+## Border radius
 
 | Variable | Value | Usage |
 |----------|-------|-------|
-| `--radius-xs` | 2px | Minimal — focus rings |
-| `--radius-sm` | 3px | Small interactive elements |
-| `--radius-md` | 4px | **Standard** — buttons, badges, inputs, branch items |
-| `--radius-lg` | 6px | Larger controls — dropdowns, add-repo button, form inputs |
-| `--radius-xl` | 8px | Modals, panels, dialogs |
-| `--radius-pill` | 12px | PR badges, status pills |
-| `--radius-full` | 50% | Circles — toggle thumbs, repo initials avatar |
+| `--radius-sm` | 4px | Tiny chips, kbd |
+| `--radius-md` | 6px | Rows, controls, tabs, chips |
+| `--radius-lg` | 8px | Menus, popovers, cards |
+| `--radius-xl` | 10px | Toasts, composer bubbles |
+| `--radius-panel` | 12px | Dialogs, settings, floating panels |
+| `--radius-pill` | 999px | Status badges, count bubbles |
 
-## Shadows
+## Elevation
 
-| Variable | Value | Usage |
-|----------|-------|-------|
-| `--shadow-popup` | `0 8px 32px rgba(0,0,0,0.4)` | Modals, dialogs |
-| `--shadow-dropdown` | `0 4px 16px rgba(0,0,0,0.3)` | Menus, popovers, context menus |
-| `--shadow-bottom-anchor` | `0 -4px 20px rgba(0,0,0,0.4)` | Bottom-anchored panels |
+Only things that float cast shadows: menus, popovers, dialogs, toasts.
+`--shadow-dropdown` for menus/popovers, `--shadow-2xl` for dialogs and
+detached panels, `--shadow-bottom-anchor` for bottom-anchored balloons.
+Panels, cards and rows at rest have no shadow.
 
-Three levels only. Never invent new shadow values.
+## Controls (`shared/controls.module.css`)
 
-## Transitions & Animation
+Compose from these; never hand-roll a button.
 
-### Durations
+- `.btn` — 28px, `--bg-tertiary`, hairline, 13px/500. Hover: `--bg-highlight` + stronger hairline.
+- `.btnPrimary` — accent fill, `--text-on-accent`, 600 weight.
+- `.btnDanger` — transparent, error-tinted text and border; hover 14 % error wash.
+- `.btnGhost` — transparent; hover `--surface-hover`.
+- `.iconBtn` — 26×26, `--fg-muted` → `--fg-primary` on hover, `--surface-hover` wash.
+- `.input` / `.textarea` / `.select` — 28px, **recessed** (`--bg-primary`), hairline, focus = accent border + 3px 22 % ring.
+- Focus for keyboard users: `box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25)`.
 
-| Duration | Usage |
-|----------|-------|
-| 0.1s | Hover backgrounds, active states — instant feedback |
-| 0.15s | Standard — opacity, color, transform, border changes |
-| 0.2s | Layout — sidebar collapse, toggle switches, chevron rotation |
-
-### Keyframe Animations
-
-**`pulse-opacity`**: Opacity 0.4 → 1.0 → 0.4, infinite. Duration 1.5s or 2s.
-Defined in each CSS Module file that uses it (not in `global.css` — CSS Modules scope animation names).
-Used for: active branch icon, CI pending badge, rate limit indicator.
-
-**`pulse-question`**: Box-shadow 0 → `0 0 12px 4px rgba(122,162,247,0.4)` → 0.
-Variants exist with red (error) and orange (confirm) colors.
-Used for: terminal tab glow when agent awaits input.
-
-**`pendulum`**: Translates text from 0 to `-overflow-px` and back. Duration computed dynamically from overflow width (~50px/s, minimum 4s cycle). Uses CSS custom properties `--overflow-px` and `--ticker-duration`.
-Used for: status bar notification text that overflows its container.
-
-**Tab status dot color scheme** (single `●` indicator left of tab name):
-- Grey (opacity 0.3): idle — no session or command never ran
-- Blue (`--activity`, pulse infinite): busy — producing output now
-- Green (`--success`): done — command completed
-- Purple (`--unseen`, static): completed while user wasn't viewing (clears on view)
-- Orange (`--attention`, pulse infinite): agent needs user input (question)
-- Red (`--error`, pulse infinite): API error or agent stuck
-
-**Tab type color scheme** (gradient background + colored border-bottom):
-- Red (`#ef4444`): diff tabs
-- Blue (`--accent` / `#7aa2f7`): editor tabs
-- Teal (`#2dd4bf`): markdown tabs
-- Purple (`#a78bfa`): panel tabs
-- Amber (`#fbbf24`): remote PTY sessions (created via HTTP/MCP)
-
-Always use `ease` timing. Respect `prefers-reduced-motion`. Never `transition: all`.
-
-## Component Reference
+## Component reference
 
 ### Sidebar
+- Repo row: 28px, leading `›` chevron (rotates 90° when open), name 13px/600 `--fg-primary`, hover reveals `⋯` and `+` in place (no overlap).
+- Branch row: 28px, indented 24px, 16px monochrome icon (shape = kind), name 13px/400 `--fg-primary`, diff stats as quiet tabular figures on the right (hidden under 240px unless hovered/active), PR state as a tinted pill.
+- Selection: `rgba(var(--accent-rgb), 0.13)` wash. Hover: `--surface-hover`. No stripes, no solid fills.
+- Icon colour is reserved for states: busy = accent pulse, question = `--attention` pulse, error = `--error` pulse, unseen = `--unseen`. Main/worktree/idle are grey.
+- Terminal rows under a branch: 24px, 7px status dot.
+- Git row: icon-only under 260px (labels return when wider). Footer: 36px, ghost buttons.
 
-```css
-#sidebar {
-  width: var(--sidebar-width);    /* 300px */
-  min-width: 200px;
-  max-width: 500px;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-}
-```
+### Tab bar
+- Tabs are 26px pills with a 7px dot (state) or a type-coloured icon. Active = `--bg-tertiary` pill with a 1px soft edge; inactive = transparent, hover wash. No accent underline/top bar. Close button appears on hover.
 
-**Section title** (e.g. "REPOS"):
-- `font-size: --font-sm`, `text-transform: uppercase`, `color: --fg-muted`
-- `letter-spacing: 0.05em`, `padding: 4px 16px`
+### Status bar
+- 28px, 12px text. Left: zoom chip, status, cwd. Right: 26px ghost icon toggles; an **open panel lights its toggle** (`.toggleActive` = 16 % accent wash + accent icon). Count bubbles are accent pills with a 2px frame-coloured ring.
 
-**Repo header**:
-- Flex row, `gap: 6px`, `padding: 6px 12px 3px`
-- Repo initials: 28×28px circle, `--accent` bg, `--text-on-accent` text, `--font-xs`, semibold
-- Repo name: `--font-sm`, semibold, uppercase, `--fg-secondary`, truncated with ellipsis
-- Chevron: `--font-lg`, `--fg-muted`, rotates 0→90° on expand (150ms ease)
-- Actions (⋯, +): hidden by default (`opacity: 0`), shown on repo-header hover
+### Side panels (`shared/panel.module.css`)
+- 36px header, 13px/600 title, icon buttons on the right, one hairline below.
+- Rows 26–28px, inset 6px, radius 6.
 
-**Branch item** (the most complex sidebar element):
-```css
-.branch-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 12px;
-  border-radius: var(--radius-md);
-  margin: 1px 0;
-  transition: background 0.1s;
-}
-.branch-item:hover { background: var(--bg-highlight); }
-.branch-item.active {
-  background: var(--bg-highlight);
-  border-left: 2px solid var(--accent);
-  padding-left: 10px;  /* compensate for border */
-}
-```
+### Menus, popovers, dialogs
+- Menus/popovers: `--surface-overlay`, hairline, radius 8, `--shadow-dropdown`, 4px inset, 28px items.
+- Dialogs: radius 12 (`--radius-panel`), `--shadow-2xl`, header 14px/600, actions bar with a hairline above. Scrim = `--scrim`.
 
-Branch item anatomy (left to right):
-```
-[icon 18px] [name flex:1] [stats badge?] [PR badge?] [actions on hover]
-```
+## Interactive states
 
-- **Icon** (18px wide, centered): `★` yellow for main, `Y` muted for feature, `Y` accent+pulse when agent active, `Y` green when shell idle, `?` warning (orange)+pulse when awaiting input
-- **Name**: `--font-md`, weight 500, `--fg-primary`, ellipsis on overflow
-- **Stats badge** (optional): `--font-xs`, monospace, `--bg-tertiary` bg, `--border` border, `--radius-lg`, shows `+N -N` in green/red
-- **PR badge** (optional): `--font-xs`, monospace, semibold, `--radius-pill`, colored by state (see Status Badges below)
-- **Actions** (on hover only): `max-width: 0 → 44px`, two 20×20px buttons (+, ×)
+- Hover: `--surface-hover` wash; text `--fg-secondary` → `--fg-primary`.
+- Selected: 13 % accent wash. Active toggle: 16 % accent wash + accent glyph.
+- Focus: accent ring (see Controls). Disabled: `opacity: 0.45`, `cursor: not-allowed`.
+- Hidden-until-hover actions (repo/branch/tab close) animate `max-width`/`opacity`, never layout-shifting margins.
 
-### Tab Bar
+## Vibrancy
 
-Located inside `#toolbar`, center section. Background matches toolbar (`--bg-primary`).
-
-```css
-.tab {
-  height: var(--tab-bar-height);  /* 32px */
-  padding: 0 12px;
-  font-size: var(--font-md);
-  font-family: var(--font-mono);
-  color: var(--fg-secondary);
-  background: transparent;
-  border: none;
-  border-top: 2px solid transparent;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 80px;
-  max-width: 200px;
-}
-.tab.active {
-  color: var(--fg-primary);
-  border-top-color: var(--accent);
-  background: var(--bg-secondary);
-}
-.tab:hover:not(.active) {
-  color: var(--fg-primary);
-  background: var(--bg-tertiary);
-}
-```
-
-Tab anatomy: `[agent badge?] [name, truncated] [close × on hover]`
-- Agent badge: small colored prefix (e.g. `C claude`, `G gemini`)
-- Close button: invisible by default, `opacity: 1` on tab hover
-- New tab button `[+]`: 28px circle, `--accent` color
-
-### Status Bar
-
-```css
-.bar {
-  height: var(--status-height);   /* 28px */
-  min-height: var(--status-height);
-  background: var(--bg-secondary);
-  border-top: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  font-size: var(--font-sm);
-  gap: 8px;
-  overflow: hidden;
-}
-```
-
-Three sections: left (zoom, status info, CWD, agent badge, ticker), center (PR + CI badges), right (toggle buttons).
-
-**Agent badge** (`.agentBadge`): `--font-mono`, `--font-sm`, weight 500, `1px 6px` padding, `--radius-sm`, `--bg-tertiary` bg. Usage-dependent color classes:
-- `.agentUsage` — `--fg-secondary` text (normal usage)
-- `.agentUsageWarning` — `#dcdcaa` text (usage >=70%)
-- `.agentUsageCritical` — `#f48771` text + `pulse-opacity` animation (usage >=90%)
-- `.agentRateLimited` — `#f44747` text + `pulse-opacity` animation
-
-**Ticker message** (`.tickerMessage`): `--font-mono`, `--font-sm`, `--fg-muted`, max-width 300px, `--radius-sm`. Warning priority (>=80): `#ffd700` text, gold bg at 0.1 alpha. `.tickerClickable` adds cursor pointer and hover effect.
-
-**Pendulum overflow** (`.infoTickerActive`): When the status info text is wider than its container, a CSS `pendulum` keyframe animation scrolls the text left then back. Duration is computed dynamically from overflow width (~50px/s). Click dismisses.
-
-**Notes toggle badge** (`.toggleBadge`): Small accent-colored pill positioned over the toggle button, showing the filtered note count.
-
-**PR badges** (center section): `PrBadge` + `CiBadge` components in `.githubStatus`, separated by a left border. CLOSED PRs are hidden; MERGED PRs have a 5-minute activity-based grace period.
-
-**Toggle buttons** (right section): `--bg-tertiary` bg, `--border` border, `--font-xs`, `2px 8px` padding.
-Active: `--accent` bg, white text. Each has a hotkey hint overlay positioned below.
-
-### Side Panels (Diff, Markdown, Notes/Ideas)
-
-All follow the same structure:
-```css
-.panel {
-  width: 400px;
-  min-width: 300px;
-  max-width: 50vw;
-  border-left: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-primary);
-}
-.panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 12px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
-}
-.panel-title { font-size: var(--font-lg); font-weight: bold; }
-.file-count-badge {
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border-radius: var(--radius-pill);
-  padding: 1px 6px;
-  font-size: var(--font-xs);
-}
-.panel-content { flex: 1; overflow-y: auto; }
-```
-
-### Dialog / Modal
-
-```css
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.65);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-.dialog {
-  width: 480px;
-  max-width: 90vw;
-  max-height: 80vh;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-popup);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.dialog-header {
-  padding: 16px;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.dialog-header h2 { font-size: var(--font-xl); }
-.dialog-content { padding: 16px; overflow-y: auto; flex: 1; }
-.dialog-actions {
-  padding: 12px 16px;
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  border-top: 1px solid var(--border);
-}
-```
-
-**Primary button**: `background: var(--accent); color: var(--text-on-accent); padding: 8px 16px; border-radius: var(--radius-lg);`
-**Secondary button**: `background: var(--bg-tertiary); color: var(--fg-secondary); same padding/radius.`
-**Danger button**: `background: var(--error); color: var(--text-on-error);`
-
-### Form Controls
-
-```css
-input, select, textarea {
-  height: 36px;                        /* standard height */
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  color: var(--fg-primary);
-  font-size: var(--font-md);
-  padding: 0 8px;
-}
-input:focus, select:focus, textarea:focus {
-  border-color: var(--accent);
-  outline: none;
-}
-```
-
-**Toggle switch**: 36×20px track, `--radius-full` (10px), off=`--bg-tertiary`, on=`--accent`. White thumb slides with 0.2s transition.
-
-**Range slider**: 4px track height, 16px circular thumb in `--accent`.
-
-### Settings Panel
-
-Full-screen overlay. Inner panel: `--bg-secondary`, 700px max-width, 80vh max-height.
-- Left sidebar with tabs (General, Notifications, Dictation, Terminal, Agents)
-- Right content area with sections
-- Section heading: `<h3>`, `--font-lg`, bold, `margin-bottom: 12px`
-- Settings row: flex space-between, label left, control right, `padding: 8px 0`
-
-## Status Badges Reference
-
-### PR State (sidebar `.branch-pr-badge`)
-
-| State | Background | Border | Text Color | Extra |
-|-------|-----------|--------|------------|-------|
-| Open | `--success` | none | `--text-on-success` | — |
-| Draft | transparent | `1px dashed --fg-muted` | `--fg-muted` | — |
-| Merged | `#a371f7` | none | `--text-on-accent` | — |
-| Closed | `--error` | none | `--text-on-error` | — |
-| Conflict | `--error` | none | `--text-on-error` | pulse-opacity 1.5s |
-| CI Failed | `--error` | none | `--text-on-error` | bold |
-| CI Pending | transparent | `1px solid #e3b341` | `#e3b341` | pulse-opacity 2s |
-| Changes Req. | `#d29922` | none | `--text-on-accent` | — |
-| Review Req. | transparent | `1px solid #d29922` | `#d29922` | — |
-
-All badges: `font-size: --font-xs`, `font-family: --font-mono`, `font-weight: 600`, `border-radius: --radius-pill`, `padding: 1px 6px`.
-
-### CI State (status bar)
-
-| State | Background | Text |
-|-------|-----------|------|
-| Success | `rgba(158,206,106,0.2)` | `#9ece6a` |
-| Failure | `rgba(247,118,142,0.2)` | `#f7768e` |
-| Pending | `rgba(224,175,104,0.2)` | `#e0af68` |
-
-### Agent/Usage (tab + status bar)
-
-| State | CSS Class | Style |
-|-------|-----------|-------|
-| Agent running | Tab colored agent prefix | Tab has colored agent prefix badge |
-| Usage normal | `.agentUsage` | `--fg-secondary` text |
-| Usage ≥70% | `.agentUsageWarning` | `#dcdcaa` text (warning yellow) |
-| Usage ≥90% | `.agentUsageCritical` | `#f48771` text + pulse-opacity 2s |
-| Rate limited | `.agentRateLimited` | `#f44747` text + pulse-opacity 2s |
-| Ticker warning (≥80 priority) | `.tickerWarning` | `#ffd700` text, gold bg at 0.1 alpha |
-| Update available | `.updateBadge` | `#4ec9b0` text, teal bg at 0.15 alpha |
-
-## Icons
-
-**No icon library.** Text symbols and Unicode only. Emoji sparingly, always with `filter: grayscale(1) brightness(1.5)` to match the monochrome UI.
-
-| Symbol | Meaning | Where |
-|--------|---------|-------|
-| `★` | Main/primary branch | Sidebar branch icon |
-| `Y` | Feature branch | Sidebar branch icon |
-| `?` | Awaiting input | Branch icon (warning/orange, pulsing) |
-| `+` | Add/create | Buttons |
-| `×` | Close/remove | Tab close, panel close, dialog close |
-| `⋯` | Context menu | Repo header |
-| `✎` | Edit/rename | Branch double-click |
-| `▶` | Send/execute | Notes panel send button |
-| `>` | Chevron (expand/collapse) | Repo sections |
-| `●` | Tab status dot | Tab bar (grey=running, green=idle, purple=unseen, blue-pulse=activity, orange-pulse=awaiting, red-pulse=error) |
-| `⎇` | Git branch symbol | Status bar |
-| `💡` | Ideas panel | Status bar, panel header |
-
-Icon dimensions: 18px wide container for branch icons. `--font-md` or `--font-lg` size. Always left of text with `gap: 6–8px`.
+The glass recipe is always on. `html.vibrancy` (macOS, transparency not
+reduced) only lowers the alphas of `--bg-app` and `--surface-glass` and turns on
+`--blur-glass`, so the desktop shows through the frame as well. The OS
+`prefers-reduced-transparency` preference collapses every pane to opaque.
+Components use the tokens unconditionally.
 
 ## Scrollbars
 
-```css
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: var(--bg-highlight);
-  border-radius: var(--radius-md);
-}
-::-webkit-scrollbar-thumb:hover { background: var(--fg-muted); }
-```
+10px gutter, 4px rounded thumb (`--scrollbar-thumb`), transparent track.
+The well keeps a 14px gutter to match the terminal's own scrollbar. Sidebar
+list: 8px gutter.
 
-Terminal scrollbar overridden to 8px with `!important`.
+## Anti-patterns (DO NOT)
 
-## Interactive States
-
-### Hover
-- Background: one level up (`--bg-secondary` → `--bg-tertiary`, or `--bg-tertiary` → `--bg-highlight`)
-- Text: `--fg-secondary` → `--fg-primary`
-- Border: transparent → `--accent` (for add-repo button)
-- Duration: 0.1s
-
-### Active / Selected
-- Active branch: `--bg-highlight` bg + `2px solid var(--accent)` left border
-- Active tab: `--bg-secondary` bg + `2px solid var(--accent)` top border + `--fg-primary` text
-- Active toggle: `--accent` bg + white text
-- No hover animation on already-active items
-
-### Focus
-```css
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-```
-Excluded on toggle buttons and mic button.
-
-### Disabled
-- `opacity: 0.3` (strong) or `0.5` (mild)
-- `cursor: not-allowed`
-- No hover, no transitions
-
-### Hidden-until-hover
-Pattern used for actions that clutter the UI when always visible:
-- Repo actions: `opacity: 0; pointer-events: none;` → `opacity: 1; pointer-events: auto;` on `.repo-header:hover`
-- Branch actions: `max-width: 0; overflow: hidden;` → `max-width: 44px;` on `.branch-item:hover`
-- Tab close button: `opacity: 0` → `opacity: 1` on `.tab:hover`
-
-## Platform Differences
-
-| Property | macOS | Windows/Linux |
-|----------|-------|---------------|
-| Toolbar height | 38px | 32px |
-| Traffic light offset | `.platform-macos .toolbar-left { padding-left: 78px; }` | None |
-| System font | -apple-system first | Segoe UI (Win) / Roboto (Linux) first |
-| Quit menu | App menu | File menu |
-| Check for Updates | App menu | Help menu |
-
-CSS classes on `<html>`: `.platform-macos`, `.platform-windows`, `.platform-linux`.
-
-## Accessibility
-
-- Primary text (#cccccc on #1e1e1e): 10:1+ contrast ratio (exceeds WCAG AAA).
-- Secondary text (#a0a0a0 on #252526): 6:1+ (exceeds WCAG AA).
-- Status communicated by **color + shape + icon** — never color alone.
-- `:focus-visible` outlines for keyboard navigation.
-- `prefers-reduced-motion` query disables all animations.
-- Custom scrollbars maintain 8px touch target.
-
-## PWA / Mobile (`src/mobile/mobile.css`)
-
-The mobile PWA has its own standalone stylesheet at `src/mobile/mobile.css`, **completely independent from the desktop `global.css`**. This allows the mobile UI to evolve separately while sharing the same design language.
-
-### What's shared
-- Core color palette (same `--bg-*`, `--fg-*`, `--accent`, `--success`, `--warning`, `--attention`, `--error` variables with identical default values)
-- Border radius scale (`--radius-sm` through `--radius-full`, excluding `--radius-xs`)
-- Shadow tokens (`--shadow-popup`, `--shadow-dropdown`)
-- ANSI terminal palette
-
-### What differs
-| Property | Desktop (`global.css`) | Mobile (`mobile.css`) |
-|----------|----------------------|----------------------|
-| Font mono stack | JetBrains Mono, Fira Code, Hack, Cascadia, ... | SF Mono, Menlo, Consolas, DejaVu, ... |
-| Font size scale | `--font-3xs` through `--font-3xl` (8–24px) | Not defined — components use explicit `px` values |
-| Layout variables | `--sidebar-width`, `--toolbar-height`, `--tab-bar-height`, `--status-height` | Not used — mobile uses flex-based layout |
-| User select | Disabled (`none`) | Enabled (`text`) |
-| Theme variables | `--activity`, `--merged`, `--unseen` | Not present (mobile has no terminal activity tracking yet) |
-| Safe areas | Not used | `env(safe-area-inset-top/bottom)` on `#mobile-app` |
-| Input font-size | From scale | Fixed `16px` minimum to prevent iOS auto-zoom |
-
-### Keeping in sync
-When updating core palette colors in `global.css`, **also update `mobile.css`** — the `:root` blocks must stay aligned for the shared variables. Theme-specific variables (`--activity`, `--merged`, `--unseen`) are desktop-only and do not need mobile equivalents until that functionality ships in PWA.
-
-## Anti-Patterns (DO NOT)
-
-- **No bright whites** — max text brightness is `--fg-primary` (#cccccc).
-- **No new shadows** — only the three defined levels exist.
-- **No `transition: all`** — always list specific properties.
-- **No hardcoded core colors** — use CSS variables for the four bg levels, three fg levels, and status colors.
-- **No icon libraries** — text/unicode/emoji only.
-- **No off-scale radius** — only `--radius-xs` through `--radius-full`.
-- **No `!important`** — except terminal scrollbar overrides.
-- **No pixel values outside the spacing scale** unless component-specific dimension (like 28px repo initials).
-- **No inline styles for theming** — all colors and spacing via CSS variables (desktop: `global.css`, mobile: `mobile.css`).
+- **No uppercase tracking** for labels or section headers.
+- **No solid semantic fills** behind black text — tint (12–16 %) + coloured text.
+- **No hairline per edge** — let the well/frame tone do the separating.
+- **No new shadows** and **no `transition: all`**.
+- **No hardcoded core colours** — tokens only; washes use `--wash-*`, `--surface-hover`.
+- **No icon libraries** — monochrome inline SVGs, `fill="currentColor"`, 14–16px.
+- **No `!important`** except terminal scrollbar overrides.

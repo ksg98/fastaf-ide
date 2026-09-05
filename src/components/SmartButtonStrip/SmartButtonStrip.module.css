@@ -70,7 +70,7 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 100;
   padding: 4px 0;
   display: flex;

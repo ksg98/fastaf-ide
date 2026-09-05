@@ -8,7 +8,7 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 100;
   max-height: calc(100vh - 60px);
   overflow-y: auto;
@@ -24,8 +24,6 @@
   font-size: var(--font-xs);
   font-weight: 600;
   color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 .addBtn {
@@ -56,8 +54,6 @@
   font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 .ruleItem {

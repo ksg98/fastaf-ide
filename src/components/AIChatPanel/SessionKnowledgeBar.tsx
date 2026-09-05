@@ -120,7 +120,7 @@ export const SessionKnowledgeBar: Component<{ sessionId: string | null }> = (pro
 					title="Session knowledge"
 				>
 					<span class={s.caret}>{expanded() ? "▾" : "▸"}</span>
-					<span class={s.label}>knowledge</span>
+					<span class={s.label}>Knowledge</span>
 					<span class={s.count}>{summary().commands_count} cmds</span>
 					<Show when={summary().recent_errors.length > 0}>
 						<span class={cx(s.count, s.errCount)}>{summary().recent_errors.length} recent err</span>
@@ -135,7 +135,7 @@ export const SessionKnowledgeBar: Component<{ sessionId: string | null }> = (pro
 					title="Browse saved knowledge sessions"
 					onClick={() => uiStore.setKnowledgeHistoryOverlayVisible(true)}
 				>
-					history
+					History
 				</button>
 			</div>
 

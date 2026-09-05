@@ -81,7 +81,7 @@ function buildNavItems(): SettingsShellTab[] {
 
 	if (repos.length > 0) {
 		items.push({ key: "__sep__", label: "─" });
-		items.push({ key: "__label__:Repositories", label: t("settings.repositories", "REPOSITORIES") });
+		items.push({ key: "__label__:Repositories", label: t("settings.repositories", "Repositories") });
 		for (const repo of repos) {
 			const label = repo.displayName || pathBasename(repo.path) || repo.path;
 			const color = getRepoColor(repo.path);

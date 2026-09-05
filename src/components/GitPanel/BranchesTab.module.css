@@ -55,8 +55,6 @@
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   color: var(--fg-muted);
   background: var(--bg-tertiary);
   border-bottom: 1px solid var(--border);
@@ -279,7 +277,7 @@
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -291,7 +289,7 @@
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popup);
+  box-shadow: var(--highlight-inset), var(--shadow-popup);
   overflow: hidden;
 }
 

@@ -3,23 +3,26 @@
   50% { opacity: 1; }
 }
 
-
-/* Sidebar */
+/* ── Sidebar ───────────────────────────────────────────────────────────────
+   Part of the frame: same surface as the toolbar and status bar, no edge
+   line. Hierarchy comes from type — repos are 13px/600 rows, branches are
+   13px/400 rows indented beneath them, terminal sessions 12px beneath those.
+   Icons are monochrome (shape = kind); only states that need attention get
+   colour. Everything sits on a 28px row rhythm. */
 .sidebar {
   width: var(--sidebar-width);
   min-width: 200px;
   max-width: 500px;
   flex-shrink: 0;
-  /* Resting chrome: surface-glass collapses to --bg-secondary when vibrancy
-     is off and becomes translucent (with --blur-glass) when vibrancy is on. */
   background: var(--surface-glass);
   backdrop-filter: var(--blur-glass);
-  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   position: relative;
   transition: width 0.2s ease, min-width 0.2s ease, opacity 0.15s ease;
   overflow: hidden;
+  container-type: inline-size;
+  container-name: sidebar-shell;
 }
 
 .resizeHandle {
@@ -30,17 +33,38 @@
   height: 100%;
   cursor: col-resize;
   z-index: 10;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .resizeHandle:hover {
-  background: var(--accent);
-  opacity: 0.5;
+  background: rgba(var(--accent-rgb), 0.45);
 }
 
 .content {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 0;
+  overflow-x: hidden;
+  padding: 2px 0 8px;
+  container-type: inline-size;
+  container-name: sidebar-list;
+}
+
+/* The list's own scrollbar is thinner than the app default — it sits right
+   against the content well and should not compete with it. */
+.content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.content::-webkit-scrollbar-thumb {
+  background: var(--wash-2);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 8px;
+}
+
+.content::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
 }
 
 .repoList {
@@ -51,16 +75,15 @@
 .searchBox {
   display: flex;
   align-items: center;
-  padding: 0 8px 6px;
+  padding: 4px 8px 8px;
 }
 
-/* Aligned to the controls .input recipe: bg-tertiary + border-subtle +
-   radius-md + accent focus ring. Padding is trimmed for the slim strip. */
 .searchInput {
   flex: 1;
   min-width: 0;
-  padding: 4px 8px;
-  background: var(--bg-tertiary);
+  height: 28px;
+  padding: 0 10px;
+  background: var(--bg-primary);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   color: var(--fg-primary);
@@ -71,9 +94,13 @@
     box-shadow var(--duration-fast) var(--ease-out);
 }
 
+.searchInput:hover:not(:focus) {
+  border-color: var(--border-strong);
+}
+
 .searchInput:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
 }
 
 .searchInput::placeholder {
@@ -84,22 +111,22 @@
 .filterStatus {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   width: calc(100% - 16px);
   margin: 0 8px 6px;
-  padding: 4px 8px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  background: rgba(var(--accent-rgb), 0.12);
+  border: none;
+  border-radius: var(--radius-md);
   color: var(--accent);
   font-size: var(--font-xs);
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .filterStatus:hover {
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  background: rgba(var(--accent-rgb), 0.18);
 }
 
 .filterStatusClear {
@@ -108,9 +135,10 @@
   opacity: 0.85;
 }
 
+/* ── Footer ── */
 .footer {
-  height: var(--status-height);
-  min-height: var(--status-height);
+  height: 36px;
+  min-height: 36px;
   padding: 0 6px;
   border-top: 1px solid var(--border-subtle);
   display: flex;
@@ -121,19 +149,25 @@
 
 .addRepo {
   flex: 1;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 5px 8px;
+  height: 26px;
+  padding: 0 8px;
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
   color: var(--fg-secondary);
   font-size: var(--font-sm);
+  font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   text-align: left;
   min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
 .addRepo:hover {
@@ -153,17 +187,18 @@
 }
 
 .footerAction {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .footerAction:hover {
@@ -172,9 +207,11 @@
 }
 
 .empty {
-  padding: 20px 16px;
+  padding: 28px 16px;
   text-align: center;
   color: var(--fg-muted);
+  font-size: var(--font-sm);
+  line-height: 1.5;
 }
 
 .empty p {
@@ -182,30 +219,32 @@
 }
 
 .empty button {
-  padding: 8px 16px;
+  height: 28px;
+  padding: 0 14px;
   margin: 2px 3px;
   background: var(--accent);
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text-on-accent);
   font-size: var(--font-md);
+  font-weight: 600;
+  font-family: inherit;
   cursor: pointer;
 }
 
 /* ── Repository Section ── */
 .repoSection {
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
-/* Repo/group rows are inset from the sidebar edges so hover/selection
-   reads as a floating pill. Keeps ~28px content height (initials 28px
-   tall) inside a slim outer margin. */
+/* Repo row — a real row, not a label: 28px, chevron leading, name 13px/600. */
 .repoHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  height: 28px;
   margin: 0 6px;
-  padding: 2px 8px;
+  padding: 0 6px 0 4px;
   border-radius: var(--radius-md);
   cursor: pointer;
   position: relative;
@@ -217,63 +256,68 @@
 }
 
 .repoInitials {
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--accent);
-  border-radius: var(--radius-md);
-  font-size: var(--font-xs);
-  font-weight: 600;
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.16);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  color: var(--accent);
   cursor: pointer;
-  transition: transform 0.15s, box-shadow 0.15s;
   flex-shrink: 0;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .repoInitials:hover {
-  transform: scale(1.1);
-  box-shadow: var(--shadow-dropdown);
+  background: rgba(var(--accent-rgb), 0.26);
 }
 
-/* Section header vocabulary: 11px uppercase muted with tight tracking. */
 .repoName {
   flex: 1;
-  font-size: var(--font-xs);
+  font-size: var(--font-md);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--fg-muted);
+  color: var(--fg-primary);
+  letter-spacing: -0.005em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
+/* Hover actions live in the row and reveal in place (no overlap tricks). */
 .repoActions {
   display: flex;
+  align-items: center;
   gap: 2px;
-  position: absolute;
-  right: 20px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: var(--bg-secondary);
-  padding-left: 4px;
+  flex-shrink: 0;
+  max-width: 0;
+  overflow: hidden;
   opacity: 0;
   pointer-events: none;
+  transition: opacity var(--duration-fast) var(--ease-out);
 }
 
 @media (hover: hover) {
   .repoHeader:hover .repoActions {
+    max-width: 96px;
     opacity: 1;
     pointer-events: auto;
   }
 }
 
+/* Leading disclosure chevron: the › glyph, rotated to point down when open. */
 .repoChevron {
-  font-size: var(--font-2xl);
-  color: var(--fg-secondary);
-  transition: transform 150ms ease;
+  order: -1;
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-lg);
+  color: var(--fg-muted);
+  transition: transform 150ms ease, color var(--duration-fast) var(--ease-out);
   transform: rotate(0deg);
   flex-shrink: 0;
   line-height: 1;
@@ -283,35 +327,39 @@
   transform: rotate(90deg);
 }
 
+.repoHeader:hover .repoChevron {
+  color: var(--fg-secondary);
+}
+
 .repoActionBtn {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
   font-size: var(--font-md);
   cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .repoActionBtn:hover {
-  background: var(--surface-hover);
+  background: var(--wash-2);
   color: var(--fg-primary);
 }
 
 .addBtn {
-  color: var(--accent);
+  color: var(--fg-muted);
   font-weight: 600;
-  margin-right: 5px;
 }
 
 .addBtn:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 /* Collapsed repository state */
@@ -320,14 +368,15 @@
 }
 
 .collapsed .repoHeader {
-  padding: 8px 6px;
+  height: auto;
+  padding: 6px;
   justify-content: center;
 }
 
 .collapsed .repoInitials {
-  width: 32px;
-  height: 32px;
-  font-size: var(--font-md);
+  width: 28px;
+  height: 28px;
+  font-size: var(--font-xs);
 }
 
 .dragging {
@@ -367,8 +416,8 @@
 }
 
 .dragOverTarget {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  border-radius: 4px;
+  background: rgba(var(--accent-rgb), 0.12);
+  border-radius: var(--radius-md);
 }
 
 /* ── Group sections ── */
@@ -380,8 +429,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  height: 28px;
   margin: 0 6px;
-  padding: 4px 8px;
+  padding: 0 6px 0 4px;
   cursor: pointer;
   user-select: none;
   border-radius: var(--radius-md);
@@ -399,14 +449,12 @@
   flex-shrink: 0;
 }
 
-/* Section header vocabulary: 11px uppercase muted with tight tracking. */
+/* Group = a folder of repos: 12px/600, muted, sentence case. */
 .groupName {
   flex: 1;
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -415,12 +463,17 @@
 .groupCount {
   font-size: var(--font-xs);
   color: var(--fg-muted);
-  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
 }
 
 .groupChevron {
-  font-size: var(--font-md);
-  color: var(--fg-secondary);
+  order: -1;
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-lg);
+  color: var(--fg-muted);
   transition: transform 150ms ease;
   transform: rotate(0deg);
   flex-shrink: 0;
@@ -432,42 +485,40 @@
 }
 
 .groupRepos {
-  padding-left: 0;
+  padding-left: 10px;
 }
 
 .groupEmptyHint {
-  padding: 8px 16px;
+  padding: 6px 24px;
   font-size: var(--font-xs);
   color: var(--fg-muted);
-  opacity: 0.5;
-  font-style: italic;
 }
 
 /* ── Branch Item ── */
 .repoBranches {
-  padding-left: 16px;
-  padding-top: 1px;
+  padding: 1px 0 3px;
 }
 
 .repoEmpty {
-  padding: 8px 16px;
+  padding: 4px 12px 4px 36px;
   font-size: var(--font-sm);
   color: var(--fg-muted);
-  font-style: italic;
 }
 
 .branchItem {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
+  gap: 7px;
+  height: var(--row-h);
+  min-height: var(--row-h);
+  padding: 0 6px 0 24px;
+  margin: 0 6px;
   cursor: pointer;
   border-radius: var(--radius-md);
-  margin: 1px 6px;
+  position: relative;
+  color: var(--fg-secondary);
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
-  position: relative;
-  min-height: 30px;
 }
 
 @media (hover: hover) {
@@ -478,7 +529,11 @@
 
 /* Selection = translucent accent wash — no solid accent fill, no inset stripe. */
 .branchItem.active {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(var(--accent-rgb), 0.13);
+  color: var(--fg-primary);
+}
+
+.branchItem.active .branchName {
   color: var(--fg-primary);
 }
 
@@ -488,29 +543,33 @@
   opacity: 0.6;
 }
 
+/* Icon = kind (star / fork / shell), monochrome at rest. */
 .branchIcon {
-  font-size: var(--font-md);
-  width: 18px;
+  font-size: var(--font-sm);
+  font-weight: 700;
+  width: 16px;
+  height: 16px;
   text-align: center;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  color: var(--fg-muted);
 }
 
 .branchIconMain {
-  color: var(--warning);
+  color: var(--fg-secondary);
 }
 
 .branchIconWorktree {
-  color: var(--success);
+  color: var(--fg-secondary);
 }
 
-/* Terminal state colors — applied directly via BranchIcon colorClass prop */
+/* Terminal state colors — applied directly via BranchIcon colorClass prop.
+   Only states that need a glance are coloured. */
 .branchIconError {
   color: var(--error);
   animation: pulse-opacity 1s ease-in-out infinite;
-  font-weight: bold;
 }
 
 .branchIconActivity {
@@ -521,11 +580,11 @@
 .branchIconQuestion {
   color: var(--attention);
   animation: pulse-opacity 1s ease-in-out infinite;
-  font-weight: bold;
 }
 
 .branchIconIdle {
   color: var(--fg-muted);
+  opacity: 0.75;
 }
 
 .branchIconUnseen {
@@ -540,59 +599,71 @@
 .branchName {
   display: block;
   font-size: var(--font-md);
-  font-weight: 500;
+  font-weight: 400;
   color: var(--fg-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-
+/* Diff stats — quiet tabular figures, no chip. */
 .branchStats {
   display: flex;
-  gap: 4px;
-  font-size: var(--font-2xs);
+  gap: 5px;
+  font-size: var(--font-xs);
   font-family: var(--font-ui);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 2px 6px;
+  font-variant-numeric: tabular-nums;
+  background: transparent;
+  border: none;
+  padding: 0;
   flex-shrink: 0;
   margin-left: auto;
+  color: var(--fg-muted);
+}
+
+/* Narrow sidebar: the branch name wins; stats come back on hover/selection. */
+@container sidebar-list (max-width: 239px) {
+  .branchItem:not(:hover):not(.active) .branchStats {
+    display: none;
+  }
 }
 
 .statAdd {
   color: var(--success);
+  opacity: 0.85;
 }
 
 .statDel {
   color: var(--error);
+  opacity: 0.85;
 }
 
-/* Git merged badge — branch fully merged into main */
+/* "remote" tag on a repo header */
 .remoteBadge {
-  font-size: 9px;
+  font-size: var(--font-2xs);
+  font-weight: 600;
   color: var(--fg-muted);
-  margin-left: 4px;
+  background: var(--wash-1);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  margin-left: 2px;
   flex-shrink: 0;
   white-space: nowrap;
 }
 
-/* Branch group — wraps a branch row + its collapsible terminal tab list.
-   When expanded, hovering anywhere over the block lifts the whole group as a
-   unified card (DIA-style), while individual items keep their own stronger hover. */
+/* Branch group — wraps a branch row + its collapsible terminal tab list. */
 .branchGroup {
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   transition: background 0.15s ease;
 }
 
 .branchGroupExpanded {
-  padding-bottom: 3px;
+  padding-bottom: 2px;
 }
 
 @media (hover: hover) {
   .branchGroupExpanded:hover {
-    background: var(--surface-hover);
+    background: var(--wash-0);
   }
 }
 
@@ -600,41 +671,39 @@
 .branchTabsChevron {
   background: none;
   border: none;
-  color: var(--fg-secondary);
-  font-size: var(--font-xl);
+  color: var(--fg-muted);
+  font-size: var(--font-lg);
   cursor: pointer;
   padding: 0 2px;
   line-height: 1;
   flex-shrink: 0;
   transition: transform 150ms ease, color 0.1s;
   transform: rotate(0deg);
-  opacity: 0.8;
 }
 
 .branchTabsChevron:hover {
   color: var(--fg-primary);
-  opacity: 1;
 }
 
 .branchTabsChevron.expanded {
   transform: rotate(90deg);
-  color: var(--fg-primary);
-  opacity: 1;
+  color: var(--fg-secondary);
 }
 
 .branchTabList {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 2px 0 4px 0;
-  margin: 0 2px 0 8px;
+  gap: 1px;
+  padding: 0 0 2px;
+  margin: 0 6px 0 30px;
 }
 
 .branchTabItem {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 6px 16px;
+  gap: 8px;
+  height: 24px;
+  padding: 0 8px 0 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
   font-size: var(--font-sm);
@@ -642,7 +711,8 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
   background: none;
   border: none;
   font-family: inherit;
@@ -651,7 +721,7 @@
 }
 
 .branchTabItem.active {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(var(--accent-rgb), 0.13);
   color: var(--fg-primary);
 }
 
@@ -666,13 +736,10 @@
   }
 }
 
-/* Terminal status dot. Sized to match the UI Legend (8px) and, for the active
- * states, given a soft same-color glow so sessions that need attention are easy
- * to spot at a glance in the sidebar (issue #100). Busy stays animated so it is
- * still distinguishable from a static idle dot without relying on hue alone. */
+/* Terminal status dot — 7px; busy pulses so it reads without hue alone. */
 .branchTabDot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--fg-muted);
@@ -682,32 +749,27 @@
 .branchTabDotBusy {
   background: var(--activity);
   opacity: 1;
-  box-shadow: 0 0 4px var(--activity);
   animation: pulse-opacity 1.5s ease-in-out infinite;
 }
 
 .branchTabDotIdle {
   background: var(--success);
   opacity: 1;
-  box-shadow: 0 0 4px var(--success);
 }
 
 .branchTabDotUnseen {
   background: var(--unseen);
   opacity: 1;
-  box-shadow: 0 0 4px var(--unseen);
 }
 
 .branchTabDotError {
   background: var(--error);
   opacity: 1;
-  box-shadow: 0 0 4px var(--error);
 }
 
 .branchTabDotQuestion {
   background: var(--attention);
   opacity: 1;
-  box-shadow: 0 0 4px var(--attention);
 }
 
 .branchTabName {
@@ -719,7 +781,8 @@
 .mergedBadge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
+  height: 18px;
+  padding: 0 6px;
   margin-left: 4px;
   font-size: var(--font-2xs);
   font-weight: 600;
@@ -727,20 +790,21 @@
   border-radius: var(--radius-pill);
   white-space: nowrap;
   flex-shrink: 0;
-  background: var(--fg-muted);
-  color: var(--bg-primary);
-  opacity: 0.7;
+  background: var(--wash-1);
+  color: var(--fg-muted);
 }
 
-/* PR state badge */
+/* PR state badge — tinted pills: 12–16 % colour wash + coloured text. */
 .prBadge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 6px;
+  height: 18px;
+  padding: 0 6px;
   margin-left: 4px;
   font-size: var(--font-2xs);
   font-weight: 600;
   font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
   border-radius: var(--radius-pill);
   white-space: nowrap;
   cursor: pointer;
@@ -749,18 +813,18 @@
 
 .prReady,
 .prOpen {
-  background: var(--success);
-  color: var(--text-on-success);
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
 }
 
 .prMerged {
-  background: var(--merged);
-  color: var(--text-on-accent);
+  background: color-mix(in srgb, var(--merged) 18%, transparent);
+  color: var(--merged);
 }
 
 .prClosed {
-  background: var(--error);
-  color: var(--text-on-error);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
 }
 
 .prBadgeDimmed {
@@ -769,35 +833,35 @@
 
 .prDraft {
   background: transparent;
-  border: 1px dashed var(--fg-secondary);
-  color: var(--fg-secondary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--fg-muted);
 }
 
 .prConflict {
-  background: var(--error);
-  color: var(--text-on-error);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+  color: var(--error);
   animation: pulse-opacity 1.5s ease-in-out infinite;
 }
 
 .prCiFailed {
-  background: var(--error);
-  color: var(--text-on-error);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+  color: var(--error);
 }
 
 .prChangesRequested {
-  background: var(--changes);
-  color: var(--text-on-accent);
+  background: color-mix(in srgb, var(--changes) 18%, transparent);
+  color: var(--changes);
 }
 
 .prReviewRequired {
   background: transparent;
-  box-shadow: inset 0 0 0 1px var(--changes);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--changes) 60%, transparent);
   color: var(--changes);
 }
 
 .prCiPending {
   background: transparent;
-  box-shadow: inset 0 0 0 1px var(--changes);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--changes) 60%, transparent);
   color: var(--changes);
   animation: pulse-opacity 2s ease-in-out infinite;
 }
@@ -806,7 +870,7 @@
 .branchActions {
   display: flex;
   flex-shrink: 0;
-  gap: 4px;
+  gap: 2px;
   max-width: 0;
   overflow: hidden;
   opacity: 0;
@@ -816,7 +880,7 @@
 
 @media (hover: hover) {
   .branchItem:hover .branchActions {
-    max-width: 44px;
+    max-width: 48px;
     opacity: 1;
     pointer-events: auto;
   }
@@ -824,44 +888,41 @@
 
 .branchAddBtn,
 .branchRemoveBtn {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   font-size: var(--font-md);
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.1s;
-}
-
-.branchAddBtn {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: transparent;
+  color: var(--fg-muted);
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .branchAddBtn:hover {
-  background: var(--accent-hover);
-}
-
-.branchRemoveBtn {
-  background: transparent;
-  color: var(--fg-secondary);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 .branchRemoveBtn:hover {
-  background: var(--error);
-  color: var(--text-on-error);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+  color: var(--error);
 }
 
 .branchShortcut {
   flex-shrink: 0;
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   color: var(--fg-muted);
   font-family: var(--font-ui);
   margin-left: auto;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--wash-1);
 }
 
 /* ── Global Workspace Entry ── */
@@ -869,12 +930,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  height: 28px;
+  margin: 2px 6px;
+  padding: 0 8px 0 10px;
+  border-radius: var(--radius-md);
   cursor: pointer;
-  padding-left: 14px;
   color: var(--fg-secondary);
-  background: var(--bg-tertiary);
-  transition: background 0.1s, color 0.1s;
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .globalWorkspaceEntry:hover {
@@ -884,12 +948,12 @@
 
 /* Selection = translucent accent wash — no left-border stripe. */
 .globalWorkspaceActive {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(var(--accent-rgb), 0.13);
   color: var(--fg-primary);
 }
 
 .globalWorkspaceLabel {
-  font-size: var(--font-sm);
+  font-size: var(--font-md);
   font-weight: 500;
 }
 
@@ -897,17 +961,18 @@
   margin-left: auto;
   font-size: var(--font-xs);
   color: var(--fg-muted);
-  background: var(--bg-tertiary);
+  background: var(--wash-1);
   padding: 0 6px;
   border-radius: var(--radius-sm);
   min-width: 18px;
   text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Git Quick Actions ── */
 .gitQuickActions {
-  height: var(--status-height);
-  min-height: var(--status-height);
+  height: 34px;
+  min-height: 34px;
   padding: 0 6px;
   border-top: 1px solid var(--border-subtle);
   display: flex;
@@ -916,10 +981,9 @@
   gap: 2px;
 }
 
+/* The rotated "GIT" label is retired — the row is self-explanatory. */
 .gitQuickLabel {
-  flex-shrink: 0;
-  color: var(--fg-secondary);
-  align-self: center;
+  display: none;
 }
 
 .gitQuickBtns {
@@ -934,14 +998,20 @@
   align-items: center;
   justify-content: center;
   gap: 5px;
-  padding: 6px 4px;
+  height: 26px;
+  padding: 0 6px;
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
   color: var(--fg-secondary);
   font-size: var(--font-sm);
+  font-weight: 500;
+  font-family: inherit;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  min-width: 0;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .gitQuickBtn:hover:not(:disabled) {
@@ -963,6 +1033,30 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
+  color: var(--fg-muted);
+}
+
+.gitQuickText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Narrow sidebar: icon-only git actions so all four always fit. */
+@container sidebar-shell (max-width: 259px) {
+  .gitQuickText {
+    display: none;
+  }
+}
+
+.addRepoLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.gitQuickBtn:hover:not(:disabled) .gitQuickIcon {
+  color: var(--fg-primary);
 }
 
 /* Parked repos popover */
@@ -970,24 +1064,24 @@
   position: absolute;
   bottom: 42px;
   right: 6px;
-  width: 220px;
+  width: 240px;
   max-height: 300px;
   overflow-y: auto;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 100;
-  padding: 4px 0;
+  padding: 4px;
 }
 
 .parkedPopoverHeader {
-  padding: 6px 10px 4px;
+  padding: 6px 8px 6px;
   font-size: var(--font-sm);
   font-weight: 600;
-  color: var(--fg-muted);
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 2px;
+  color: var(--fg-secondary);
 }
 
 .parkedPopoverEmpty {
@@ -1001,7 +1095,6 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 0 4px;
 }
 
 .parkedPopoverName {
@@ -1009,9 +1102,11 @@
   background: none;
   border: none;
   color: var(--fg-primary);
-  font-size: var(--font-sm);
-  padding: 5px 6px;
-  border-radius: var(--radius-sm);
+  font-size: var(--font-md);
+  font-family: inherit;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   text-align: left;
   min-width: 0;
@@ -1021,67 +1116,65 @@
 }
 
 .parkedPopoverName:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .parkedPopoverUnpark {
   flex-shrink: 0;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
   cursor: pointer;
 }
 
 .parkedPopoverUnpark:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
 .parkedBadge {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  top: 1px;
+  right: 1px;
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-pill);
   background: var(--accent);
-  color: var(--bg-primary);
-  font-size: var(--font-2xs);
+  color: var(--text-on-accent);
+  font-size: 9px;
   font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
   pointer-events: none;
+  box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 
-/* GitHub badge always visible (replaces broken :has() with LightningCSS Modules) */
+/* GitHub badge always visible; the other actions stay hidden until hover. */
 .repoActionsWithBadge {
+  max-width: 96px;
   opacity: 1;
   pointer-events: auto;
 }
 
-/* Hide non-badge action buttons; only the ghBadgeBtn stays visible */
 .repoActionsWithBadge .repoActionBtn {
-  opacity: 0;
-  pointer-events: none;
+  display: none;
 }
 
 .repoActionsWithBadge .ghBadgeBtn {
-  opacity: 1;
-  pointer-events: auto;
+  display: inline-flex;
 }
 
 @media (hover: hover) {
   .repoHeader:hover .repoActionsWithBadge .repoActionBtn {
-    opacity: 1;
-    pointer-events: auto;
+    display: inline-flex;
   }
 }
 
@@ -1103,39 +1196,38 @@
   z-index: 201;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow-2xl);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
 }
 
 .remoteOnlyHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 12px 8px;
-  border-bottom: 1px solid var(--border);
-  font-size: var(--font-sm);
+  height: 36px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--font-md);
   font-weight: 600;
-  color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--fg-primary);
   flex-shrink: 0;
 }
 
 .remoteOnlyClose {
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
   cursor: pointer;
   font-size: var(--font-md);
 }
 
 .remoteOnlyClose:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -1151,25 +1243,28 @@
 }
 
 .remoteOnlyItemExpanded {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .remoteOnlyRow {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  margin: 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 
 .remoteOnlyRow:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .remoteOnlyNum {
   font-size: var(--font-xs);
   color: var(--fg-muted);
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .remoteOnlyTitle {
@@ -1186,16 +1281,16 @@
 .remoteOnlyDetail {
   position: relative;
   padding: 0 4px 8px;
-  background: var(--bg-tertiary);
-  border-top: 1px solid var(--border);
+  background: var(--wash-0);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .remoteOnlyDetailDismiss {
   position: absolute;
   top: 6px;
   right: 6px;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1209,7 +1304,7 @@
 }
 
 .remoteOnlyDetailDismiss:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -1221,67 +1316,64 @@
 }
 
 .remoteOnlyCheckout,
-.remoteOnlyWorktree {
-  padding: 4px 12px;
+.remoteOnlyWorktree,
+.remoteOnlyApprove,
+.remoteOnlyMerge,
+.remoteOnlyViewDiff,
+.remoteOnlyDismiss {
+  height: 24px;
+  padding: 0 10px;
   font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: none;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
   color: var(--fg-secondary);
   cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
-.remoteOnlyCheckout:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border-color: var(--accent);
+.remoteOnlyCheckout:hover,
+.remoteOnlyViewDiff:hover {
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.4);
 }
 
-.remoteOnlyWorktree:hover {
-  background: var(--bg-tertiary);
+.remoteOnlyWorktree:hover,
+.remoteOnlyDismiss:hover {
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
 .remoteOnlyApprove {
-  padding: 4px 12px;
-  font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--accent);
-  background: none;
+  border-color: rgba(var(--accent-rgb), 0.4);
   color: var(--accent);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
 }
 
 .remoteOnlyApprove:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.14);
 }
 
 .remoteOnlyApprove:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
 .remoteOnlyMerge {
-  padding: 4px 12px;
-  font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--success);
-  background: none;
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
   color: var(--success);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
 }
 
 .remoteOnlyMerge:hover {
-  background: var(--success);
-  color: var(--text-on-success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
 }
 
 .remoteOnlyMerge:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -1291,48 +1383,15 @@
   color: var(--error);
 }
 
-.remoteOnlyViewDiff {
-  padding: 4px 12px;
-  font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: none;
-  color: var(--fg-secondary);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-
-.remoteOnlyViewDiff:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border-color: var(--accent);
-}
-
 .remoteOnlyViewDiffActive {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.4);
 }
 
 .remoteOnlyViewDiff:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
-}
-
-.remoteOnlyDismiss {
-  padding: 4px 12px;
-  font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s;
-}
-
-.remoteOnlyDismiss:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
 }
 
 .remoteOnlyShowDismissed {
@@ -1352,7 +1411,7 @@
 .remoteOnlyDiffViewer {
   max-height: 400px;
   overflow-y: auto;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-subtle);
   padding: 4px;
   font-family: var(--font-mono);
   font-size: var(--font-2xs);
@@ -1382,7 +1441,7 @@
   z-index: 201;
   display: flex;
   flex-direction: column;
-  box-shadow: var(--shadow-2xl);
+  box-shadow: var(--highlight-inset), var(--shadow-2xl);
   outline: none;
   -webkit-app-region: no-drag;
 }
@@ -1391,13 +1450,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 12px 8px;
-  border-bottom: 1px solid var(--border);
-  font-size: var(--font-sm);
+  height: 36px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--font-md);
   font-weight: 600;
-  color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--fg-primary);
   flex-shrink: 0;
 }
 
@@ -1407,41 +1465,41 @@
 }
 
 .ghChangelogBtn {
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
   cursor: pointer;
   margin-left: auto;
 }
 
 .ghChangelogBtn:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
 .ghPanelClose {
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: none;
   border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
   cursor: pointer;
   font-size: var(--font-md);
   margin-left: auto;
 }
 
 .ghPanelClose:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -1454,14 +1512,15 @@
 
 /* ── Section (PR / Issues) ── */
 .ghSection {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .ghSectionHeader {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  height: 32px;
+  padding: 0 12px;
   cursor: pointer;
   font-size: var(--font-sm);
   font-weight: 600;
@@ -1470,7 +1529,7 @@
 }
 
 .ghSectionHeader:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .ghSectionHeader svg {
@@ -1497,15 +1556,16 @@
   margin-left: auto;
   min-width: 18px;
   height: 18px;
-  padding: 0 4px;
+  padding: 0 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: var(--font-2xs);
-  font-weight: 700;
+  font-weight: 600;
   color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-lg);
+  background: rgba(var(--accent-rgb), 0.14);
+  border-radius: var(--radius-pill);
+  font-variant-numeric: tabular-nums;
 }
 
 .ghShowDismissed {
@@ -1522,7 +1582,7 @@
 }
 
 .ghSectionList {
-  padding: 0;
+  padding: 2px 0 4px;
 }
 
 .ghEmpty {
@@ -1538,25 +1598,28 @@
 }
 
 .ghItemExpanded {
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .ghItemRow {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
+  margin: 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 
 .ghItemRow:hover {
-  background: var(--bg-tertiary);
+  background: var(--surface-hover);
 }
 
 .ghItemNum {
   font-size: var(--font-xs);
   color: var(--fg-muted);
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .ghItemTitle {
@@ -1574,18 +1637,17 @@
   padding: 1px 6px;
   border-radius: var(--radius-pill);
   font-size: var(--font-2xs);
-  font-weight: 700;
-  text-transform: uppercase;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
 .ghIssueOpen {
-  background: color-mix(in srgb, var(--success) 12%, transparent);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
   color: var(--success);
 }
 
 .ghIssueClosed {
-  background: color-mix(in srgb, var(--merged) 12%, transparent);
+  background: color-mix(in srgb, var(--merged) 14%, transparent);
   color: var(--merged);
 }
 
@@ -1593,16 +1655,16 @@
 .ghItemDetail {
   position: relative;
   padding: 0 0 8px;
-  background: var(--bg-tertiary);
-  border-top: 1px solid var(--border);
+  background: var(--wash-0);
+  border-top: 1px solid var(--border-subtle);
 }
 
 .ghItemDismiss {
   position: absolute;
   top: 6px;
   right: 6px;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1616,7 +1678,7 @@
 }
 
 .ghItemDismiss:hover {
-  background: var(--bg-highlight);
+  background: var(--surface-hover);
   color: var(--fg-primary);
 }
 
@@ -1629,75 +1691,67 @@
 }
 
 .ghActionBtn {
-  padding: 4px 12px;
+  height: 24px;
+  padding: 0 10px;
   font-size: var(--font-xs);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: none;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
   color: var(--fg-secondary);
   cursor: pointer;
-  transition: background 0.1s, color 0.1s;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 
 .ghActionBtn:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border-color: var(--accent);
+  background: var(--surface-hover);
+  color: var(--fg-primary);
+  border-color: var(--border-strong);
 }
 
 .ghActionBtn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
-.ghApproveBtn {
-  border-color: var(--accent);
+.ghApproveBtn,
+.ghLinkBtn {
+  border-color: rgba(var(--accent-rgb), 0.4);
   color: var(--accent);
 }
 
-.ghApproveBtn:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
+.ghApproveBtn:hover,
+.ghLinkBtn:hover {
+  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.5);
 }
 
-.ghMergeBtn {
-  border-color: var(--success);
+.ghMergeBtn,
+.ghReopenBtn {
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
   color: var(--success);
 }
 
-.ghMergeBtn:hover {
-  background: var(--success);
-  color: var(--text-on-success);
-}
-
-.ghLinkBtn {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.ghLinkBtn:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
+.ghMergeBtn:hover,
+.ghReopenBtn:hover {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 55%, transparent);
 }
 
 .ghCloseBtn {
-  border-color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
   color: var(--error);
 }
 
 .ghCloseBtn:hover {
-  background: var(--error);
-  color: var(--bg-primary);
-}
-
-.ghReopenBtn {
-  border-color: var(--success);
-  color: var(--success);
-}
-
-.ghReopenBtn:hover {
-  background: var(--success);
-  color: var(--bg-primary);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 55%, transparent);
 }
 
 .ghActionError {
@@ -1708,18 +1762,20 @@
 
 /* ── Filter bar ── */
 .ghFilterBar {
-  padding: 6px 12px;
-  border-top: 1px solid var(--border);
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .ghFilterSelect {
   width: 100%;
-  padding: 4px 8px;
-  font-size: var(--font-xs);
-  background: var(--bg-tertiary);
+  height: 28px;
+  padding: 0 8px;
+  font-size: var(--font-sm);
+  font-family: inherit;
+  background: var(--bg-primary);
   color: var(--fg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 
@@ -1728,24 +1784,27 @@
   border-color: var(--accent);
 }
 
-/* ── GitHub badge button (replaces remoteOnlyBadgeBtn) ── */
+/* ── GitHub badge button (PR/issue counts on a repo row) ── */
 .ghBadgeBtn {
   min-width: 20px;
   width: auto;
-  padding: 0 4px;
+  height: 18px;
+  padding: 0 6px;
   font-size: var(--font-2xs);
-  font-weight: 700;
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
   gap: 3px;
   color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-lg);
+  background: rgba(var(--accent-rgb), 0.14);
+  border: none;
+  border-radius: var(--radius-pill);
+  font-variant-numeric: tabular-nums;
 }
 
 .ghBadgeBtn:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.24);
+  color: var(--accent);
 }
 
 .ghBadgeSep {
@@ -1768,15 +1827,18 @@
   background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
   font-size: var(--font-xs);
-  font-weight: 600;
+  font-weight: 500;
   flex-shrink: 0;
 }
 
 .ghRetryBtn {
-  padding: 2px 10px;
+  height: 22px;
+  padding: 0 10px;
   font-size: var(--font-2xs);
+  font-weight: 600;
+  font-family: inherit;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--error);
+  border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
   background: none;
   color: var(--error);
   cursor: pointer;
@@ -1784,14 +1846,13 @@
 }
 
 .ghRetryBtn:hover {
-  background: var(--error);
-  color: var(--bg-primary);
+  background: color-mix(in srgb, var(--error) 16%, transparent);
 }
 
 /* ── Focused item (keyboard nav) ── */
 .ghItemFocused {
-  background: var(--bg-tertiary);
-  outline: 1px solid var(--accent);
+  background: var(--surface-hover);
+  outline: 1px solid rgba(var(--accent-rgb), 0.6);
   outline-offset: -1px;
 }
 
@@ -1825,21 +1886,22 @@
    --------------------------------------------------------------------------- */
 
 .pluginSection {
-  margin-top: 4px;
-  padding-left: 16px;
+  margin-top: 2px;
+  padding-left: 14px;
 }
 
 .pluginSectionHeader {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
+  height: 26px;
+  margin: 0 6px 0 0;
+  padding: 0 8px;
   cursor: pointer;
   border-radius: var(--radius-md);
-  font-size: var(--font-2xs);
+  font-size: var(--font-xs);
+  font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   user-select: none;
 }
 
@@ -1871,10 +1933,10 @@
 
 .pluginSectionBadge {
   font-size: var(--font-3xs);
-  background: var(--accent);
-  color: var(--bg-primary);
-  padding: 0 5px;
-  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: var(--radius-pill);
   line-height: 1.4;
   font-weight: 600;
   flex-shrink: 0;
@@ -1894,11 +1956,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 8px;
+  height: 26px;
+  margin: 0 6px 0 0;
+  padding: 0 8px;
   border-radius: var(--radius-md);
-  margin: 1px 0;
-  transition: background 0.1s;
-  min-height: 26px;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .pluginItem:hover {
