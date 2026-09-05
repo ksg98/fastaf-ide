@@ -35,6 +35,7 @@ interface VoiceStatus {
 	muted: boolean;
 	speaking: boolean;
 	audio_level: number;
+	output_level?: number;
 }
 
 interface AudioOutputDevice {
@@ -68,6 +69,8 @@ interface VoiceStoreState {
 	muted: boolean;
 	agentState: VoiceAgentState;
 	audioLevel: number;
+	/** Loudness of the agent's own speech leaving the speaker, 0..1. */
+	outputLevel: number;
 	/** Which asset id is downloading, so only its row shows a bar. */
 	downloading: string | null;
 	downloadPercent: number;
@@ -100,6 +103,7 @@ function createVoiceStore() {
 		muted: false,
 		agentState: "idle",
 		audioLevel: 0,
+		outputLevel: 0,
 		downloading: null,
 		downloadPercent: 0,
 		loadingEngine: false,
@@ -127,7 +131,7 @@ function createVoiceStore() {
 	const stopLevelPolling = () => {
 		if (levelTimer) clearInterval(levelTimer);
 		levelTimer = null;
-		setState("audioLevel", 0);
+		setState({ audioLevel: 0, outputLevel: 0 });
 	};
 	const startLevelPolling = () => {
 		stopLevelPolling();
@@ -137,7 +141,11 @@ function createVoiceStore() {
 					// Rust reports 0 while muted even though the capture is still
 					// running, so the meter goes flat rather than dancing to audio
 					// that is being thrown away.
-					setState({ audioLevel: normalizeLevel(status.audio_level), muted: status.muted });
+					setState({
+						audioLevel: normalizeLevel(status.audio_level),
+						outputLevel: normalizeLevel(status.output_level),
+						muted: status.muted,
+					});
 					// Rust knows when the speaker actually goes quiet; the reply
 					// stream finishes well before the audio queue drains, so
 					// without this the label would read "Listening…" over the

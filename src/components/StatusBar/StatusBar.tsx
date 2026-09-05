@@ -24,6 +24,7 @@ import { settingsStore } from "../../stores/settings";
 import { statusBarTicker } from "../../stores/statusBarTicker";
 import { terminalsStore } from "../../stores/terminals";
 import { uiStore } from "../../stores/ui";
+import { voiceStore } from "../../stores/voice";
 import { cx } from "../../utils";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
@@ -31,6 +32,7 @@ import { activePrStatus } from "../../utils/mergedPrGrace";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
 import { AgentIcon } from "../ui/AgentIcon";
 import { CiBadge, PrBadge } from "../ui/StatusBadge";
+import { VoiceOrb } from "../ui/VoiceOrb";
 import { ZoomIndicator } from "../ui/ZoomIndicator";
 import s from "./StatusBar.module.css";
 import { TickerArea } from "./TickerArea";
@@ -436,6 +438,24 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
 							<path d="M3 2a2 2 0 00-2 2v6a2 2 0 002 2h1v2.5L7.5 12H13a2 2 0 002-2V4a2 2 0 00-2-2H3z" />
 						</svg>
+					</button>
+				</Show>
+
+				{/* A running voice conversation shows its orb here too, so the agent
+				    stays visible when the chat panel is closed. */}
+				<Show when={voiceStore.state.sessionActive}>
+					<button
+						class={cx(s.toggleBtn, s.voiceOrbBtn)}
+						onClick={() => props.onToggleAiChat?.()}
+						title="Voice conversation running — open AI Chat"
+						aria-label="Voice conversation running — open AI Chat"
+					>
+						<VoiceOrb
+							state={voiceStore.state.agentState}
+							mic={voiceStore.state.audioLevel}
+							output={voiceStore.state.outputLevel}
+							size={16}
+						/>
 					</button>
 				</Show>
 

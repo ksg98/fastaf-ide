@@ -425,6 +425,11 @@
   color: var(--fg-primary);
 }
 
+/* The status-bar orb: same 26×24 hit area as its neighbours, the orb inside. */
+.voiceOrbBtn {
+  padding: 0;
+}
+
 .toggleActive,
 .toggleActive:hover {
   background: rgba(var(--accent-rgb), 0.16);

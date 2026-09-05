@@ -1,0 +1,7 @@
+/* The orb paints itself; the element only needs to be a block that never
+   stretches. */
+.orb {
+  display: block;
+  flex-shrink: 0;
+  pointer-events: none;
+}
