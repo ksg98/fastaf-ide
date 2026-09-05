@@ -1,0 +1,245 @@
+/* Welcome well — the empty well's first-run state. Sits inside the matte black
+   well, so everything here is drawn in washes and hairlines; the only colour
+   is the accent on the active branch and the status dots. */
+.well {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  width: min(760px, 92%);
+  padding: 8px 0;
+  user-select: none;
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  max-width: 52ch;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--font-2xl);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--fg-primary);
+  text-wrap: balance;
+}
+
+.lede {
+  margin: 0;
+  font-size: var(--font-base);
+  color: var(--fg-secondary);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 14px 12px;
+  border-radius: var(--radius-panel);
+  background: var(--sheen), var(--wash-0);
+  box-shadow: var(--highlight-inset), 0 0 0 1px var(--border-subtle);
+}
+
+.cardTitle {
+  font-size: var(--font-md);
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+.cardBody {
+  margin: 0;
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.keys {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.kbd {
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  color: var(--fg-secondary);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--wash-1);
+  box-shadow: var(--highlight-inset), 0 0 0 1px var(--border-subtle);
+}
+
+/* ── Miniatures ─────────────────────────────────────────── */
+.figure {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 84px;
+  margin-bottom: 6px;
+  padding: 10px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.miniSidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 54px;
+  flex-shrink: 0;
+}
+
+.miniRepo {
+  height: 6px;
+  width: 34px;
+  border-radius: 3px;
+  background: var(--wash-2);
+}
+
+.miniBranch {
+  height: 6px;
+  width: 44px;
+  margin-left: 8px;
+  border-radius: 3px;
+  background: var(--wash-1);
+}
+
+.miniBranchActive {
+  background: rgba(var(--accent-rgb), 0.55);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.14);
+}
+
+.miniArrow {
+  width: 14px;
+  height: 1px;
+  background: var(--border-strong);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.miniArrow::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: -3px;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-strong);
+  transform: rotate(45deg);
+}
+
+.miniWell,
+.miniPane,
+.miniTile {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 7px;
+  border-radius: 6px;
+  background: var(--wash-0);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.miniPrompt {
+  height: 4px;
+  width: 18px;
+  border-radius: 2px;
+  background: var(--success);
+  opacity: 0.8;
+}
+
+.miniLine {
+  height: 4px;
+  width: 80%;
+  border-radius: 2px;
+  background: var(--wash-2);
+}
+
+.miniLineShort {
+  width: 45%;
+}
+
+.miniSplit {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+}
+
+.miniGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 5px;
+  width: 100%;
+  height: 100%;
+}
+
+.miniTile {
+  padding: 5px;
+  align-items: flex-end;
+  justify-content: flex-start;
+}
+
+.miniDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.miniDotBusy {
+  background: var(--accent);
+  animation: welcomePulse 1.6s ease-in-out infinite;
+}
+
+.miniDotWaiting {
+  background: var(--attention);
+}
+
+@keyframes welcomePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .miniDotBusy { animation: none; }
+}
+
+/* ── Footer ─────────────────────────────────────────────── */
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.gotIt {
+  composes: btn from "../shared/controls.module.css";
+}
+
+.footerNote {
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+}
