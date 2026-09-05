@@ -42,39 +42,47 @@
   border-left: none !important;
 }
 
-/* Main Content */
+/* Main column — the frame shows through; the content well below is the card. */
 #main {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
-  background: var(--bg-primary);
+  background: transparent;
 }
 
-/* Tab Bar wrapper (used by App.tsx) */
+/* Tab strip — sits on the frame above the well. Tabs are pills (TabBar.module.css). */
 #tab-bar {
   height: var(--tab-bar-height);
   min-height: var(--tab-bar-height);
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
   display: flex;
-  align-items: stretch;
-  padding: 0;
+  align-items: center;
+  padding: 0 var(--well-gap);
 }
 
-/* Terminal Container */
+/* The content well — terminals, editors and diffs live in one matte black
+   card cut into the smoked-glass frame. A 1px rim light is the only edge;
+   no hairlines needed around it. */
 #terminal-container {
   flex: 1;
   display: flex;
   overflow: hidden;
-  background: var(--bg-primary);
   position: relative;
+  margin: 0 var(--well-gap) var(--well-gap);
+  background: var(--bg-primary);
+  border-radius: var(--well-radius);
+  box-shadow: 0 0 0 1px var(--border-subtle), inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+#app.focus-mode #terminal-container {
+  margin-top: var(--well-gap);
 }
 
 /* Highlight applied (via JS) to the folder row under a Tauri drag-drop cursor.
    Matches elements with data-drop-target="folder" during a drag session. */
 .drop-target-hover[data-drop-target="folder"] {
-  background: rgba(80, 160, 255, 0.18) !important;
+  background: rgba(var(--accent-rgb), 0.18) !important;
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
@@ -83,29 +91,29 @@
   position: fixed;
   z-index: 9999;
   pointer-events: none;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--bg-tertiary);
+  padding: 3px 8px;
+  border-radius: var(--radius-md);
+  background: var(--bg-highlight);
   color: var(--fg-primary);
-  font-size: 12px;
+  font-size: var(--font-sm);
   white-space: nowrap;
-  opacity: 0.9;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  opacity: 0.95;
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
 }
 
 #terminal-panes {
   flex: 1;
   min-width: 200px;
   position: relative;
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
 }
 
 .terminal-pane {
   position: absolute;
   inset: 0;
-  padding: 5px;
+  padding: 4px 4px 2px 6px;
   display: none;
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
 }
 
 .terminal-pane.active {

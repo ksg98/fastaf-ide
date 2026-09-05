@@ -3,38 +3,45 @@
   50% { opacity: 1; }
 }
 
-/* TabBar wrapper — flex row with scroll region + new-tab button */
+/* TabBar — pill tabs resting on the frame above the content well. Type is
+   carried by the leading icon colour, state by the dot; the active tab is a
+   raised pill, never an underline or a coloured bar. */
 .tabBarWrapper {
   display: flex;
   flex: 1;
-  align-items: stretch;
+  align-items: center;
   min-width: 0;
+  height: 100%;
+  gap: 4px;
 }
 
 /* File drag-over highlight (applied by dragDrop.ts via global class) */
 .tabBarWrapper:global(.drop-target-hover) {
-  background: rgba(var(--accent-rgb, 99, 102, 241), 0.18);
+  background: rgba(var(--accent-rgb, 90, 160, 248), 0.14);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+  border-radius: var(--radius-md);
 }
 
 /* Scroll region — contains arrows, fades, and the scrollable tab list */
 .scrollRegion {
   display: flex;
   flex: 1;
-  align-items: stretch;
+  align-items: center;
   position: relative;
   overflow: hidden;
   min-width: 0;
+  height: 100%;
 }
 
 /* Scrollable tab list */
 .tabs {
   display: flex;
   flex: 1;
-  gap: 0;
+  gap: 2px;
   overflow-x: auto;
-  align-items: stretch;
+  align-items: center;
+  height: 100%;
   /* Hide scrollbar but keep scroll functional */
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE/Edge */
@@ -44,8 +51,7 @@
   display: none; /* Chrome/Safari/WebKit */
 }
 
-/* Scroll arrow buttons — iconBtn-style vocabulary but kept opaque so the
-   underlying scrolling tabs don't bleed through the edge overlay. */
+/* Scroll arrow buttons — opaque so scrolling tabs don't bleed through. */
 .scrollArrow {
   position: absolute;
   top: 0;
@@ -63,7 +69,6 @@
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--duration-fast) var(--ease-out),
-    background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
@@ -74,20 +79,17 @@
 
 .scrollArrow:hover {
   color: var(--fg-primary);
-  background: var(--bg-highlight);
 }
 
 .scrollArrowLeft {
   left: 0;
-  border-right: 1px solid var(--border-subtle);
 }
 
 .scrollArrowRight {
   right: 0;
-  border-left: 1px solid var(--border-subtle);
 }
 
-/* Fade gradients to indicate more tabs — bar background is --bg-secondary */
+/* Fade gradients to indicate more tabs — bar background is the frame */
 .fadeGradient {
   position: absolute;
   top: 0;
@@ -116,15 +118,19 @@
 .tab {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  min-width: 80px;
+  gap: 7px;
+  height: 26px;
+  padding: 0 8px 0 9px;
+  min-width: 56px;
+  max-width: 220px;
   flex-shrink: 0;
   background: transparent;
-  border-radius: 0;
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
+    color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
   position: relative;
   overflow: hidden;
 }
@@ -134,39 +140,38 @@
     background: var(--surface-hover);
   }
   .tab:hover .tabName {
-    color: var(--fg-secondary);
+    color: var(--fg-primary);
   }
 }
 
-/* Active tab is "connected" to the editor: same bg as editor surface with
-   rounded top corners and a 2px accent bar along the TOP edge (per-type
-   colors override this base color below). */
+/* Active tab — a raised pill. The old accent top-bar is gone; the leading
+   icon colour already says what kind of tab this is. */
 .tab.active {
-  background: var(--bg-primary);
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--sheen-strong), var(--bg-tertiary);
+  box-shadow: var(--highlight-inset), 0 0 0 1px var(--border-subtle), 0 2px 6px rgba(0, 0, 0, 0.35);
 }
 
 .tab.active::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: rgba(var(--accent-rgb), 0.75);
-  z-index: 1;
+  content: none;
 }
 
 .tabIcon {
-  font-size: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  font-size: 7px;
+  line-height: 1;
   color: var(--fg-muted);
   flex-shrink: 0;
-  opacity: 0.3;
+  opacity: 0.35;
 }
 
 .tabName {
   font-size: var(--font-md);
-  color: var(--fg-muted);
+  font-weight: 450;
+  color: var(--fg-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -176,12 +181,13 @@
 
 .tab.active .tabName {
   color: var(--fg-primary);
+  font-weight: 500;
 }
 
 .tabNameInput {
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
   border: 1px solid var(--accent);
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-sm);
   color: var(--fg-primary);
   font-size: var(--font-md);
   font-family: inherit;
@@ -189,6 +195,7 @@
   min-width: 40px;
   max-width: 200px;
   outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
 }
 
 .tabClose {
@@ -203,7 +210,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
   opacity: 0;
@@ -219,16 +226,16 @@
 
 @media (hover: hover) {
   .tabClose:hover {
-    background: var(--surface-hover);
+    background: var(--wash-2);
     color: var(--fg-primary);
   }
 }
 
-/* New-tab button — iconBtn vocabulary; stretches to bar height for row
-   alignment while carrying the same transparent-hover-wash treatment. */
+/* New-tab / multiview buttons — icon-button vocabulary at the tab height. */
 .newBtn {
-  width: 28px;
-  min-width: 28px;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -237,11 +244,11 @@
   border: none;
   border-radius: var(--radius-md);
   color: var(--fg-muted);
-  font-size: var(--font-xl);
+  font-size: var(--font-lg);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
-  align-self: stretch;
+  align-self: center;
 }
 
 .newBtn:hover {
@@ -252,10 +259,11 @@
 /* Multiview toggle + hover preview */
 .mvBtnActive {
   color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
 }
 
 /* Glass popover recipe — surface-overlay + overlay blur + subtle border +
-   inset sheen + dropdown shadow; collapses to opaque when vibrancy is off. */
+   dropdown shadow; collapses to opaque when vibrancy is off. */
 .mvPreview {
   position: fixed;
   z-index: 1000;
@@ -335,13 +343,13 @@
   font-size: 9px;
   line-height: 1;
   color: var(--fg-muted);
-  background: var(--bg-tertiary, var(--bg-secondary));
-  border-radius: 3px;
-  padding: 1px 5px;
+  background: var(--bg-highlight);
+  border-radius: var(--radius-xs);
+  padding: 2px 5px;
   white-space: nowrap;
   pointer-events: none;
   flex-shrink: 0;
-  opacity: 0.85;
+  opacity: 0.9;
 }
 
 /* Pin icon for pinned tabs */
@@ -357,26 +365,22 @@
 .tab.shellBusy .tabIcon {
   color: var(--activity);
   opacity: 1;
-  font-size: var(--font-3xs);
   animation: pulse-opacity 1.5s ease-in-out infinite;
 }
 
 .tab.shellIdle .tabIcon {
   color: var(--success);
   opacity: 1;
-  font-size: var(--font-3xs);
 }
 
 .tab.shellUnseen .tabIcon {
   color: var(--unseen);
   opacity: 1;
-  font-size: var(--font-3xs);
 }
 
 .tab.shellExited .tabIcon {
   color: var(--fg-muted);
   opacity: 0.45;
-  font-size: var(--font-3xs);
 }
 
 .tab.standby {
@@ -392,7 +396,6 @@
 /* Awaiting input — override tabIcon to show state via left dot */
 .tab.awaitingInput .tabIcon {
   opacity: 1;
-  font-size: var(--font-3xs);
   color: var(--warning);
   animation: pulse-opacity 1.5s ease-in-out infinite;
 }
@@ -405,87 +408,50 @@
   color: var(--error);
 }
 
-
-/* Repo color tint — bottom-to-center gradient in global workspace */
+/* Repo color tint — soft wash in global workspace */
 .tab[style*="--repo-color"]::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(to top, color-mix(in srgb, var(--repo-color) 12%, transparent), transparent 60%);
+  background: color-mix(in srgb, var(--repo-color) 8%, transparent);
   pointer-events: none;
   z-index: 0;
 }
 
 .tab[style*="--repo-color"].active::after {
-  background: linear-gradient(to top, color-mix(in srgb, var(--repo-color) 18%, transparent), transparent 60%);
+  background: color-mix(in srgb, var(--repo-color) 14%, transparent);
 }
 
-/* Tab-kind identity: per-type flavor comes from the tabIcon color and the
-   muted top accent bar on the active tab. No bottom borders, no gradient
-   fills — the flat surface stays consistent with the connected-editor look. */
-
-/* Diff tabs */
-.tab.diffTab.active::before {
-  background: rgba(var(--tab-diff-rgb), 0.75);
-}
-
+/* Tab-kind identity: per-type flavour comes from the tabIcon colour only. */
 .tab.diffTab .tabIcon {
   color: rgb(var(--tab-diff-rgb));
-  opacity: 0.8;
-  display: flex;
-  align-items: center;
-}
-
-/* Editor tabs */
-.tab.editTab.active::before {
-  background: rgba(var(--tab-edit-rgb), 0.75);
+  opacity: 0.9;
 }
 
 .tab.editTab .tabIcon {
   color: rgb(var(--tab-edit-rgb));
-  opacity: 0.8;
-  display: flex;
-  align-items: center;
-}
-
-/* Markdown tabs */
-.tab.mdTab.active::before {
-  background: rgba(var(--tab-md-rgb), 0.75);
+  opacity: 0.9;
 }
 
 .tab.mdTab .tabIcon {
   color: rgb(var(--tab-md-rgb));
-  opacity: 0.8;
-  display: flex;
-  align-items: center;
-}
-
-/* Panel tabs (non-file md tabs: Claude Usage, plugins, etc.) */
-.tab.panelTab.active::before {
-  background: rgba(var(--tab-panel-rgb), 0.75);
+  opacity: 0.9;
 }
 
 .tab.panelTab .tabIcon {
   color: rgb(var(--tab-panel-rgb));
-  opacity: 0.8;
-  display: flex;
-  align-items: center;
-}
-
-/* Remote/PTY tabs — subtle cyan tint on top bar + icon */
-.tab.remoteTab.active::before {
-  background: rgba(var(--tab-remote-rgb), 0.75);
+  opacity: 0.9;
 }
 
 .tab.remoteTab:not(.shellBusy):not(.shellIdle):not(.shellUnseen):not(.shellExited) .tabIcon {
   color: rgb(var(--tab-remote-rgb));
-  opacity: 0.8;
+  opacity: 0.9;
 }
 
-/* Detached to floating window — dim name; keep the dashed bottom hint so
-   the state is still legible without stealing the top-edge indicator. */
+/* Detached to floating window — dashed outline, dimmed name. */
 .tab.detached {
-  border-bottom: 2px dashed var(--fg-muted);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  border-style: dashed;
 }
 
 .tab.detached .tabName {
@@ -531,9 +497,9 @@
   right: 4px;
   transform: translateY(-50%);
   padding: 1px 5px;
-  background: var(--bg-tertiary);
-  color: var(--fg-muted);
-  border-radius: var(--radius-md);
+  background: var(--bg-highlight);
+  color: var(--fg-secondary);
+  border-radius: var(--radius-sm);
   font-family: var(--font-ui);
   font-size: var(--font-2xs);
   font-weight: 600;

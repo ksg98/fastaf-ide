@@ -601,7 +601,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 									/>
 								</svg>
 							</span>
-							{t("sidebar.gitPullLabel", "Pull")}
+							<span class={s.gitQuickText}>{t("sidebar.gitPullLabel", "Pull")}</span>
 						</button>
 						<button
 							class={s.gitQuickBtn}
@@ -625,7 +625,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 									/>
 								</svg>
 							</span>
-							{t("sidebar.gitPushLabel", "Push")}
+							<span class={s.gitQuickText}>{t("sidebar.gitPushLabel", "Push")}</span>
 						</button>
 						<button
 							class={s.gitQuickBtn}
@@ -661,7 +661,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 									/>
 								</svg>
 							</span>
-							{t("sidebar.gitFetchLabel", "Fetch")}
+							<span class={s.gitQuickText}>{t("sidebar.gitFetchLabel", "Fetch")}</span>
 						</button>
 						<button
 							class={s.gitQuickBtn}
@@ -684,7 +684,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 									/>
 								</svg>
 							</span>
-							{t("sidebar.gitStashLabel", "Stash")}
+							<span class={s.gitQuickText}>{t("sidebar.gitStashLabel", "Stash")}</span>
 						</button>
 					</div>
 				</div>
@@ -700,7 +700,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 							stroke-width="1.2"
 						/>
 					</svg>
-					{t("sidebar.addRepository", "Add Repository")}
+					<span class={s.addRepoLabel}>{t("sidebar.addRepository", "Add Repository")}</span>
 				</button>
 				<div class={s.footerIcons}>
 					<button

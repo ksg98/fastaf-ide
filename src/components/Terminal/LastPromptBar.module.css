@@ -31,8 +31,6 @@
 .label {
   flex-shrink: 0;
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   opacity: 0.6;
 }
 

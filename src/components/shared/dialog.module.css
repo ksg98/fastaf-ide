@@ -2,19 +2,16 @@
  * Shared Dialog/Popover styles (RenameBranchDialog, RunCommandDialog,
  * PromptDialog, CommandPalette, BranchSwitcher, and ~30 other dialogs).
  *
- * The .popover surface uses the glass recipe: opaque bg + no blur by
- * default; when the platform layer flips `html.vibrancy` on (macOS, no
- * reduce-transparency), the tokens collapse to translucent rgba + real
- * backdrop-filter blur — components need no branching.
- *
- * The overlay scrim is a plain rgba(0,0,0,0.5) — no dedicated --scrim
- * token exists yet; this keeps behavior unchanged when vibrancy is off.
+ * The .popover surface uses the overlay recipe: a tinted, blurred glass
+ * pane with a top sheen and a 1px rim light (global.css gloss tokens).
+ * `html.vibrancy` only changes how much of the desktop shows through —
+ * components need no branching.
  * ───────────────────────────────────────────────────────────────────────── */
 
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5); /* scrim — no token yet, kept literal */
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -25,18 +22,18 @@
 .overlayTop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5); /* scrim — no token yet, kept literal */
+  background: var(--scrim);
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 80px;
+  padding-top: 12vh;
   z-index: var(--z-modal);
 }
 
 @keyframes dialogIn {
   from {
     opacity: 0;
-    transform: translateY(4px) scale(0.98);
+    transform: translateY(6px) scale(0.985);
   }
   to {
     opacity: 1;
@@ -45,7 +42,7 @@
 }
 
 .popover {
-  width: 320px;
+  width: 360px;
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
   -webkit-backdrop-filter: var(--blur-overlay);
@@ -59,17 +56,16 @@
 /* Wide variant for CommandPalette, BranchSwitcher etc. */
 .panelLg {
   composes: popover;
-  width: 560px;
+  width: 600px;
   max-width: calc(100vw - 32px);
 }
 
 .header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
+  gap: 10px;
+  padding: 14px 16px 12px;
   background: transparent;
-  border-bottom: 1px solid var(--border-subtle);
 }
 
 .headerText {
@@ -80,41 +76,44 @@
 }
 
 .headerIcon {
-  font-size: var(--font-xl);
-  color: var(--accent);
+  font-size: var(--font-lg);
+  color: var(--fg-muted);
 }
 
 .header h4 {
   margin: 0;
-  font-size: var(--font-lg);
+  font-size: var(--font-base);
   font-weight: 600;
   color: var(--fg-primary);
+  letter-spacing: -0.01em;
 }
 
 .subtitle {
   margin: 2px 0 0;
-  font-size: 11px;
+  font-size: var(--font-sm);
   color: var(--fg-muted);
-  font-family: monospace;
+  font-family: var(--font-ui);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .body {
-  padding: 16px;
+  padding: 4px 16px 16px;
 }
 
 /* Align body inputs with the controls .input recipe (focus ring). */
 .body input:not([type="checkbox"]):not([type="radio"]) {
   width: 100%;
+  min-height: 30px;
   padding: 6px 10px;
-  background: var(--bg-tertiary);
+  background: var(--bg-primary);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+  box-shadow: var(--inset-well);
   color: var(--fg-primary);
   font-size: var(--font-md);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   outline: none;
   transition: border-color var(--duration-fast) var(--ease-out),
     box-shadow var(--duration-fast) var(--ease-out);
@@ -122,17 +121,17 @@
 
 .body input:not([type="checkbox"]):not([type="radio"]):focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
 }
 
 .body input:not([type="checkbox"]):not([type="radio"]):disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
 .error {
   margin: 8px 0 0;
-  font-size: var(--font-md);
+  font-size: var(--font-sm);
   color: var(--error);
 }
 
@@ -150,7 +149,7 @@
 }
 
 .actions button:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 

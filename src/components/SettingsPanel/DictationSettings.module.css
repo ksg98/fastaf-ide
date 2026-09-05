@@ -179,8 +179,6 @@
   font-size: var(--font-sm);
   font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 .correctionsRow {

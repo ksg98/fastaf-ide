@@ -11,8 +11,8 @@
 .commitSection {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
@@ -21,13 +21,13 @@
    layered with row-specific sizing/behavior. */
 .commitTextarea {
   composes: textarea from "../shared/controls.module.css";
-  min-height: 38px;
+  min-height: 60px;
   max-height: 114px;
   overflow-y: hidden;
-  font-family: var(--font-mono);
-  padding: 6px 8px;
+  font-family: var(--font-ui);
+  padding: 7px 10px;
   resize: none;
-  line-height: 1.6;
+  line-height: 1.5;
   transition: border-color var(--duration-fast) var(--ease-out),
     box-shadow var(--duration-fast) var(--ease-out),
     height var(--duration-fast) var(--ease-out);
@@ -162,21 +162,22 @@
   line-height: 1;
 }
 
-/* Section headers (STAGED, CHANGES) */
+/* Section headers (Staged, Changes) — sentence case, 12px/600, no fill. */
 .sectionHeader {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  height: 30px;
+  padding: 0 12px;
   cursor: pointer;
   user-select: none;
   font-size: var(--font-sm);
   font-family: var(--font-ui);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg-muted);
-  background: var(--bg-tertiary);
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg-secondary);
+  background: transparent;
   border-bottom: 1px solid var(--border-subtle);
   transition: background var(--duration-fast) var(--ease-out);
 }
@@ -200,8 +201,9 @@
 
 .sectionCount {
   font-size: var(--font-xs);
-  color: var(--fg-secondary);
-  font-weight: 400;
+  color: var(--fg-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .sectionAction {
@@ -238,9 +240,10 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   margin: 0 6px;
-  padding: 3px 6px 3px 14px;
+  height: 26px;
+  padding: 0 6px 0 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out);
@@ -254,12 +257,12 @@
 
 .fileFocused {
   background: var(--surface-hover);
-  outline: 1px solid var(--accent);
+  outline: 1px solid rgba(var(--accent-rgb), 0.6);
   outline-offset: -1px;
 }
 
 .fileSelected {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(var(--accent-rgb), 0.13);
 }
 
 .fileSelected.fileFocused {
@@ -329,10 +332,11 @@
 /* Diff stats (+N -M) — hidden when action buttons show */
 .diffStats {
   display: flex;
-  gap: 4px;
+  gap: 5px;
   flex-shrink: 0;
-  font-size: var(--font-2xs);
+  font-size: var(--font-xs);
   font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
   transition: opacity var(--duration-fast) var(--ease-out);
 }
 
@@ -347,14 +351,13 @@
 /* Action buttons — overlay on hover, replacing diff stats */
 .actions {
   position: absolute;
-  right: 8px;
+  right: 6px;
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   gap: 2px;
   opacity: 0;
   transition: opacity var(--duration-fast) var(--ease-out);
-  background: inherit;
   padding-left: 4px;
 }
 

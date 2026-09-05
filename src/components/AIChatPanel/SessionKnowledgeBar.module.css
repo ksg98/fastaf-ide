@@ -46,8 +46,6 @@
 .label {
   color: var(--fg-primary);
   font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
   font-size: 10px;
 }
 
@@ -82,8 +80,6 @@
 .sectionLabel {
   color: var(--fg-muted);
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .row {
@@ -98,8 +94,6 @@
   padding: 1px 5px;
   border-radius: var(--radius-sm);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
   flex-shrink: 0;
 }
 
@@ -147,8 +141,6 @@
   color: var(--fg-secondary);
   font: inherit;
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   cursor: pointer;
 }
 

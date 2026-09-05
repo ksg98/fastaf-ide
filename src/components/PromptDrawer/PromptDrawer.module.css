@@ -515,8 +515,6 @@
   border: 1px solid var(--border-subtle);
   margin-left: 6px;
   vertical-align: middle;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
 }
 
 /* Tag badges on prompt rows */
@@ -529,8 +527,6 @@
 .tagBadge {
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   padding: 0 5px;
   border-radius: var(--radius-sm);
   line-height: 1.6;
@@ -637,9 +633,9 @@
   font-size: var(--font-2xs);
   font-weight: 700;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   position: sticky;
   top: 0;
 }

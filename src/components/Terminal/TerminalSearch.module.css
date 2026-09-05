@@ -8,10 +8,12 @@
   align-items: center;
   gap: 4px;
   padding: 4px 6px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   font-family: var(--font-ui);
   font-size: var(--font-md);
 }
@@ -71,6 +73,6 @@
 .separator {
   width: 1px;
   height: 16px;
-  background: var(--border);
+  background: var(--border-strong);
   margin: 0 2px;
 }

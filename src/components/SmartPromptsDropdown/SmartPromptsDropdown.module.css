@@ -105,8 +105,6 @@
   font-size: var(--font-xs);
   font-weight: 600;
   color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
 .item {

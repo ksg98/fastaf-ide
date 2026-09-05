@@ -9,7 +9,6 @@
   border-radius: var(--radius-pill);
   font-size: var(--font-2xs);
   font-weight: 700;
-  text-transform: uppercase;
   flex-shrink: 0;
 }
 

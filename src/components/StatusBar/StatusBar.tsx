@@ -23,6 +23,7 @@ import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { statusBarTicker } from "../../stores/statusBarTicker";
 import { terminalsStore } from "../../stores/terminals";
+import { uiStore } from "../../stores/ui";
 import { cx } from "../../utils";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
@@ -374,6 +375,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				</Show>
 				<button
 					class={s.toggleBtn}
+					classList={{ [s.toggleActive]: uiStore.state.notesPanelVisible }}
 					onClick={() => props.onToggleNotes?.()}
 					title={`${t("statusBar.toggleNotes", "Toggle Ideas Panel")} (${keyFor("toggle-notes")})`}
 					style={{ position: "relative" }}
@@ -387,6 +389,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				</button>
 				<button
 					class={s.toggleBtn}
+					classList={{ [s.toggleActive]: uiStore.state.fileBrowserPanelVisible }}
 					onClick={() => props.onToggleFileBrowser?.()}
 					title={`${t("statusBar.fileBrowser", "File Browser")} (${keyFor("toggle-file-browser")})`}
 					style={{ position: "relative" }}
@@ -397,6 +400,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				</button>
 				<button
 					class={s.toggleBtn}
+					classList={{ [s.toggleActive]: uiStore.state.markdownPanelVisible }}
 					onClick={props.onToggleMarkdown}
 					title={`${t("statusBar.markdown", "Markdown")} (${keyFor("toggle-markdown")})`}
 					style={{ position: "relative" }}
@@ -408,6 +412,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				</button>
 				<button
 					class={s.toggleBtn}
+					classList={{ [s.toggleActive]: uiStore.state.gitPanelVisible }}
 					onClick={props.onToggleDiff}
 					title={`${t("statusBar.git", "Git")} (${keyFor("toggle-git-ops")})`}
 					style={{ position: "relative" }}
@@ -423,6 +428,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				<Show when={settingsStore.isAiChatEnabled()}>
 					<button
 						class={s.toggleBtn}
+						classList={{ [s.toggleActive]: uiStore.state.aiChatPanelVisible }}
 						onClick={() => props.onToggleAiChat?.()}
 						title={`AI Chat (${keyFor("toggle-ai-chat")})`}
 						style={{ position: "relative" }}

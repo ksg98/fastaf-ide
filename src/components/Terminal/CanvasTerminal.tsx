@@ -378,7 +378,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		setMetrics(m);
 
 		const cs = getComputedStyle(canvasRef);
-		cachedBgDefault = cs.getPropertyValue("--bg-secondary").trim() || "#1e1e1e";
+		// The terminal lives in the content well, so its default paper is --bg-primary
+		// (the frame around it is --bg-secondary).
+		cachedBgDefault = cs.getPropertyValue("--bg-primary").trim() || "#050505";
 		cachedFgDefault = cs.getPropertyValue("--fg-primary").trim() || "#d4d4d4";
 		// Overlay chrome tokens — kept in sync with the app theme so search/fold/
 		// exit/selection marks recolor when the user swaps themes at runtime.

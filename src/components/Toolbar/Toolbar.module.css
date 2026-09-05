@@ -1,12 +1,8 @@
 /* Toolbar
  *
- * Cursor-restyle Stage 1: the bar itself paints transparently over the window
- * base (vibrancy/glass shows through) and separates from content with a single
- * hairline. All chrome buttons adopt the shared iconBtn vocabulary — 24×24,
- * transparent, radius-md, hover surface-hover wash — so the toolbar reads as
- * one system with the rest of the app. State classes (.filterToggleActive,
- * .lastItemError/Success/Warn, .notif*, .activityItem*) are preserved by name
- * and only their declarations are refreshed.
+ * Part of the frame: paints nothing of its own (the frame surface shows
+ * through) and draws no hairline — the content well below provides the
+ * separation. Every control is a 26px icon button or a quiet chip.
  *
  * The 78px macOS traffic-light inset and every -webkit-app-region rule are
  * load-bearing (Tauri drag region + native window controls) — do not touch. */
@@ -14,10 +10,9 @@
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
   background: transparent;
-  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
-  padding: 0 12px;
+  padding: 0 10px 0 12px;
   -webkit-app-region: drag;
   -webkit-user-select: none;
   user-select: none;
@@ -37,7 +32,7 @@
   flex: none;
   position: relative;
   justify-content: flex-end;
-  padding-right: 10px;
+  padding-right: 6px;
   gap: 2px;
   -webkit-app-region: drag;
 }
@@ -48,6 +43,7 @@
   transform: translateX(-50%);
   pointer-events: none;
   user-select: none;
+  opacity: 0.9;
 }
 
 .appNameFull {
@@ -84,20 +80,21 @@
 .center {
   flex: 1;
   gap: 8px;
+  padding-left: 2px;
 }
 
 .right {
   flex: none;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 4px;
 }
 
-/* Sidebar toggle / filter toggle — iconBtn vocabulary (24×24 transparent) plus
+/* Sidebar toggle / filter toggle — iconBtn vocabulary (26×26 transparent) plus
    the no-drag override so they remain clickable inside the drag region. */
 .sidebarToggle,
 .filterToggle {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -106,7 +103,6 @@
   border: none;
   border-radius: var(--radius-md);
   color: var(--fg-muted);
-  font-size: var(--font-xl);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
@@ -122,31 +118,29 @@
 .sidebarToggle:focus-visible,
 .filterToggle:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
 }
 
-/* Repo filter icon — loud accent state when "active only" is engaged so it is
-   obvious repos are being filtered. */
+/* Repo filter icon — accent tint when "active only" is engaged. */
 .filterToggleActive,
 .filterToggleActive:hover {
-  background: var(--accent);
-  color: var(--text-on-accent);
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
-/* Branch button — center chip that reads as a subtle glass pill. */
+/* Branch chip — quiet breadcrumb: repo / branch. No border at rest. */
 .branch {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 24px;
-  padding: 0 10px;
+  height: 26px;
+  padding: 0 10px 0 8px;
   background: transparent;
-  border: 1px solid var(--border-subtle);
+  border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
   font-family: inherit;
-  transition: background var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
+  transition: background var(--duration-fast) var(--ease-out);
   -webkit-app-region: no-drag;
 }
 
@@ -155,7 +149,7 @@
 }
 
 .branchIcon {
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   flex-shrink: 0;
 }
 
@@ -169,7 +163,7 @@
 .branchSeparator {
   font-size: var(--font-md);
   color: var(--fg-muted);
-  margin: 0 2px;
+  opacity: 0.6;
 }
 
 .branchName {
@@ -180,33 +174,33 @@
 }
 
 .aheadBehind {
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   font-weight: 500;
   color: var(--fg-muted);
   white-space: nowrap;
   margin-left: 2px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Notification group: layout container for bell, watcher, last-item */
 .notifGroup {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 24px;
+  gap: 4px;
+  height: 26px;
   position: relative;
   -webkit-app-region: no-drag;
 }
 
-/* Bell + watcher: iconBtn vocabulary (24×24, transparent, hover wash). Kept
-   position: relative so the .notifCount badge can anchor to them. */
+/* Bell + watcher: iconBtn vocabulary. position: relative anchors .notifCount. */
 .bell,
 .watcherBtn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   background: transparent;
   border: none;
@@ -227,38 +221,44 @@
 .bell:focus-visible,
 .watcherBtn:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
 }
 
 .notifCount {
   position: absolute;
   top: -2px;
-  right: 0;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  border-radius: var(--radius-sm);
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--text-on-accent);
   font-size: var(--font-2xs);
   font-weight: 700;
+  line-height: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   pointer-events: none;
+  box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 
+/* Popover — floating overlay surface */
 .popover {
   position: absolute;
   top: 100%;
   right: 0;
-  margin-top: 4px;
-  min-width: 240px;
-  max-width: 320px;
-  background: var(--bg-secondary);
+  margin-top: 6px;
+  min-width: 300px;
+  max-width: 360px;
+  padding: 4px 0;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-dropdown);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
   z-index: 100;
   max-height: calc(100vh - 60px);
   overflow-y: auto;
@@ -266,35 +266,33 @@
 }
 
 .emptyState {
-  padding: 16px 12px;
+  padding: 20px 12px;
   text-align: center;
   color: var(--fg-muted);
-  font-size: 12px;
+  font-size: var(--font-sm);
 }
 
 .notifHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 6px 12px 6px;
 }
 
 .notifTitle {
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   font-weight: 600;
-  color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--fg-secondary);
 }
 
 .dismissAll {
   background: none;
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-xs);
+  font-weight: 500;
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 3px 6px;
   border-radius: var(--radius-sm);
 }
 
@@ -306,19 +304,16 @@
 .notifItem {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  gap: 10px;
+  margin: 0 4px;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out);
 }
 
 .notifItem:hover {
   background: var(--surface-hover);
-}
-
-.notifItem:last-child {
-  border-bottom: none;
 }
 
 .notifIcon {
@@ -338,8 +333,8 @@
 
 .notifRepo {
   font-size: var(--font-xs);
-  color: var(--accent);
-  font-weight: 600;
+  color: var(--fg-muted);
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -362,12 +357,13 @@
 .notifClose {
   background: none;
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-lg);
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
   flex-shrink: 0;
+  border-radius: var(--radius-sm);
 }
 
 .notifClose:hover {
@@ -387,27 +383,25 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 12px 4px;
   border-top: 1px solid var(--border-subtle);
-  margin-top: 2px;
+  margin-top: 4px;
 }
 
 .sectionLabel {
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   font-weight: 600;
-  color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  color: var(--fg-secondary);
 }
 
 .activityDismissAll {
   background: none;
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-xs);
+  font-weight: 500;
   cursor: pointer;
-  padding: 2px 6px;
+  padding: 3px 6px;
   border-radius: var(--radius-sm);
 }
 
@@ -449,19 +443,16 @@
 .activityItem {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  gap: 10px;
+  margin: 0 4px;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out);
 }
 
 .activityItem:hover {
   background: var(--surface-hover);
-}
-
-.activityItem:last-child {
-  border-bottom: none;
 }
 
 .activityItemIcon {
@@ -508,7 +499,7 @@
 .activityItemDismiss {
   background: none;
   border: none;
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   font-size: var(--font-lg);
   cursor: pointer;
   padding: 0 4px;
@@ -521,23 +512,23 @@
 }
 
 /* Last-item shortcut pill (inside notifGroup) — a preview of the newest bell
-   notification. Reads as a subtle glass pill; severity variants below tint
-   the border/text for at-a-glance outcome recognition. */
+   notification. Neutral chip by default; severity variants tint text + border. */
 .lastItemBtn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   height: 24px;
   padding: 0 10px;
   background: var(--bg-tertiary);
-  color: var(--fg-primary);
+  color: var(--fg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-pill);
   cursor: pointer;
   font-size: var(--font-xs);
+  font-weight: 500;
   font-family: var(--font-ui);
   white-space: nowrap;
-  max-width: 180px;
+  max-width: 200px;
   transition: background var(--duration-fast) var(--ease-out),
     border-color var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
@@ -545,46 +536,50 @@
 }
 
 .lastItemBtn:hover {
-  background: var(--surface-hover);
+  background: var(--bg-highlight);
+  color: var(--fg-primary);
 }
 
 /* Severity tints — the pill is a notification, not a neutral button: make the
    outcome readable at a glance (red = failure, green = success, amber = attention). */
 .lastItemError {
-  border-color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
   color: var(--error);
   background: color-mix(in srgb, var(--error) 12%, transparent);
 }
 
 .lastItemError:hover {
-  background: color-mix(in srgb, var(--error) 22%, transparent);
+  background: color-mix(in srgb, var(--error) 20%, transparent);
+  color: var(--error);
 }
 
 .lastItemSuccess {
-  border-color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
   color: var(--success);
   background: color-mix(in srgb, var(--success) 12%, transparent);
 }
 
 .lastItemSuccess:hover {
-  background: color-mix(in srgb, var(--success) 22%, transparent);
+  background: color-mix(in srgb, var(--success) 20%, transparent);
+  color: var(--success);
 }
 
 .lastItemWarn {
-  border-color: var(--changes);
+  border-color: color-mix(in srgb, var(--changes) 40%, transparent);
   color: var(--changes);
   background: color-mix(in srgb, var(--changes) 12%, transparent);
 }
 
 .lastItemWarn:hover {
-  background: color-mix(in srgb, var(--changes) 22%, transparent);
+  background: color-mix(in srgb, var(--changes) 20%, transparent);
+  color: var(--changes);
 }
 
 .lastItemIcon {
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  opacity: 0.8;
+  opacity: 0.85;
 }
 
 .lastItemIcon svg {

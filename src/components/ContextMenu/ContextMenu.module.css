@@ -1,11 +1,10 @@
-/* Menus follow the glass overlay recipe. Both .menu and .submenu are
- * transient floats, so they use --surface-overlay + --blur-overlay
- * (collapses to opaque when vibrancy is off) with a --radius-lg shell and
- * inset items at --radius-md. */
+/* Menus — floating overlay surface: raised bg, hairline, soft shadow,
+ * 4px inset with 6px-radius rows. Both .menu and .submenu are transient
+ * floats and share the recipe. */
 
 .menu {
   position: fixed;
-  min-width: 180px;
+  min-width: 190px;
   padding: 4px;
   overflow-y: auto;
   z-index: var(--z-dropdown);
@@ -21,11 +20,11 @@
 @keyframes menuIn {
   from {
     opacity: 0;
-    transform: translateY(2px);
+    transform: translateY(2px) scale(0.99);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: translateY(0) scale(1);
   }
 }
 
@@ -34,12 +33,14 @@
   justify-content: space-between;
   align-items: center;
   width: 100%;
-  padding: 6px 10px;
+  min-height: 28px;
+  padding: 0 10px;
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
   color: var(--fg-primary);
-  font-size: var(--font-base);
+  font-size: var(--font-md);
+  font-family: inherit;
   text-align: left;
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out);
@@ -59,8 +60,8 @@
 }
 
 .shortcut {
-  margin-left: 20px;
-  font-size: var(--font-sm);
+  margin-left: 24px;
+  font-size: var(--font-xs);
   color: var(--fg-muted);
 }
 
@@ -83,7 +84,7 @@
 .submenu {
   position: fixed;
   width: max-content;
-  min-width: 160px;
+  min-width: 170px;
   max-height: 400px;
   overflow-y: auto;
   padding: 4px;

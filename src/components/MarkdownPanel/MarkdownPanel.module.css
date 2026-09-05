@@ -45,8 +45,6 @@
   font-size: var(--font-sm);
   font-weight: 600;
   color: var(--fg-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   padding: 8px 12px 4px;
 }
 

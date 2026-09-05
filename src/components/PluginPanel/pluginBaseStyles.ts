@@ -69,22 +69,23 @@ button, .btn {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 26px;
-  padding: 4px 12px;
+  min-height: 28px;
+  padding: 0 12px;
   font-size: 13px;
   font-weight: 500;
   font-family: inherit;
   line-height: 1.2;
-  color: var(--fg-secondary, #c2c2c2);
-  background: var(--bg-tertiary, #202020);
-  border: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+  color: var(--fg-primary, #f0f0f0);
+  background: var(--sheen-strong, none), var(--bg-tertiary, #161616);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
   border-radius: 6px;
+  box-shadow: var(--highlight-inset, inset 0 1px 0 rgba(255,255,255,0.09)), 0 1px 2px rgba(0,0,0,0.35);
   cursor: pointer;
   transition: background 0.1s ease-out, color 0.1s ease-out,
     border-color 0.1s ease-out, box-shadow 0.1s ease-out;
 }
 button:hover:not(:disabled), .btn:hover:not(:disabled) {
-  background: var(--bg-highlight, #282828);
+  background: var(--sheen-strong, none), var(--bg-highlight, #222222);
   color: var(--fg-primary, #e0e0e0);
 }
 button:focus-visible, .btn:focus-visible {
@@ -177,11 +178,9 @@ table {
 }
 th {
   text-align: left;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--fg-secondary, #a0a0a0);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-secondary, #a3a3a3);
   padding: 6px 10px;
   border-bottom: 1px solid var(--border, #3e3e42);
 }

@@ -191,8 +191,6 @@
   font-weight: 600;
   color: var(--fg-secondary);
   margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .diagWarning {

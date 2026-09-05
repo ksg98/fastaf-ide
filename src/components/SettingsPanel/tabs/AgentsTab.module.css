@@ -69,8 +69,6 @@
 .badge {
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
 }
@@ -133,8 +131,6 @@
   font-weight: 600;
   color: var(--fg-secondary);
   margin-bottom: 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 /* Run config rows */
@@ -175,8 +171,6 @@
 .defaultBadge {
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   background: rgba(var(--accent-rgb), 0.15);
@@ -409,8 +403,6 @@
 .envBadge {
   font-size: var(--font-2xs);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--warning) 15%, transparent);
@@ -435,8 +427,6 @@
   font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .envVarsList {
@@ -494,8 +484,6 @@
   font-size: var(--font-2xs);
   font-weight: 600;
   color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   margin-bottom: 4px;
   padding: 0 2px;
 }

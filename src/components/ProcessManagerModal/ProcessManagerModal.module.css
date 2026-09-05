@@ -13,8 +13,6 @@
   color: var(--fg-muted);
   font-weight: 500;
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
   border-bottom: 1px solid var(--border-subtle);
   white-space: nowrap;
   user-select: none;

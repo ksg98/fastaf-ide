@@ -7,7 +7,6 @@
   background: var(--surface-glass);
   backdrop-filter: var(--blur-glass);
   -webkit-backdrop-filter: var(--blur-glass);
-  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -27,10 +26,11 @@
 }
 
 .empty {
-  padding: 20px;
+  padding: 28px 20px;
   text-align: center;
   color: var(--fg-muted);
   font-size: var(--font-sm);
+  line-height: 1.5;
 }
 
 .item {
@@ -64,7 +64,7 @@
 }
 
 .text {
-  font-size: var(--font-sm);
+  font-size: var(--font-md);
   color: var(--fg-primary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -78,7 +78,7 @@
 }
 
 .date {
-  font-size: var(--font-sm);
+  font-size: var(--font-xs);
   color: var(--fg-muted);
 }
 
@@ -101,7 +101,7 @@
 }
 
 .projectGlobal {
-  background: var(--bg-tertiary);
+  background: var(--wash-1);
   color: var(--fg-secondary);
 }
 
@@ -161,29 +161,29 @@
 
 .input {
   composes: textarea from "../shared/controls.module.css";
-  padding: 8px 12px;
-  font-size: var(--font-sm);
-  min-height: 40px;
+  padding: 8px 40px 8px 12px;
+  font-size: var(--font-md);
+  min-height: 44px;
+  border-radius: var(--radius-xl);
 }
 
 .submitBtn {
   position: absolute;
   right: 24px;
-  bottom: 20px;
-  width: 24px;
-  height: 24px;
+  bottom: 22px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--accent);
   color: var(--text-on-accent);
   border: none;
-  border-radius: var(--radius-md);
-  font-size: var(--font-xl);
+  border-radius: var(--radius-full);
+  font-size: var(--font-lg);
   font-weight: 600;
   line-height: 1;
   cursor: pointer;
-  box-shadow: var(--highlight-inset);
   transition: background var(--duration-fast) var(--ease-out);
 }
 
