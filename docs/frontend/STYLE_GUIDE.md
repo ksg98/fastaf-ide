@@ -214,6 +214,24 @@ Components use the tokens unconditionally.
 The well keeps a 14px gutter to match the terminal's own scrollbar. Sidebar
 list: 8px gutter.
 
+## AI Chat panel
+
+A conversation, not a control panel (`components/AIChatPanel`):
+
+- **Header** carries only what the chat is attached to (session dot + terminal chip), history, clear, window controls.
+- **Composer** is one glass field: textarea on top, a chip row beneath. Left chips shape the turn (Ask/Agent, model, effort; Steps and Approvals appear in Agent mode). Right: voice, dictate, and the single accent send button. Chips are native `<select>`s dressed as pills so macOS pops the system menu.
+- **Thread** is flat: assistant text sits on the panel, user turns are `--wash-1` blocks on the right, tool calls are 26px expandable rows, and agent progress, results, errors and approvals are rows at the *end* of the thread (`.statusRow`, `.errorBanner`, `.approvalCard`), never banners above it.
+- **Empty state** teaches by doing: three starter prompts that send on click plus a hand-off to Agent mode.
+- **Voice stage** (`.voiceStage`) shows the `VoiceOrb` (`components/ui/VoiceOrb.tsx`): a canvas sphere fed by the mic level and the speaker level from `voice_status`. Idle breathes, listening grows a halo, speaking brightens the core, thinking orbits a glint, muted drains to grey. A 16px twin sits in the status bar while a session runs.
+
+## Onboarding
+
+Three ideas the chrome cannot explain are taught once, in place (`components/Onboarding`, state in `stores/onboarding.ts`, persisted in localStorage):
+
+- **WelcomeWell** replaces the empty well's placeholder on a fresh install: a terminal per branch, split the well, Multiview — with the user's real shortcuts. Dismissed by "Got it".
+- **CoachMark** is a glass callout pinned above a `data-coach="…"` anchor (status-bar chat toggle, dictation mic, sidebar gear). `CoachMarks` shows at most one, 1.5 s after the first terminal is open, chat first then dictation, and each steps aside as soon as the user does the thing.
+- **Help › Getting started** ticks the three milestones (`multi`, `chat`, `dictation`) and offers "Show the hints again".
+
 ## Anti-patterns (DO NOT)
 
 - **No uppercase tracking** for labels or section headers.

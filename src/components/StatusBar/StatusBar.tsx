@@ -433,6 +433,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						classList={{ [s.toggleActive]: uiStore.state.aiChatPanelVisible }}
 						onClick={() => props.onToggleAiChat?.()}
 						title={`AI Chat (${keyFor("toggle-ai-chat")})`}
+						data-coach="ai-chat"
 						style={{ position: "relative" }}
 					>
 						<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
@@ -478,6 +479,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 							if (dictationStore.state.recording || dictationStore.state.loading) props.onDictationStop();
 						}}
 						title={`${t("statusBar.voiceDictation", "Voice Dictation")} (${dictationStore.state.hotkey})`}
+						data-coach="dictation"
 						style={{ position: "relative" }}
 					>
 						<svg class={s.micIcon} viewBox="0 0 24 24" width="14" height="14" fill="currentColor">

@@ -30,6 +30,7 @@ import { DictationToast } from "./components/DictationToast/DictationToast";
 import { ErrorLogPanel } from "./components/ErrorLogPanel";
 import { McpPopup } from "./components/McpPopup/McpPopup";
 import { MobileViewBanner } from "./components/MobileViewBanner";
+import { CoachMarks } from "./components/Onboarding/CoachMarks";
 import { ToastContainer } from "./components/ToastContainer/ToastContainer";
 import { type WorktreeActions, WorktreeManager } from "./components/WorktreeManager";
 import { useActiveTerminalSync } from "./hooks/useActiveTerminalSync";
@@ -989,6 +990,9 @@ const App: Component = () => {
 			{/* Dictation streaming toast — shows partial transcription */}
 			<DictationToast />
 			<ToastContainer />
+
+			{/* One-time hints for the three things the chrome cannot explain on its own */}
+			<CoachMarks onOpenChat={() => togglePanel("ai-chat")} onOpenSettings={openSettings} />
 
 			{/* Prompt library drawer */}
 			<PromptDrawer />

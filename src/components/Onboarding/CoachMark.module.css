@@ -1,0 +1,90 @@
+/* Coach mark — a glass callout pinned above a status-bar control. The arrow is
+   a rotated square in the raised tone so it survives the bubble's blur. */
+.mark {
+  position: fixed;
+  z-index: var(--z-toast);
+  padding: 12px 14px 10px;
+  border-radius: var(--radius-panel);
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--highlight-inset), var(--shadow-popup);
+  color: var(--fg-primary);
+  font-size: var(--font-sm);
+  animation: markIn var(--duration-slow) var(--ease-out);
+}
+
+.mark::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--arrow-x) - 6px);
+  bottom: -7px;
+  width: 12px;
+  height: 12px;
+  transform: rotate(45deg);
+  background: var(--bg-tertiary);
+  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+@keyframes markIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.title {
+  font-size: var(--font-md);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.body {
+  color: var(--fg-secondary);
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.kbd {
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  color: var(--fg-secondary);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--wash-1);
+  box-shadow: var(--highlight-inset), 0 0 0 1px var(--border-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
+.dismiss {
+  composes: btnGhost from "../shared/controls.module.css";
+}
+
+.action {
+  composes: btnPrimary from "../shared/controls.module.css";
+}
+
+.actions .dismiss,
+.actions .action {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: var(--font-sm);
+}

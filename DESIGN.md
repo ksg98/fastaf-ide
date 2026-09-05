@@ -160,6 +160,16 @@ on a 60 % black scrim. Vibrancy (macOS) is opt-in through `html.vibrancy` tokens
 - 7px dots: grey idle, accent pulsing busy, green done, purple unseen, orange waiting, red error.
 - Badges: 18px tinted pills, 11px/600, tabular numbers. Count bubbles: accent pill with a 2px frame-coloured ring.
 
+### AI Chat
+- A conversation, not a control panel. Header: session dot, "AI Chat", terminal chip, history, clear. Composer: one glass field with the turn's knobs as pills beneath the text (Ask/Agent, model, effort; Steps and Approvals in Agent mode) and one accent send button.
+- Thread is flat: assistant text on the panel, user turns as quiet washes on the right, tool calls as 26px rows, agent progress / results / errors / approvals as rows at the end of the thread. No banners.
+- Empty state teaches by doing: three starter prompts plus a hand-off to the agent.
+- Voice: the orb (`VoiceOrb`) is the agent you can watch — halo for the microphone, bright core for its own speech, glint while thinking, grey with a slash when muted. A 16px twin lives in the status bar while a session runs.
+
+### Onboarding
+- Three ideas are taught once, in place, then remembered: the empty well's first-run cards (a terminal per branch, split, Multiview), a coach mark on the chat toggle, a coach mark on dictation. At most one callout at a time, never before a terminal is open, and each steps aside as soon as the user does the thing.
+- Help › Getting started ticks the three milestones and can bring the hints back.
+
 ## 6. Do's and Don'ts
 
 ### Do

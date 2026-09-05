@@ -1,6 +1,7 @@
 import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { t } from "../../i18n";
 import { registerModal } from "../../stores/modalStack";
+import { onboardingStore } from "../../stores/onboarding";
 import { writeClipboard } from "../../utils/clipboard";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { KeyboardShortcutsTab } from "../SettingsPanel/tabs/KeyboardShortcutsTab";
@@ -100,6 +101,37 @@ export const HelpPanel: Component<HelpPanelProps> = (props) => {
 								</p>
 							</div>
 
+							<div class={s.section}>
+								<h3 class={s.sectionTitle}>{t("helpPanel.gettingStarted", "Getting started")}</h3>
+								<ul class={s.checklist} data-testid="getting-started">
+									<li class={s.checkItem} classList={{ [s.checkDone]: onboardingStore.isDone("multi") }}>
+										<span class={s.checkMark} aria-hidden="true" />
+										<span class={s.checkText}>
+											<span class={s.checkTitle}>Run more than one terminal</span>
+											<span class={s.checkHint}>Open a second branch, split the well, or turn on Multiview</span>
+										</span>
+									</li>
+									<li class={s.checkItem} classList={{ [s.checkDone]: onboardingStore.isDone("chat") }}>
+										<span class={s.checkMark} aria-hidden="true" />
+										<span class={s.checkText}>
+											<span class={s.checkTitle}>Ask the chat about a terminal</span>
+											<span class={s.checkHint}>It reads what is on screen and can drive the terminal as an agent</span>
+										</span>
+									</li>
+									<li class={s.checkItem} classList={{ [s.checkDone]: onboardingStore.isDone("dictation") }}>
+										<span class={s.checkMark} aria-hidden="true" />
+										<span class={s.checkText}>
+											<span class={s.checkTitle}>Dictate into a terminal</span>
+											<span class={s.checkHint}>
+												Hold the dictation key and speak; set it up under Settings › Voice
+											</span>
+										</span>
+									</li>
+								</ul>
+								<button class={s.resetHints} onClick={() => onboardingStore.reset()}>
+									Show the hints again
+								</button>
+							</div>
 							<div class={s.section}>
 								<h3 class={s.sectionTitle}>{t("helpPanel.quickActions", "Quick Actions")}</h3>
 								<div class={s.linkList}>

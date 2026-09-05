@@ -17,6 +17,7 @@ import { diffTabsStore } from "../stores/diffTabs";
 import { editorTabsStore } from "../stores/editorTabs";
 import { mdTabsStore } from "../stores/mdTabs";
 import { multiviewStore } from "../stores/multiview";
+import { onboardingStore } from "../stores/onboarding";
 import { paneLayoutStore } from "../stores/paneLayout";
 import { repoSettingsStore } from "../stores/repoSettings";
 import { repositoriesStore } from "../stores/repositories";
@@ -27,6 +28,7 @@ import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { getRepoColor } from "../utils/repoColor";
 import { shouldAutoSubmitSuggestion } from "../utils/sendCommand";
 import { sendTextToSession } from "../utils/sendToActiveTerminal";
+import { WelcomeWell } from "./Onboarding/WelcomeWell";
 import { PaneNodeView } from "./PaneTree/PaneTree";
 import SuggestOverlay from "./SuggestOverlay/SuggestOverlay";
 import { MdTabContent } from "./shared/MdTabContent";
@@ -256,8 +258,10 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 					}
 				>
 					<div class={s.emptyState}>
-						<img src={noTuiOpenImg} alt="No TUI Open" class={s.emptyIcon} />
-						<TipOfTheDay />
+						<Show when={onboardingStore.isDismissed("welcome")} fallback={<WelcomeWell />}>
+							<img src={noTuiOpenImg} alt="No TUI Open" class={s.emptyIcon} />
+							<TipOfTheDay />
+						</Show>
 					</div>
 				</Show>
 

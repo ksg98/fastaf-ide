@@ -112,6 +112,85 @@
   margin: 0;
 }
 
+/* Getting started — three milestones, ticked as the user reaches them. */
+.checklist {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.checkItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+}
+
+.checkMark {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--border-strong);
+  position: relative;
+}
+
+.checkDone .checkMark {
+  background: var(--success);
+  box-shadow: none;
+}
+
+.checkDone .checkMark::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 3px;
+  width: 4px;
+  height: 7px;
+  border-right: 2px solid var(--text-on-success);
+  border-bottom: 2px solid var(--text-on-success);
+  transform: rotate(45deg);
+}
+
+.checkText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.checkTitle {
+  font-size: var(--font-md);
+  color: var(--fg-primary);
+}
+
+.checkDone .checkTitle {
+  color: var(--fg-secondary);
+}
+
+.checkHint {
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+  line-height: 1.4;
+}
+
+.resetHints {
+  composes: btnGhost from "../shared/controls.module.css";
+}
+
+.section .resetHints {
+  min-height: 24px;
+  padding: 0 8px;
+  margin-left: 2px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
 .linkList {
   display: flex;
   flex-direction: column;

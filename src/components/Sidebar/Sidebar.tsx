@@ -764,7 +764,12 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 							<circle cx="8" cy="11.5" r="0.7" fill="currentColor" />
 						</svg>
 					</button>
-					<button class={s.footerAction} onClick={props.onOpenSettings} title={t("sidebar.settings", "Settings")}>
+					<button
+						class={s.footerAction}
+						onClick={props.onOpenSettings}
+						title={t("sidebar.settings", "Settings")}
+						data-coach="settings"
+					>
 						<svg width="15" height="15" viewBox="0 0 16 16" fill="none">
 							<path
 								d="M6.5 1.5h3l.4 1.8a5 5 0 011.2.7l1.7-.6 1.5 2.6-1.3 1.2a5 5 0 010 1.4l1.3 1.2-1.5 2.6-1.7-.6a5 5 0 01-1.2.7l-.4 1.8h-3l-.4-1.8a5 5 0 01-1.2-.7l-1.7.6-1.5-2.6 1.3-1.2a5 5 0 010-1.4L1.7 5.7l1.5-2.6 1.7.6a5 5 0 011.2-.7z"
