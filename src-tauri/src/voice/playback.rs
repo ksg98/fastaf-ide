@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use rodio::{ChannelCount, Player, SampleRate, Source};
@@ -38,6 +38,10 @@ struct Inner {
     /// far-end reference. Filled from inside playback rather than at enqueue
     /// time so it is paced by the speaker, not by the synthesizer.
     tee: Mutex<VecDeque<f32>>,
+    /// RMS of the most recent tee batch (10 ms), as `f32` bits — the level of
+    /// what is leaving the speaker right now, for the voice orb. Written on
+    /// the audio thread, so an atomic rather than a lock.
+    output_level: AtomicU32,
 }
 
 impl Playback {
@@ -51,6 +55,7 @@ impl Playback {
                 _stream: stream,
                 generation: AtomicU64::new(0),
                 tee: Mutex::new(VecDeque::new()),
+                output_level: AtomicU32::new(0),
             }),
         })
     }
@@ -93,6 +98,18 @@ impl Playback {
         !self.inner.player.empty()
     }
 
+    /// Loudness of the speech leaving the speaker right now, 0..1.
+    ///
+    /// The last batch's RMS, scaled so ordinary speech spans most of the range;
+    /// zero once the queue has drained so a stale reading never lingers.
+    pub fn output_level(&self) -> f32 {
+        if !self.is_speaking() {
+            return 0.0;
+        }
+        let rms = f32::from_bits(self.inner.output_level.load(Ordering::Relaxed));
+        (rms * 4.0).clamp(0.0, 1.0)
+    }
+
     /// Quieten playback while a possible barge-in is being verified.
     ///
     /// Used by the software echo path: when the detector fires over our own
@@ -120,6 +137,7 @@ impl Playback {
         // Reference audio for sound that will now never be heard would only
         // mislead the echo canceller.
         self.inner.tee.lock().clear();
+        self.inner.output_level.store(0, Ordering::Relaxed);
     }
 }
 
@@ -154,6 +172,13 @@ impl<S: Source> TeeSource<S> {
     fn try_flush(&mut self, force: bool) {
         if self.batch.len() < TEE_BATCH && !force {
             return;
+        }
+        // Level first: it must not depend on winning the lock below, or the
+        // orb would freeze whenever the echo canceller is mid-drain.
+        if !self.batch.is_empty() {
+            let sum: f32 = self.batch.iter().map(|s| s * s).sum();
+            let rms = (sum / self.batch.len() as f32).sqrt();
+            self.shared.output_level.store(rms.to_bits(), Ordering::Relaxed);
         }
         let Some(mut tee) = self.shared.tee.try_lock() else {
             // Bound the local batch too: if the consumer never frees the lock,

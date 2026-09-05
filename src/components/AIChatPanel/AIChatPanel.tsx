@@ -26,6 +26,7 @@ import { MicMeter } from "../DictationToast/MicMeter";
 import p from "../shared/panel.module.css";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
+import { VoiceOrb } from "../ui/VoiceOrb";
 import s from "./AIChatPanel.module.css";
 import { SessionKnowledgeBar } from "./SessionKnowledgeBar";
 
@@ -135,16 +136,16 @@ const SVG_COPIED =
 const SVG_RUN =
 	'<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><path d="M4 2.5l8 4.5-8 4.5z"/></svg>';
 
+const IconClose = () => (
+	<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4">
+		<path d="M3 3l6 6M9 3l-6 6" stroke-linecap="round" />
+	</svg>
+);
+
 const IconHistory = () => (
 	<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
 		<circle cx="7" cy="7" r="5.5" />
 		<path d="M7 4v3.5l2 1.5" stroke-linecap="round" />
-	</svg>
-);
-
-const IconRobot = () => (
-	<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
-		<path d="M7 1a.75.75 0 01.75.75V3h1.5A2.25 2.25 0 0111.5 5.25v4.5A2.25 2.25 0 019.25 12h-4.5A2.25 2.25 0 012.5 9.75v-4.5A2.25 2.25 0 014.75 3h1.5V1.75A.75.75 0 017 1zM5 6.5a.75.75 0 100 1.5.75.75 0 000-1.5zm4 0a.75.75 0 100 1.5.75.75 0 000-1.5zM5.5 9a.5.5 0 000 1h3a.5.5 0 000-1h-3z" />
 	</svg>
 );
 
@@ -167,6 +168,44 @@ const IconUnlock = () => (
 		<path d="M5 6V4a2 2 0 014 0" stroke-linecap="round" />
 	</svg>
 );
+
+const IconSpark = () => (
+	<svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+		<path d="M8 1.5c.3 2.9 1.6 4.2 4.5 4.5-2.9.3-4.2 1.6-4.5 4.5-.3-2.9-1.6-4.2-4.5-4.5 2.9-.3 4.2-1.6 4.5-4.5zM3.25 10c.15 1.35.75 1.95 2.1 2.1-1.35.15-1.95.75-2.1 2.1-.15-1.35-.75-1.95-2.1-2.1 1.35-.15 1.95-.75 2.1-2.1z" />
+	</svg>
+);
+
+const IconArrowRight = () => (
+	<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4">
+		<path d="M4 2.5L7.5 6 4 9.5" stroke-linecap="round" stroke-linejoin="round" />
+	</svg>
+);
+
+const IconChevronDown = () => (
+	<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4">
+		<path d="M2.5 3.75L5 6.25l2.5-2.5" stroke-linecap="round" stroke-linejoin="round" />
+	</svg>
+);
+
+/**
+ * Starter prompts for the empty state. Each is a real question against the
+ * attached terminal and sends on click, so the empty state teaches what the
+ * chat can do by doing it rather than by describing it.
+ */
+const STARTERS: ReadonlyArray<{ label: string; prompt: string }> = [
+	{
+		label: "Explain what's on screen",
+		prompt: "Explain what is currently on this terminal and what state it is in.",
+	},
+	{
+		label: "Fix the last error",
+		prompt: "Find the most recent error in this terminal, explain the cause, and give me the exact command to fix it.",
+	},
+	{
+		label: "Summarize this session",
+		prompt: "Summarize what has happened in this terminal session so far, in a few short bullet points.",
+	},
+];
 
 /** Fields stripped from the args display — internal plumbing the user doesn't need. */
 const TOOL_NOISE_FIELDS = new Set(["session_id", "timeout_ms"]);
@@ -457,6 +496,24 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		turnOptions: () => ({ modelOverride: modelOverride(), reasoningEffort: effort() }),
 	});
 
+	const voiceHint = () => {
+		switch (voiceStore.state.agentState) {
+			case "starting":
+				return "Warming up the voice engine";
+			case "listening":
+				return "Speak whenever you like";
+			case "transcribing":
+			case "thinking":
+				return "Working on it";
+			case "speaking":
+				return "Interrupt to cut in";
+			case "muted":
+				return "Unmute to continue";
+			default:
+				return "";
+		}
+	};
+
 	const voiceStatusLabel = () => {
 		switch (voiceStore.state.agentState) {
 			case "starting":
@@ -595,109 +652,48 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		}
 	};
 
+	// ── Empty-state starters ───────────────────────────────────────────────
+	const runStarter = (prompt: string) => {
+		if (isFrozen()) return;
+		setInputText(prompt);
+		handleSend();
+	};
+
+	const switchToAgent = () => {
+		setAutonomy("autonomous");
+		textareaRef?.focus();
+	};
+
+	const agentBusy = () => conversationStore.agentState() === "running" || conversationStore.agentState() === "paused";
+
 	return (
 		<div id="ai-chat-panel" class={cx(s.panel, !props.visible && s.hidden)}>
 			<PanelResizeHandle panelId="ai-chat-panel" minWidth={300} maxWidth={700} />
 
-			{/* ── Header ──────────────────────────────────────────── */}
+			{/* ── Header — what this chat is attached to, and nothing else. Every
+			    knob that shapes a turn (mode, model, effort) lives on the composer,
+			    next to the text it applies to. */}
 			<div class={p.header}>
 				<div class={p.headerLeft}>
-					<span class={p.title}>
-						<svg
-							width="14"
-							height="14"
-							viewBox="0 0 14 14"
-							fill="currentColor"
-							style={{ "vertical-align": "-2px", "margin-right": "4px" }}
-						>
-							<path
-								d="M2 2.5A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5v6A1.5 1.5 0 0110.5 10H5l-3 2.5V10A1.5 1.5 0 010.5 8.5v-6z"
-								transform="translate(1 0.5)"
-							/>
-						</svg>
-						AI Chat
-					</span>
+					<span class={cx(s.sessionDot, activeTerminalName() ? s.sessionDotOn : s.sessionDotOff)} />
+					<span class={p.title}>AI Chat</span>
 					<Show when={activeTerminalName()}>{(name) => <span class={s.terminalName}>{name()}</span>}</Show>
 				</div>
 				<div class={s.headerActions}>
-					{/* Model picker */}
-					<Show when={availableModels().length > 0}>
-						<select
-							class={s.modelPicker}
-							value={modelOverride()}
-							onChange={(e) => setModelOverride(e.currentTarget.value)}
-							title="Model override for this conversation"
-						>
-							<option value="">Default model</option>
-							<For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
-						</select>
-					</Show>
-					{/* Reasoning effort for this conversation. Seeded from the model's
-					    configured effort; leaving it on Default falls through to that,
-					    then to the global AI Chat setting. */}
-					<select
-						class={s.modelPicker}
-						data-testid="effort-picker"
-						value={effort()}
-						onChange={(e) => setEffort(e.currentTarget.value)}
-						title="Reasoning effort for this conversation"
-					>
-						<option value="">Default effort</option>
-						<option value="off">off</option>
-						<For each={effortLevels()}>{(level) => <option value={level}>{level}</option>}</For>
-					</select>
-					{/* Autonomy toggle */}
-					<button
-						class={cx(s.headerBtn, autonomy() === "autonomous" && s.headerBtnActive)}
-						onClick={() => setAutonomy((v) => (v === "assisted" ? "autonomous" : "assisted"))}
-						title={
-							autonomy() === "autonomous"
-								? "Autonomous mode — click for Assisted"
-								: "Assisted mode — click for Autonomous"
-						}
-					>
-						<IconRobot />
-					</button>
-					{/* Step count (autonomous only) */}
-					<Show when={autonomy() === "autonomous"}>
-						<input
-							type="number"
-							class={s.stepInput}
-							min={1}
-							max={50}
-							value={maxSteps()}
-							onInput={(e) => setMaxSteps(Math.max(1, Math.min(50, Number(e.currentTarget.value))))}
-							title="Max agent steps"
-						/>
-					</Show>
-					{/* Unrestricted toggle (autonomous only) */}
-					<Show when={autonomy() === "autonomous"}>
-						<button
-							class={cx(s.headerBtn, conversationStore.unrestricted() && s.headerBtnDanger)}
-							onClick={() => {
-								if (conversationStore.unrestricted()) {
-									conversationStore.setUnrestricted(false);
-								} else {
-									setShowUnrestrictedConfirm(true);
-								}
-							}}
-							title={
-								conversationStore.unrestricted()
-									? "Disable unrestricted mode"
-									: "Enable unrestricted mode (no approval prompts)"
-							}
-						>
-							<IconUnlock />
-						</button>
-					</Show>
 					<button
 						class={cx(s.headerBtn, showHistory() && s.headerBtnActive)}
 						onClick={() => (showHistory() ? setShowHistory(false) : openHistory())}
 						title="Conversation history"
+						aria-label="Conversation history"
 					>
 						<IconHistory />
 					</button>
-					<button class={s.headerBtn} onClick={() => conversationStore.clearHistory()} title="Clear conversation">
+					<button
+						class={s.headerBtn}
+						onClick={() => conversationStore.clearHistory()}
+						title="Clear conversation"
+						aria-label="Clear conversation"
+					>
 						<IconTrash />
 					</button>
 					<PanelWindowControls
@@ -708,155 +704,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 				</div>
 			</div>
 
-			{/* ── Error banner ────────────────────────────────────── */}
-			<Show when={conversationStore.error()}>
-				<div class={s.errorBanner}>
-					<span class={s.errorText}>{conversationStore.error()}</span>
-					<button class={s.retryBtn} onClick={handleRetry}>
-						Retry
-					</button>
-				</div>
-			</Show>
-
-			{/* ── Unrestricted confirmation dialog ─────────────── */}
-			<Show when={showUnrestrictedConfirm()}>
-				<div class={s.approvalCard}>
-					<div class={s.approvalText}>
-						<strong>Enable unrestricted mode?</strong>
-						<br />
-						<span style={{ "font-size": "var(--font-xs)", color: "var(--fg-secondary)" }}>
-							The agent will skip all approval prompts and operate without sandbox restrictions. Only use on repos you
-							fully trust.
-						</span>
-					</div>
-					<div class={s.approvalActions}>
-						<button
-							class={cx(s.approvalBtn, s.approveBtn)}
-							onClick={() => {
-								conversationStore.setUnrestricted(true);
-								setShowUnrestrictedConfirm(false);
-							}}
-						>
-							Enable
-						</button>
-						<button class={cx(s.approvalBtn, s.denyBtn)} onClick={() => setShowUnrestrictedConfirm(false)}>
-							Cancel
-						</button>
-					</div>
-				</div>
-			</Show>
-
-			{/* ── Unrestricted banner ───────────────────────────── */}
-			<Show when={conversationStore.unrestricted()}>
-				<div class={s.unrestrictedBanner}>UNRESTRICTED</div>
-			</Show>
-
-			{/* ── Agent banner ──────────────────────────────────── */}
-			<Show when={conversationStore.agentState() === "running" || conversationStore.agentState() === "paused"}>
-				<div class={s.agentBanner}>
-					<IconRobot />
-					<Show
-						when={conversationStore.isThinking()}
-						fallback={
-							<span class={s.agentBannerText}>
-								Agent {conversationStore.agentState() === "paused" ? "paused" : "running"}
-							</span>
-						}
-					>
-						<span class={cx(s.agentBannerText, s.thinkingPulse)}>Thinking…</span>
-					</Show>
-					<span class={s.agentBannerIteration}>iter {conversationStore.currentIteration() + 1}</span>
-					<Show when={conversationStore.agentState() === "running"}>
-						<button
-							class={s.agentBannerBtn}
-							onClick={() => {
-								const sid = activeSessionId();
-								if (sid) conversationStore.pauseAgent(sid);
-							}}
-							title="Pause agent"
-						>
-							<IconPause />
-						</button>
-					</Show>
-					<Show when={conversationStore.agentState() === "paused"}>
-						<button
-							class={s.agentBannerBtn}
-							onClick={() => {
-								const sid = activeSessionId();
-								if (sid) conversationStore.resumeAgent(sid);
-							}}
-							title="Resume agent"
-						>
-							<IconPlay />
-						</button>
-					</Show>
-					<button
-						class={cx(s.agentBannerBtn, s.agentBannerBtnDanger)}
-						onClick={() => {
-							const sid = activeSessionId();
-							if (sid) conversationStore.cancelAgent(sid);
-						}}
-						title="Stop agent"
-					>
-						<IconStop />
-					</button>
-				</div>
-			</Show>
-
-			{/* ── Agent completion/error banner ─────────────────── */}
-			<Show when={["completed", "cancelled", "error"].includes(conversationStore.agentState())}>
-				<div class={cx(s.agentDoneBanner, conversationStore.agentState() === "error" && s.agentDoneBannerError)}>
-					<span class={s.agentBannerText}>
-						{conversationStore.agentState() === "completed"
-							? `Agent done${conversationStore.completionReason() ? ` — ${conversationStore.completionReason()}` : ""}`
-							: conversationStore.agentState() === "cancelled"
-								? "Agent cancelled"
-								: `Agent error: ${conversationStore.agentError() ?? "unknown error"}`}
-					</span>
-					<button class={s.agentBannerBtn} onClick={() => conversationStore.reset()} title="Dismiss">
-						✕
-					</button>
-				</div>
-			</Show>
-
-			{/* ── Approval prompt ────────────────────────────────── */}
-			<Show when={conversationStore.pendingApproval()}>
-				{(approval) => (
-					<div class={s.approvalCard}>
-						<div class={s.approvalText}>
-							Agent wants to run: <strong>{approval().command}</strong>
-							<br />
-							<span style={{ "font-size": "var(--font-xs)", color: "var(--fg-secondary)" }}>{approval().reason}</span>
-						</div>
-						<div class={s.approvalActions}>
-							<button
-								class={cx(s.approvalBtn, s.approveBtn)}
-								onClick={() => conversationStore.approveAction(approval().sessionId, true)}
-							>
-								Approve
-							</button>
-							<button
-								class={cx(s.approvalBtn, s.denyBtn)}
-								onClick={() => conversationStore.approveAction(approval().sessionId, false)}
-							>
-								Deny
-							</button>
-							<button
-								class={cx(s.approvalBtn, s.alwaysAllowBtn)}
-								onClick={() => {
-									conversationStore.setUnrestricted(true);
-									conversationStore.approveAction(approval().sessionId, true);
-								}}
-								title="Approve and disable all future approval prompts"
-							>
-								Always allow
-							</button>
-						</div>
-					</div>
-				)}
-			</Show>
-
-			{/* ── History panel ───────────────────────────────────── */}
+			{/* ── History ─────────────────────────────────────────── */}
 			<Show when={showHistory()}>
 				<div class={s.historyPanel}>
 					<div class={s.historyHeader}>All conversations</div>
@@ -883,11 +731,43 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 				</div>
 			</Show>
 
-			{/* ── Message list ────────────────────────────────────── */}
+			{/* ── Thread ──────────────────────────────────────────── */}
 			<div class={cx(s.messageList, showHistory() && s.hidden)} ref={messageListRef}>
 				<Show
-					when={conversationStore.messages().length > 0 || conversationStore.isStreaming()}
-					fallback={<div class={s.emptyState}>Ask me about your terminal output</div>}
+					when={conversationStore.messages().length > 0 || conversationStore.isStreaming() || agentBusy()}
+					fallback={
+						<div class={s.emptyState}>
+							<span class={s.emptyMark}>
+								<IconSpark />
+							</span>
+							<div class={s.emptyTitle}>
+								{isFrozen() ? "Focus a terminal to start" : `Ask about ${activeTerminalName() ?? "this terminal"}`}
+							</div>
+							<div class={s.emptyHint}>
+								{isFrozen()
+									? "The chat reads whichever terminal you focus, remembers its commands, and can run things in it."
+									: "It reads what's on screen and the session's command history. Switch to Agent and it runs the task on its own, in this terminal."}
+							</div>
+							<Show when={!isFrozen()}>
+								<div class={s.starters}>
+									<For each={STARTERS}>
+										{(starter) => (
+											<button class={s.starter} onClick={() => runStarter(starter.prompt)}>
+												<span class={s.starterLabel}>{starter.label}</span>
+												<span class={s.starterArrow}>
+													<IconArrowRight />
+												</span>
+											</button>
+										)}
+									</For>
+									<button class={s.starter} onClick={switchToAgent}>
+										<span class={s.starterLabel}>Give the agent a task</span>
+										<span class={s.starterKind}>Agent</span>
+									</button>
+								</div>
+							</Show>
+						</div>
+					}
 				>
 					<For each={conversationStore.messages()}>
 						{(msg) => (
@@ -931,9 +811,11 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 						)}
 					</Show>
 
-					{/* Agent tool call cards */}
+					{/* Agent tool calls — one compact row each */}
 					<Show when={conversationStore.toolCalls().length > 0}>
-						<For each={conversationStore.toolCalls()}>{(entry) => <ToolCallCard entry={entry} />}</For>
+						<div class={s.toolCalls}>
+							<For each={conversationStore.toolCalls()}>{(entry) => <ToolCallCard entry={entry} />}</For>
+						</div>
 					</Show>
 
 					{/* Agent text output */}
@@ -943,18 +825,159 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 						</div>
 					</Show>
 				</Show>
+
+				{/* ── Live status, inline at the end of the thread ──── */}
+				<Show when={agentBusy()}>
+					<div class={s.statusRow}>
+						<span class={cx(s.statusDot, conversationStore.agentState() === "running" && s.statusDotLive)} />
+						<Show
+							when={conversationStore.isThinking()}
+							fallback={
+								<span class={s.statusText}>
+									{conversationStore.agentState() === "paused" ? "Agent paused" : "Agent running"}
+								</span>
+							}
+						>
+							<span class={cx(s.statusText, s.thinkingPulse)}>Thinking…</span>
+						</Show>
+						<span class={s.statusMeta}>
+							step {conversationStore.currentIteration() + 1} of {maxSteps()}
+						</span>
+						<Show when={conversationStore.agentState() === "running"}>
+							<button
+								class={s.statusBtn}
+								onClick={() => {
+									const sid = activeSessionId();
+									if (sid) conversationStore.pauseAgent(sid);
+								}}
+								title="Pause agent"
+								aria-label="Pause agent"
+							>
+								<IconPause />
+							</button>
+						</Show>
+						<Show when={conversationStore.agentState() === "paused"}>
+							<button
+								class={s.statusBtn}
+								onClick={() => {
+									const sid = activeSessionId();
+									if (sid) conversationStore.resumeAgent(sid);
+								}}
+								title="Resume agent"
+								aria-label="Resume agent"
+							>
+								<IconPlay />
+							</button>
+						</Show>
+						<button
+							class={cx(s.statusBtn, s.statusBtnDanger)}
+							onClick={() => {
+								const sid = activeSessionId();
+								if (sid) conversationStore.cancelAgent(sid);
+							}}
+							title="Stop agent"
+							aria-label="Stop agent"
+						>
+							<IconStop />
+						</button>
+					</div>
+				</Show>
+
+				<Show when={["completed", "cancelled", "error"].includes(conversationStore.agentState())}>
+					<div class={cx(s.statusRow, s.statusRowDone, conversationStore.agentState() === "error" && s.statusRowError)}>
+						<span class={s.statusText}>
+							{conversationStore.agentState() === "completed"
+								? `Agent finished${conversationStore.completionReason() ? ` — ${conversationStore.completionReason()}` : ""}`
+								: conversationStore.agentState() === "cancelled"
+									? "Agent stopped"
+									: `Agent error: ${conversationStore.agentError() ?? "unknown error"}`}
+						</span>
+						<button class={s.statusBtn} onClick={() => conversationStore.reset()} title="Dismiss" aria-label="Dismiss">
+							<IconClose />
+						</button>
+					</div>
+				</Show>
+
+				<Show when={conversationStore.error()}>
+					<div class={s.errorBanner}>
+						<span class={s.errorText}>{conversationStore.error()}</span>
+						<button class={s.retryBtn} onClick={handleRetry}>
+							Retry
+						</button>
+					</div>
+				</Show>
+
+				{/* Approval — the one thing that must not be missed, so it sits at
+				    the end of the thread as a card, not in a bar above it. */}
+				<Show when={conversationStore.pendingApproval()}>
+					{(approval) => (
+						<div class={s.approvalCard}>
+							<div class={s.approvalText}>
+								<span class={s.approvalLead}>The agent wants to run</span>
+								<code class={s.approvalCommand}>{approval().command}</code>
+								<Show when={approval().reason}>
+									<span class={s.approvalReason}>{approval().reason}</span>
+								</Show>
+							</div>
+							<div class={s.approvalActions}>
+								<button
+									class={cx(s.approvalBtn, s.approveBtn)}
+									onClick={() => conversationStore.approveAction(approval().sessionId, true)}
+								>
+									Approve
+								</button>
+								<button
+									class={cx(s.approvalBtn, s.denyBtn)}
+									onClick={() => conversationStore.approveAction(approval().sessionId, false)}
+								>
+									Deny
+								</button>
+								<button
+									class={cx(s.approvalBtn, s.alwaysAllowBtn)}
+									onClick={() => {
+										conversationStore.setUnrestricted(true);
+										conversationStore.approveAction(approval().sessionId, true);
+									}}
+									title="Approve and skip every future approval"
+								>
+									Always allow
+								</button>
+							</div>
+						</div>
+					)}
+				</Show>
+
+				<Show when={showUnrestrictedConfirm()}>
+					<div class={s.approvalCard}>
+						<div class={s.approvalText}>
+							<span class={s.approvalLead}>Skip all approvals?</span>
+							<span class={s.approvalReason}>
+								The agent will run commands without asking and without sandbox limits. Only for repos you fully trust.
+							</span>
+						</div>
+						<div class={s.approvalActions}>
+							<button
+								class={cx(s.approvalBtn, s.denyBtn)}
+								onClick={() => {
+									conversationStore.setUnrestricted(true);
+									setShowUnrestrictedConfirm(false);
+								}}
+							>
+								Skip approvals
+							</button>
+							<button class={s.approvalBtn} onClick={() => setShowUnrestrictedConfirm(false)}>
+								Cancel
+							</button>
+						</div>
+					</div>
+				</Show>
 			</div>
 
-			{/* ── Session knowledge footer ────────────────────────── */}
+			{/* ── Session knowledge — what the chat already knows about this terminal */}
 			<SessionKnowledgeBar sessionId={activeSessionId()} />
 
-			{/* ── Frozen overlay ──────────────────────────────────── */}
-			<Show when={isFrozen()}>
-				<div class={s.frozenBanner}>No terminal focused — chat is read-only</div>
-			</Show>
-
-			{/* Live mic strip — its own row so the meter spans the composer width
-			    instead of competing with the textarea for horizontal space. */}
+			{/* Live dictation strip — its own row so the meter spans the composer
+			    width instead of competing with the textarea for horizontal space. */}
 			<Show when={dictating()}>
 				<div class={s.micLive} data-testid="chat-mic-live">
 					<span class={s.micDot} />
@@ -973,10 +996,20 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 			    in half-duplex mode the microphone really is muted then — and while
 			    muted, where Rust reports a level of zero rather than the live one. */}
 			<Show when={voice.active()}>
-				<div class={s.micLive} data-testid="chat-voice-live">
-					<span class={voiceStore.state.muted ? s.micDotMuted : s.micDot} />
-					<MicMeter level={voiceStore.state.audioLevel} barCount={11} maxPx={14} />
-					<span class={s.micLabel}>{voiceStatusLabel()}</span>
+				<div class={s.voiceStage} data-testid="chat-voice-live">
+					<VoiceOrb
+						state={voiceStore.state.agentState}
+						mic={voiceStore.state.audioLevel}
+						output={voiceStore.state.outputLevel}
+						size={44}
+						title={voiceStatusLabel()}
+					/>
+					<div class={s.voiceText}>
+						<span class={s.voiceLabel}>{voiceStatusLabel()}</span>
+						<Show when={voiceHint()}>
+							<span class={s.voiceHint}>{voiceHint()}</span>
+						</Show>
+					</div>
 					<div class={s.micActions}>
 						<Show when={voiceStore.state.agentState === "speaking"}>
 							<button
@@ -1015,8 +1048,9 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 				</div>
 			</Show>
 
-			{/* ── Input area ──────────────────────────────────────── */}
-			<div class={s.inputArea}>
+			{/* ── Composer — one glass field: the text on top, and beneath it the
+			    knobs that shape this turn on the left, the ways to send on the right. */}
+			<div class={cx(s.inputArea, isFrozen() && s.inputAreaFrozen)}>
 				<textarea
 					ref={textareaRef}
 					data-focus-target="ai-chat"
@@ -1024,10 +1058,10 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					rows={1}
 					placeholder={
 						isFrozen()
-							? "Focus a terminal first..."
+							? "Focus a terminal first…"
 							: autonomy() === "autonomous"
-								? "Describe a goal for the agent..."
-								: "Ask about your terminal... (Enter to send)"
+								? "Describe a task for the agent…"
+								: "Ask about this terminal…"
 					}
 					value={inputText()}
 					onInput={(e) => {
@@ -1037,75 +1071,163 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					onKeyDown={handleKeyDown}
 					disabled={isFrozen()}
 				/>
-				<button
-					class={voice.active() ? s.micBtnActive : s.micBtn}
-					data-testid="chat-voice-btn"
-					onClick={() => voice.toggle()}
-					disabled={isFrozen() || dictating()}
-					title={
-						voice.active()
-							? "End the voice conversation"
-							: "Talk to the agent — it listens, answers out loud, and keeps going"
-					}
-					aria-label={voice.active() ? "Stop voice mode" : "Start voice mode"}
-					aria-pressed={voice.active()}
-				>
-					<IconVoice />
-				</button>
-				<Show
-					when={dictating()}
-					fallback={
+				<div class={s.composerRow}>
+					<div class={s.composerChips}>
+						<label class={cx(s.chip, autonomy() === "autonomous" && s.chipAccent)} title="Ask answers; Agent acts">
+							<select
+								class={s.chipSelect}
+								data-testid="mode-picker"
+								value={autonomy()}
+								onChange={(e) => setAutonomy(e.currentTarget.value as "assisted" | "autonomous")}
+								aria-label="Mode"
+							>
+								<option value="assisted">Ask</option>
+								<option value="autonomous">Agent</option>
+							</select>
+							<IconChevronDown />
+						</label>
+						<Show when={availableModels().length > 0}>
+							<label class={s.chip} title="Model for this conversation">
+								<select
+									class={s.chipSelect}
+									value={modelOverride()}
+									onChange={(e) => setModelOverride(e.currentTarget.value)}
+									aria-label="Model"
+								>
+									<option value="">Default model</option>
+									<For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
+								</select>
+								<IconChevronDown />
+							</label>
+						</Show>
+						{/* Reasoning effort for this conversation. Seeded from the model's
+						    configured effort; leaving it on Default falls through to that,
+						    then to the global AI Chat setting. */}
+						<label class={s.chip} title="Reasoning effort for this conversation">
+							<select
+								class={s.chipSelect}
+								data-testid="effort-picker"
+								value={effort()}
+								onChange={(e) => setEffort(e.currentTarget.value)}
+								aria-label="Reasoning effort"
+							>
+								<option value="">Effort</option>
+								<option value="off">off</option>
+								<For each={effortLevels()}>{(level) => <option value={level}>{level}</option>}</For>
+							</select>
+							<IconChevronDown />
+						</label>
+						<Show when={autonomy() === "autonomous"}>
+							<label class={s.chip} title="Most steps the agent may take">
+								<span class={s.chipLabel}>Steps</span>
+								<input
+									type="number"
+									class={s.stepInput}
+									min={1}
+									max={50}
+									value={maxSteps()}
+									onInput={(e) => setMaxSteps(Math.max(1, Math.min(50, Number(e.currentTarget.value))))}
+									aria-label="Max agent steps"
+								/>
+							</label>
+							<button
+								class={cx(s.chip, s.chipButton, conversationStore.unrestricted() && s.chipDanger)}
+								onClick={() => {
+									if (conversationStore.unrestricted()) {
+										conversationStore.setUnrestricted(false);
+									} else {
+										setShowUnrestrictedConfirm(true);
+									}
+								}}
+								title={
+									conversationStore.unrestricted()
+										? "Approvals are off — click to ask before each command again"
+										: "The agent asks before running commands — click to skip approvals"
+								}
+								aria-pressed={conversationStore.unrestricted()}
+							>
+								<IconUnlock />
+								{conversationStore.unrestricted() ? "No approvals" : "Approvals"}
+							</button>
+						</Show>
+					</div>
+					<div class={s.composerActions}>
 						<button
-							class={s.micBtn}
-							data-testid="chat-mic-btn"
-							onClick={startDictation}
-							disabled={isFrozen() || dictationStore.state.loading || voice.active()}
+							class={voice.active() ? s.micBtnActive : s.micBtn}
+							data-testid="chat-voice-btn"
+							onClick={() => voice.toggle()}
+							disabled={isFrozen() || dictating()}
 							title={
-								voice.active() ? "Voice mode is using the microphone" : "Dictate (transcribes into the message box)"
+								voice.active()
+									? "End the voice conversation"
+									: "Talk to the agent — it listens, answers out loud, and keeps going"
 							}
-							aria-label="Start dictation"
+							aria-label={voice.active() ? "Stop voice mode" : "Start voice mode"}
+							aria-pressed={voice.active()}
 						>
-							<IconMic />
+							<IconVoice />
 						</button>
-					}
-				>
-					<button
-						class={s.micBtnActive}
-						data-testid="chat-mic-stop-btn"
-						onClick={stopDictation}
-						disabled={dictationStore.state.processing || dictationStore.state.rewriting}
-						title="Stop dictation and insert the transcript"
-						aria-label="Stop dictation"
-					>
-						<IconStop />
-					</button>
-				</Show>
-				<Show
-					when={conversationStore.isStreaming()}
-					fallback={
-						<button
-							class={s.sendBtn}
-							onClick={handleSend}
-							disabled={
-								!inputText().trim() ||
-								conversationStore.isStreaming() ||
-								isFrozen() ||
-								(autonomy() === "autonomous" &&
-									(conversationStore.agentState() === "running" || conversationStore.agentState() === "paused"))
+						<Show
+							when={dictating()}
+							fallback={
+								<button
+									class={s.micBtn}
+									data-testid="chat-mic-btn"
+									onClick={startDictation}
+									disabled={isFrozen() || dictationStore.state.loading || voice.active()}
+									title={
+										voice.active() ? "Voice mode is using the microphone" : "Dictate (transcribes into the message box)"
+									}
+									aria-label="Start dictation"
+								>
+									<IconMic />
+								</button>
 							}
-							title="Send (Enter)"
 						>
-							<IconSend />
-						</button>
-					}
-				>
-					<button class={s.stopBtn} onClick={() => conversationStore.cancelStream()} title="Stop generating">
-						<IconStop />
-					</button>
-				</Show>
+							<button
+								class={s.micBtnActive}
+								data-testid="chat-mic-stop-btn"
+								onClick={stopDictation}
+								disabled={dictationStore.state.processing || dictationStore.state.rewriting}
+								title="Stop dictation and insert the transcript"
+								aria-label="Stop dictation"
+							>
+								<IconStop />
+							</button>
+						</Show>
+						<Show
+							when={conversationStore.isStreaming()}
+							fallback={
+								<button
+									class={s.sendBtn}
+									onClick={handleSend}
+									disabled={
+										!inputText().trim() ||
+										conversationStore.isStreaming() ||
+										isFrozen() ||
+										(autonomy() === "autonomous" && agentBusy())
+									}
+									title="Send (Enter)"
+									aria-label="Send"
+								>
+									<IconSend />
+								</button>
+							}
+						>
+							<button
+								class={s.stopBtn}
+								onClick={() => conversationStore.cancelStream()}
+								title="Stop generating"
+								aria-label="Stop generating"
+							>
+								<IconStop />
+							</button>
+						</Show>
+					</div>
+				</div>
 			</div>
 
-			{/* ── Usage footer ────────────────────────────────────── */}
+			{/* ── Usage — one quiet line, numbers only ─────────────── */}
 			<Show when={conversationStore.sessionUsage()}>
 				{(usage) => {
 					const prompt = () => usage().promptTokens ?? 0;

@@ -45,6 +45,8 @@ pub struct VoiceStatus {
     pub speaking: bool,
     /// Live microphone level, for the meter.
     pub audio_level: f32,
+    /// Live speaker level of the agent's own speech, for the voice orb.
+    pub output_level: f32,
 }
 
 #[tauri::command]
@@ -64,6 +66,11 @@ pub fn voice_status(voice: State<'_, VoiceState>, dictation: State<'_, Dictation
             .lock()
             .as_ref()
             .is_some_and(Playback::is_speaking),
+        output_level: voice
+            .playback
+            .lock()
+            .as_ref()
+            .map_or(0.0, Playback::output_level),
         // Report silence while muted rather than the true input level. The
         // capture is still running (see VoiceState::muted), so the meter would
         // otherwise keep dancing to a microphone whose audio is being thrown
