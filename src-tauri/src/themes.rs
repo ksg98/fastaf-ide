@@ -352,6 +352,10 @@ const SUPERSEDED_BUILTIN_THEMES: &[(&str, &str)] = &[
         "cursor-dark.json",
         include_str!("themes/legacy/cursor-dark-v2.json"),
     ),
+    (
+        "cursor-dark.json",
+        include_str!("themes/legacy/cursor-dark-v3.json"),
+    ),
 ];
 
 /// Seed the themes directory with built-in themes.

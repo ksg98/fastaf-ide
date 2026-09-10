@@ -59,7 +59,7 @@ variables, never hardcode core palette values.
 | Variable | Default | Usage |
 |----------|---------|-------|
 | `--bg-primary` | `#050505` | The well: terminals, editors, diffs, recessed inputs |
-| `--bg-secondary` | `#0c0c0c` | The frame: toolbar, sidebar, status bar, side panels |
+| `--bg-secondary` | `#050505` | The frame: toolbar, sidebar, status bar, side panels — the same black as the well |
 | `--bg-tertiary` | `#161616` | Raised: chips, menus, popovers, active tab pill |
 | `--bg-highlight` | `#222222` | Strong hover / pressed fill |
 | `--surface-hover` | white 7 % | Hover wash over any surface |
@@ -74,10 +74,10 @@ variables, never hardcode core palette values.
 
 | Variable | Value | Usage |
 |----------|-------|-------|
-| `--app-gloss` | cool radial key light + 2.5 % top fade | Layered over `--bg-app` by `body` — the window's single light source |
+| `--app-gloss` | `none` | Reserved for themes that want a key light; the default frame is flat black with no top glow |
 | `--sheen` | white 5 % → 0 top-down gradient | First layer of every glass surface token |
 | `--sheen-strong` | white 11 % → 3.5 % | Raised controls: `.btn`, active tab, chips |
-| `--surface-glass` | `--sheen`, frame at 60 % | Sidebar and side panels (`backdrop-filter: var(--blur-glass)`) |
+| `--surface-glass` | frame at 60 %, no sheen | Sidebar and side panels (`backdrop-filter: var(--blur-glass)`) — flat, so the top of the window is as black as the terminal |
 | `--surface-overlay` | `--sheen`, raised at 82 % | Menus, palettes, dialogs, toasts, tooltips (`backdrop-filter: var(--blur-overlay)`) |
 | `--blur-overlay` | `blur(22px) saturate(1.4)` | Always on — overlays frost the content beneath |
 | `--blur-glass` | none / `blur(28px)` under vibrancy | Frame blur only matters once the desktop shows through |

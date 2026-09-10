@@ -5,7 +5,7 @@ colors:
   accent-blue: "#5aa0f8"
   accent-blue-hover: "#79b3fa"
   well: "#050505"
-  frame: "#0c0c0c"
+  frame: "#050505"
   raised: "#161616"
   highlight: "#222222"
   text-primary: "#f0f0f0"
@@ -84,7 +84,7 @@ runtime.
 
 ### Surfaces
 - **Well** (#050505): terminals, editors, diffs, recessed inputs.
-- **Frame** (#0c0c0c): toolbar, sidebar, status bar, side panels. The window's base paint, carrying one cool key light at its top edge (`--app-gloss`).
+- **Frame** (#050505): toolbar, sidebar, status bar, side panels. The same black as the well; no key light, no gradient. The well is told apart by its 1px rim, not by tone.
 - **Raised** (#161616): chips, menus, popovers, the active tab — always with `--sheen-strong` on top.
 - **Highlight** (#222222): pressed / strong hover.
 - **Hairline**: white at 8 % (16 % when hovered or focused). Rim light: white at 9 % along the top edge of anything raised. Washes: white at 4 / 7 / 7 / 12 %.
