@@ -167,7 +167,7 @@ const FALLBACK_TERMINAL: TerminalTheme = {
 // looks like the default instead of a ghost of the pre-restyle palette.
 const FALLBACK_APP: IAppTheme = {
 	bgPrimary: "#050505",
-	bgSecondary: "#0c0c0c",
+	bgSecondary: "#050505",
 	bgTertiary: "#161616",
 	bgHighlight: "#222222",
 	fgPrimary: "#f0f0f0",

@@ -196,12 +196,13 @@
 :root {
   /* ── Surfaces ──────────────────────────────────────────────────────────
      Cursor Dark seed — kept in lockstep with cursor-dark.json appChrome.
-     Obsidian glass: everything near-black. The frame (toolbar, sidebar,
-     status bar, side panels) is smoked glass lit from the top edge; content
-     (terminal, editor, diff) sits in a matte black well. Edges come from a
-     1px rim light and a top sheen, not from tone steps. */
+     One black. The frame (toolbar, sidebar, status bar, side panels) and
+     the content well (terminal, editor, diff) share the same near-black;
+     nothing is lit from above. Structure comes from 1px rim lights and the
+     raised tone on chips, menus and tabs, never from a tone step between
+     regions. */
   --bg-primary: #050505;      /* content well */
-  --bg-secondary: #0c0c0c;    /* frame / resting chrome */
+  --bg-secondary: #050505;    /* frame / resting chrome — same black as the well */
   --bg-tertiary: #161616;     /* raised: inputs, chips, menus, cards */
   --bg-highlight: #222222;    /* hover / selection fill */
   --fg-primary: #f0f0f0;
@@ -214,7 +215,7 @@
 
   /* Static RGB triples — FOUC guard before applyAppTheme emits runtime ones */
   --bg-primary-rgb: 5, 5, 5;
-  --bg-secondary-rgb: 12, 12, 12;
+  --bg-secondary-rgb: 5, 5, 5;
   --bg-tertiary-rgb: 22, 22, 22;
   --bg-highlight-rgb: 34, 34, 34;
   --accent-rgb: 90, 160, 248;
@@ -290,20 +291,19 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
 
-  /* Gloss — the glass recipe. Every raised or floating surface is a tinted
-     pane with a top-down sheen and a 1px top rim light; overlays frost the
-     content beneath them (backdrop blur) on every platform. The body carries
-     one cool key light at its top edge. html.vibrancy (macOS, transparency
-     not reduced) additionally lets the desktop show through the frame.
-     Surface tokens are full `background` values (sheen layer + tint), so
-     use them with `background:`, never `background-color:`. */
-  --gloss-rgb: 190, 205, 255;                      /* cool key light */
-  --app-gloss: radial-gradient(90% 40% at 50% 0%, rgba(var(--gloss-rgb), 0.1), transparent 70%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0) 30%);
+  /* Gloss — the glass recipe. Raised and floating surfaces are tinted panes
+     with a top-down sheen and a 1px top rim light; overlays frost the content
+     beneath them (backdrop blur) on every platform. The frame itself is flat:
+     no key light, no sheen, so the top of the window is exactly as black as
+     the terminal. html.vibrancy (macOS, transparency not reduced) lets the
+     desktop show through the frame. Surface tokens are full `background`
+     values (sheen layer + tint), so use them with `background:`, never
+     `background-color:`. */
+  --app-gloss: none;                                /* the frame is one flat black */
   --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.012) 45%, rgba(255, 255, 255, 0));
   --sheen-strong: linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.035));
   --bg-app: var(--bg-secondary);                                        /* body paint = the frame */
-  --surface-glass: var(--sheen), rgba(var(--bg-secondary-rgb), 0.6);    /* resting chrome (sidebar, side panels) */
+  --surface-glass: rgba(var(--bg-secondary-rgb), 0.6);                  /* resting chrome (sidebar, side panels) — flat, no sheen */
   --surface-overlay: var(--sheen), rgba(var(--bg-tertiary-rgb), 0.82);  /* transient overlays (menus, palettes, modals) */
   --blur-glass: none;                       /* frame blur only matters once the desktop shows through */
   --blur-overlay: blur(22px) saturate(1.4); /* frosted glass over content */
@@ -376,7 +376,7 @@
 
 html.vibrancy {
   --bg-app: rgba(var(--bg-secondary-rgb), 0.72);
-  --surface-glass: var(--sheen), rgba(var(--bg-secondary-rgb), 0.3);
+  --surface-glass: rgba(var(--bg-secondary-rgb), 0.3);
   --surface-overlay: var(--sheen), rgba(var(--bg-tertiary-rgb), 0.78);
   --blur-glass: blur(28px) saturate(1.4);
   --blur-overlay: blur(22px) saturate(1.4);
