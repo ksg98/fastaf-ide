@@ -4,11 +4,12 @@
 }
 
 /* ── Sidebar ───────────────────────────────────────────────────────────────
-   Part of the frame: same surface as the toolbar and status bar, no edge
-   line. Hierarchy comes from type — repos are 13px/600 rows, branches are
-   13px/400 rows indented beneath them, terminal sessions 12px beneath those.
-   Icons are monochrome (shape = kind); only states that need attention get
-   colour. Everything sits on a 28px row rhythm. */
+   Part of the frame: same surface as the toolbar and status bar, divided
+   from the content by one hairline. Hierarchy comes from type — repos are
+   13px/500 rows, branches are 13px/400 rows indented beneath them, terminal
+   sessions 12px beneath those. Icons are monochrome (shape = kind); only
+   states that need attention get colour. Everything sits on a 28px row
+   rhythm. */
 .sidebar {
   width: var(--sidebar-width);
   min-width: 200px;
@@ -16,6 +17,7 @@
   flex-shrink: 0;
   background: var(--surface-glass);
   backdrop-filter: var(--blur-glass);
+  border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   position: relative;
@@ -49,17 +51,23 @@
   container-name: sidebar-list;
 }
 
-/* The list's own scrollbar is thinner than the app default — it sits right
-   against the content well and should not compete with it. */
+/* The list's own scrollbar is thinner than the app default and, like every
+   scrollbar in the app, only shows its thumb while the pointer is over the
+   list — otherwise a long repo list wears a permanent grey bar down its edge. */
 .content::-webkit-scrollbar {
   width: 8px;
 }
 
 .content::-webkit-scrollbar-thumb {
-  background: var(--wash-2);
+  background: transparent;
   background-clip: padding-box;
   border: 2px solid transparent;
   border-radius: 8px;
+}
+
+.content:hover::-webkit-scrollbar-thumb {
+  background: var(--wash-2);
+  background-clip: padding-box;
 }
 
 .content::-webkit-scrollbar-thumb:hover {
@@ -278,7 +286,7 @@
 .repoName {
   flex: 1;
   font-size: var(--font-md);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--fg-primary);
   letter-spacing: -0.005em;
   white-space: nowrap;

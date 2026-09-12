@@ -1,12 +1,12 @@
 /* Shared Panel Styles (DiffPanel, MarkdownPanel, FileBrowserPanel, etc.)
-   Side panels are part of the frame: same surface, 36px header, 13px/600
-   title, icon buttons on the right. */
+   Side panels are part of the frame: same surface, a header the height of
+   the tab strip, 13px/500 title, icon buttons on the right. */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 36px;
-  min-height: 36px;
+  height: var(--tab-bar-height);
+  min-height: var(--tab-bar-height);
   padding: 0 6px 0 12px;
   background: transparent;
   border-bottom: 1px solid var(--border-subtle);
@@ -36,7 +36,7 @@
 
 .title {
   color: var(--fg-primary);
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
   flex-shrink: 0;
 }

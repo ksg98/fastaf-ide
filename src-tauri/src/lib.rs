@@ -2301,7 +2301,15 @@ pub async fn run_remote(port: u16) -> anyhow::Result<()> {
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
 
-    let router = mcp_http::build_remote_router(state.clone());
+    // TUIC_REMOTE_FULL_API=1 serves the desktop API (config, plugins, …) instead of
+    // the trimmed remote router, so the full web UI can run against a headless
+    // backend (dev previews, end-to-end checks). Auth is enforced either way.
+    let router = if std::env::var_os("TUIC_REMOTE_FULL_API").is_some() {
+        tracing::info!(source = "remote", "Serving the full desktop API (TUIC_REMOTE_FULL_API)");
+        mcp_http::build_router(state.clone(), true, false)
+    } else {
+        mcp_http::build_remote_router(state.clone())
+    };
     let svc = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     tokio::select! {

@@ -232,7 +232,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	let cachedErrorRgb = "255, 85, 85";
 	let cachedSuccessRgb = "61, 214, 140";
 	let cachedFgMutedRgb = "140, 140, 140";
-	let cachedFgPrimaryRgb = "224, 224, 224";
 	let cachedWarning = "#f5a623";
 	let cachedError = "#ff5555";
 	let cachedSuccess = "#3dd68c";
@@ -389,7 +388,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		cachedErrorRgb = cs.getPropertyValue("--error-rgb").trim() || cachedErrorRgb;
 		cachedSuccessRgb = cs.getPropertyValue("--success-rgb").trim() || cachedSuccessRgb;
 		cachedFgMutedRgb = cs.getPropertyValue("--fg-muted-rgb").trim() || cachedFgMutedRgb;
-		cachedFgPrimaryRgb = cs.getPropertyValue("--fg-primary-rgb").trim() || cachedFgPrimaryRgb;
 		cachedWarning = cs.getPropertyValue("--warning").trim() || cachedWarning;
 		cachedError = cs.getPropertyValue("--error").trim() || cachedError;
 		cachedSuccess = cs.getPropertyValue("--success").trim() || cachedSuccess;
@@ -3335,21 +3333,13 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			>
 				<div
 					ref={scrollThumbRef!}
-					onMouseEnter={(e) => {
-						// Darker, subtle hover — a fg-primary wash at 0.3 keeps the old
-						// #cccccc @0.3 feel while flowing through the theme pipeline.
-						e.currentTarget.style.background = chromeTint(cachedFgPrimaryRgb, 0.3);
-					}}
-					onMouseLeave={(e) => {
-						e.currentTarget.style.background = "var(--bg-highlight)";
-					}}
+					// Colour lives in styles.css (.term-scroll-thumb): invisible until the
+					// terminal is hovered, like every other scrollbar in the app.
+					class="term-scroll-thumb"
 					style={{
 						width: "10px",
 						"margin-left": "2px",
 						"border-radius": "5px",
-						// Harmonized with the editor scrollbar: same --bg-highlight resting
-						// color, --fg-muted on hover, and a hand pointer cursor.
-						background: "var(--bg-highlight)",
 						"min-height": "20px",
 						position: "absolute",
 						top: "0",

@@ -257,9 +257,11 @@
   --radius-full: 50%;
   --radius-panel: 12px;  /* dialogs, floating panels */
 
-  /* Content well — the recessed dark area that hosts terminals/editors */
-  --well-gap: 8px;
-  --well-radius: 10px;
+  /* Content well — terminals/editors sit flush against the chrome, edge to
+     edge, separated by hairlines rather than cut out as a card. The tokens
+     stay so a theme can bring the inset back. */
+  --well-gap: 0px;
+  --well-radius: 0px;
 
   /* Spacing — 4px grid, numeric suffix = multiples of 4 */
   --space-half: 2px;
@@ -349,9 +351,9 @@
   --shadow-2xl: 0 28px 70px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.35);
 
   --sidebar-width: 300px;
-  --toolbar-height: 32px;
-  --tab-bar-height: 36px;
-  --status-height: 28px;
+  --toolbar-height: 36px;
+  --tab-bar-height: 34px;
+  --status-height: 26px;
   --font-mono: "JetBrains Mono", "Fira Code", "Hack", "Cascadia Code", "Source Code Pro", "DejaVu Sans Mono", monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Liberation Sans", sans-serif;
 
@@ -439,7 +441,9 @@ button > span > svg {
   flex-shrink: 0;
 }
 
-/* ── Scrollbars — thin overlay-style thumbs, no track paint. The wide 14px
+/* ── Scrollbars — overlay-style: no track paint, and the thumb only appears
+   while the pointer is over the scrolling element (a permanently visible
+   thumb reads as a stray grey bar down the side of a panel). The wide 14px
    "terminal" look is scoped to central pane content (.pane-content) below. */
 ::-webkit-scrollbar {
   width: 10px;
@@ -451,10 +455,15 @@ button > span > svg {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
+  background: transparent;
   background-clip: padding-box;
   border: 3px solid transparent;
   border-radius: 8px;
+}
+
+:hover::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
