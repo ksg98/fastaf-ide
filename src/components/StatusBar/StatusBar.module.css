@@ -3,12 +3,13 @@
   50% { opacity: 1; }
 }
 
-/* StatusBar — part of the frame. 28px, 12px type, no hairline: the content
-   well above already ends with its own soft edge. */
+/* StatusBar — part of the frame. 26px, 12px type, one hairline above to
+   close the content area. */
 .bar {
   height: var(--status-height);
   min-height: var(--status-height);
   background: transparent;
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   padding: 0 8px 0 12px;

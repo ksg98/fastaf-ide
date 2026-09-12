@@ -56,21 +56,22 @@ spacing:
 
 **Creative North Star: "The Quiet Instrument, cut in black glass"**
 
-FastAF is a frame around live terminals. The frame (toolbar, sidebar, status
-bar, side panels) is one continuous pane of smoked glass lit from the top
-edge; the content (terminals, editors, diffs) sits in a matte black well with
-a soft rounded edge. Everything is near-black: edges come from 1px rim lights
-and top-down sheens, not from tone steps, and anything that floats frosts what
-is beneath it. Type carries hierarchy; colour is spent only on things that
-need a glance. Density is welcome, decoration is not.
+FastAF is a frame around live terminals. The whole window is one flat black
+surface — toolbar, sidebar, tab strip, content, side panels, status bar —
+divided the way an editor divides its panes: by 1px hairlines, never by
+nesting one box inside another. Nothing in the chrome is a card, a well or a
+pill. Anything that floats (menus, palettes, dialogs) is a tinted pane that
+frosts what is beneath it. Type carries hierarchy and stays light; colour is
+spent only on things that need a glance. Density is welcome, decoration is
+not.
 
 **Platform:** Desktop only (Tauri v2 webview). `src/mobile/` is a separate
 Capacitor companion app outside this system's scope.
 
 **Key characteristics:**
-- **Frame and well.** Smoked glass around a black well, one rim-lit edge. No panel borders, no tab underlines.
-- **Glass, not grey.** Raised things (tabs, buttons, chips) carry a top sheen and a 1px rim light; floating things (menus, palettes, dialogs) are tinted panes that blur the content beneath them.
-- **Type does the work.** 13px system UI, weights 400/500/600, sentence case everywhere. Mono only for terminal content, code and hashes.
+- **One surface, hairline divisions.** Sidebar, tabs, content, side panels and status bar sit edge to edge on the same black; a single 1px line separates neighbours. No panel cards, no rounded well, no tab pills or underlines.
+- **Glass only where it floats.** Buttons and chips carry a top sheen and a 1px rim light; menus, palettes and dialogs are tinted panes that blur the content beneath them. The chrome itself is flat.
+- **Type does the work.** 13px system UI, weights 400/500 (600 only for dialog titles and primary buttons), sentence case everywhere. Mono only for terminal content, code and hashes.
 - **Icon = kind, dot = state.** Monochrome 14–16px inline SVGs; a coloured 7px dot (or pulsing icon) says busy, waiting, failed, unseen.
 - **Tints, not fills.** Semantic colours appear as text, dots and 12–16 % washes — never as solid blocks behind black text.
 - **Floating things cast shadows; resting things don't.**
@@ -83,9 +84,9 @@ family for semantics. Dark by default. Values live in `src/global.css`
 runtime.
 
 ### Surfaces
-- **Well** (#050505): terminals, editors, diffs, recessed inputs.
-- **Frame** (#050505): toolbar, sidebar, status bar, side panels. The same black as the well; no key light, no gradient. The well is told apart by its 1px rim, not by tone.
-- **Raised** (#161616): chips, menus, popovers, the active tab — always with `--sheen-strong` on top.
+- **Content** (#050505): terminals, editors, diffs, recessed inputs.
+- **Frame** (#050505): toolbar, sidebar, status bar, side panels. The same black as the content; no key light, no gradient. Regions are told apart by one hairline, not by tone.
+- **Raised** (#161616): chips, menus, popovers — always with `--sheen-strong` on top. The active tab is not raised: it is a flat `--wash-1` block.
 - **Highlight** (#222222): pressed / strong hover.
 - **Hairline**: white at 8 % (16 % when hovered or focused). Rim light: white at 9 % along the top edge of anything raised. Washes: white at 4 / 7 / 7 / 12 %.
 
@@ -107,9 +108,10 @@ runtime.
 **The Tint Rule.** A semantic colour is used as text, a dot, or a
 `color-mix(... 12–16%)` wash. Never a solid fill with black text.
 
-**The One Edge Rule.** The well's soft edge is the only structural line the
-main layout needs. Add a hairline only where two same-tone regions would
-otherwise merge (a panel header, a section divider).
+**The One Line Rule.** Two neighbouring regions share exactly one 1px
+hairline between them — never a border each, never a gap, never a box with
+its own edge inside another. Sidebar | content | side panel; toolbar / tab
+strip / content / status bar; tile | tile.
 
 ## 3. Typography
 
@@ -144,14 +146,15 @@ on a 60 % black scrim. Vibrancy (macOS) is opt-in through `html.vibrancy` tokens
 - 28px, recessed (well colour), hairline, 6px radius. Hover strengthens the hairline; focus = accent border + 3px ring at 22 %.
 
 ### Tabs
-- 26px pills in a 36px strip on the frame. Active = raised pill with a soft 1px edge. State via a 7px dot; kind via icon colour. No underline, no top bar.
+- Flat text tabs filling a 34px strip, square, 12px side padding, 13px/400 in every state. Active = `--wash-1` block with primary text; resting = transparent with a hover wash. State via a 7px dot; kind via icon colour. No pill, no underline, no top bar.
+- Multiview tiles: square, one shared hairline between neighbours (1px grid gap, tiles outline into it), 24px flat header.
 
 ### Lists (sidebar, files, git changes)
 - 28px rows inset 6px with 6px radius. Hover = wash; selected = 13 % accent wash. Actions reveal in place on hover.
-- Repo rows: leading chevron, 13px/600. Branch rows: indented 24px, monochrome kind icon, quiet tabular stats on the right, tinted PR pill.
+- Repo rows: leading chevron, 13px/500. Branch rows: indented 24px, monochrome kind icon, quiet tabular stats on the right, tinted PR pill.
 
 ### Side panels
-- Frame surface, 36px header (13px/600 title, icon buttons), one hairline under the header.
+- Frame surface, one hairline on the left edge, header the height of the tab strip (13px/500 title, icon buttons), one hairline under the header.
 
 ### Menus, popovers, dialogs
 - Raised surface, hairline, 8px radius (12px for dialogs), dropdown/2XL shadow, 4px inset, 28px items.
@@ -173,7 +176,7 @@ on a 60 % black scrim. Vibrancy (macOS) is opt-in through `html.vibrancy` tokens
 ## 6. Do's and Don'ts
 
 ### Do
-- **Do** let the frame/well tone separate regions; reach for a hairline last.
+- **Do** divide regions with one shared hairline; never wrap a region in its own bordered, rounded or shadowed box.
 - **Do** keep every control on the 28px / 26px rhythm and the 6px radius.
 - **Do** express state with dots and pulses, kind with monochrome icons.
 - **Do** tint semantic colour (12–16 %) and keep the accent for selection and primary actions.

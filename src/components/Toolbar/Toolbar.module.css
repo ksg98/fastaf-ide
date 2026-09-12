@@ -1,8 +1,8 @@
 /* Toolbar
  *
  * Part of the frame: paints nothing of its own (the frame surface shows
- * through) and draws no hairline — the content well below provides the
- * separation. Every control is a 26px icon button or a quiet chip.
+ * through); one hairline underneath separates it from the sidebar and tab
+ * strip. Every control is a 26px icon button or a quiet chip.
  *
  * The 78px macOS traffic-light inset and every -webkit-app-region rule are
  * load-bearing (Tauri drag region + native window controls) — do not touch. */
@@ -10,6 +10,7 @@
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
   background: transparent;
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   padding: 0 10px 0 12px;
@@ -153,10 +154,11 @@
   flex-shrink: 0;
 }
 
+/* Breadcrumb weight stays regular: the branch reads by colour, not by bold. */
 .repoName {
   font-size: var(--font-md);
-  font-weight: 500;
-  color: var(--fg-secondary);
+  font-weight: 400;
+  color: var(--fg-muted);
   white-space: nowrap;
 }
 
@@ -168,7 +170,7 @@
 
 .branchName {
   font-size: var(--font-md);
-  font-weight: 500;
+  font-weight: 400;
   color: var(--fg-primary);
   white-space: nowrap;
 }

@@ -230,7 +230,7 @@ export const TerminalArea: Component<TerminalAreaProps> = (props) => {
 					mvOpen() && mvTileIds().length > 0
 						? {
 								display: "grid",
-								gap: "2px",
+								gap: "1px" /* tiles outline into this gap: one shared hairline */,
 								"grid-template-columns": mvColTracks()
 									.map((w) => `minmax(0, ${w.toFixed(4)}fr)`)
 									.join(" "),

@@ -42,7 +42,8 @@
   border-left: none !important;
 }
 
-/* Main column — the frame shows through; the content well below is the card. */
+/* Main column — one flat surface. Regions are divided by 1px hairlines, the
+   way an editor's panes are, never by nesting one box inside another. */
 #main {
   flex: 1;
   display: flex;
@@ -51,7 +52,8 @@
   background: transparent;
 }
 
-/* Tab strip — sits on the frame above the well. Tabs are pills (TabBar.module.css). */
+/* Tab strip — flush with the left edge of the column; tabs are flat text
+   (TabBar.module.css). The hairline under it belongs to the content below. */
 #tab-bar {
   height: var(--tab-bar-height);
   min-height: var(--tab-bar-height);
@@ -61,9 +63,8 @@
   padding: 0 var(--well-gap);
 }
 
-/* The content well — terminals, editors and diffs live in one matte black
-   card cut into the smoked-glass frame. A 1px rim light is the only edge;
-   no hairlines needed around it. */
+/* The content area — terminals, editors and diffs, edge to edge under the
+   tab strip. One hairline on top separates it from the tabs. */
 #terminal-container {
   flex: 1;
   display: flex;
@@ -71,12 +72,13 @@
   position: relative;
   margin: 0 var(--well-gap) var(--well-gap);
   background: var(--bg-primary);
+  border-top: 1px solid var(--border-subtle);
   border-radius: var(--well-radius);
-  box-shadow: 0 0 0 1px var(--border-subtle), inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
+/* Focus mode hides the tab strip; the toolbar's own hairline then does the job. */
 #app.focus-mode #terminal-container {
-  margin-top: var(--well-gap);
+  border-top: none;
 }
 
 /* Highlight applied (via JS) to the folder row under a Tauri drag-drop cursor.
@@ -125,13 +127,16 @@
    Scoped under #terminal-panes.multiview so the id out-specifies
    .terminal-pane.active; detached panes' inline display:none still wins. --- */
 #terminal-panes.multiview {
-  padding-top: 28px; /* strip for the top-right controls (pill + "+") */
+  padding-top: 26px; /* strip for the top-right controls (pill + "+") */
 }
 
 #terminal-panes.multiview > .terminal-pane {
   display: none; /* diff/md/edit panes and non-tile terminals stay hidden */
 }
 
+/* Tiles are divided like editor groups: the grid gap is 1px and every tile
+   draws a 1px outline into it, so neighbours share one hairline instead of
+   each carrying a rounded border of its own. */
 #terminal-panes.multiview > .terminal-pane.mv-tile {
   display: block;
   position: relative;
@@ -140,18 +145,16 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding: 26px 4px 4px; /* top band hosts the tile header */
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  transition: border-color var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out);
+  padding: 24px 4px 2px 6px; /* top band hosts the tile header */
+  border: none;
+  border-radius: 0;
+  outline: 1px solid var(--border-subtle);
+  transition: outline-color var(--duration-fast) var(--ease-out);
 }
 
 #terminal-panes.multiview > .terminal-pane.mv-tile.active {
-  border-color: var(--accent);
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.2);
+  outline-color: rgba(var(--accent-rgb), 0.6);
+  z-index: 1; /* its hairline wins over the neighbours' */
 }
 
 .mv-tile-header {
@@ -164,13 +167,10 @@
   align-items: center;
   gap: 6px;
   padding: 0 8px;
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   color: var(--fg-muted);
-  background: var(--surface-glass);
-  backdrop-filter: var(--blur-glass);
-  -webkit-backdrop-filter: var(--blur-glass);
+  background: var(--bg-primary);
   border-bottom: 1px solid var(--border-subtle);
-  box-shadow: var(--highlight-inset);
   cursor: pointer;
   user-select: none;
 }
@@ -192,9 +192,7 @@
 
 .mv-tile-status {
   flex: none;
-  text-transform: uppercase;
-  font-size: var(--font-2xs);
-  letter-spacing: 0.5px;
+  font-size: var(--font-xs);
 }
 
 .mv-tile-status.busy {
@@ -248,7 +246,7 @@
 /* Top-right multiview controls: overflow pill + "+" project picker (glass) */
 .mv-controls {
   position: absolute;
-  top: 4px;
+  top: 3px;
   right: 8px;
   z-index: var(--z-toolbar);
   display: flex;
@@ -434,6 +432,23 @@
 }
 
 [data-terminal-id] .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-muted);
+}
+
+/* Canvas terminal scrollbar thumb (CanvasTerminal.tsx) — like every other
+   scrollbar, invisible until the terminal is hovered; the editor's resting
+   and hover tints, and it stays lit while being dragged. */
+.term-scroll-thumb {
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+[data-terminal-id]:hover .term-scroll-thumb {
+  background: var(--bg-highlight);
+}
+
+[data-terminal-id] .term-scroll-thumb:hover,
+[data-terminal-id] .term-scroll-thumb:active {
   background: var(--fg-muted);
 }
 

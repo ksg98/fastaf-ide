@@ -3,9 +3,10 @@
   50% { opacity: 1; }
 }
 
-/* TabBar — pill tabs resting on the frame above the content well. Type is
-   carried by the leading icon colour, state by the dot; the active tab is a
-   raised pill, never an underline or a coloured bar. */
+/* TabBar — flat text tabs the full height of the strip, like an editor's.
+   Type is carried by the leading icon colour, state by the dot; the active
+   tab is a slightly lighter block with brighter text — no pill, no underline,
+   no coloured bar. */
 .tabBarWrapper {
   display: flex;
   flex: 1;
@@ -38,7 +39,7 @@
 .tabs {
   display: flex;
   flex: 1;
-  gap: 2px;
+  gap: 0;
   overflow-x: auto;
   align-items: center;
   height: 100%;
@@ -119,13 +120,13 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  height: 26px;
-  padding: 0 8px 0 9px;
+  height: 100%;
+  padding: 0 12px;
   min-width: 56px;
   max-width: 220px;
   flex-shrink: 0;
   background: transparent;
-  border-radius: var(--radius-md);
+  border-radius: 0;
   color: var(--fg-muted);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
@@ -144,11 +145,11 @@
   }
 }
 
-/* Active tab — a raised pill. The old accent top-bar is gone; the leading
-   icon colour already says what kind of tab this is. */
+/* Active tab — a flat, slightly lighter block. The leading icon colour
+   already says what kind of tab this is. */
 .tab.active {
-  background: var(--sheen-strong), var(--bg-tertiary);
-  box-shadow: var(--highlight-inset), 0 0 0 1px var(--border-subtle), 0 2px 6px rgba(0, 0, 0, 0.35);
+  background: var(--wash-1);
+  box-shadow: none;
 }
 
 .tab.active::before {
@@ -170,7 +171,7 @@
 
 .tabName {
   font-size: var(--font-md);
-  font-weight: 450;
+  font-weight: 400;
   color: var(--fg-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -179,9 +180,9 @@
   transition: color var(--duration-fast) var(--ease-out);
 }
 
+/* Same weight active and resting, so switching tabs never reflows the strip. */
 .tab.active .tabName {
   color: var(--fg-primary);
-  font-weight: 500;
 }
 
 .tabNameInput {
