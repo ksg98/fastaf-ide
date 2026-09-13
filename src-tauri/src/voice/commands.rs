@@ -243,6 +243,7 @@ pub fn voice_delete_model(
         voice.clear_engine();
     }
     assets::delete_model(model)?;
+    tracing::info!(source = "voice", model = model.name(), "Voice model deleted from Settings");
     Ok(format!("Deleted {}", model.display_name()))
 }
 

@@ -1,6 +1,7 @@
-import { type Component, For, onMount, Show } from "solid-js";
+import { type Component, createSignal, For, onMount, Show } from "solid-js";
 import { type VoiceInfo, type VoiceModelInfo, voiceStore } from "../../../stores/voice";
 import { cx } from "../../../utils";
+import { ConfirmDialog } from "../../ConfirmDialog/ConfirmDialog";
 import d from "../DictationSettings.module.css";
 import { SettingSelect, SettingSlider, SettingToggle } from "../SettingFields";
 import s from "../Settings.module.css";
@@ -17,6 +18,7 @@ const DownloadBar: Component = () => (
 
 /** One Kokoro graph: size, download state, and the actions for it. */
 const ModelRow: Component<{ model: VoiceModelInfo }> = (props) => {
+	const [confirmDelete, setConfirmDelete] = createSignal(false);
 	const isSelected = () => voiceStore.state.config.model === props.model.name;
 	const isDownloading = () => voiceStore.state.downloading === props.model.name;
 	const sizeLabel = () =>
@@ -53,15 +55,24 @@ const ModelRow: Component<{ model: VoiceModelInfo }> = (props) => {
 					<DownloadBar />
 				</Show>
 				<Show when={props.model.downloaded}>
-					<button
-						class={d.modelDelete}
-						onClick={() => voiceStore.deleteModel(props.model.name)}
-						title="Delete download"
-					>
+					<button class={d.modelDelete} onClick={() => setConfirmDelete(true)} title="Delete download">
 						&times;
 					</button>
 				</Show>
 			</div>
+			<ConfirmDialog
+				visible={confirmDelete()}
+				title="Delete model?"
+				message={`${props.model.display_name} (${sizeLabel()}) will be removed from this Mac. Using it again means downloading it again.`}
+				confirmLabel="Delete"
+				kind="warning"
+				defaultButton="cancel"
+				onClose={() => setConfirmDelete(false)}
+				onConfirm={() => {
+					setConfirmDelete(false);
+					void voiceStore.deleteModel(props.model.name);
+				}}
+			/>
 		</div>
 	);
 };
