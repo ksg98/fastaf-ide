@@ -440,7 +440,6 @@
    and hover tints, and it stays lit while being dragged. */
 .term-scroll-thumb {
   background: transparent;
-  transition: background var(--duration-fast) var(--ease-out);
 }
 
 [data-terminal-id]:hover .term-scroll-thumb {
