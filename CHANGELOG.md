@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-09-12
+
+### Fixed
+
+- **Opening the Voice settings tab, or starting agent mode in chat, froze the whole window** — `voice_status` locked the playback state twice inside one expression. The lock is not reentrant and a temporary guard in a function's tail expression lives until the function returns, so the second lock waited on the first forever. It is a sync command, so it ran on the main thread and every call hung the window. The Voice tab calls it on open and voice/agent mode polls it every 75 ms. The lock is now taken once, up front, and a regression test fails within 5 s on the old code instead of hanging.
+- **Interrupted model downloads resume instead of starting over** — a Whisper or Kokoro download that was cut off by an app restart, an update or a crash threw its progress away, because the partial file was recreated on every attempt; a 1.6 GB Large v3 Turbo download rarely survived. Downloads now continue the partial file with an HTTP Range request when the server honours it (HuggingFace does), start over when it does not, and keep the partial when the transfer ends early so the next attempt picks up where it stopped.
+- **Deleting a downloaded model asks first** — the × next to a model in the Dictation and Voice settings deleted it on a single click, one button away from Use, and logged nothing. Both now confirm (Enter picks Cancel), and deletions, downloads and download failures are written to the log so a missing model can be traced.
+
+### Changed
+
+- **One flat surface** — the window is one black surface divided by hairlines, like an editor. The terminal area runs edge to edge under the tab strip instead of sitting in a rounded, ring-lit card; tabs are flat text the full height of the strip with the same weight active or resting, so switching never reflows the strip; multiview tiles share one hairline through a 1px gap; chrome type drops to regular weight. Scrollbar thumbs in the app, the sidebar and the terminal only appear while the pointer is over the scrolling element.
+- `tuic-remote` accepts `TUIC_REMOTE_FULL_API=1` to serve the full desktop API headless, for developing the UI in a browser without opening a window.
+
+## [1.8.0] - 2026-09-10
+
+### Added
+
+- **AI chat rebuilt as a conversation** — the header keeps only what the chat is attached to; mode, model, effort, steps and approvals are chips on the composer. The thread is flat: assistant text sits on the panel, your turns are quiet tinted blocks, tool calls are one-line expandable rows, and agent progress, results, errors and approvals are rows at the end of the thread instead of banners above it. The empty state offers three starter prompts and a hand-off to the agent.
+- **Voice orb** — a small sphere that breathes while idle, opens a halo to the microphone, brightens to the agent's own speech and orbits a glint while thinking. A 16px twin sits in the status bar so the conversation stays visible when the panel is closed.
+- **Mute without ending the session** — muting is enforced in Rust: the microphone stays open but its capture is discarded, so unmuting is instant and nothing said while muted can reach the chat. The level meter reads zero while muted.
+- **First-run onboarding** — the empty well shows the three moves (a terminal per branch, split the well, Multiview) with your real shortcuts; one coach mark at a time points at the chat toggle and at dictation; Help › Getting started tracks the milestones and can show the hints again.
+- **Copy the whole markdown document**, and ⌘A works outside editors.
+
+### Changed
+
+- **Near-black glass redesign** — a smoked-glass frame around a matte black terminal well: surfaces near-black, edges from 1px rim lights instead of tone steps, every floating surface frosts what is beneath it. The frame then dropped to the same black as the terminal so no lighter band shows across the top. Existing installs of the built-in theme pick up the retune; the previous palettes are kept as legacy themes.
+
 ## [1.7.4] - 2026-08-20
 
 ### Fixed
