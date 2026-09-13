@@ -6,6 +6,7 @@ import type { ModelInfo } from "../../stores/dictation";
 import { dictationStore, WHISPER_LANGUAGES } from "../../stores/dictation";
 import { providerRegistryStore } from "../../stores/providerRegistry";
 import { cx } from "../../utils";
+import { ConfirmDialog } from "../ConfirmDialog/ConfirmDialog";
 import { KeyComboCapture } from "../shared/KeyComboCapture";
 import d from "./DictationSettings.module.css";
 import { SettingSlider } from "./SettingFields";
@@ -13,6 +14,9 @@ import s from "./Settings.module.css";
 
 /** Single model row in the model selector list */
 const ModelRow: Component<{ model: ModelInfo }> = (props) => {
+	// Deleting throws away a download of up to 1.6 GB, one click from "Use":
+	// always ask first.
+	const [confirmDelete, setConfirmDelete] = createSignal(false);
 	const isSelected = () => dictationStore.state.selectedModel === props.model.name;
 	const isDownloading = () =>
 		dictationStore.state.downloading && dictationStore.state.selectedModel === props.model.name;
@@ -63,13 +67,26 @@ const ModelRow: Component<{ model: ModelInfo }> = (props) => {
 				<Show when={props.model.downloaded}>
 					<button
 						class={d.modelDelete}
-						onClick={() => dictationStore.deleteModel(props.model.name)}
+						onClick={() => setConfirmDelete(true)}
 						title={t("dictation.deleteModel", "Delete model")}
 					>
 						&times;
 					</button>
 				</Show>
 			</div>
+			<ConfirmDialog
+				visible={confirmDelete()}
+				title={t("dictation.deleteModelTitle", "Delete model?")}
+				message={`${props.model.display_name} (${sizeLabel()}) will be removed from this Mac. Using it again means downloading it again.`}
+				confirmLabel={t("dictation.deleteModelConfirm", "Delete")}
+				kind="warning"
+				defaultButton="cancel"
+				onClose={() => setConfirmDelete(false)}
+				onConfirm={() => {
+					setConfirmDelete(false);
+					void dictationStore.deleteModel(props.model.name);
+				}}
+			/>
 		</div>
 	);
 };

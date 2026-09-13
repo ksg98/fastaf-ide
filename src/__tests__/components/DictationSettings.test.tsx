@@ -1,4 +1,4 @@
-import { fireEvent, render } from "@solidjs/testing-library";
+import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mockInvoke } from "../mocks/tauri";
 
@@ -202,12 +202,23 @@ describe("DictationSettings – Model Selector", () => {
 		expect(mockStore.downloadModel).toHaveBeenCalledWith("small");
 	});
 
-	it("delete button calls deleteModel with model name", () => {
+	it("delete button asks first, then calls deleteModel with model name", () => {
 		const { container } = render(() => <DictationSettings />);
 		const rows = container.querySelectorAll(".modelRow");
 		const deleteBtn = rows[1].querySelector(".modelDelete");
 		fireEvent.click(deleteBtn!);
+		// A 1.6 GB download must not vanish on one click.
+		expect(mockStore.deleteModel).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 		expect(mockStore.deleteModel).toHaveBeenCalledWith("large-v3-turbo");
+	});
+
+	it("cancelling the delete keeps the model", () => {
+		const { container } = render(() => <DictationSettings />);
+		const rows = container.querySelectorAll(".modelRow");
+		fireEvent.click(rows[1].querySelector(".modelDelete")!);
+		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+		expect(mockStore.deleteModel).not.toHaveBeenCalled();
 	});
 
 	it("does not allow selecting a not-downloaded model", () => {

@@ -137,6 +137,8 @@ describe("VoiceTab", () => {
 		);
 		render(() => <VoiceTab />);
 		fireEvent.click(screen.getAllByTitle("Delete download")[0]);
+		expect(store.deleteModel).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 		expect(store.deleteModel).toHaveBeenCalledWith("q8f16");
 	});
 

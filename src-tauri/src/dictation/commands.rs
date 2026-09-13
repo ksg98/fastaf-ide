@@ -174,7 +174,11 @@ pub async fn download_whisper_model(app: AppHandle, model_name: String) -> Resul
             }),
         );
     })
-    .await?;
+    .await
+    .inspect_err(|e| {
+        tracing::warn!(source = "dictation", model = whisper_model.name(), "Whisper model download failed: {e}");
+    })?;
+    tracing::info!(source = "dictation", model = whisper_model.name(), "Whisper model downloaded to {}", path.display());
 
     Ok(format!("Downloaded to {}", path.display()))
 }
@@ -195,6 +199,9 @@ pub fn delete_whisper_model(
     }
 
     model::delete_model(whisper_model)?;
+    // Logged so a model that goes missing can be traced to this, the only
+    // code path that removes one.
+    tracing::info!(source = "dictation", model = whisper_model.name(), "Whisper model deleted from Settings");
     Ok(format!("Deleted {}", whisper_model.display_name()))
 }
 
