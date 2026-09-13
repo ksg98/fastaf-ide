@@ -51,26 +51,35 @@ pub struct VoiceStatus {
 
 #[tauri::command]
 pub fn voice_status(voice: State<'_, VoiceState>, dictation: State<'_, DictationState>) -> VoiceStatus {
+    status_of(&voice, &dictation)
+}
+
+fn status_of(voice: &VoiceState, dictation: &DictationState) -> VoiceStatus {
     // Deliberately reads `loaded_model` rather than locking `kokoro`: this is
     // polled every 75 ms for the level meter, and the engine lock is held for
     // the length of a synthesis pass.
     let loaded_model = voice.loaded_model.lock().clone();
     let muted = voice.muted.load(Ordering::Acquire);
+    // Lock `playback` exactly once, in its own statement, so the guard is gone
+    // before anything else is read. parking_lot mutexes are not reentrant, and
+    // a guard created inside the struct literal below would live until the end
+    // of the function: locking `playback` a second time there deadlocked this
+    // command — which runs on the main thread — and froze the whole window.
+    let (speaking, output_level) = {
+        let playback = voice.playback.lock();
+        let playback = playback.as_ref();
+        (
+            playback.is_some_and(Playback::is_speaking),
+            playback.map_or(0.0, Playback::output_level),
+        )
+    };
     VoiceStatus {
         engine_state: if loaded_model.is_some() { "ready" } else { "stopped" }.to_string(),
         loaded_model,
         session_active: voice.active.load(Ordering::Acquire),
         muted,
-        speaking: voice
-            .playback
-            .lock()
-            .as_ref()
-            .is_some_and(Playback::is_speaking),
-        output_level: voice
-            .playback
-            .lock()
-            .as_ref()
-            .map_or(0.0, Playback::output_level),
+        speaking,
+        output_level,
         // Report silence while muted rather than the true input level. The
         // capture is still running (see VoiceState::muted), so the meter would
         // otherwise keep dancing to a microphone whose audio is being thrown
@@ -78,7 +87,7 @@ pub fn voice_status(voice: State<'_, VoiceState>, dictation: State<'_, Dictation
         audio_level: if muted {
             0.0
         } else {
-            current_audio_level(&voice, &dictation)
+            current_audio_level(voice, dictation)
         },
     }
 }
@@ -466,4 +475,31 @@ pub fn voice_set_config(app: AppHandle, config: VoiceConfig) -> Result<(), Strin
 #[tauri::command]
 pub fn voice_list_output_devices() -> Vec<crate::notification_sound::AudioOutputDevice> {
     crate::notification_sound::list_output_devices()
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// `voice_status` is a sync command, so it runs on the main thread: if it
+    /// ever blocks, the whole window freezes. It once locked `playback` twice
+    /// in one expression and deadlocked on every call. Run it on a worker and
+    /// fail instead of hanging the test run.
+    #[test]
+    fn status_returns_without_deadlocking() {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let voice = VoiceState::new();
+            let dictation = DictationState::new();
+            let _ = status_of(&voice, &dictation);
+            let _ = status_of(&voice, &dictation);
+            tx.send(()).ok();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "voice_status blocked: a lock is being taken twice"
+        );
+    }
 }
