@@ -1,6 +1,6 @@
 //! Minimal MCP client for the peer registry.
 //!
-//! `tuic agent send` must reach the SAME authoritative delivery path the MCP
+//! `fastaf agent send` must reach the SAME authoritative delivery path the MCP
 //! `agent action=send` tool uses, so a message to a registered peer lands in
 //! that peer's inbox instead of being typed into a PTY. That path resolves the
 //! SENDER from the MCP protocol session, so this client performs the three
@@ -18,8 +18,8 @@ use crate::ipc;
 /// advertised revision; the server negotiates down if it is older.
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// The tuic session UUID of the PTY this CLI runs inside, injected by TUIC.
-/// Absent when `tuic` is run from a plain terminal outside FastAF.
+/// The fastaf session UUID of the PTY this CLI runs inside, injected by TUIC.
+/// Absent when `fastaf` is run from a plain terminal outside FastAF.
 fn tuic_session() -> Option<String> {
     std::env::var("TUIC_SESSION").ok().filter(|s| !s.is_empty())
 }
@@ -65,9 +65,9 @@ fn unwrap_tool_result(resp: &ipc::Response) -> Result<Value, String> {
 /// Open an MCP session and bind it to this PTY's peer identity.
 fn connect() -> Result<String, String> {
     let session = tuic_session().ok_or(
-        "TUIC_SESSION is not set: `tuic agent send` addresses the peer registry \
+        "TUIC_SESSION is not set: `fastaf agent send` addresses the peer registry \
          and must run inside a FastAF session. To type a prompt into an \
-         agent's terminal instead, use `tuic agent type <target> <text>`.",
+         agent's terminal instead, use `fastaf agent type <target> <text>`.",
     )?;
 
     let init = json!({
@@ -77,7 +77,7 @@ fn connect() -> Result<String, String> {
         "params": {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": { "name": "tuic-cli", "version": env!("CARGO_PKG_VERSION") },
+            "clientInfo": { "name": "fastaf-cli", "version": env!("CARGO_PKG_VERSION") },
         }
     });
     let resp = post(&init, None)?;

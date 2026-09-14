@@ -107,7 +107,7 @@ pub(crate) mod text_rank;
 pub(crate) mod themes;
 pub(crate) mod tool_search;
 #[cfg(feature = "desktop")]
-mod tuic_cli;
+mod fastaf_cli;
 #[allow(dead_code)] // Many items used only by the remote binary (not(desktop) build)
 pub(crate) mod tunnels;
 #[cfg(feature = "desktop")]
@@ -1578,8 +1578,8 @@ pub fn run() {
             // Auto-update CLI binary if installed
             #[cfg(feature = "desktop")]
             tauri::async_runtime::spawn(async {
-                if let Err(error) = tokio::task::spawn_blocking(tuic_cli::auto_update_cli).await {
-                    tracing::warn!(source = "tuic_cli", "CLI auto-update task failed: {error}");
+                if let Err(error) = tokio::task::spawn_blocking(fastaf_cli::auto_update_cli).await {
+                    tracing::warn!(source = "fastaf_cli", "CLI auto-update task failed: {error}");
                 }
             });
 
@@ -2045,12 +2045,12 @@ pub fn run() {
             notification_sound::play_notification_sound,
             notification_sound::list_audio_output_devices,
             git_graph::get_commit_graph,
-            tuic_cli::get_cli_status,
-            tuic_cli::install_cli,
-            tuic_cli::uninstall_cli,
-            tuic_cli::dismiss_cli_prompt,
-            tuic_cli::get_last_seen_version,
-            tuic_cli::set_last_seen_version,
+            fastaf_cli::get_cli_status,
+            fastaf_cli::install_cli,
+            fastaf_cli::uninstall_cli,
+            fastaf_cli::dismiss_cli_prompt,
+            fastaf_cli::get_last_seen_version,
+            fastaf_cli::set_last_seen_version,
             tunnels::tauri_commands::list_tunnel_profiles,
             tunnels::tauri_commands::save_tunnel_profile,
             tunnels::tauri_commands::delete_tunnel_profile,
@@ -2535,7 +2535,7 @@ mod tests {
     #[test]
     fn cli_auto_update_is_deferred_off_tauri_setup() {
         let source = include_str!("lib.rs");
-        let deferred_call = ["spawn_blocking(tuic_cli::", "auto_update_cli)"].concat();
+        let deferred_call = ["spawn_blocking(fastaf_cli::", "auto_update_cli)"].concat();
         assert!(
             source.contains(&deferred_call),
             "CLI version probes and replacement must not block Tauri setup"

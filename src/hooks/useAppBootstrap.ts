@@ -37,7 +37,7 @@ export type AppBootstrapOptions = InitOptions & {
 	restoreDetachedPanels: () => void;
 	setWhatsNewVersion: (version: string) => void;
 	openSettings: (tab?: string) => void;
-	/** Add a repo by path — wired to the deep link `tuic://open-repo` (`tuic <dir>`). */
+	/** Add a repo by path — wired to the deep link `tuic://open-repo` (`fastaf <dir>`). */
 	openRepoPath: (path: string) => Promise<void>;
 	confirm: (options: {
 		title: string;
@@ -101,14 +101,14 @@ function offerCliInstall(confirm: AppBootstrapOptions["confirm"]): void {
 		.then(async (status) => {
 			if (status.installed || status.prompt_dismissed) return;
 			const confirmed = await confirm({
-				title: "Install tuic CLI?",
+				title: "Install fastaf CLI?",
 				message:
-					"The tuic command lets you control FastAF from the terminal:\n\n" +
-					"• tuic open file.rs:42 — open files with line numbers\n" +
-					"• tuic ls / new / send — manage terminal sessions\n" +
-					"• tuic agent spawn claude — spawn AI agents\n" +
-					"• Works as a tmux replacement (tuic alias)\n\n" +
-					"Install to /usr/local/bin/tuic? (You can always install later from Settings.)",
+					"The fastaf command lets you control FastAF from the terminal:\n\n" +
+					"• fastaf open file.rs:42 — open files with line numbers\n" +
+					"• fastaf ls / new / send — manage terminal sessions\n" +
+					"• fastaf agent spawn claude — spawn AI agents\n" +
+					"• Works as a tmux replacement (fastaf alias)\n\n" +
+					"Install to /usr/local/bin/fastaf? (You can always install later from Settings.)",
 				kind: "info",
 			});
 			if (confirmed) {

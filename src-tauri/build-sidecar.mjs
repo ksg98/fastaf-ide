@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Cross-platform sidecar builder for tuic-bridge and tuic CLI.
+// Cross-platform sidecar builder for tuic-bridge and the fastaf CLI.
 // Called by `pnpm build:sidecar` — works on macOS, Linux, and Windows.
 // Skips rebuild if the source crate hasn't changed since last build.
 import { execSync } from "child_process";
@@ -24,7 +24,7 @@ const targetDir = envTargetDir
 
 const sidecars = [
   { pkg: "tuic-bridge", bin: "tuic-bridge", crate: "crates/tuic-bridge" },
-  { pkg: "tuic-cli", bin: "tuic", crate: "crates/tuic-cli" },
+  { pkg: "fastaf-cli", bin: "fastaf", crate: "crates/fastaf-cli" },
 ];
 
 for (const { pkg, bin, crate: cratePath } of sidecars) {

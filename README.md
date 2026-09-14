@@ -180,7 +180,7 @@ On-device speech-to-text powered by whisper-rs. No cloud service, no API keys, n
 
 FastAF isn't a black box. Everything you click, you can also drive from a script, another tool, or an AI agent.
 
-- **`tuic` CLI companion** — Open files with cursor goto (`tuic src/main.rs:42:8`), manage sessions (`ls` / `new` / `kill` / `send`), orchestrate agents (`spawn` / `ls` / `send`), plus a tmux-compatibility alias mode. Installs from Settings, auto-updates on launch.
+- **`fastaf` CLI companion** — Open files with cursor goto (`fastaf src/main.rs:42:8`), manage sessions (`ls` / `new` / `kill` / `send`), orchestrate agents (`spawn` / `ls` / `send`), plus a tmux-compatibility alias mode. Installs from Settings, auto-updates on launch.
 - **HTTP API** — REST + WebSocket + SSE on a local port: list/create/close sessions, stream live output, spawn agents, read terminal grids and scrollback, query process CPU/RSS. Script TUIC from anything that can hit a socket.
 - **MCP control surface** — TUIC is itself an MCP server. Connected agents get `session`, `agent`, `repo`, and `ui` tools — including `drive_agent` (atomic send → wait-for-idle → read) and delta cursors that return only new output. *(Distinct from the MCP Proxy Hub above, which aggregates your upstream servers.)*
 - **Custom "Open in…" launchers** — Define your own editor/tool commands with placeholder tokens: `{file}`, `{repo}`, `{fileDir}`, `{cwd}`, `{home}`, `{line}`, `{column}`. iTerm2, Tower, and the full JetBrains family ship built in.
@@ -264,7 +264,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 <details>
 <summary><strong>Developer & automation</strong> — CLI, HTTP/MCP control, command blocks, generators, process manager</summary>
 
-- `tuic` CLI: file open with cursor goto, session/agent orchestration, tmux-compat alias mode, auto-update
+- `fastaf` CLI: file open with cursor goto, session/agent orchestration, tmux-compat alias mode, auto-update
 - HTTP API (REST + WebSocket + SSE): sessions, live output stream, agent spawn, terminal grid/scrollback ops, process stats
 - MCP control surface: `session` / `agent` / `repo` / `ui` tools, `drive_agent` atomic send→wait→read, delta cursors for incremental reads
 - Custom launchers: user-defined exec + args with `{file}`/`{repo}`/`{fileDir}`/`{cwd}`/`{home}`/`{line}`/`{column}` placeholder tokens

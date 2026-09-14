@@ -7,7 +7,7 @@ threshold = 30.0
 
 # `pessimistic` (the built-in default) scores every function with no LCOV entry
 # as 0% covered. `make cov` runs `cargo llvm-cov nextest` on the `tuicommander`
-# package only, so the tuic-cli / tuic-bridge binaries are never instrumented —
+# package only, so the fastaf-cli / tuic-bridge binaries are never instrumented —
 # reporting them at 0% is fabricated data, not a finding. Omit them instead.
 # Consequence: those two binaries are invisible here until the coverage run
 # itself covers them.

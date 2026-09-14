@@ -381,21 +381,21 @@ export const TIPS: Tip[] = [
 		shortcut: `${mod}+Alt+Enter`,
 	},
 	{
-		feature: "tuic CLI",
+		feature: "fastaf CLI",
 		description:
 			"Control FastAF from the terminal. Open files, manage sessions, spawn agents, and use it as a tmux replacement. Install from Settings > General.",
 		shortcut: null,
 	},
 	{
-		feature: "tuic as tmux",
+		feature: "fastaf as tmux",
 		description:
-			"Run 'tuic alias' to create a tmux compatibility symlink. Any tool expecting tmux (like Claude Code) will use FastAF instead.",
+			"Run 'fastaf alias' to create a tmux compatibility symlink. Any tool expecting tmux (like Claude Code) will use FastAF instead.",
 		shortcut: null,
 	},
 	{
-		feature: "tuic open",
+		feature: "fastaf open",
 		description:
-			"Open files in FastAF from the terminal: 'tuic file.rs:42' opens at line 42. 'tuic .' opens the current directory as a repo.",
+			"Open files in FastAF from the terminal: 'fastaf file.rs:42' opens at line 42. 'fastaf .' opens the current directory as a repo.",
 		shortcut: null,
 	},
 	{

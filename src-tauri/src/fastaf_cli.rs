@@ -1,8 +1,8 @@
-//! Tauri commands for managing the `tuic` CLI binary installation.
+//! Tauri commands for managing the `fastaf` CLI binary installation.
 //!
 //! The CLI binary is embedded as a sidecar. These commands handle:
 //! - Checking if the CLI is installed in PATH
-//! - Installing the CLI (copy sidecar to /usr/local/bin/tuic)
+//! - Installing the CLI (copy sidecar to /usr/local/bin/fastaf)
 //! - Auto-updating the installed CLI on app startup
 //! - Tracking whether the first-run prompt has been dismissed
 
@@ -29,7 +29,7 @@ pub(crate) fn get_cli_status() -> CliStatus {
         .exists();
 
     // Prefer the canonical install location (keeps install/update semantics),
-    // then fall back to wherever `tuic` lives on the user's PATH — they may have
+    // then fall back to wherever `fastaf` lives on the user's PATH — they may have
     // symlinked it into their own bin dir without using our installer (#98).
     let canonical = resolve_install_path();
     let install_path = if std::path::Path::new(&canonical).exists() {
@@ -77,7 +77,7 @@ pub(crate) fn install_cli() -> Result<String, String> {
         let _ = std::fs::set_permissions(&install_path, std::fs::Permissions::from_mode(0o755));
     }
 
-    tracing::info!(source = "tuic_cli", path = %install_path, "CLI installed");
+    tracing::info!(source = "fastaf_cli", path = %install_path, "CLI installed");
 
     Ok(install_path)
 }
@@ -91,7 +91,7 @@ pub(crate) fn uninstall_cli() -> Result<(), String> {
     }
 
     remove_with_elevation(&install_path)?;
-    tracing::info!(source = "tuic_cli", path = %install_path, "CLI uninstalled");
+    tracing::info!(source = "fastaf_cli", path = %install_path, "CLI uninstalled");
     Ok(())
 }
 
@@ -136,10 +136,10 @@ pub(crate) fn auto_update_cli() {
     )
     .is_ok()
     {
-        tracing::info!(source = "tuic_cli", "CLI auto-updated at {install_path}");
+        tracing::info!(source = "fastaf_cli", "CLI auto-updated at {install_path}");
     } else {
         tracing::debug!(
-            source = "tuic_cli",
+            source = "fastaf_cli",
             "CLI auto-update skipped (permission denied)"
         );
     }
@@ -178,13 +178,13 @@ fn resolve_install_path() -> String {
     // macOS: /usr/local/bin (in default PATH, standard for user-installed CLIs)
     #[cfg(target_os = "macos")]
     {
-        "/usr/local/bin/tuic".to_string()
+        "/usr/local/bin/fastaf".to_string()
     }
 
     // Linux: /usr/local/bin (FHS standard for locally installed software)
     #[cfg(target_os = "linux")]
     {
-        "/usr/local/bin/tuic".to_string()
+        "/usr/local/bin/fastaf".to_string()
     }
 
     // Windows: add to user-scoped PATH via %LOCALAPPDATA%\Microsoft\WindowsApps
@@ -192,21 +192,21 @@ fn resolve_install_path() -> String {
     #[cfg(target_os = "windows")]
     {
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        format!("{local_app_data}\\Microsoft\\WindowsApps\\tuic.exe")
+        format!("{local_app_data}\\Microsoft\\WindowsApps\\fastaf.exe")
     }
 }
 
 /// Bundled sidecar filename (no target-triple suffix — Tauri strips it at
-/// bundle time, so the installed file is plain `tuic`/`tuic.exe`).
+/// bundle time, so the installed file is plain `fastaf`/`fastaf.exe`).
 fn sidecar_name() -> &'static str {
     if cfg!(target_os = "windows") {
-        "tuic.exe"
+        "fastaf.exe"
     } else {
-        "tuic"
+        "fastaf"
     }
 }
 
-/// Locate the bundled `tuic` sidecar to copy into PATH.
+/// Locate the bundled `fastaf` sidecar to copy into PATH.
 ///
 /// `externalBin` sidecars are installed *next to the main executable* —
 /// `Contents/MacOS/` on macOS, the install dir on Windows, the same dir on
@@ -237,10 +237,10 @@ fn resolve_sidecar_path() -> Result<String, String> {
         }
     }
 
-    Err("tuic CLI binary not found. Run 'cargo build -p tuic-cli' first.".to_string())
+    Err("fastaf CLI binary not found. Run 'cargo build -p fastaf-cli' first.".to_string())
 }
 
-/// Run `<path> --version` and return its trimmed stdout (e.g. "tuic 1.1.0").
+/// Run `<path> --version` and return its trimmed stdout (e.g. "fastaf 1.1.0").
 /// Returns None if the binary can't be executed or exits non-zero.
 fn cli_version(path: &str) -> Option<String> {
     let output = std::process::Command::new(path)
@@ -388,8 +388,8 @@ mod tests {
     #[test]
     fn cli_update_replaces_the_installed_binary_atomically() {
         let dir = tempfile::tempdir().expect("temp CLI dir");
-        let sidecar = dir.path().join("sidecar-tuic");
-        let installed = dir.path().join("tuic");
+        let sidecar = dir.path().join("sidecar-fastaf");
+        let installed = dir.path().join("fastaf");
         std::fs::write(&sidecar, b"complete-new-binary").expect("write sidecar");
         std::fs::write(&installed, b"complete-old-binary").expect("write installed CLI");
 
@@ -425,8 +425,8 @@ mod tests {
             "sidecar name must not embed a target triple, got {name:?}"
         );
         #[cfg(target_os = "windows")]
-        assert_eq!(name, "tuic.exe");
+        assert_eq!(name, "fastaf.exe");
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(name, "tuic");
+        assert_eq!(name, "fastaf");
     }
 }

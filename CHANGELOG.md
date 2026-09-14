@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The command-line companion is now `fastaf`** — the `tuic` sidecar, its Settings installer and the first-run prompt all use the new name (`fastaf .`, `fastaf ls`, `fastaf agent send …`, `/usr/local/bin/fastaf`). The `tuic-bridge` MCP sidecar, the `tuic://` deep-link scheme, `TUIC_*` environment variables and `.tuic.json` are unchanged, so existing agent configurations keep working. An older `tmux → tuic` alias is still recognised by `fastaf alias --remove`.
+
 ### Merged from upstream TUICommander
 
 Everything sstraus/tuicommander shipped between v1.6.2 and v1.7.6, plus its unreleased work as of 2026-09-03, is now in FastAF. The upstream release headings below are kept for reference; FastAF version numbers are independent of upstream ones.
