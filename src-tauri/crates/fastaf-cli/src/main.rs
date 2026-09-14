@@ -15,6 +15,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "fastaf",
+    // The bundled file is `fastaf-cli`; users run it as `fastaf`, so say so in help.
+    bin_name = "fastaf",
     version,
     about = "FastAF CLI — editor, multiplexer, orchestrator"
 )]

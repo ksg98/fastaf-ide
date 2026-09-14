@@ -35,7 +35,7 @@ pub(crate) fn get_cli_status() -> CliStatus {
     let install_path = if std::path::Path::new(&canonical).exists() {
         Some(canonical)
     } else {
-        crate::cli::which_cli(sidecar_name())
+        crate::cli::which_cli(installed_name())
     };
 
     let Some(install_path) = install_path else {
@@ -197,8 +197,20 @@ fn resolve_install_path() -> String {
 }
 
 /// Bundled sidecar filename (no target-triple suffix — Tauri strips it at
-/// bundle time, so the installed file is plain `fastaf`/`fastaf.exe`).
+/// bundle time). It is `fastaf-cli`, not `fastaf`: the app's own executable is
+/// `FastAF`, and on a case-insensitive filesystem (macOS, Windows) a sidecar
+/// named `fastaf` overwrites it inside the bundle. The file is installed into
+/// PATH under the user-facing name, see `installed_name`.
 fn sidecar_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "fastaf-cli.exe"
+    } else {
+        "fastaf-cli"
+    }
+}
+
+/// The command users type, and the file name in PATH.
+fn installed_name() -> &'static str {
     if cfg!(target_os = "windows") {
         "fastaf.exe"
     } else {
@@ -425,8 +437,18 @@ mod tests {
             "sidecar name must not embed a target triple, got {name:?}"
         );
         #[cfg(target_os = "windows")]
-        assert_eq!(name, "fastaf.exe");
+        assert_eq!(name, "fastaf-cli.exe");
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(name, "fastaf");
+        assert_eq!(name, "fastaf-cli");
+    }
+
+    /// The bundled file must never share a name with the main executable
+    /// (`FastAF`): on a case-insensitive filesystem the sidecar copy would
+    /// replace it. The name typed by users stays `fastaf`.
+    #[test]
+    fn sidecar_name_does_not_collide_with_the_app_executable() {
+        assert_ne!(sidecar_name().to_ascii_lowercase(), "fastaf");
+        assert_ne!(sidecar_name().to_ascii_lowercase(), "fastaf.exe");
+        assert!(installed_name().starts_with("fastaf"));
     }
 }

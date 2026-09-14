@@ -67,7 +67,7 @@
     "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/tuic-bridge",
-      "binaries/fastaf"
+      "binaries/fastaf-cli"
     ],
     "fileAssociations": [
       {

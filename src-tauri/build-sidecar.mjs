@@ -24,7 +24,7 @@ const targetDir = envTargetDir
 
 const sidecars = [
   { pkg: "tuic-bridge", bin: "tuic-bridge", crate: "crates/tuic-bridge" },
-  { pkg: "fastaf-cli", bin: "fastaf", crate: "crates/fastaf-cli" },
+  { pkg: "fastaf-cli", bin: "fastaf-cli", crate: "crates/fastaf-cli" },
 ];
 
 for (const { pkg, bin, crate: cratePath } of sidecars) {

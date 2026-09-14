@@ -138,7 +138,7 @@ jobs:
         run: |
           target=$(rustc --print host-tuple)
           touch "src-tauri/binaries/tuic-bridge-${target}"
-          touch "src-tauri/binaries/fastaf-${target}"
+          touch "src-tauri/binaries/fastaf-cli-${target}"
 
       - name: Clippy
         working-directory: src-tauri
@@ -299,11 +299,11 @@ jobs:
         run: |
           target=$(rustc --print host-tuple)
           touch "src-tauri/binaries/tuic-bridge-${target}"
-          touch "src-tauri/binaries/fastaf-${target}"
+          touch "src-tauri/binaries/fastaf-cli-${target}"
           # Windows needs .exe extension for sidecar resolution
           if [[ "$target" == *windows* ]]; then
             touch "src-tauri/binaries/tuic-bridge-${target}.exe"
-            touch "src-tauri/binaries/fastaf-${target}.exe"
+            touch "src-tauri/binaries/fastaf-cli-${target}.exe"
           fi
 
       - name: Clippy

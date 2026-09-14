@@ -5,8 +5,11 @@ description = "CLI companion for FastAF — editor opener, session multiplexer, 
 authors = ["Stefano Straus <github.com/sstraus>"]
 edition = "2024"
 
+# The bundled file is `fastaf-cli`: a sidecar named `fastaf` would overwrite the
+# app's own `FastAF` executable on a case-insensitive filesystem (macOS, Windows).
+# The installer copies it into PATH as plain `fastaf`.
 [[bin]]
-name = "fastaf"
+name = "fastaf-cli"
 path = "src/main.rs"
 
 [dependencies]
