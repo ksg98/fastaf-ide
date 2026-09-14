@@ -6,17 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // only faking the network/event layer it depends on.
 // ---------------------------------------------------------------------------
 
+/** Event handlers the hook registered with `subscribeEvents`. */
+const sseHandlers = new Map<string, (payload: unknown) => void>();
+
 vi.mock("../../transport", () => ({
 	rpc: vi.fn(),
-}));
-
-const listenHandlers = new Map<string, (event: { payload: unknown }) => void>();
-vi.mock("../../invoke", () => ({
-	listen: vi.fn((event: string, handler: (event: { payload: unknown }) => void) => {
-		listenHandlers.set(event, handler);
-		return Promise.resolve(() => {
-			listenHandlers.delete(event);
-		});
+	isTauri: vi.fn(() => false),
+	subscribeEvents: vi.fn((handlers: Record<string, (payload: unknown) => void>) => {
+		for (const [event, handler] of Object.entries(handlers)) sseHandlers.set(event, handler);
+		return Promise.resolve(() => sseHandlers.clear());
 	}),
 }));
 
@@ -24,11 +22,12 @@ vi.mock("../../stores/appLogger", () => ({
 	appLogger: { warn: vi.fn(), error: vi.fn(), info: vi.fn() },
 }));
 
-import { rpc } from "../../transport";
+import { rpc, subscribeEvents } from "../../transport";
 import type { SessionInfo } from "../useSessions";
 import { useSessions } from "../useSessions";
 
 const mockRpc = vi.mocked(rpc);
+const mockSubscribeEvents = vi.mocked(subscribeEvents);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -393,14 +392,12 @@ describe("useSessions — refreshing signal", () => {
 
 		expect(sessions()[0].state?.shell_state).toBe("busy");
 
-		const handler = listenHandlers.get("pty-parsed");
+		const handler = sseHandlers.get("pty-parsed");
 		expect(handler).toBeDefined();
 
 		handler!({
-			payload: {
-				session_id: "s1",
-				parsed: { type: "shell-state", state: "idle" },
-			},
+			session_id: "s1",
+			parsed: { type: "shell-state", state: "idle" },
 		});
 
 		expect(sessions()[0].state?.shell_state).toBe("idle");
@@ -433,12 +430,10 @@ describe("useSessions — refreshing signal", () => {
 		await initialD.promise;
 		await Promise.resolve();
 
-		const handler = listenHandlers.get("pty-parsed");
+		const handler = sseHandlers.get("pty-parsed");
 		handler!({
-			payload: {
-				session_id: "s1",
-				parsed: { type: "question", text: "Continue?" },
-			},
+			session_id: "s1",
+			parsed: { type: "question", text: "Continue?" },
 		});
 
 		expect(sessions()[0].state?.shell_state).toBe("busy");
@@ -471,12 +466,10 @@ describe("useSessions — refreshing signal", () => {
 		await initialD.promise;
 		await Promise.resolve();
 
-		const handler = listenHandlers.get("pty-parsed");
+		const handler = sseHandlers.get("pty-parsed");
 		handler!({
-			payload: {
-				session_id: "unknown",
-				parsed: { type: "shell-state", state: "idle" },
-			},
+			session_id: "unknown",
+			parsed: { type: "shell-state", state: "idle" },
 		});
 
 		expect(sessions()[0].state?.shell_state).toBe("busy");
@@ -512,6 +505,240 @@ describe("useSessions — refreshing signal", () => {
 		await vi.advanceTimersByTimeAsync(3000);
 
 		expect(mockRpc).toHaveBeenCalledTimes(3);
+
+		dispose();
+	});
+});
+
+/** Build a SessionInfo carrying a shell_state, as the server sends it. */
+function makeStatefulSession(id: string, shellState: string): SessionInfo {
+	return makeSession(id, {
+		state: {
+			awaiting_input: false,
+			rate_limited: false,
+			shell_state: shellState,
+			last_activity_ms: 1,
+		},
+	});
+}
+
+describe("useSessions — SSE subscription", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.clearAllMocks();
+		sseHandlers.clear();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("opens one filtered subscription covering only the events it handles", async () => {
+		mockRpc.mockResolvedValue([] as never);
+
+		const dispose = createRoot((d) => {
+			useSessions();
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+
+		// `subscribeEvents` derives the `?types=` query from the handler keys, so
+		// one call with exactly these three keys is what keeps the client from
+		// receiving and parsing every event kind the backend publishes.
+		expect(mockSubscribeEvents).toHaveBeenCalledTimes(1);
+		const handlers = mockSubscribeEvents.mock.calls[0][0];
+		expect(Object.keys(handlers).sort()).toEqual(["pty-parsed", "session-closed", "session-created"]);
+
+		dispose();
+	});
+
+	it("session-created and session-closed each trigger a refetch", async () => {
+		mockRpc.mockResolvedValue([] as never);
+
+		const dispose = createRoot((d) => {
+			useSessions();
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mockRpc).toHaveBeenCalledTimes(1);
+
+		sseHandlers.get("session-created")!({ session_id: "s1", cwd: "/tmp/s1" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mockRpc).toHaveBeenCalledTimes(2);
+
+		sseHandlers.get("session-closed")!({ session_id: "s1" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mockRpc).toHaveBeenCalledTimes(3);
+
+		dispose();
+	});
+});
+
+describe("useSessions — poll reconciliation", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.clearAllMocks();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("a poll that changes nothing keeps every session object identity", async () => {
+		// The server rebuilds each SessionInfo from scratch on every request, so
+		// the poll always sees fresh objects with identical content.
+		mockRpc.mockImplementation(() => Promise.resolve([makeSession("s1"), makeSession("s2")]) as never);
+
+		let sessions: () => SessionInfo[] = () => [];
+		const dispose = createRoot((d) => {
+			sessions = useSessions().sessions;
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		const first = sessions();
+		expect(first).toHaveLength(2);
+
+		await vi.advanceTimersByTimeAsync(3000);
+
+		expect(sessions()[0]).toBe(first[0]);
+		expect(sessions()[1]).toBe(first[1]);
+		// Nothing changed at all, so even the list identity must survive —
+		// otherwise every memo and <For> downstream re-runs 20 times a minute.
+		expect(sessions()).toBe(first);
+
+		dispose();
+	});
+
+	it("only the session whose payload changed gets a new object", async () => {
+		let shellState = "busy";
+		mockRpc.mockImplementation(
+			() => Promise.resolve([makeStatefulSession("s1", shellState), makeSession("s2")]) as never,
+		);
+
+		let sessions: () => SessionInfo[] = () => [];
+		const dispose = createRoot((d) => {
+			sessions = useSessions().sessions;
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		const first = sessions();
+
+		shellState = "idle";
+		await vi.advanceTimersByTimeAsync(3000);
+
+		expect(sessions()[0]).not.toBe(first[0]);
+		expect(sessions()[0].state?.shell_state).toBe("idle");
+		expect(sessions()[1]).toBe(first[1]);
+
+		dispose();
+	});
+
+	it("survivors keep identity when a session is added and another removed", async () => {
+		let payload = [makeSession("s1"), makeSession("s2")];
+		mockRpc.mockImplementation(() => Promise.resolve(payload.map((s) => ({ ...s }))) as never);
+
+		let sessions: () => SessionInfo[] = () => [];
+		const dispose = createRoot((d) => {
+			sessions = useSessions().sessions;
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		const first = sessions();
+
+		payload = [makeSession("s2"), makeSession("s3")];
+		await vi.advanceTimersByTimeAsync(3000);
+
+		expect(sessions().map((s) => s.session_id)).toEqual(["s2", "s3"]);
+		expect(sessions()[0]).toBe(first[1]);
+
+		dispose();
+	});
+});
+
+/** Swap `document.visibilityState` and fire the matching event. */
+function setVisibility(state: "visible" | "hidden") {
+	Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+	document.dispatchEvent(new Event("visibilitychange"));
+}
+
+describe("useSessions — visibility gating", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.clearAllMocks();
+		setVisibility("visible");
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		setVisibility("visible");
+	});
+
+	it("stops polling while the page is hidden", async () => {
+		mockRpc.mockResolvedValue([] as never);
+
+		const dispose = createRoot((d) => {
+			useSessions();
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mockRpc).toHaveBeenCalledTimes(1); // initial fetch
+
+		setVisibility("hidden");
+		await vi.advanceTimersByTimeAsync(30_000); // ten poll intervals
+
+		expect(mockRpc).toHaveBeenCalledTimes(1);
+
+		dispose();
+	});
+
+	it("refetches immediately when the page becomes visible again", async () => {
+		mockRpc.mockResolvedValue([] as never);
+
+		const dispose = createRoot((d) => {
+			useSessions();
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		setVisibility("hidden");
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(mockRpc).toHaveBeenCalledTimes(1);
+
+		setVisibility("visible");
+		await vi.advanceTimersByTimeAsync(0);
+
+		// Visible again: catch up at once rather than showing stale state for 3s.
+		expect(mockRpc).toHaveBeenCalledTimes(2);
+
+		// And resume the regular cadence.
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(mockRpc).toHaveBeenCalledTimes(3);
+
+		dispose();
+	});
+
+	it("does not poll at all when mounted on a hidden page", async () => {
+		mockRpc.mockResolvedValue([] as never);
+		setVisibility("hidden");
+
+		const dispose = createRoot((d) => {
+			useSessions();
+			return d;
+		});
+
+		await vi.advanceTimersByTimeAsync(0);
+		// The initial fetch still runs — a hidden page may become visible at any
+		// moment and must not start from an empty list.
+		expect(mockRpc).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(mockRpc).toHaveBeenCalledTimes(1);
 
 		dispose();
 	});

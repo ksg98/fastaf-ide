@@ -3,12 +3,17 @@ import { testInScope } from "../helpers/store";
 
 describe("toastsStore", () => {
 	let toastsStore: typeof import("../../stores/toasts").toastsStore;
+	// Read from the store instead of restating the numbers: these are tuning
+	// values, and a test that pins them fails on every retune while proving
+	// nothing about the dismissal mechanism it means to cover.
+	let durations: typeof import("../../stores/toasts").DEFAULT_DURATION_MS;
 
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.resetModules();
 		const mod = await import("../../stores/toasts");
 		toastsStore = mod.toastsStore;
+		durations = mod.DEFAULT_DURATION_MS;
 	});
 
 	afterEach(() => {
@@ -41,11 +46,13 @@ describe("toastsStore", () => {
 		});
 	});
 
-	it("auto-dismisses after 4 seconds", () => {
+	it("auto-dismisses an info toast at its default duration", () => {
 		testInScope(() => {
 			toastsStore.add("Ephemeral");
 			expect(toastsStore.toasts).toHaveLength(1);
-			vi.advanceTimersByTime(4000);
+			vi.advanceTimersByTime(durations.info - 1);
+			expect(toastsStore.toasts).toHaveLength(1); // not a millisecond early
+			vi.advanceTimersByTime(1);
 			expect(toastsStore.toasts).toHaveLength(0);
 		});
 	});
@@ -56,8 +63,8 @@ describe("toastsStore", () => {
 			toastsStore.remove(id);
 			expect(toastsStore.toasts).toHaveLength(0);
 
-			// Advance past the 4s auto-dismiss — must not error or double-remove
-			expect(() => vi.advanceTimersByTime(5000)).not.toThrow();
+			// Advance past the auto-dismiss — must not error or double-remove
+			expect(() => vi.advanceTimersByTime(durations.info + 1000)).not.toThrow();
 			expect(toastsStore.toasts).toHaveLength(0);
 		});
 	});
@@ -69,18 +76,19 @@ describe("toastsStore", () => {
 			toastsStore.add("Keeper");
 			toastsStore.remove(id);
 			expect(toastsStore.toasts).toHaveLength(1);
-			vi.advanceTimersByTime(4000);
+			vi.advanceTimersByTime(durations.info);
 			// Both timers fired — Tmp was already removed, Keeper auto-dismissed
 			expect(toastsStore.toasts).toHaveLength(0);
 		});
 	});
 
-	it("warn toasts linger past 4s and auto-dismiss at 15s", () => {
+	it("warn toasts outlive the info window and auto-dismiss at their own", () => {
 		testInScope(() => {
+			expect(durations.warn).toBeGreaterThan(durations.info); // the point of the level
 			toastsStore.add("Careful", "heads up", "warn");
-			vi.advanceTimersByTime(4000);
+			vi.advanceTimersByTime(durations.info);
 			expect(toastsStore.toasts).toHaveLength(1); // still visible past the info window
-			vi.advanceTimersByTime(11000); // total 15s
+			vi.advanceTimersByTime(durations.warn - durations.info);
 			expect(toastsStore.toasts).toHaveLength(0);
 		});
 	});
@@ -126,6 +134,106 @@ describe("toastsStore", () => {
 			const after = Date.now();
 			expect(toastsStore.toasts[0].createdAt).toBeGreaterThanOrEqual(before);
 			expect(toastsStore.toasts[0].createdAt).toBeLessThanOrEqual(after);
+		});
+	});
+});
+
+/** A toast fades on its own, usually while the user looks somewhere else. The
+ *  mirror is what makes the message readable afterwards, so what matters here is
+ *  that the bell item outlives the toast — and that the opt-out really opts out. */
+describe("toastsStore — mirroring into the bell", () => {
+	let toastsStore: typeof import("../../stores/toasts").toastsStore;
+	let sectionId: string;
+	let durations: typeof import("../../stores/toasts").DEFAULT_DURATION_MS;
+	let activityStore: typeof import("../../stores/activityStore").activityStore;
+	let notificationsStore: typeof import("../../stores/notifications").notificationsStore;
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		const mod = await import("../../stores/toasts");
+		toastsStore = mod.toastsStore;
+		sectionId = mod.TOAST_ACTIVITY_SECTION_ID;
+		durations = mod.DEFAULT_DURATION_MS;
+		activityStore = (await import("../../stores/activityStore")).activityStore;
+		notificationsStore = (await import("../../stores/notifications")).notificationsStore;
+		activityStore.clearAll();
+		notificationsStore.setToastsInBell(true);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("mirrors a toast into the messages section", () => {
+		testInScope(() => {
+			toastsStore.add("Branch deleted", 'Removed "feature/x"');
+			const items = activityStore.getForSection(sectionId);
+			expect(items).toHaveLength(1);
+			expect(items[0]).toMatchObject({
+				title: "Branch deleted",
+				subtitle: 'Removed "feature/x"',
+				severity: "info",
+				dismissible: true,
+			});
+		});
+	});
+
+	it("preserves repository scope in the mirrored bell item", () => {
+		testInScope(() => {
+			toastsStore.add("Release published", "tuicommander · v1.7.4", "info", false, undefined, undefined, "/repo");
+			expect(activityStore.getForSection(sectionId, "/repo")[0]).toMatchObject({
+				title: "Release published",
+				repoPath: "/repo",
+			});
+			expect(activityStore.getForSection(sectionId, "/other")).toHaveLength(0);
+		});
+	});
+
+	it("keeps the bell item after the toast auto-dismisses", () => {
+		testInScope(() => {
+			toastsStore.add("Gone in a flash");
+			vi.advanceTimersByTime(durations.info + 1);
+			expect(toastsStore.toasts).toHaveLength(0);
+			expect(activityStore.getForSection(sectionId)).toHaveLength(1);
+		});
+	});
+
+	it("carries the toast level through as the item severity", () => {
+		testInScope(() => {
+			toastsStore.add("Careful", "", "warn");
+			toastsStore.add("Broke", "", "error");
+			const severities = activityStore.getForSection(sectionId).map((i) => i.severity);
+			expect(severities).toEqual(["warn", "error"]);
+		});
+	});
+
+	it("mirrors the toast action as the item click handler", () => {
+		testInScope(() => {
+			const onClick = vi.fn();
+			toastsStore.add("Update ready", "", "info", false, { label: "Install", onClick });
+			activityStore.getForSection(sectionId)[0].onClick?.();
+			expect(onClick).toHaveBeenCalledOnce();
+		});
+	});
+
+	it("leaves toasts transient when the setting is off", () => {
+		testInScope(() => {
+			notificationsStore.setToastsInBell(false);
+			toastsStore.add("Unmirrored", "nothing to see later");
+			expect(toastsStore.toasts).toHaveLength(1);
+			expect(activityStore.getForSection(sectionId)).toHaveLength(0);
+		});
+	});
+
+	it("resumes mirroring when the setting is turned back on", () => {
+		testInScope(() => {
+			notificationsStore.setToastsInBell(false);
+			toastsStore.add("Skipped");
+			notificationsStore.setToastsInBell(true);
+			toastsStore.add("Kept");
+			const titles = activityStore.getForSection(sectionId).map((i) => i.title);
+			expect(titles).toEqual(["Kept"]);
 		});
 	});
 });

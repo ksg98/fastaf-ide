@@ -454,7 +454,7 @@ mod tests {
             TOOL_DISPATCH_LIMIT_PER_SESSION,
         );
         // Tool limiter allows more per minute than LLM limiter
-        assert!(TOOL_DISPATCH_LIMIT_PER_MINUTE > RATE_LIMIT_PER_MINUTE);
+        const { assert!(TOOL_DISPATCH_LIMIT_PER_MINUTE > RATE_LIMIT_PER_MINUTE) };
         for _ in 0..RATE_LIMIT_PER_MINUTE {
             llm.record();
             tool.record();
@@ -530,16 +530,16 @@ mod tests {
 
     #[test]
     fn constants_are_reasonable() {
-        assert!(MAX_ITERATIONS > 0 && MAX_ITERATIONS <= 100);
+        const { assert!(MAX_ITERATIONS > 0 && MAX_ITERATIONS <= 100) };
         assert!(LOOP_TIMEOUT.as_secs() >= 60);
         // The idle guard must be able to fire before the whole loop gives up,
         // or a stalled stream still eats the entire turn budget in one wait.
         assert!(STREAM_IDLE_TIMEOUT < LOOP_TIMEOUT);
         // ...but long enough that a slow first token isn't mistaken for a stall.
         assert!(STREAM_IDLE_TIMEOUT.as_secs() >= 60);
-        assert!(MAX_IDENTICAL_CALLS >= 2);
-        assert!(RATE_LIMIT_PER_MINUTE > 0);
-        assert!(RATE_LIMIT_PER_SESSION > RATE_LIMIT_PER_MINUTE);
+        const { assert!(MAX_IDENTICAL_CALLS >= 2) };
+        const { assert!(RATE_LIMIT_PER_MINUTE > 0) };
+        const { assert!(RATE_LIMIT_PER_SESSION > RATE_LIMIT_PER_MINUTE) };
     }
 
     // ── redact_json_values ────────────────────────────────────

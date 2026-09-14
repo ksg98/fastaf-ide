@@ -110,7 +110,7 @@ src-tauri/src/
 ## Application Startup Flow
 
 1. **Rust** (`main.rs`): Calls `tui_commander_lib::run()`
-2. **Library** (`lib.rs`): Creates `AppState`, loads config, spawns HTTP server if enabled, builds Tauri app with plugins, registers 73+ commands, sets up native menu
+2. **Library** (`lib.rs`): Creates `AppState`, loads config, spawns HTTP server if enabled, builds Tauri app with plugins, registers the Tauri command surface, and sets up the native menu
 3. **Frontend** (`index.tsx`): Mounts `<App />` component
 4. **App** (`App.tsx`): Initializes all hooks, calls `initApp()` which hydrates stores from backend, detects binaries, sets up keyboard shortcuts, starts GitHub polling
 5. **Render**: Full UI hierarchy with terminals, panels, overlays, and dialogs

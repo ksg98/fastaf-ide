@@ -370,6 +370,13 @@
   color: var(--accent);
 }
 
+/* Empty stand-in for an action button that does not apply to this repo.
+   Keeps the box (and its margins) in the flex row so the trailing icons
+   align across all repo headers. */
+.repoActionSlot {
+  visibility: hidden;
+}
+
 /* Collapsed repository state */
 .collapsed {
   transition: width 0.2s ease-in-out, padding 0.2s ease-in-out, opacity 0.2s ease-in-out;
@@ -503,6 +510,8 @@
 }
 
 /* ── Branch Item ── */
+/* One indent step below the repo header — same step the file browser uses per
+   tree level, so the two panels read as one system (see --tree-indent). */
 .repoBranches {
   padding: 1px 0 3px;
 }
@@ -606,6 +615,11 @@
 
 .branchName {
   display: block;
+  /* Claim the free space instead of merely tolerating it. Every badge in the row
+     is flex-shrink:0, so without this the name was the ONLY element that gave way
+     and a 300px sidebar rendered "fix/msn…" beside an intact "+238 -267 ⌘^3". */
+  flex: 1;
+  min-width: 0;
   font-size: var(--font-md);
   font-weight: 400;
   color: var(--fg-primary);
@@ -1621,6 +1635,13 @@
 
 .ghItemRow:hover {
   background: var(--surface-hover);
+}
+
+/* Keyboard-navigated row. Distinct from :hover so arrow keys stay visible
+   while the pointer rests elsewhere; DOM focus stays on the panel. */
+.ghItemRowActive {
+  background: var(--bg-tertiary);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .ghItemNum {

@@ -497,6 +497,80 @@ describe("mdTabsStore", () => {
 		});
 	});
 
+	describe("file tabs are scoped to their OWN repo, never the focused one", () => {
+		/** Register a repo with one branch checked out, so branchKeyFor() can answer. */
+		const addRepoWithBranch = (path: string, branch: string) => {
+			repositoriesStore.add({ path, displayName: path });
+			repositoriesStore.setBranch(path, branch, { worktreePath: path });
+			repositoriesStore.setActiveBranch(path, branch);
+		};
+
+		it("stamps branchKey from the tab's repo, not from the active repo", () => {
+			testInScope(() => {
+				addRepoWithBranch("/Gits/alpha", "main");
+				addRepoWithBranch("/Gits/beta", "develop");
+				repositoriesStore.setActive("/Gits/beta");
+
+				const id = store.add("/Gits/alpha", "README.md");
+				expect(store.get(id)?.branchKey).toBe("/Gits/alpha|main");
+			});
+		});
+
+		it("does not re-stamp an existing tab when it is reopened from another repo", () => {
+			testInScope(() => {
+				addRepoWithBranch("/Gits/alpha", "main");
+				addRepoWithBranch("/Gits/beta", "develop");
+
+				repositoriesStore.setActive("/Gits/alpha");
+				const id = store.add("/Gits/alpha", "README.md");
+
+				// User walks over to beta and reopens the same alpha file.
+				repositoriesStore.setActive("/Gits/beta");
+				expect(store.add("/Gits/alpha", "README.md")).toBe(id);
+
+				const tab = store.get(id);
+				expect(tab?.repoPath).toBe("/Gits/alpha");
+				expect(tab?.branchKey).toBe("/Gits/alpha|main");
+			});
+		});
+
+		it("keeps two same-named files from two repos as two tabs, each on its own branch", () => {
+			testInScope(() => {
+				addRepoWithBranch("/Gits/alpha", "main");
+				addRepoWithBranch("/Gits/beta", "develop");
+
+				const alphaId = store.add("/Gits/alpha", "README.md");
+				const betaId = store.add("/Gits/beta", "README.md");
+
+				expect(alphaId).not.toBe(betaId);
+				expect(store.get(alphaId)?.branchKey).toBe("/Gits/alpha|main");
+				expect(store.get(betaId)?.branchKey).toBe("/Gits/beta|develop");
+			});
+		});
+
+		it("leaves a tab unscoped when its repo is unknown instead of borrowing the active one", () => {
+			testInScope(() => {
+				addRepoWithBranch("/Gits/beta", "develop");
+				repositoriesStore.setActive("/Gits/beta");
+
+				const id = store.add("", "/tmp/scratch.md");
+				expect(store.get(id)?.branchKey).toBeUndefined();
+			});
+		});
+
+		it("addFileBackground scopes to its own repo too", () => {
+			testInScope(() => {
+				addRepoWithBranch("/Gits/alpha", "main");
+				addRepoWithBranch("/Gits/beta", "develop");
+				repositoriesStore.setActive("/Gits/beta");
+
+				const id = store.addFileBackground("/Gits/alpha", "plans/foo.md");
+				expect(id).not.toBeNull();
+				expect(store.get(id as string)?.branchKey).toBe("/Gits/alpha|main");
+			});
+		});
+	});
+
 	describe("openUiTab() repo routing", () => {
 		it("scopes tab to the origin repo, NOT the active repo, when originRepoPath is given", () => {
 			testInScope(() => {

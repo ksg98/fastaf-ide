@@ -171,4 +171,60 @@ describe("PostMergeCleanupDialog", () => {
 			expect(wtCheck).toBeNull();
 		});
 	});
+
+	// This dialog IS the confirmation for the destructive worktree step — the
+	// hook that runs it passes `force: true`, so the backend guard never asks
+	// again. If the warning does not show here, nothing warns at all.
+	describe("uncommitted work in the worktree", () => {
+		const warning = (container: Element) => container.querySelector("[data-testid='worktree-dirty-warning']");
+
+		it("warns that deleting the worktree loses the work", () => {
+			const { container } = render(() => (
+				<PostMergeCleanupDialog {...defaultProps()} worktreeAction="delete" worktreeDirty={true} />
+			));
+			expect(warning(container)!.textContent).toBe(
+				"The feature/login worktree has uncommitted changes. Deleting it removes the directory — that work is lost.",
+			);
+		});
+
+		it("says archiving keeps the work instead", () => {
+			const { container } = render(() => (
+				<PostMergeCleanupDialog {...defaultProps()} worktreeAction="archive" worktreeDirty={true} />
+			));
+			expect(warning(container)!.textContent).toBe(
+				"The feature/login worktree has uncommitted changes. They move to __archived/ with it.",
+			);
+		});
+
+		it("stays silent when the worktree is clean", () => {
+			const { container } = render(() => (
+				<PostMergeCleanupDialog {...defaultProps()} worktreeAction="delete" worktreeDirty={false} />
+			));
+			expect(warning(container)).toBeNull();
+		});
+
+		it("disappears once the user unchecks the step", () => {
+			const { container } = render(() => (
+				<PostMergeCleanupDialog {...defaultProps()} worktreeAction="delete" worktreeDirty={true} />
+			));
+			expect(warning(container)).not.toBeNull();
+			fireEvent.click(container.querySelector("input[data-testid='step-check-worktree']")!);
+			// Nothing gets destroyed, so there is nothing to warn about.
+			expect(warning(container)).toBeNull();
+		});
+
+		it("is separate from the base-repo stash warning", () => {
+			const { container } = render(() => (
+				<PostMergeCleanupDialog
+					{...defaultProps()}
+					worktreeAction="archive"
+					worktreeDirty={true}
+					hasDirtyFiles={true}
+				/>
+			));
+			// Two different directories, two different warnings.
+			expect(warning(container)).not.toBeNull();
+			expect(container.querySelector("[data-testid='dirty-warning']")).not.toBeNull();
+		});
+	});
 });

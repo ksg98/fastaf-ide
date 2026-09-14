@@ -19,10 +19,16 @@ function createFileIconRegistry() {
 	// of any registration keeps the remaining chain intact (mirrors
 	// markdownProviderRegistry's per-registration restore semantics).
 	const providers: Array<{ pluginId?: string; provider: FileIconProvider }> = [];
+	// Resolved icons per `${isDir}:${name}`. A directory listing mounts one row per
+	// entry and each row resolves its icon, so without this the active provider is
+	// asked again for every repeated name, on every re-render. Dropped whenever the
+	// active provider can change — a different provider answers differently.
+	const resolved = new Map<string, string | null>();
 
 	function register(provider: FileIconProvider, pluginId?: string): Disposable {
 		const entry = { pluginId, provider };
 		providers.push(entry);
+		resolved.clear();
 		setVersion((v) => v + 1);
 
 		return {
@@ -30,6 +36,7 @@ function createFileIconRegistry() {
 				const index = providers.lastIndexOf(entry);
 				if (index !== -1) {
 					providers.splice(index, 1);
+					resolved.clear();
 					setVersion((v) => v + 1);
 				}
 			},
@@ -39,9 +46,15 @@ function createFileIconRegistry() {
 	function resolve(name: string, isDir: boolean): string | null {
 		const activeProvider = providers[providers.length - 1];
 		if (!activeProvider) return null;
+		const key = `${isDir ? "d" : "f"}:${name}`;
+		if (resolved.has(key)) return resolved.get(key) ?? null;
 		try {
-			return activeProvider.provider.resolveFileIcon(name, isDir);
+			const icon = activeProvider.provider.resolveFileIcon(name, isDir);
+			resolved.set(key, icon);
+			return icon;
 		} catch (err) {
+			// Not cached: a throwing provider stays visible in the logs, and a
+			// transient failure is not turned into a permanently missing icon.
 			reportPluginCallbackError(activeProvider.pluginId, "file icon resolve", err);
 			return null;
 		}
@@ -55,6 +68,7 @@ function createFileIconRegistry() {
 	/** Remove all registrations (for testing). */
 	function clear(): void {
 		providers.length = 0;
+		resolved.clear();
 		setVersion(0);
 	}
 

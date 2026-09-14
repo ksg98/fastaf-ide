@@ -245,6 +245,9 @@ pub(crate) async fn github_poll_login_impl(
         // Activate immediately in runtime state
         *state.github_token.write() = Some(access_token.clone());
         *state.github_token_source.write() = TokenSource::OAuth;
+        // The token may belong to a different user than the one we cached, and the
+        // cached login drives `author:@me` and the issue filters.
+        crate::github::invalidate_viewer_login(state);
         // Reset the github.com circuit breaker so we retry any previously-failed repos
         state.github_circuit_breaker.reset();
         // Clear only github.com cooldowns ("owner/name", no ':'), leaving GHE
@@ -324,6 +327,8 @@ pub(crate) async fn github_logout_impl(state: &Arc<AppState>) -> Result<(), Stri
         .map_err(|e| format!("token resolve task panicked: {e}"))?;
     *state.github_token.write() = token;
     *state.github_token_source.write() = source;
+    // The fallback token (env / gh CLI) is very likely a different user.
+    crate::github::invalidate_viewer_login(state);
 
     tracing::info!(
         source = "github",
@@ -354,6 +359,7 @@ pub(crate) async fn github_disconnect_impl(state: &Arc<AppState>) -> Result<(), 
     // Clear runtime state entirely
     *state.github_token.write() = None;
     *state.github_token_source.write() = TokenSource::None;
+    crate::github::invalidate_viewer_login(state);
     tracing::info!(
         source = "github",
         "GitHub disconnected (runtime token cleared)"
@@ -738,6 +744,53 @@ mod tests {
     // These tests interact with the real OS keyring. Write tests are #[ignore]
     // because macOS prompts for Keychain access interactively, blocking CI.
     // Run manually with: cargo test github_auth -- --ignored
+
+    // --- viewer login is dropped when the identity changes (#491-6bb2) ---
+
+    /// Disconnect clears the token but used to leave `github_viewer_login` set, so
+    /// the PR search kept filtering on `author:@me` for the account we just left.
+    #[tokio::test]
+    async fn disconnect_forgets_the_cached_viewer_login() {
+        let state = std::sync::Arc::new(crate::state::tests_support::make_test_app_state());
+        *state.github_viewer_login.write() = Some("previous-user".to_string());
+
+        github_disconnect_impl(&state).await.expect("disconnect");
+
+        assert_eq!(*state.github_viewer_login.read(), None);
+        assert_eq!(*state.github_token.read(), None);
+    }
+
+    /// Logout falls back to whatever env/gh CLI token is around — very likely a
+    /// different user, so the cached login must not survive it either. The token
+    /// the fallback resolves to depends on the machine and is deliberately not
+    /// asserted; only the invalidation is.
+    #[tokio::test]
+    async fn logout_forgets_the_cached_viewer_login() {
+        let state = std::sync::Arc::new(crate::state::tests_support::make_test_app_state());
+        *state.github_viewer_login.write() = Some("previous-user".to_string());
+
+        github_logout_impl(&state).await.expect("logout");
+
+        assert_eq!(*state.github_viewer_login.read(), None);
+    }
+
+    /// A successful device-flow login installs a token that may belong to somebody
+    /// else entirely. `github_poll_login_impl` cannot be driven from a test — its
+    /// device-flow POST goes to github.com — so pin the invalidation at the source
+    /// instead of leaving that third path unverified.
+    #[test]
+    fn a_successful_login_invalidates_the_viewer_login() {
+        let src = include_str!("github_auth.rs");
+        let body = src
+            .split("pub(crate) async fn github_poll_login_impl(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("github_poll_login_impl must exist");
+        assert!(
+            body.contains("invalidate_viewer_login"),
+            "the login success path must drop the previous account's cached login"
+        );
+    }
 
     #[test]
     fn read_nonexistent_returns_none() {

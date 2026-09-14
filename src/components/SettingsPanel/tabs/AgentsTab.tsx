@@ -70,6 +70,8 @@ interface McpStatus {
 	supported: boolean;
 	installed: boolean;
 	config_path: string | null;
+	/** Bridge entry lives in the tool's general settings file, so it is never installed automatically. */
+	shared_settings_file: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -812,11 +814,12 @@ const AgentRow: Component<{
 									checked={configStore.getIntentTabTitle(props.agentType) ?? true}
 									onChange={(e) => configStore.setIntentTabTitle(props.agentType, e.currentTarget.checked)}
 								/>
-								<span>Show intent as tab title</span>
+								<span>Track agent intent</span>
 							</label>
 							<p class={s.hint}>
-								Emit <code>intent:</code> markers to update the tab name with current work phase. Turn off if parsing
-								misbehaves on this agent.
+								Ask the model to emit <code>intent:</code> markers at task start and phase changes. The current intent
+								appears in the terminal Context bar and may update the tab name. Turn off if parsing misbehaves on this
+								agent.
 							</p>
 						</div>
 
@@ -900,6 +903,11 @@ const AgentRow: Component<{
 										{mcpStatus()!.installed ? "MCP bridge installed" : "MCP bridge not installed"}
 									</span>
 								</Show>
+								<Show when={mcpStatus() && !mcpStatus()!.installed && mcpStatus()!.shared_settings_file}>
+									<span class={a.mcpStatus}>
+										Not installed automatically — the entry goes in this tool's own settings file.
+									</span>
+								</Show>
 							</Show>
 						</div>
 					</div>
@@ -912,6 +920,71 @@ const AgentRow: Component<{
 				</div>
 			</Show>
 		</div>
+	);
+};
+
+// ---------------------------------------------------------------------------
+// MCP integrations cleanup (embedded in Agents tab)
+// ---------------------------------------------------------------------------
+
+/**
+ * One place to see — and undo — every MCP bridge entry FastAF wrote.
+ *
+ * Without it, uninstalling TUIC leaves a dangling `tuic-bridge` entry in each
+ * client it ever configured, and the user has to know which ones those were to
+ * clean up (issue #115).
+ */
+const McpIntegrationsSection: Component = () => {
+	const [installed, setInstalled] = createSignal<string[]>([]);
+	const [busy, setBusy] = createSignal(false);
+	const [error, setError] = createSignal<string | null>(null);
+
+	const refresh = async () => {
+		if (!isTauri()) return;
+		try {
+			setInstalled(await invoke<string[]>("list_installed_mcp_integrations"));
+		} catch (err) {
+			appLogger.error("config", "Failed to list MCP integrations", err);
+		}
+	};
+
+	onMount(refresh);
+
+	const handleRemoveAll = async () => {
+		if (busy()) return;
+		setBusy(true);
+		setError(null);
+		try {
+			await invoke<string[]>("remove_all_mcp_integrations");
+		} catch (err) {
+			// The sweep removes what it can and reports the rest, so refresh
+			// regardless — some entries are gone even on a partial failure.
+			setError(String(err));
+			appLogger.error("config", "Failed to remove MCP integrations", err);
+		} finally {
+			await refresh();
+			setBusy(false);
+		}
+	};
+
+	return (
+		<Show when={isTauri() && installed().length > 0}>
+			<div class={a.expandedSection}>
+				<div class={a.expandedLabel}>MCP integrations</div>
+				<p class={s.hint} style={{ "margin-bottom": "8px" }}>
+					The FastAF bridge is configured in: <strong>{installed().join(", ")}</strong>. Remove them before uninstalling
+					FastAF, or each client will report a missing MCP server.
+				</p>
+				<div class={a.actionsRow}>
+					<button class={a.actionBtn} onClick={handleRemoveAll} disabled={busy()}>
+						{busy() ? "Removing..." : "Remove all MCP integrations"}
+					</button>
+				</div>
+				<Show when={error()}>
+					<p class={a.remoteError}>{error()}</p>
+				</Show>
+			</div>
+		</Show>
 	);
 };
 
@@ -1080,6 +1153,8 @@ export const AgentsTab: Component<AgentsTabProps> = (props) => {
 						)}
 					</For>
 				</div>
+
+				<McpIntegrationsSection />
 
 				<AiPromptsSection />
 			</div>

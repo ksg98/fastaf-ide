@@ -328,6 +328,36 @@ pub(crate) fn check_graphql_errors(
     Err(GqlError::Other(format!("GraphQL error: {msg}")))
 }
 
+/// Flatten a `reqwest` error and its source chain into a single line.
+/// `reqwest::Error`'s `Display` omits sources, so the only useful part of a
+/// transport failure ("connection closed before message completed", TLS
+/// errors, …) never reaches the log.
+fn describe_reqwest_error(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut src = std::error::Error::source(e);
+    while let Some(s) = src {
+        out.push_str(&format!(": {s}"));
+        src = s.source();
+    }
+    out
+}
+
+/// Single-line, length-capped preview of a response body for error messages.
+/// GitHub/proxy error pages are HTML — a snippet identifies them instantly.
+fn body_snippet(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return "<empty body>".to_string();
+    }
+    if flat.chars().count() > 200 {
+        let head: String = flat.chars().take(200).collect();
+        format!("{head}…")
+    } else {
+        flat
+    }
+}
+
 /// Execute a GraphQL query against the GitHub API.
 /// Returns the parsed JSON response or a typed error.
 /// Detects rate limits from HTTP status codes, headers, and GraphQL error types.
@@ -350,7 +380,12 @@ pub(crate) async fn graphql_request(
         .json(&body)
         .send()
         .await
-        .map_err(|e| GqlError::Other(format!("GraphQL request failed: {e}")))?;
+        .map_err(|e| {
+            GqlError::Other(format!(
+                "GraphQL request failed: {}",
+                describe_reqwest_error(&e)
+            ))
+        })?;
 
     let status = response.status();
 
@@ -368,13 +403,23 @@ pub(crate) async fn graphql_request(
         });
     }
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| GqlError::Other(format!("Failed to parse GraphQL response: {e}")))?;
+    // Read the body as bytes and parse separately: `response.json()` collapses a
+    // transport failure (truncated body) and a non-JSON payload (GitHub 5xx /
+    // proxy HTML error page) into the same opaque "error decoding response body",
+    // discarding the HTTP status that would have explained it.
+    let body = response.bytes().await.map_err(|e| {
+        GqlError::Other(format!(
+            "GraphQL response body read failed (HTTP {status}): {}",
+            describe_reqwest_error(&e)
+        ))
+    })?;
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(&body).ok();
 
     if !status.is_success() {
-        let msg = json["message"].as_str().unwrap_or("Unknown error");
+        let msg = parsed
+            .as_ref()
+            .and_then(|j| j["message"].as_str().map(str::to_string))
+            .unwrap_or_else(|| body_snippet(&body));
         let err_msg = format!("GitHub API error ({status}): {msg}");
 
         if status.as_u16() == 401 {
@@ -404,6 +449,14 @@ pub(crate) async fn graphql_request(
 
         return Err(GqlError::Other(err_msg));
     }
+
+    let json = parsed.ok_or_else(|| {
+        GqlError::Other(format!(
+            "Failed to parse GraphQL response (HTTP {status}, {} bytes): {}",
+            body.len(),
+            body_snippet(&body)
+        ))
+    })?;
 
     // 4. HTTP 200 + GraphQL errors
     check_graphql_errors(&json, ratelimit_reset, retry_after)?;
@@ -704,17 +757,63 @@ pub(crate) struct StateLabel {
     pub(crate) css_class: String,
 }
 
+/// Whether a PR's branch conflicts with its base — as far as GitHub has
+/// actually worked out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ConflictState {
+    Conflicting,
+    /// GitHub is still recomputing. It keeps serving the LAST KNOWN `mergeable`
+    /// meanwhile, so that field says nothing about the current head.
+    Checking,
+    Clear,
+}
+
+/// The single rule for "does this PR conflict", shared by the sidebar badge and
+/// the PR popover.
+///
+/// It exists because the two used to decide separately: the badge tested
+/// `mergeable == CONFLICTING` on its own and kept painting a red Conflicts badge
+/// through the window where GitHub had already invalidated that value, and the
+/// popover's own CONFLICTING short-circuit did the same. A push therefore
+/// accused a PR of conflicting on stale data, with no second surface to
+/// contradict it (#8537).
+///
+/// `mergeStateStatus == UNKNOWN` is the recompute marker and wins over
+/// `mergeable`; `DIRTY` is GitHub's computed conflict verdict and is trusted on
+/// its own.
+pub(crate) fn classify_conflict_state(
+    mergeable: Option<&str>,
+    merge_state_status: Option<&str>,
+) -> ConflictState {
+    match merge_state_status {
+        Some("DIRTY") => ConflictState::Conflicting,
+        // Absent is treated as recomputing: an answer we never received is not
+        // evidence of a clean merge.
+        None | Some("UNKNOWN") => ConflictState::Checking,
+        _ if mergeable == Some("CONFLICTING") => ConflictState::Conflicting,
+        _ => ConflictState::Clear,
+    }
+}
+
 /// Classify merge readiness from mergeable + merge_state_status fields
 pub(crate) fn classify_merge_state(
     mergeable: Option<&str>,
     merge_state_status: Option<&str>,
 ) -> Option<StateLabel> {
-    // CONFLICTING takes priority (merge would fail)
-    if mergeable == Some("CONFLICTING") {
-        return Some(StateLabel {
-            label: "Conflicts".to_string(),
-            css_class: "conflicting".to_string(),
-        });
+    match classify_conflict_state(mergeable, merge_state_status) {
+        ConflictState::Conflicting => {
+            return Some(StateLabel {
+                label: "Conflicts".to_string(),
+                css_class: "conflicting".to_string(),
+            });
+        }
+        // No chip at all while GitHub recomputes — same as before, and still the
+        // honest answer: the popover has nothing to report yet. The sidebar
+        // badge, which must render *something* in that slot, shows its neutral
+        // checking state instead.
+        ConflictState::Checking => return None,
+        ConflictState::Clear => {}
     }
 
     match merge_state_status {
@@ -828,6 +927,10 @@ pub(crate) struct BranchPrStatus {
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
     pub(crate) merge_state_label: Option<StateLabel>,
+    /// The conflict verdict both surfaces render. Sent pre-computed so the
+    /// sidebar badge cannot re-derive it from `mergeable` alone and disagree
+    /// with the popover (#8537).
+    pub(crate) conflict_state: ConflictState,
     pub(crate) review_state_label: Option<StateLabel>,
     /// Repo-level: merge commits allowed
     pub(crate) merge_commit_allowed: bool,
@@ -995,6 +1098,8 @@ fn parse_pr_node(v: &serde_json::Value) -> Option<BranchPrStatus> {
 
     let merge_state_label =
         classify_merge_state(Some(mergeable.as_str()), Some(merge_state_status.as_str()));
+    let conflict_state =
+        classify_conflict_state(Some(mergeable.as_str()), Some(merge_state_status.as_str()));
     let review_state_label = classify_review_state(if review_decision.is_empty() {
         None
     } else {
@@ -1028,6 +1133,7 @@ fn parse_pr_node(v: &serde_json::Value) -> Option<BranchPrStatus> {
         created_at,
         updated_at,
         merge_state_label,
+        conflict_state,
         review_state_label,
         // Defaults — stamped with real values from repo-level response after parsing
         merge_commit_allowed: true,
@@ -1046,6 +1152,21 @@ fn stamp_merge_policy(nodes: &mut [BranchPrStatus], repo_json: &serde_json::Valu
         pr.squash_merge_allowed = squash;
         pr.rebase_merge_allowed = rebase;
     }
+}
+
+/// Forget the cached github.com viewer login so the next query re-resolves it.
+///
+/// `github_viewer_login` is the identity behind `author:@me` in the viewer-PR
+/// search and behind `issues_filter_clause`'s assignee/creator/mentioned filters.
+/// It was written on the first successful viewer query and cleared nowhere, so
+/// after logging out and back in as somebody else the user kept seeing the
+/// PREVIOUS account's PRs and issues for the rest of the session. Every path that
+/// changes who "we" are on github.com must call this.
+///
+/// Named accounts cache their own login in `ghe_state` and are unaffected — that
+/// is the point of the per-account cache.
+pub(crate) fn invalidate_viewer_login(state: &AppState) {
+    *state.github_viewer_login.write() = None;
 }
 
 /// Fetch the authenticated user's GitHub login via `query { viewer { login } }`.
@@ -1740,16 +1861,18 @@ pub(crate) async fn close_issue_impl(
     crate::github_debug::log_api("PATCH", &url, "close_issue_impl");
     let body = serde_json::json!({ "state": "closed" });
 
-    let response = state
-        .http_client
-        .patch(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "tuicommander")
-        .header("Accept", "application/vnd.github+json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+    let response = send_rest_with_breaker(
+        state,
+        &account,
+        state
+            .http_client
+            .patch(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "tuicommander")
+            .header("Accept", "application/vnd.github+json")
+            .json(&body),
+    )
+    .await?;
 
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
@@ -1788,16 +1911,18 @@ pub(crate) async fn reopen_issue_impl(
     crate::github_debug::log_api("PATCH", &url, "reopen_issue_impl");
     let body = serde_json::json!({ "state": "open" });
 
-    let response = state
-        .http_client
-        .patch(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "tuicommander")
-        .header("Accept", "application/vnd.github+json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+    let response = send_rest_with_breaker(
+        state,
+        &account,
+        state
+            .http_client
+            .patch(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "tuicommander")
+            .header("Accept", "application/vnd.github+json")
+            .json(&body),
+    )
+    .await?;
 
     let status = response.status().as_u16();
     if (200..300).contains(&status) {
@@ -1821,24 +1946,111 @@ pub(crate) async fn reopen_issue(
     reopen_issue_impl(&repo_path, issue_number, &state).await
 }
 
+/// Send a direct REST request through the account's circuit breaker.
+///
+/// `graphql_with_retry` and `run_gh_write` were breaker-aware; the direct-REST
+/// sites were not, so once an account was rate-limited every one of them kept
+/// hammering GitHub while the GraphQL path politely backed off. This is the same
+/// check-send-record cycle, adapted to REST.
+///
+/// The response is handed back on any non-rate-limit status so each caller keeps
+/// its own status handling and error wording (merge conflicts, self-approval,
+/// diff-too-large fallback all read the body themselves). Only rate limits are
+/// intercepted, because they are the one outcome that must not reach the caller
+/// as an ordinary failure.
+///
+/// A 403 is classified from headers first — `x-ratelimit-remaining: 0` for the
+/// primary limit, a `retry-after` for a secondary/abuse limit — then from the
+/// JSON message when GitHub omits both headers. Ambiguous bodies are buffered
+/// and rebuilt so plain permission-denied responses still reach their caller.
+async fn send_rest_with_breaker(
+    state: &AppState,
+    account: &crate::github_account::GitHubAccount,
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, String> {
+    with_account_breaker(state, account, |b| b.check())?;
+
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(e) => {
+            with_account_breaker(state, account, |b| b.record_failure());
+            return Err(format!("GitHub API request failed: {e}"));
+        }
+    };
+
+    let status = response.status().as_u16();
+    let reset_at = header_as_u64(response.headers(), "x-ratelimit-reset");
+    let retry_after = header_as_u64(response.headers(), "retry-after");
+    let remaining = header_as_u64(response.headers(), "x-ratelimit-remaining");
+
+    let mut rate_limited =
+        status == 429 || (status == 403 && (remaining == Some(0) || retry_after.is_some()));
+    let response = if status == 403 && !rate_limited {
+        let response_status = response.status();
+        let response_version = response.version();
+        let response_headers = response.headers().clone();
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                with_account_breaker(state, account, |b| b.record_failure());
+                return Err(format!("Failed to read GitHub 403 response: {error}"));
+            }
+        };
+        let message = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|json| json["message"].as_str().map(str::to_lowercase))
+            .unwrap_or_default();
+        rate_limited = message.contains("secondary rate") || message.contains("abuse");
+
+        let mut rebuilt = axum::http::Response::builder()
+            .status(response_status)
+            .version(response_version)
+            .body(reqwest::Body::from(body))
+            .map_err(|e| format!("Failed to rebuild GitHub response: {e}"))?;
+        *rebuilt.headers_mut() = response_headers;
+        reqwest::Response::from(rebuilt)
+    } else {
+        response
+    };
+    if rate_limited {
+        let wait = rate_limit_wait_secs(reset_at, retry_after);
+        with_account_breaker(state, account, |b| b.record_rate_limit(wait));
+        return Err(format!("rate-limit: GitHub returned HTTP {status}"));
+    }
+
+    if (500..600).contains(&status) {
+        with_account_breaker(state, account, |b| b.record_failure());
+    } else {
+        // Any ordinary response proves the service is reachable. Authentication,
+        // validation, conflicts and missing resources are caller errors, not an
+        // availability incident for unrelated operations.
+        with_account_breaker(state, account, |b| b.record_success());
+    }
+    Ok(response)
+}
+
 /// GET a GitHub REST endpoint and parse the JSON body, returning a descriptive
 /// error on any non-2xx status (e.g. 404/401/403) instead of parsing an error
 /// body as a valid-but-empty resource. Mirrors the status idiom used by
 /// `close_issue_impl`/`reopen_issue_impl`.
 async fn fetch_github_json(
-    client: &reqwest::Client,
+    state: &AppState,
+    account: &crate::github_account::GitHubAccount,
     url: &str,
     token: &str,
     context: &str,
 ) -> Result<serde_json::Value, String> {
-    let response = client
-        .get(url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "tuicommander")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+    let response = send_rest_with_breaker(
+        state,
+        account,
+        state
+            .http_client
+            .get(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "tuicommander")
+            .header("Accept", "application/vnd.github+json"),
+    )
+    .await?;
 
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
@@ -1864,8 +2076,7 @@ pub(crate) async fn get_issue_detail_impl(
         &format!("/repos/{owner}/{repo}/issues/{issue_number}"),
     );
     crate::github_debug::log_api("GET", &issue_url, "get_issue_detail_impl");
-    let issue_json =
-        fetch_github_json(&state.http_client, &issue_url, &token, "GitHub issue").await?;
+    let issue_json = fetch_github_json(state, &account, &issue_url, &token, "GitHub issue").await?;
 
     let comments_url = crate::github_account::github_rest_url(
         &account.host,
@@ -1873,7 +2084,8 @@ pub(crate) async fn get_issue_detail_impl(
     );
     crate::github_debug::log_api("GET", &comments_url, "get_issue_detail_impl comments");
     let comments_json = fetch_github_json(
-        &state.http_client,
+        state,
+        &account,
         &comments_url,
         &token,
         "GitHub issue comments",
@@ -2541,16 +2753,18 @@ pub(crate) async fn merge_pr_github_impl(
     crate::github_debug::log_api("PUT", &url, "merge_pr_github_impl");
     let body = serde_json::json!({ "merge_method": merge_method });
 
-    let response = state
-        .http_client
-        .put(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "tuicommander")
-        .header("Accept", "application/vnd.github+json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+    let response = send_rest_with_breaker(
+        state,
+        &account,
+        state
+            .http_client
+            .put(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "tuicommander")
+            .header("Accept", "application/vnd.github+json")
+            .json(&body),
+    )
+    .await?;
 
     let status = response.status().as_u16();
     let json: serde_json::Value = response
@@ -2963,16 +3177,18 @@ pub(crate) async fn approve_pr_impl(
     crate::github_debug::log_api("POST", &url, "approve_pr_impl");
     let body = serde_json::json!({ "event": "APPROVE" });
 
-    let response = state
-        .http_client
-        .post(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "tuicommander")
-        .header("Accept", "application/vnd.github+json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+    let response = send_rest_with_breaker(
+        state,
+        &account,
+        state
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "tuicommander")
+            .header("Accept", "application/vnd.github+json")
+            .json(&body),
+    )
+    .await?;
 
     let status = response.status();
     if status.is_success() {
@@ -3047,15 +3263,17 @@ pub(crate) async fn get_pr_diff_impl(
     );
     crate::github_debug::log_api("GET", &url, "get_pr_diff_impl");
 
-    let response = state
-        .http_client
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "tuicommander")
-        .header("Accept", "application/vnd.github.diff")
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API request failed: {e}"))?;
+    let response = send_rest_with_breaker(
+        state,
+        &account,
+        state
+            .http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "tuicommander")
+            .header("Accept", "application/vnd.github.diff"),
+    )
+    .await?;
 
     let status = response.status();
     if status.is_success() {
@@ -3211,18 +3429,20 @@ pub(crate) async fn get_pr_refs_impl(
         &format!("/repos/{owner}/{repo}/pulls/{pr_number}"),
     );
     crate::github_debug::log_api("GET", &url, "get_pr_refs_impl");
-    let json: serde_json::Value = state
-        .http_client
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "tuicommander")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API request failed: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse GitHub PR response: {e}"))?;
+    let json: serde_json::Value = send_rest_with_breaker(
+        state,
+        &account,
+        state
+            .http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", "tuicommander")
+            .header("Accept", "application/vnd.github+json"),
+    )
+    .await?
+    .json()
+    .await
+    .map_err(|e| format!("Failed to parse GitHub PR response: {e}"))?;
     parse_pr_refs(&json).ok_or_else(|| "PR response missing head/base refs".to_string())
 }
 
@@ -3541,24 +3761,24 @@ mod tests {
     #[test]
     fn github_actions_run_link_is_recognized() {
         assert!(is_github_actions_link(
-            "https://github.com/Lansweeper/agent2/actions/runs/29229498673/job/86750457823"
+            "https://github.com/sstraus/tuicommander/actions/runs/29229498673/job/86750457823"
         ));
     }
 
     #[test]
     fn circleci_link_is_not_github_actions() {
         assert!(!is_github_actions_link(
-            "https://circleci.com/gh/Lansweeper/agent2/1328"
+            "https://circleci.com/gh/sstraus/tuicommander/1328"
         ));
         assert!(!is_github_actions_link(
-            "https://app.circleci.com/pipelines/gh/Lansweeper/agent2/229/workflows/abc"
+            "https://app.circleci.com/pipelines/gh/sstraus/tuicommander/229/workflows/abc"
         ));
     }
 
     #[test]
     fn codacy_and_empty_links_are_not_github_actions() {
         assert!(!is_github_actions_link(
-            "https://app.codacy.com/gh/Lansweeper/agent2/pull-requests/38"
+            "https://app.codacy.com/gh/sstraus/tuicommander/pull-requests/38"
         ));
         assert!(!is_github_actions_link(""));
     }
@@ -3624,6 +3844,50 @@ mod tests {
     fn test_is_light_color_just_above_threshold() {
         // 818181: (129*299+129*587+129*114)/1000 = 129.0 > 128
         assert!(is_light_color("818181"));
+    }
+
+    // --- conflict state: the one rule both surfaces read (#8537) ---
+
+    /// After a push GitHub keeps serving the LAST KNOWN `mergeable` while
+    /// `mergeStateStatus` is UNKNOWN, i.e. while it recomputes. Trusting
+    /// `mergeable` alone in that window accuses a PR of conflicting on a value
+    /// GitHub has already invalidated.
+    #[test]
+    fn conflict_state_matrix() {
+        use ConflictState::*;
+        let cases = [
+            (Some("CONFLICTING"), Some("DIRTY"), Conflicting),
+            (Some("CONFLICTING"), Some("UNKNOWN"), Checking),
+            (Some("MERGEABLE"), Some("CLEAN"), Clear),
+            (Some("MERGEABLE"), Some("UNKNOWN"), Checking),
+            (Some("UNKNOWN"), Some("UNKNOWN"), Checking),
+            // A computed status with a stale-looking mergeable is still a real
+            // conflict — DIRTY is GitHub's own verdict.
+            (Some("MERGEABLE"), Some("DIRTY"), Conflicting),
+            (None, None, Checking),
+        ];
+        for (mergeable, status, expected) in cases {
+            assert_eq!(
+                classify_conflict_state(mergeable, status),
+                expected,
+                "mergeable={mergeable:?} status={status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_state_label_never_claims_conflicts_while_recomputing() {
+        // The regression: a stale CONFLICTING used to short-circuit straight to
+        // the red chip, even with the status still being recomputed.
+        assert_eq!(
+            classify_merge_state(Some("CONFLICTING"), Some("UNKNOWN")),
+            None
+        );
+        // Once GitHub has computed it, the chip is owed.
+        assert_eq!(
+            classify_merge_state(Some("CONFLICTING"), Some("DIRTY")).map(|label| label.css_class),
+            Some("conflicting".to_string())
+        );
     }
 
     // --- classify_merge_state tests ---
@@ -5232,6 +5496,172 @@ mod tests {
         assert_eq!(format!("{err}"), "network timeout");
     }
 
+    // --- non-JSON GraphQL responses ---
+    //
+    // The defect: `response.json()` ran before the status check, so any response
+    // GitHub (or an intercepting proxy) served as HTML collapsed into the opaque
+    // "Failed to parse GraphQL response: error decoding response body" — the
+    // status code, and with it the Auth/RateLimit classification, was thrown away.
+
+    #[test]
+    fn body_snippet_collapses_whitespace_and_caps_length() {
+        assert_eq!(body_snippet(b""), "<empty body>");
+        assert_eq!(body_snippet(b"   \n\t "), "<empty body>");
+        assert_eq!(
+            body_snippet(b"<html>\n  <body>Bad gateway</body>\n</html>"),
+            "<html> <body>Bad gateway</body> </html>"
+        );
+
+        let long = "x".repeat(500);
+        let snippet = body_snippet(long.as_bytes());
+        assert_eq!(snippet.chars().count(), 201, "200 chars plus the ellipsis");
+        assert!(snippet.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn a_502_html_page_reports_the_http_status_not_a_parse_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/graphql")
+            .with_status(502)
+            .with_body("<html><body>Bad gateway</body></html>")
+            .create_async()
+            .await;
+
+        let err = graphql_request(
+            &reqwest::Client::new(),
+            "token",
+            &format!("{}/graphql", server.url()),
+            "query { viewer { login } }",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect_err("a 502 must not be reported as success");
+        mock.assert_async().await;
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("502") && msg.contains("Bad gateway"),
+            "the status and body must both survive: {msg}"
+        );
+    }
+
+    /// A 401 behind a non-JSON body used to surface as `Other`, so the
+    /// token-candidate fallback loop (which only advances on `Auth`) never tried
+    /// the next token.
+    #[tokio::test]
+    async fn a_401_with_a_non_json_body_is_still_an_auth_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/graphql")
+            .with_status(401)
+            .with_body("Bad credentials")
+            .create_async()
+            .await;
+
+        let err = graphql_request(
+            &reqwest::Client::new(),
+            "token",
+            &format!("{}/graphql", server.url()),
+            "query { viewer { login } }",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect_err("a 401 must not be reported as success");
+        mock.assert_async().await;
+
+        assert!(
+            matches!(err, GqlError::Auth(_)),
+            "expected Auth, got {err:?}"
+        );
+        assert!(err.to_string().contains("Bad credentials"));
+    }
+
+    /// Same misclassification, worse consequence: an exhausted primary limit
+    /// served as HTML counted as an ordinary failure instead of backing off.
+    #[tokio::test]
+    async fn a_403_with_exhausted_headers_and_a_non_json_body_is_a_rate_limit() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/graphql")
+            .with_status(403)
+            .with_header("x-ratelimit-remaining", "0")
+            .with_header("x-ratelimit-reset", "99999999999")
+            .with_body("<html>rate limited</html>")
+            .create_async()
+            .await;
+
+        let err = graphql_request(
+            &reqwest::Client::new(),
+            "token",
+            &format!("{}/graphql", server.url()),
+            "query { viewer { login } }",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect_err("an exhausted primary limit must not be reported as success");
+        mock.assert_async().await;
+
+        match err {
+            GqlError::RateLimit { reset_at, .. } => {
+                assert_eq!(reset_at, Some(99999999999));
+            }
+            other => panic!("expected RateLimit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_json_200_body_names_the_body_it_could_not_parse() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/graphql")
+            .with_status(200)
+            .with_body("<html>logged out</html>")
+            .create_async()
+            .await;
+
+        let err = graphql_request(
+            &reqwest::Client::new(),
+            "token",
+            &format!("{}/graphql", server.url()),
+            "query { viewer { login } }",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect_err("a non-JSON 200 body is not a usable GraphQL response");
+        mock.assert_async().await;
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("logged out") && msg.contains("23 bytes"),
+            "the body must be quoted so the cause is identifiable: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_valid_json_200_still_parses() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/graphql")
+            .with_status(200)
+            .with_body(r#"{"data":{"viewer":{"login":"octocat"}}}"#)
+            .create_async()
+            .await;
+
+        let json = graphql_request(
+            &reqwest::Client::new(),
+            "token",
+            &format!("{}/graphql", server.url()),
+            "query { viewer { login } }",
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("a well-formed response must still come through");
+        mock.assert_async().await;
+
+        assert_eq!(json["data"]["viewer"]["login"], "octocat");
+    }
+
     // --- GitHubCircuitBreaker tests ---
 
     #[test]
@@ -6060,6 +6490,279 @@ mod tests {
         );
     }
 
+    // --- direct-REST circuit breaker (#491-6bb2) ---
+
+    /// The defect: only graphql_with_retry and run_gh_write consulted the breaker,
+    /// so a rate-limited account kept hammering GitHub through every direct-REST
+    /// call while the GraphQL path politely backed off. A tripped breaker must now
+    /// stop the request before it is sent — asserted by the mock NEVER being hit.
+    #[tokio::test]
+    async fn a_tripped_breaker_stops_a_rest_call_before_it_is_sent() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/o/r/issues/1")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
+        state.github_circuit_breaker.record_rate_limit(60);
+
+        let url = format!("{}/repos/o/r/issues/1", server.url());
+        let err = send_rest_with_breaker(&state, &account, state.http_client.get(&url))
+            .await
+            .expect_err("an open breaker must refuse the call");
+
+        assert!(err.contains("rate-limit"), "unexpected error: {err}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_rest_429_trips_the_breaker_for_the_next_call() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("PATCH", "/repos/o/r/issues/1")
+            .with_status(429)
+            .with_header("retry-after", "42")
+            .create_async()
+            .await;
+
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
+        let url = format!("{}/repos/o/r/issues/1", server.url());
+
+        let err = send_rest_with_breaker(&state, &account, state.http_client.patch(&url))
+            .await
+            .expect_err("429 must not be handed back as an ordinary response");
+        assert!(err.contains("rate-limit"), "unexpected error: {err}");
+        mock.assert_async().await;
+
+        let follow_up = state.github_circuit_breaker.check().unwrap_err();
+        assert!(
+            follow_up.contains("rate-limit"),
+            "the 429 must leave the breaker backing off: {follow_up}"
+        );
+    }
+
+    /// GitHub's 403 is ambiguous. An exhausted primary limit (remaining: 0) must
+    /// back off; a plain permission denial must not, or one protected branch would
+    /// silence every GitHub call for the account.
+    #[tokio::test]
+    async fn a_403_is_a_rate_limit_only_when_the_headers_say_so() {
+        let mut server = mockito::Server::new_async().await;
+        let exhausted = server
+            .mock("GET", "/exhausted")
+            .with_status(403)
+            .with_header("x-ratelimit-remaining", "0")
+            .with_header("x-ratelimit-reset", "99999999999")
+            .create_async()
+            .await;
+        let forbidden = server
+            .mock("GET", "/forbidden")
+            .with_status(403)
+            .with_body(r#"{"message":"Resource not accessible"}"#)
+            .create_async()
+            .await;
+
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
+
+        let err = send_rest_with_breaker(
+            &state,
+            &account,
+            state.http_client.get(format!("{}/exhausted", server.url())),
+        )
+        .await
+        .expect_err("an exhausted primary limit is a rate limit");
+        assert!(err.contains("rate-limit"), "unexpected error: {err}");
+        exhausted.assert_async().await;
+        state.github_circuit_breaker.reset();
+
+        // The permission 403 comes back as a Response so the caller can read the
+        // body and produce its own wording (friendly_approve_error, merge errors…).
+        let response = send_rest_with_breaker(
+            &state,
+            &account,
+            state.http_client.get(format!("{}/forbidden", server.url())),
+        )
+        .await
+        .expect("a permission 403 must reach the caller with its body intact");
+        assert_eq!(response.status().as_u16(), 403);
+        assert!(response.text().await.unwrap().contains("not accessible"));
+        forbidden.assert_async().await;
+        assert!(
+            state.github_circuit_breaker.check().is_ok(),
+            "a single permission denial must not open the breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_rest_4xx_responses_do_not_poison_account_availability() {
+        let mut server = mockito::Server::new_async().await;
+        for (path, status) in [("/missing", 404), ("/conflict", 409), ("/invalid", 422)] {
+            server
+                .mock("GET", path)
+                .with_status(status)
+                .with_body(r#"{"message":"deterministic caller error"}"#)
+                .create_async()
+                .await;
+        }
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
+
+        for path in ["missing", "conflict", "invalid"] {
+            let response = send_rest_with_breaker(
+                &state,
+                &account,
+                state.http_client.get(format!("{}/{path}", server.url())),
+            )
+            .await
+            .expect("ordinary 4xx must reach its caller");
+            assert!(response.status().is_client_error());
+        }
+
+        assert!(
+            state.github_circuit_breaker.check().is_ok(),
+            "three deterministic 4xx responses must not open the breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn three_rest_5xx_responses_open_the_availability_breaker() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/unavailable")
+            .with_status(503)
+            .expect(3)
+            .create_async()
+            .await;
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
+
+        for _ in 0..3 {
+            let response = send_rest_with_breaker(
+                &state,
+                &account,
+                state
+                    .http_client
+                    .get(format!("{}/unavailable", server.url())),
+            )
+            .await
+            .expect("5xx body remains caller-readable");
+            assert_eq!(response.status().as_u16(), 503);
+        }
+
+        mock.assert_async().await;
+        assert!(state.github_circuit_breaker.check().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_secondary_limit_body_trips_rest_backoff_without_headers() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/secondary")
+            .with_status(403)
+            .with_body(r#"{"message":"You have exceeded a secondary rate limit."}"#)
+            .create_async()
+            .await;
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
+
+        let error = send_rest_with_breaker(
+            &state,
+            &account,
+            state.http_client.get(format!("{}/secondary", server.url())),
+        )
+        .await
+        .expect_err("body-signalled secondary limit must back off");
+
+        mock.assert_async().await;
+        assert!(error.contains("rate-limit"), "{error}");
+        assert!(
+            state
+                .github_circuit_breaker
+                .check()
+                .unwrap_err()
+                .starts_with("rate-limit:")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_rest_call_clears_earlier_failures() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/ok")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
+        state.github_circuit_breaker.record_failure();
+
+        let response = send_rest_with_breaker(
+            &state,
+            &account,
+            state.http_client.get(format!("{}/ok", server.url())),
+        )
+        .await
+        .expect("2xx");
+        assert_eq!(response.status().as_u16(), 200);
+        mock.assert_async().await;
+        assert!(state.github_circuit_breaker.check().is_ok());
+    }
+
+    // --- viewer login invalidation (#491-6bb2) ---
+
+    /// github_viewer_login was written once and cleared nowhere, so after switching
+    /// accounts the `author:@me` PR search and the issue assignee/creator filters
+    /// kept resolving to the PREVIOUS user.
+    #[test]
+    fn invalidating_the_viewer_login_forgets_the_previous_account() {
+        let state = crate::state::tests_support::make_test_app_state();
+        *state.github_viewer_login.write() = Some("old-user".to_string());
+
+        invalidate_viewer_login(&state);
+
+        assert_eq!(*state.github_viewer_login.read(), None);
+        assert_eq!(
+            github_com_account(&state).login,
+            None,
+            "the derived account identity must forget it too"
+        );
+    }
+
+    /// Named accounts cache their own login in ghe_state — that isolation is the
+    /// point, so clearing the ambient one must not touch them.
+    #[test]
+    fn invalidating_the_viewer_login_leaves_named_accounts_alone() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let named = named_cloud_account();
+        *state.github_viewer_login.write() = Some("ambient-user".to_string());
+        *state
+            .ghe_state
+            .entry(named.id.clone())
+            .or_insert_with(GheAccountState::new)
+            .viewer_login
+            .write() = Some("named-user".to_string());
+
+        invalidate_viewer_login(&state);
+
+        assert_eq!(*state.github_viewer_login.read(), None);
+        assert_eq!(
+            state
+                .ghe_state
+                .get(&named.id)
+                .unwrap()
+                .viewer_login
+                .read()
+                .clone(),
+            Some("named-user".to_string())
+        );
+    }
+
     // --- fetch_github_json status-check tests ---
 
     #[tokio::test]
@@ -6073,9 +6776,10 @@ mod tests {
             .create_async()
             .await;
 
-        let client = reqwest::Client::new();
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
         let url = format!("{}/repos/o/r/issues/999", server.url());
-        let result = fetch_github_json(&client, &url, "tok", "GitHub issue").await;
+        let result = fetch_github_json(&state, &account, &url, "tok", "GitHub issue").await;
 
         mock.assert_async().await;
         // A 404 must surface as an Err, NOT parse into a silent empty issue.
@@ -6098,9 +6802,10 @@ mod tests {
             .create_async()
             .await;
 
-        let client = reqwest::Client::new();
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
         let url = format!("{}/repos/o/r/issues/1", server.url());
-        let result = fetch_github_json(&client, &url, "tok", "GitHub issue").await;
+        let result = fetch_github_json(&state, &account, &url, "tok", "GitHub issue").await;
 
         mock.assert_async().await;
         let err = result.expect_err("401 must return Err");
@@ -6122,9 +6827,10 @@ mod tests {
             .create_async()
             .await;
 
-        let client = reqwest::Client::new();
+        let state = crate::state::tests_support::make_test_app_state();
+        let account = github_com_account(&state);
         let url = format!("{}/repos/o/r/issues/42", server.url());
-        let value = fetch_github_json(&client, &url, "tok", "GitHub issue")
+        let value = fetch_github_json(&state, &account, &url, "tok", "GitHub issue")
             .await
             .expect("2xx should parse into JSON");
 

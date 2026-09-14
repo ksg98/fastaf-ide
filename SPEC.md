@@ -1,11 +1,11 @@
 # FastAF Specification
 
-**Version:** 1.6.3
-**Last Updated:** 2026-07-11
+**Version:** 1.7.6
+**Last Updated:** 2026-08-27
 
 ## Overview
 
-FastAF is a multi-agent terminal orchestrator designed to manage multiple AI coding agents (Claude Code, Gemini CLI, OpenCode, Aider, Codex) in parallel. It provides per-pane zoom, git worktree isolation, and GitHub integration.
+FastAF is a multi-agent terminal orchestrator designed to manage supported AI coding agents, including Claude Code, Gemini CLI, OpenCode, Aider, and Codex, in parallel. It provides per-pane zoom, git worktree isolation, and GitHub integration.
 
 ## Goals
 
@@ -94,6 +94,33 @@ interface TerminalData {
 type AwaitingInputType = "question" | "error" | null;
 ```
 
+### Authoritative agent wait state
+
+Agent lifecycle state is owned by one per-session backend state machine. Every
+input turn has a monotonically increasing `turn_epoch`; asynchronous parser and
+timer events are applied only to the epoch that produced them. A wait carries
+its source and confidence, and every SET has an explicit CLEAR path (submitted
+input, choice resolution/disappearance, protocol busy/idle, interruption, or
+PTY exit). Terminal scrollback is evidence only for the current chat turn: a
+question retained above a later response or completion must never re-arm
+`awaiting_input`.
+
+Desktop IPC, HTTP/PWA, WebSocket, MCP, and orchestrator injection use the same
+post-input bookkeeping. Frontends render the backend snapshot; parsed terminal
+events may trigger one-shot effects but are not a second state authority.
+PTY lifecycle mutations reach that snapshot through a lossless ordered lane;
+the broadcast event bus is reserved for reconnectable live consumers and cannot
+be the sole carrier of sticky SET/CLEAR state. Before any lifecycle evidence,
+the shell state is absent and a detected agent remains `starting`.
+
+MCP managed-agent commands use one `session action=submit` request. It claims a
+confirmed-idle empty composer, never queues, serializes the complete raw-mode
+payload through Enter, advances this same input FSM and epoch, and waits
+internally for bounded child terminal movement. The receipt distinguishes
+complete, not-started, and uncertain writes; only a provably not-started write
+is retry-safe. Terminal movement is acknowledgement evidence, not semantic
+application acceptance. `session action=input` remains raw and write-only.
+
 #### repositoriesStore
 Manages the list of git repositories.
 
@@ -166,7 +193,7 @@ See `src/hooks/` for full signatures — the above is a representative summary.
 ## Agent Types
 
 ```typescript
-type AgentType = "claude" | "gemini" | "opencode" | "aider" | "codex" | "amp" | "cursor" | "goose" | "droid" | "git" | "api";
+type AgentType = "claude" | "gemini" | "opencode" | "aider" | "codex" | "amp" | "cursor" | "goose" | "grok" | "droid" | "pi" | "git" | "api";
 ```
 
 Full agent configuration (binary, resume command, session discovery, detection patterns) lives in `src/agents.ts`.
@@ -254,10 +281,15 @@ Features:
 
 ## Persistence
 
-Repository state is persisted by the Rust backend in `repositories.json`.
-Release builds use the platform config directory; debug builds use a one-time
-production-seeded `~/.tuicommander-dev/repositories.json` to avoid collisions
-with an installed app. No other backend config path is changed by this rule.
+Repository state is persisted by the Rust backend in `repositories.json`, in
+the single platform config directory shared by debug and release builds,
+written through the locked/atomic `ConfigFile` path.
+
+Ordinary `config.json` and `mcp-upstreams.json` mutations use delta-under-lock
+semantics: after taking the cross-process file lock, the backend reloads the
+latest document and applies only the caller's changed fields or server-ID
+operations. Independent saves from concurrent debug and release instances do
+not overwrite one another's unrelated changes.
 
 Some frontend-only stores persist to localStorage:
 
@@ -269,7 +301,7 @@ Some frontend-only stores persist to localStorage:
 ## Feature Status
 
 ### Completed (P1)
-- [x] Multi-agent support (Claude, Gemini, OpenCode, Aider, Codex)
+- [x] Multi-agent support through the canonical `AgentType` registry
 - [x] Git worktree management per task
 - [x] Agent spawning integration
 - [x] SolidJS migration
@@ -281,10 +313,15 @@ Some frontend-only stores persist to localStorage:
 - [x] Interactive agent prompts UI
 - [x] IDE launcher dropdown
 - [x] GitHub integration
+- [x] Sidebar PR badges retain `#number` while showing lifecycle, conflict, CI, and review state
 - [x] Parallel agent orchestration
+- [x] Orchestrated PTY task descriptions with prompt-derived fallback metadata
+- [x] One-call MCP managed-agent submission with bounded terminal-movement receipt
+- [x] Expandable terminal Context bar for agent intent, orchestrator assignment, and last user prompt
 - [x] Font selection setting
 - [x] Tab bar with keyboard navigation
 - [x] Density modes for readability
+- [x] Terminal selection copy unwraps soft-wrapped rows and removes coherent Claude visual gutters without altering literal block characters
 - [x] Status bar with branch and PR info
 - [x] Rate limit detection
 - [x] JSONL output parsing
@@ -316,12 +353,12 @@ Some frontend-only stores persist to localStorage:
 - [x] Plugin system (see FEATURES.md section 17)
 - [x] Remote access / HTTP server
 - [x] Mobile Companion PWA (sessions, live output, question reply, activity feed)
-- [x] MCP Proxy Hub (aggregate upstream MCP servers via HTTP and stdio, tool namespace prefixing, circuit breaker, hot-reload, OS keyring credentials, tool filtering)
+- [x] MCP Proxy Hub (aggregate upstream MCP servers via HTTP and stdio, tool namespace prefixing, circuit breaker, hot-reload, OS keyring credentials, tool filtering, session-local Grok compatibility through lazy meta-tools)
 - [x] Copy Path in Markdown panel
 - [x] Claude Usage Dashboard (native SolidJS component with API polling, session analytics, usage timeline)
 - [x] ConfirmDialog component (in-app dark-themed replacement for native OS dialogs)
 - [x] Status bar unified agent badge with priority cascade (rate limit > usage API > PTY usage > name)
-- [x] Movement-based PTY agent activity detection ("text above the input area moves = active") with explicit-hook precedence, prompt-based Ready screens, Codex presence-based Working policy, interrupt confirmation, and confirmed-idle safety gates
+- [x] Movement-based PTY agent activity detection ("text above the input area moves = active") with explicit-hook precedence, prompt-based Ready screens, Codex presence-based Working policy, Grok activity/composer disambiguation, interrupt confirmation, and confirmed-idle safety gates
 - [x] PR lifecycle filtering (CLOSED hidden, MERGED hidden after 5min user activity)
 - [x] Notes/Ideas: mark as used, badge count in status bar
 - [x] Notes/Ideas: image paste support (Ctrl+V), thumbnails, send absolute paths to terminal
@@ -352,8 +389,11 @@ Some frontend-only stores persist to localStorage:
 - [x] Prompt token carry-forward across windows
 
 ### Completed (P2)
+- [x] Alternate-screen scrollback — isolated bounded history for fullscreen apps, primary-only durable logs, and atomic renderer-generation transitions
 - [x] Task completion detection
 - [x] Audio notification when agent awaits input
+- [x] Intent tab titles override spawn labels while explicit user renames remain protected across reconnects
+- [x] Remote completion muting survives reconnects and deduplicates idle/exit signals per busy cycle
 - [x] IDE launcher with app icons
 
 ### Pending (P2)
@@ -361,7 +401,7 @@ Some frontend-only stores persist to localStorage:
 
 ### Agent Configuration (Done)
 - [x] Settings > Agents tab with per-agent run configurations
-- [x] MCP bridge install/remove for supported agents (Claude, Cursor, Windsurf, VS Code, Zed, Amp, Gemini)
+- [x] MCP bridge install/remove for every MCP-capable agent in the canonical registry
 - [x] Terminal context menu > Agents submenu with run configs
 - [x] Agent binary detection and version display
 - [x] agents.json persistence for run configurations

@@ -1,6 +1,10 @@
 # FastAF Documentation
 
-- **[Complete Feature Reference](FEATURES.md)** — Canonical inventory of every feature, shortcut, and UI element
+Start with the [documentation home](index.md) or the [Getting Started](user-guide/getting-started.md) guide.
+
+- **[Feature Reference](FEATURES.md)** — Canonical capability inventory, current feature status, and recent feature deltas for users and LLMs
+- **[Troubleshooting](user-guide/troubleshooting.md)** — Common setup, agent, GitHub, browser-mode, and diagnostics problems
+- **[FastAF modes](user-guide/modes.md)** — Desktop, browser, mobile, and remote-daemon differences
 
 ## User Guide
 
@@ -41,7 +45,7 @@
 
 ## API Reference
 
-- [Tauri Commands](api/tauri-commands.md) - All 73+ Tauri commands by module
+- [Tauri Commands](api/tauri-commands.md) - Tauri commands by module
 - [HTTP API](api/http-api.md) - REST endpoints for MCP/remote access
 
 ## Guides
@@ -49,12 +53,8 @@
 - [Project History](guides/project-history.md) - Timeline, milestones, contributor analysis
 - [Development Setup](guides/development-setup.md) - Build, test, run instructions
 
-## Existing Documents
+## Design and project history
 
-These documents predate the structured docs and contain valuable context:
-
-| Document | Description |
-|----------|-------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Original architecture deep-dive with data models |
-| [UI_CHANGES.md](UI_CHANGES.md) | Removed/relocated UI elements |
-| [proposals/split-panes.md](proposals/split-panes.md) | Split pane design proposal |
+- [Architecture overview](architecture/overview.md) — current system design
+- [Project history](guides/project-history.md) — historical milestones and repository context
+- [Product specification](https://github.com/sstraus/tuicommander/blob/main/SPEC.md) — product scope and implementation status

@@ -125,8 +125,9 @@ function createPrNotificationsStore() {
 	}
 
 	/** Get active (non-dismissed) notifications */
+	/** Newest first — the bell reads top-down, so the latest notification must lead. */
 	function getActive(): PrNotification[] {
-		return state.notifications.filter((n) => !n.dismissed);
+		return state.notifications.filter((n) => !n.dismissed).sort((a, b) => b.createdAt - a.createdAt);
 	}
 
 	/** Clear all notifications (for reset/testing) */

@@ -35,6 +35,17 @@ function relativeAge(timestamp: number): string {
 	return `${Math.floor(hours / 24)}d ago`;
 }
 
+/** Narrowest sidebar that still fits the full "FastAF" wordmark.
+ *
+ * Worst case is macOS: 78px of `padding-left` reserved for the traffic lights,
+ * 10px `padding-right`, two 26px toggles plus gaps (~56px) and the 110px svg —
+ * 254px total. The old threshold was 240, so between 240 and 254 the full name
+ * did not fit; because it was absolutely positioned it overlapped the toggles
+ * instead of pushing them. Below this the short "TUIC" mark (38px) is used, which
+ * fits comfortably at the 200px minimum sidebar width.
+ */
+const FULL_APP_NAME_MIN_SIDEBAR_PX = 254;
+
 const NOTIFICATION_LABELS: Record<PrNotificationType, { label: string; icon: string; cls: string }> = {
 	merged: { label: "Merged", icon: "\u2714", cls: s.notifMerged },
 	closed: { label: "Closed", icon: "\u2716", cls: s.notifClosed },
@@ -166,9 +177,9 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 	/** Count only activity items visible in the popover (filtered by active repo) */
 	const visibleActivityCount = createMemo(() => {
 		const repoPath = repositoriesStore.state.activeRepoPath ?? undefined;
-		return activitySections().reduce(
-			(sum, section) => sum + activityStore.getForSection(section.id, repoPath).length,
-			0,
+		return activityStore.countActiveInSections(
+			activitySections().map((s) => s.id),
+			repoPath,
 		);
 	});
 	const totalBadgeCount = () => activeNotifs().length + visibleActivityCount() + (hasUpdate() ? 1 : 0);
@@ -254,7 +265,11 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 
 	return (
 		<div id="toolbar" class={s.toolbar} data-tauri-drag-region>
-			<div class={cx(s.left, uiStore.state.sidebarWidth < 240 && s.narrowSidebar)} data-tauri-drag-region>
+			<div
+				class={cx(s.left, uiStore.state.sidebarWidth < FULL_APP_NAME_MIN_SIDEBAR_PX && s.narrowSidebar)}
+				data-tauri-drag-region
+			>
+				<span class={s.leftSpacer} data-tauri-drag-region />
 				{/* Embossed app name — full version for wide sidebar, short for narrow */}
 				<svg
 					class={`${s.appName} ${s.appNameFull}`}
@@ -362,6 +377,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 						AF
 					</text>
 				</svg>
+				<span class={s.leftSpacer} data-tauri-drag-region />
 				<Show when={uiStore.state.sidebarVisible}>
 					<button
 						class={s.filterToggle}
@@ -748,12 +764,15 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 					when={isTauri()}
 					fallback={
 						<button
+							type="button"
 							class={s.watcherBtn}
 							onClick={() => commandPaletteStore.toggle()}
 							title={t("toolbar.commandPalette", "Command palette ({key})", {
 								key: keyFor("command-palette"),
 							})}
 							aria-label="Command palette"
+							aria-controls="command-palette"
+							aria-expanded={commandPaletteStore.state.isOpen}
 						>
 							<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
 								<path d="M15.5 14h-.79l-.28-.27a6.471 6.471 0 0 0 1.48-5.34c-.47-2.78-2.79-5-5.59-5.34a6.505 6.505 0 0 0-7.27 7.27c.34 2.8 2.56 5.12 5.34 5.59a6.471 6.471 0 0 0 5.34-1.48l.27.28v.79l4.25 4.25c.41.41 1.08.41 1.49 0 .41-.41.41-1.08 0-1.49L15.5 14zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />

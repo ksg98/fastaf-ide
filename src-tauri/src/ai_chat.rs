@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::config::{load_json_config, save_json_config};
+use crate::config::{ConfigFile, load_json_config};
 use crate::state::AppState;
 
 pub(crate) const CONFIG_FILE: &str = "ai-chat.json";
@@ -165,7 +165,7 @@ pub(crate) fn load_ai_chat_config() -> AiChatConfig {
 
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn save_ai_chat_config(config: AiChatConfig) -> Result<(), String> {
-    save_json_config(CONFIG_FILE, &config)
+    ConfigFile::<AiChatConfig>::new(CONFIG_FILE).save(&config)
 }
 
 /// Assemble terminal context string for use by conversation_engine.rs.

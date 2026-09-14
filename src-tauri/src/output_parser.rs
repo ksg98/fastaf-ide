@@ -37,6 +37,17 @@ pub enum ParsedEvent {
         /// Desktop uses this to skip the "busy = false positive" guard on confident questions.
         confident: bool,
     },
+    /// A low-confidence question left the screen without being answered through
+    /// a channel that clears it (typed line, choice-prompt key, status line).
+    /// Emitted by the silence timer in pty.rs, not by the parser.
+    ///
+    /// Without it `awaiting_input` survives the rest of the turn: an agent that
+    /// answers its own prompt, or a user who picks an option with a bare Enter,
+    /// produces no `UserInput`, and an agent whose spinner is not parsed as a
+    /// status line produces no clear either. The session then reports "question"
+    /// with the prompt long gone from the screen.
+    #[serde(rename = "question-cleared")]
+    QuestionCleared,
     /// Claude Code usage limit: "You've used X% of your weekly/session limit"
     #[serde(rename = "usage-limit")]
     UsageLimit {
@@ -102,6 +113,9 @@ pub enum ParsedEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         amend_key: Option<String>,
     },
+    /// A previously detected numbered choice dialog is no longer active.
+    #[serde(rename = "choice-cleared")]
+    ChoiceCleared,
     /// Claude Code sub-task indicator: `›› task · N local agents` or `›› task · 1 bash`.
     /// Count > 0 means the agent has background work in progress; 0 means all sub-tasks finished.
     #[serde(rename = "active-subtasks")]
@@ -313,11 +327,11 @@ impl OutputParser {
             events.push(evt);
         }
 
-        if !self.session_conflict_fired {
-            if let Some(evt) = parse_agent_session_conflict(&clean) {
-                self.session_conflict_fired = true;
-                events.push(evt);
-            }
+        if !self.session_conflict_fired
+            && let Some(evt) = parse_agent_session_conflict(&clean)
+        {
+            self.session_conflict_fired = true;
+            events.push(evt);
         }
 
         events
@@ -501,6 +515,7 @@ impl OutputParser {
     fn parse_api_error(&mut self, text: &str) -> Option<ParsedEvent> {
         // Fast path: every api-error pattern requires at least one of these keywords.
         if !text.contains("api_error")
+            && !text.contains("API Error: 5")
             && !text.contains("authentication_error")
             && !text.contains("server_error")
             && !text.contains("UNAVAILABLE")
@@ -716,6 +731,20 @@ fn build_api_error_patterns() -> Vec<ApiErrorPattern> {
             r#""type":"authentication_error""#,
             "auth",
         ),
+        // Claude Code: user-facing friendly 5xx message, no JSON body. Full UI string:
+        // "API Error: 500 Internal server error. This is a server-side issue, usually
+        // temporary — try again in a moment. If it persists, check https://status.claude.com."
+        //
+        // Anchored on the status code because it opens the message: the prose wraps at
+        // the terminal width and rendered rows are joined with '\n', so any phrase
+        // further in can be split mid-match. Requiring a letter after the code excludes
+        // the JSON-body variants (`API Error: 5xx {"type":…`), which the patterns above
+        // classify more precisely — 529 overloaded stays a rate limit, not a server error.
+        ae(
+            "claude-server-error-friendly",
+            r"API Error: 5\d\d [A-Za-z]",
+            "server",
+        ),
         // Gemini CLI: API Error: got status: UNAVAILABLE/INTERNAL
         ae(
             "gemini-server-error",
@@ -812,6 +841,69 @@ pub(crate) fn parse_osc94(text: &str) -> Option<ParsedEvent> {
         let value: u8 = caps[2].parse().unwrap_or(0).min(100);
         ParsedEvent::Progress { state, value }
     })
+}
+
+/// Parse response-required OSC 777 desktop notifications:
+/// `\x1b]777;notify;TITLE;BODY\x07`.
+///
+/// OSC 777 describes a desktop notification, not an awaiting-state transition.
+/// Claude also emits the generic observed body `Claude Code needs your
+/// attention`, which may announce completion and must not latch a confident
+/// question. Only response-required wording becomes `Question`: permission,
+/// approval, or waiting-for-input. This retains the plan/skill picker signal
+/// (`Claude is waiting for your input`) that native hooks do not cover.
+///
+/// That last body carries two meanings Claude does not distinguish: a blocked
+/// picker, and the 60s idle timer of a turn that simply finished. Observed
+/// 2026-08-11 — a session that printed its recap 17h earlier still read
+/// "question", because a confident question is retracted by nothing but real
+/// user input. So it is emitted with `confident: false`: the badge still
+/// appears, and `emit_question_cleared_if_stale` drops it on the next quiet
+/// tick when no prompt is on screen. A picker keeps it — the screen, not the
+/// notification body, is what tells the two apart. Permission and approval
+/// wording is unambiguous and stays confident.
+///
+/// The `prompt_text` is the body when present, else the title.
+pub(crate) fn parse_osc777_notifies(text: &str) -> Vec<ParsedEvent> {
+    // Fast path: skip the regex unless the introducer is present.
+    if !text.contains("\x1b]777;notify;") {
+        return Vec::new();
+    }
+    lazy_static::lazy_static! {
+        // Terminated by BEL or ST. Field bodies stop at `;`, BEL or ESC so a
+        // truncated sequence at a chunk boundary cannot swallow later output.
+        static ref OSC777_RE: regex::Regex =
+            regex::Regex::new(r"\x1b\]777;notify;([^;\x07\x1b]*)(?:;([^\x07\x1b]*))?(?:\x07|\x1b\\)")
+                .unwrap();
+    }
+    OSC777_RE
+        .captures_iter(text)
+        .filter_map(|caps| {
+            let title = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
+            let body = caps.get(2).map(|m| m.as_str().trim()).unwrap_or_default();
+            let prompt_text = if body.is_empty() { title } else { body };
+            if prompt_text.is_empty() {
+                return None;
+            }
+            let normalized = prompt_text.to_ascii_lowercase();
+            let confident = normalized.contains("needs your permission")
+                || normalized.contains("approval required");
+            let requires_response = confident || normalized.contains("is waiting for your input");
+            requires_response.then(|| ParsedEvent::Question {
+                prompt_text: prompt_text.to_string(),
+                confident,
+            })
+        })
+        .collect()
+}
+
+/// Compatibility helper for callers that classify one notification. When a
+/// buffer contains several, the newest qualifying event retains the historical
+/// single-result behavior; production uses `parse_osc777_notifies` and keeps all,
+/// so this exists for tests only.
+#[cfg(test)]
+pub(crate) fn parse_osc777_notify(text: &str) -> Option<ParsedEvent> {
+    parse_osc777_notifies(text).pop()
 }
 
 /// Parse GitHub/GitLab PR/MR URLs
@@ -1137,6 +1229,46 @@ fn parse_agent_session_conflict(clean: &str) -> Option<ParsedEvent> {
         .or_else(|| try_match(&SESSION_NOT_FOUND_RE, "not-found"))
 }
 
+/// Whether a rendered row is the Ink dialog footer itself, rather than a copy of
+/// it somewhere in an agent's own output.
+///
+/// The anchor is matched against the row **unindented**. A dialog is drawn
+/// full-bleed by the TUI and its footer starts at column 0; everything an agent
+/// streams — prose, code blocks, quoted screens — is indented inside the agent's
+/// own frame. That indentation is the only thing telling the two apart, because
+/// the text is otherwise identical byte for byte.
+///
+/// Observed 2026-08-30: an agent pasted a screen it had just read, footer
+/// included, into a fenced code block. The two leading spaces were the entire
+/// difference; without this check the row matched, the tab latched
+/// `question_confident`, and no clear path retracts a confident question — the
+/// agent had marked *itself* as blocked on the user while it was working.
+fn is_ink_dialog_footer_row(row: &str) -> bool {
+    lazy_static::lazy_static! {
+        // Anchored at column 0 of the rendered row, NOT of its trimmed text. See
+        // the doc comment: the indentation is the signal.
+        static ref INK_FOOTER_RE: regex::Regex =
+            regex::Regex::new(r"^Enter to select").unwrap();
+    }
+    INK_FOOTER_RE.is_match(row) && !line_is_diff_or_code_context(row)
+}
+
+/// The Ink dialog footer, if one is visible anywhere on the screen.
+///
+/// This is the same anchor `parse_question` matches, read as a **level** instead
+/// of an edge: as long as the row is on screen, an interactive dialog is open and
+/// the agent is blocked on the user. Deliberately no structure parsing — no
+/// title, no options, no wizard tab bar. Those all move between the sub-questions
+/// of a multi-question `AskUserQuestion`, which is exactly what made the
+/// changed-rows path miss them: the footer is the one row that stays byte-identical
+/// from the first sub-question to the last, so it is useless as a *change* signal
+/// and perfect as a *presence* signal.
+pub(crate) fn ink_dialog_footer(screen_rows: &[String]) -> Option<&str> {
+    screen_rows
+        .iter()
+        .find_map(|row| is_ink_dialog_footer_row(row).then(|| row.trim()))
+}
+
 /// Question detection: most detection is handled by the silence-based detector
 /// in pty.rs (last line ending with `?` + 10s of silence = real question).
 ///
@@ -1146,8 +1278,6 @@ fn parse_agent_session_conflict(clean: &str) -> Option<ParsedEvent> {
 /// killed all the other regex patterns.
 fn parse_question(clean: &str) -> Option<ParsedEvent> {
     lazy_static::lazy_static! {
-        static ref INK_FOOTER_RE: regex::Regex =
-            regex::Regex::new(r"Enter to select").unwrap();
         // cliclack interactive prompt: "◆  Do you allow this tool call?"
         // ◆ (U+25C6) is Goose's cliclack active-prompt marker. It is NOT unique to
         // interactive prompts, though: grok reuses ◆ as a decorative timeline bullet
@@ -1162,7 +1292,10 @@ fn parse_question(clean: &str) -> Option<ParsedEvent> {
     }
     for line in clean.lines() {
         let trimmed = line.trim();
-        if INK_FOOTER_RE.is_match(trimmed) && !line_is_diff_or_code_context(line) {
+        // Column-0 anchored — see `is_ink_dialog_footer_row`. An agent quoting a
+        // dialog it read reproduces the footer's text exactly; only the frame's
+        // indentation separates the copy from the original.
+        if is_ink_dialog_footer_row(line) {
             return Some(ParsedEvent::Question {
                 prompt_text: trimmed.to_string(),
                 confident: true,
@@ -1189,7 +1322,7 @@ fn parse_question(clean: &str) -> Option<ParsedEvent> {
 /// Returns true if a line looks like diff output, code context, or documentation
 /// rather than a genuine interactive prompt. Applied to ALL question regex matches
 /// to prevent false positives from diff hunks containing question-like patterns.
-fn line_is_diff_or_code_context(line: &str) -> bool {
+pub(crate) fn line_is_diff_or_code_context(line: &str) -> bool {
     let trimmed = line.trim();
 
     // Line-number prefix from code listings: "462 -...", "75 +-...", "465 //...", "1226    assert!(..."
@@ -1312,6 +1445,11 @@ fn parse_plan_file(clean: &str) -> Option<ParsedEvent> {
 /// so a Codex-emitted `• intent:` / `• suggest:` (first message line) never
 /// parsed. Char-class body only (no surrounding `[ ]`) so callers write `[{…}]`.
 const AGENT_LINE_BULLETS: &str = r"\x{25CF}\x{23FA}\x{2022}\x{25E6}";
+
+/// The same glyph set as [`AGENT_LINE_BULLETS`], for the one anchor that tests
+/// leading characters directly instead of through a regex (`dewrap_suggest_keyword`).
+/// Kept in sync by `agent_line_bullet_chars_match_the_regex_class`.
+const AGENT_LINE_BULLET_CHARS: [char; 4] = ['\u{25CF}', '\u{23FA}', '\u{2022}', '\u{25E6}'];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StructuredTokenAnchor {
@@ -1492,8 +1630,12 @@ fn dewrap_suggest_content(text: &str) -> std::borrow::Cow<'_, str> {
         // Matches a `suggest:` prefix line (with optional whitespace/bullet)
         // that ends with only whitespace before the newline — no item content.
         // Capture group 1: everything up to (but not including) trailing space+\n.
+        // The trailing run is `*`, not `+`: after the keyword rejoin of a
+        // colon-alone row (`\u{2022} suggest` / `  :` at 9 cols) there is no
+        // space left after the colon at all, and requiring one dropped the
+        // narrowest real Codex shape.
         static ref SUGGEST_TRAILING_RE: regex::Regex = regex::Regex::new(&format!(
-            r"(?m)^([\t ]*(?:[{b}][\t ]+)?suggest:[\t ]+)[ \t]*\n",
+            r"(?m)^([\t ]*(?:[{b}][\t ]+)?suggest:[\t ]*)[ \t]*\n",
             b = AGENT_LINE_BULLETS
         ))
         .unwrap();
@@ -1591,7 +1733,9 @@ fn dewrap_suggest_brackets(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// Rejoin a `suggest:` keyword that got split across a newline by terminal
 /// auto-wrap (e.g. zoomed / narrow window). Handles every split position of
-/// the literal word: `s\nuggest:`, `su\nggest:`, ..., `suggest\n:`.
+/// the literal word: `s\nuggest:`, `su\nggest:`, ..., `suggest\n:`, including
+/// when the continuation row carries the agent's own hanging wrap indent
+/// (`suggest\n  :`), which is what Codex emits in a narrow pane.
 ///
 /// Returns `Cow::Borrowed` when no wrap is detected so the caller pays no
 /// allocation cost in the common (wide terminal) case.
@@ -1602,8 +1746,8 @@ fn dewrap_suggest_keyword(text: &str) -> std::borrow::Cow<'_, str> {
     const SUGGEST: &str = "suggest:";
 
     // Every way "suggest:" can split across a newline at column 0:
-    //   prefix (non-empty proper prefix of "suggest:") + "\n" + suffix
-    //   where prefix + suffix == "suggest:".
+    //   prefix (non-empty proper prefix of "suggest:") + "\n" + wrap indent
+    //   + suffix, where prefix + suffix == "suggest:".
     // Iterate 1..=7 split points: s|uggest:, su|ggest:, …, suggest|:.
     //
     // Stay Borrowed until we actually rewrite. PTY chunks land here on every
@@ -1613,35 +1757,53 @@ fn dewrap_suggest_keyword(text: &str) -> std::borrow::Cow<'_, str> {
 
     for split in 1..SUGGEST.len() {
         let (prefix, suffix) = SUGGEST.split_at(split);
-        let needle = format!("{prefix}\n{suffix}");
-        if !current.contains(&needle) {
+        // Match on the prefix + newline alone: the suffix may sit behind the
+        // agent's own wrap indent, so it cannot be part of a fixed needle.
+        let wrap_at = format!("{prefix}\n");
+        if !current.contains(&wrap_at) {
             continue;
         }
 
         let src: &str = current.as_ref();
-        let mut buf = String::with_capacity(src.len());
+        // Allocate only once a match actually qualifies — a bare `s\n` ends
+        // plenty of ordinary prose lines and must stay on the borrowed path.
+        let mut buf: Option<String> = None;
         let mut last = 0;
-        let mut changed_this_pass = false;
-        for (idx, _) in src.match_indices(&needle) {
+        for (idx, _) in src.match_indices(&wrap_at) {
+            // A previous rewrite already consumed this region.
+            if idx < last {
+                continue;
+            }
             // Only dewrap when the prefix begins at column 0 — optionally
-            // after whitespace or a Claude Code `●`/`⏺` bullet marker.
+            // after whitespace or an agent bullet marker. Accept the same
+            // glyphs as the token regexes: this check knew only the Ink
+            // bullets, so a wrapped Codex `• sugg\nest:` never rejoined.
             let line_start = src[..idx].rfind('\n').map_or(0, |n| n + 1);
             let leading = &src[line_start..idx];
             let leading_ok = leading
                 .chars()
-                .all(|c| c == ' ' || c == '\t' || c == '\u{25CF}' || c == '\u{23FA}');
+                .all(|c| c == ' ' || c == '\t' || AGENT_LINE_BULLET_CHARS.contains(&c));
             if !leading_ok {
                 continue;
             }
-            buf.push_str(&src[last..idx]);
-            buf.push_str(prefix);
-            buf.push_str(suffix);
-            last = idx + needle.len();
-            changed_this_pass = true;
+            // Skip the continuation row's hanging indent: Codex soft-wraps its
+            // own output with two leading spaces, so the tail of the keyword
+            // does not start at column 0 (captured live in a 9-column pane).
+            let after_newline = idx + wrap_at.len();
+            let rest = &src[after_newline..];
+            let indent = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+            if !rest[indent..].starts_with(suffix) {
+                continue;
+            }
+            let out = buf.get_or_insert_with(|| String::with_capacity(src.len()));
+            out.push_str(&src[last..idx]);
+            out.push_str(prefix);
+            out.push_str(suffix);
+            last = after_newline + indent + suffix.len();
         }
-        if changed_this_pass {
-            buf.push_str(&src[last..]);
-            current = std::borrow::Cow::Owned(buf);
+        if let Some(mut out) = buf {
+            out.push_str(&src[last..]);
+            current = std::borrow::Cow::Owned(out);
         }
     }
 
@@ -1742,6 +1904,14 @@ pub fn parse_slash_menu(screen_rows: &[String]) -> Option<ParsedEvent> {
 ///      `Do you want` / `Proceed` / `Continue` / `Should I` verb (guardrail
 ///      against markdown numbered lists).
 ///   4. Require ≥ 2 options to reduce false positives.
+///
+/// Deliberately does NOT match Claude Code's `AskUserQuestion` dialog: its
+/// options are separated by wrapped description lines and a `───` rule, and its
+/// footer is `Enter to select · …`, not `Esc to … · Tab to …`. Relaxing steps 1–2
+/// enough to absorb it would also match any prose "Which one do you want?\n1. …
+/// \n   detail\n2. …" an agent prints — and a false ChoicePrompt renders a real
+/// interactive overlay. That dialog is covered by the `Enter to select` question
+/// footer in `parse_question` instead.
 pub fn parse_choice_prompt(screen_rows: &[String]) -> Option<ParsedEvent> {
     lazy_static::lazy_static! {
         // Option: optional ❯/›/> marker, digit(s), . or ), space, label.
@@ -3383,6 +3553,59 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     }
 
     #[test]
+    fn test_api_error_claude_500_friendly() {
+        // Claude Code renders 5xx as prose with no JSON body. Nothing in this string
+        // hits the JSON patterns, so before the friendly pattern existed the message
+        // never reached auto-retry — it fell out at the keyword fast path.
+        let mut parser = OutputParser::new();
+        let input = "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com.";
+        let events = parser.parse(input);
+        let (name, _, kind) = get_api_error(&events).expect("should detect friendly Claude 5xx");
+        assert_eq!(name, "claude-server-error-friendly");
+        assert_eq!(kind, "server");
+    }
+
+    #[test]
+    fn test_api_error_claude_500_friendly_survives_wrapping() {
+        // The prose wraps at the terminal width and rows are joined with '\n', so the
+        // pattern must anchor on the status code that opens the message — a phrase
+        // further in gets split mid-match.
+        let mut parser = OutputParser::new();
+        let rows = vec![
+            row(0, "API Error: 500 Internal server error. This is a server-"),
+            row(1, "side issue, usually temporary — try again in a moment."),
+        ];
+        let events = parser.parse_clean_lines(&rows, true);
+        let (name, _, kind) = get_api_error(&events).expect("should detect across a row wrap");
+        assert_eq!(name, "claude-server-error-friendly");
+        assert_eq!(kind, "server");
+    }
+
+    #[test]
+    fn test_api_error_friendly_pattern_yields_to_json_variants() {
+        // The friendly pattern is deliberately last among the Claude patterns: a JSON
+        // body classifies more precisely, and 529 must stay a rate limit.
+        let mut parser = OutputParser::new();
+        let json_500 = r#"API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}"#;
+        let events = parser.parse(json_500);
+        let (name, _, _) = get_api_error(&events).expect("json 500 detected");
+        assert_eq!(name, "claude-api-error");
+
+        let mut parser = OutputParser::new();
+        let json_529 = r#"API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert!(!has_api_error(&parser.parse(json_529)));
+    }
+
+    #[test]
+    fn test_no_api_error_friendly_401() {
+        // Only 5xx is retryable; an auth failure must not match the friendly pattern.
+        let mut parser = OutputParser::new();
+        assert!(!has_api_error(&parser.parse(
+            "API Error: 401 Unauthorized. Run /login to reauthenticate."
+        )));
+    }
+
+    #[test]
     fn test_api_error_claude_auth() {
         let mut parser = OutputParser::new();
         let input = r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid bearer token"}}"#;
@@ -4201,6 +4424,129 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
     }
 
     #[test]
+    fn test_dewrap_accepts_every_agent_bullet_as_leading() {
+        // Same drift as the token regexes had: this leading check knew only the
+        // Ink bullets, so a wrapped Codex `• sugg\nest:` stayed broken and the
+        // suggest never parsed. Every glyph in AGENT_LINE_BULLET_CHARS must
+        // anchor the dewrap.
+        for bullet in super::AGENT_LINE_BULLET_CHARS {
+            let input = format!("{bullet} sugges\nt: A | B");
+            assert_eq!(
+                super::dewrap_suggest_keyword(&input).as_ref(),
+                format!("{bullet} suggest: A | B"),
+                "bullet {bullet:?} must anchor the dewrap"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dewrap_rejoins_across_the_wrap_indent() {
+        // Captured live from Codex in a 9-column pane: it soft-wraps its own
+        // output with a two-space hanging indent, so the tail of the split
+        // keyword does NOT start at column 0. Requiring the suffix immediately
+        // after the newline dropped every narrow-terminal suggest.
+        assert_eq!(
+            super::dewrap_suggest_keyword("\u{2022} suggest\n  : [ X | Y | Z ]").as_ref(),
+            "\u{2022} suggest: [ X | Y | Z ]"
+        );
+        assert_eq!(
+            super::dewrap_suggest_keyword("\u{2022} sugges\n  t: [ X | Y ]").as_ref(),
+            "\u{2022} suggest: [ X | Y ]"
+        );
+    }
+
+    #[test]
+    fn test_suggest_parses_when_the_keyword_wraps_with_indent() {
+        // End-to-end shape of the live 9-column capture: the keyword split plus
+        // the bracket body wrapped across three rows must still yield the items.
+        let items = match parse_suggest("\u{2022} suggest\n  : [ X |\n  Y | Z ]", true) {
+            Some(ParsedEvent::Suggest { items }) => items,
+            _ => panic!("indented narrow-terminal wrap must parse"),
+        };
+        assert_eq!(items, vec!["X", "Y", "Z"]);
+    }
+
+    #[test]
+    fn test_suggest_parses_when_the_colon_row_holds_nothing_else() {
+        // Captured live from Codex at 9 columns (2026-07-28): the bullet plus
+        // `suggest` fills the row, so the colon lands alone on the continuation
+        // row and the bracket body starts on the row after that. The keyword
+        // rejoin then yields `suggest:` with NOTHING after it, which the
+        // trailing-space pull refused to join.
+        let items = match parse_suggest(
+            "\u{2022} suggest\n  :\n  [ Alpha\n  | Beta\n  |\n  Gamma ]",
+            true,
+        ) {
+            Some(ParsedEvent::Suggest { items }) => items,
+            _ => panic!("colon-alone narrow-terminal wrap must parse"),
+        };
+        assert_eq!(items, vec!["Alpha", "Beta", "Gamma"]);
+    }
+
+    #[test]
+    fn test_colon_alone_row_still_needs_a_bracket_body() {
+        // Relaxing the trailing-space run to `*` lets any column-0 `suggest:`
+        // pull the next row up. The bracket + item-count guards must still
+        // reject ordinary prose that happens to follow.
+        assert!(
+            parse_suggest("\u{2022} suggest\n  :\n  and then I will refactor", true).is_none(),
+            "a colon-alone row followed by prose must not parse"
+        );
+    }
+
+    #[test]
+    fn test_colon_alone_row_parses_for_an_earlier_keyword_split() {
+        // The colon need not be the split point: at other widths the break
+        // lands mid-word and the colon still ends its row alone.
+        let items = match parse_suggest("\u{2022} sugges\n  t:\n  [ A | B ]", true) {
+            Some(ParsedEvent::Suggest { items }) => items,
+            _ => panic!("mid-word split with a colon-alone row must parse"),
+        };
+        assert_eq!(items, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn test_colon_alone_row_rejects_prose_prefix() {
+        // The column-0 anchor is what keeps prose out; the `*` relaxation must
+        // not weaken it.
+        assert!(
+            parse_suggest("I will suggest:\n  [ A | B ]", true).is_none(),
+            "leading prose must not anchor a wrapped suggest"
+        );
+    }
+
+    #[test]
+    fn test_dewrap_rejects_prose_before_the_split_keyword() {
+        // The column-0 constraint still holds: arbitrary text before the split
+        // means this is prose, not a protocol token.
+        let input = "I will sugges\nt: A | B";
+        assert_eq!(
+            super::dewrap_suggest_keyword(input).as_ref(),
+            input,
+            "non-bullet, non-whitespace leading text must not dewrap"
+        );
+    }
+
+    #[test]
+    fn agent_line_bullet_chars_match_the_regex_class() {
+        // The char array and the regex char-class body are two spellings of one
+        // glyph set; drift between them is exactly the bug story 458-4d7b fixed.
+        let class = regex::Regex::new(&format!(r"^[{}]$", super::AGENT_LINE_BULLETS)).unwrap();
+        for bullet in super::AGENT_LINE_BULLET_CHARS {
+            assert!(
+                class.is_match(&bullet.to_string()),
+                "{bullet:?} is in AGENT_LINE_BULLET_CHARS but not in AGENT_LINE_BULLETS"
+            );
+        }
+        for other in ['\u{25CB}', '\u{2234}', '-', '*'] {
+            assert!(
+                !class.is_match(&other.to_string()),
+                "{other:?} must not be treated as an agent line bullet"
+            );
+        }
+    }
+
+    #[test]
     fn test_suggest_short_two_items_does_not_grab_tail() {
         // The closing `]` ends the token — unrelated prose on the next row is
         // never grabbed as a continuation.
@@ -4338,6 +4684,28 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
                 .iter()
                 .any(|e| matches!(e, ParsedEvent::StatusLine { .. })),
             "expected StatusLine, got: {:?}",
+            events
+        );
+    }
+
+    #[test]
+    fn test_parse_clean_lines_codex_working_with_background_terminal_suffix() {
+        // Captured live from a running Codex turn. The trailing hint suffix
+        // (added when Codex holds a background terminal) carries `/ps` and
+        // `/stop`, which must not disqualify the status line — losing it
+        // leaves a prior turn's `suggest:` sticky, which the snapshot reads
+        // as completion and reports the working agent as idle.
+        let mut parser = OutputParser::new();
+        let rows = vec![row(
+            34,
+            "• Working (1m 39s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close",
+        )];
+        let events = parser.parse_clean_lines(&rows, true);
+        assert!(
+            events.iter().any(
+                |e| matches!(e, ParsedEvent::StatusLine { task_name, .. } if task_name == "Working")
+            ),
+            "expected StatusLine(Working), got: {:?}",
             events
         );
     }
@@ -5234,6 +5602,118 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
         );
     }
 
+    // --- OSC 777 notify: the agent asking for the user in protocol ---
+
+    /// Both payloads are verbatim from live Claude Code sessions observed while
+    /// a plan picker sat blocked and the tab still showed a "working" dot. They
+    /// are the regression this parser exists for.
+    ///
+    /// The confidence differs because the wording does. Permission is a request
+    /// with no other reading; `is waiting for your input` is also what Claude
+    /// says on its 60s idle timer after a finished turn, so it must stay
+    /// retractable.
+    #[test]
+    fn osc777_notify_reports_awaiting_with_wording_dependent_confidence() {
+        for (raw, expected, expect_confident) in [
+            (
+                "\x1b]777;notify;Claude Code;Claude needs your permission\x07",
+                "Claude needs your permission",
+                true,
+            ),
+            (
+                "\x1b]777;notify;Claude Code;Claude is waiting for your input\x07",
+                "Claude is waiting for your input",
+                false,
+            ),
+        ] {
+            match parse_osc777_notify(raw) {
+                Some(ParsedEvent::Question {
+                    prompt_text,
+                    confident,
+                }) => {
+                    assert_eq!(prompt_text, expected);
+                    assert_eq!(
+                        confident, expect_confident,
+                        "wrong confidence for {raw:?} — a retractable body must not latch"
+                    );
+                }
+                other => panic!("expected Question for {raw:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// ST-terminated form: some terminals/agents close OSC with ESC-backslash
+    /// instead of BEL. Both must parse or the signal is agent-specific again.
+    #[test]
+    fn osc777_notify_accepts_st_terminator() {
+        let evt = parse_osc777_notify("\x1b]777;notify;Codex;approval required\x1b\\");
+        assert!(matches!(
+            evt,
+            Some(ParsedEvent::Question { ref prompt_text, .. }) if prompt_text == "approval required"
+        ));
+    }
+
+    #[test]
+    fn osc777_notify_keeps_every_response_required_event_in_one_chunk() {
+        let raw = concat!(
+            "\x1b]777;notify;Claude Code;Claude needs your permission\x07",
+            "\x1b]777;notify;Claude Code;Claude Code needs your attention\x07",
+            "\x1b]777;notify;Codex;approval required\x07"
+        );
+        let events = parse_osc777_notifies(raw);
+        assert_eq!(
+            events.len(),
+            2,
+            "generic attention is filtered, both waits survive"
+        );
+        assert!(matches!(
+            &events[0],
+            ParsedEvent::Question { prompt_text, .. } if prompt_text == "Claude needs your permission"
+        ));
+        assert!(matches!(
+            &events[1],
+            ParsedEvent::Question { prompt_text, .. } if prompt_text == "approval required"
+        ));
+    }
+
+    /// A title-only or generic notification carries no response-required
+    /// semantics and must not park the session in confident awaiting.
+    #[test]
+    fn osc777_notify_ignores_generic_attention() {
+        assert!(parse_osc777_notify("\x1b]777;notify;Claude Code\x07").is_none());
+        assert!(
+            parse_osc777_notify("\x1b]777;notify;Claude Code;Claude Code needs your attention\x07")
+                .is_none()
+        );
+    }
+
+    /// A truncated sequence at a chunk boundary must not match: matching it
+    /// would let the field bodies run on into unrelated later output.
+    #[test]
+    fn osc777_notify_ignores_an_unterminated_sequence() {
+        assert!(parse_osc777_notify("\x1b]777;notify;Claude Code;Claude nee").is_none());
+    }
+
+    /// The literal text of a notify, quoted in prose or in a code listing, is
+    /// not a notify. Only the escape sequence is.
+    #[test]
+    fn osc777_notify_ignores_prose_and_other_osc_verbs() {
+        assert!(parse_osc777_notify("we emit 777;notify;Claude Code;permission here").is_none());
+        assert!(parse_osc777_notify("\x1b]777;precmd\x07").is_none());
+        assert!(parse_osc777_notify("\x1b]9;4;1;50\x07").is_none());
+    }
+
+    /// Several notifications in one chunk: the newest is the current state.
+    #[test]
+    fn osc777_notify_takes_the_last_notification_in_a_chunk() {
+        let raw = "\x1b]777;notify;Claude Code;Claude needs your permission\x07 output \
+                   \x1b]777;notify;Claude Code;Claude is waiting for your input\x07";
+        assert!(matches!(
+            parse_osc777_notify(raw),
+            Some(ParsedEvent::Question { ref prompt_text, .. }) if prompt_text == "Claude is waiting for your input"
+        ));
+    }
+
     // --- Ink footer question detection ---
 
     #[test]
@@ -5250,6 +5730,52 @@ Enter to select · ↑/↓ to navigate · Esc to cancel";
             }
             other => panic!("Expected Question, got: {:?}", other),
         }
+    }
+
+    /// Regression: a grep hit that quotes the footer is not a footer. This exact
+    /// line came off a live session whose tab showed the awaiting badge while the
+    /// agent was mid-task — the agent was grepping its own detector's source.
+    #[test]
+    fn ink_footer_quoted_in_a_grep_hit_is_not_a_prompt() {
+        for input in [
+            r#"src-tauri/src/output_parser.rs:1150:            regex::Regex::new(r"Enter to select").unwrap();"#,
+            "docs/parser.md:12: the footer reads Enter to select · Esc to cancel",
+            "  see Enter to select below",
+        ] {
+            assert!(
+                parse_question(input).is_none(),
+                "quoted footer must not park the badge: {input:?}"
+            );
+        }
+    }
+
+    /// Regression, observed 2026-08-30 on this repo's own tab: the agent read the
+    /// screen of another session, pasted it into a fenced code block to explain it,
+    /// and the footer came back out inside its own output. Claude Code indents
+    /// streamed text by two columns; the dialog that produced the line drew it at
+    /// column 0. The tab latched `question_confident`, which nothing retracts, so
+    /// it read "awaiting" for the rest of the turn while the agent worked.
+    ///
+    /// The exact row, copied from the live grid.
+    #[test]
+    fn ink_footer_indented_inside_agent_output_is_not_a_prompt() {
+        let quoted = "  Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel";
+        assert!(
+            parse_question(quoted).is_none(),
+            "an agent quoting the footer must not park its own badge"
+        );
+        assert!(
+            ink_dialog_footer(&[quoted.to_string()]).is_none(),
+            "the re-arm reads the same row off the full screen — it must agree"
+        );
+
+        // Same text, drawn by the dialog itself: full-bleed at column 0.
+        let real = "Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel";
+        assert!(
+            parse_question(real).is_some(),
+            "the real footer must still be detected"
+        );
+        assert!(ink_dialog_footer(&[real.to_string()]).is_some());
     }
 
     #[test]

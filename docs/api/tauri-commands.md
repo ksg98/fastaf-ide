@@ -9,25 +9,52 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `create_pty` | `config: PtyConfig` | `String` (session ID) | Create PTY session |
 | `create_pty_with_worktree` | `pty_config, worktree_config` | `WorktreeResult` | Create worktree + PTY |
 | `write_pty` | `session_id, data` | `()` | Write to PTY |
-| `resize_pty` | `session_id, rows, cols` | `()` | Resize PTY |
+| `write_pty_parts` | `session_id, parts: Vec<String>` | `()` | Write several inputs under one writer lock. The parts stay separate on purpose: post-write bookkeeping runs once per part, and it is not a function of the joined bytes (a lone `/` opens slash mode, an exact option key answers a choice prompt) |
+| `enqueue_agent_command` | `session_id, text` | `{ typed, queued }` | Queue a command for the agent's next idle window (typed at once when already idle); errors for non-agent sessions |
+| `clear_queued_agent_commands` | `session_id` | `usize` | Drop every queued command; returns how many |
+| `list_queued_agent_commands` | `session_id` | `[{ id, text }]` | The queued user commands in delivery order; peer messages excluded |
+| `remove_queued_agent_command` | `session_id, command_id` | `bool` | Drop one queued command by id; false when it already drained |
+| `resize_pty` | `session_id, rows, cols` | `()` | Resize PTY; alternate-screen resizes preserve primary-log continuity |
 | `pause_pty` | `session_id` | `()` | Pause reader thread |
 | `resume_pty` | `session_id` | `()` | Resume reader thread |
 | `close_pty` | `session_id, cleanup_worktree` | `()` | Close PTY session |
 | `can_spawn_session` | -- | `bool` | Check session limit |
 | `get_orchestrator_stats` | -- | `OrchestratorStats` | Active/max/available |
 | `get_session_metrics` | -- | `JSON` | Spawn/fail/byte counts |
-| `list_active_sessions` | -- | `Vec<ActiveSessionInfo>` | List all sessions with the same optional lifecycle `state` (`shell_state`, `agent_state`, `background_work`) returned by `GET /sessions` |
+| `list_active_sessions` | -- | `Vec<ActiveSessionInfo>` | List all sessions with `display_name_is_custom`, `is_remote`, and the same optional lifecycle `state` (`shell_state`, `agent_state`, `background_work`, `queued_commands`) returned by `GET /sessions` |
 | `list_worktrees` | -- | `Vec<JSON>` | List managed worktrees |
-| `update_session_cwd` | `session_id, cwd` | `()` | Update session working directory (from OSC 7) |
 | `get_session_foreground_process` | `session_id` | `JSON` | Get foreground process info |
 | `get_kitty_flags` | `session_id` | `u32` | Get Kitty keyboard protocol flags for session |
 | `get_last_prompt` | `session_id` | `Option<String>` | Get last user-typed prompt from input line buffer |
-| `get_shell_state` | `session_id` | `Option<String>` | Get current shell state ("busy", "idle", or null) |
+| `get_shell_state` | `session_id` | `Option<String>` | Get current shell state ("busy", "idle", or null); agent-specific semantic Working markers can repair a transient false-idle state |
 | `has_foreground_process` | `session_id: String` | `bool` | Checks if a non-shell foreground process is running |
 | `debug_agent_detection` | `session_id: String` | `AgentDiagnostics` | Returns diagnostic breakdown of agent detection pipeline |
-| `set_session_name` | `session_id, name` | `()` | Set custom display name for a session |
+| `get_pty_capture` | -- | `JSON` | Raw PTY capture tap state: enabled, session filter, directory, bytes per session. Browser parity: `GET /diagnostics/capture`. |
+| `set_pty_capture` | `enabled: bool, session_id: Option<String>` | `JSON` | Start/stop recording raw PTY bytes to `<config dir>/captures/<id>.tcap`; starting begins a fresh file. Surfaced as **Capture Session** in the tab context menu under `isPerfDebug()`. Browser parity: `POST /diagnostics/capture`. |
+| `set_session_name` | `session_id, name, is_custom?` | `()` | Set a session display name and whether it represents an explicit user rename |
 | `get_input_buffer_content` | `session_id` | `String` | Get the current content of the input line buffer (what the user is typing). Used by plugins with `pty:read` capability. |
+| `terminal_get_selection_text` | `session_id, start_row, start_col, end_row, end_col` | `Result<String, String>` | Read a scrollback-aware selection, join soft-wrapped rows, and remove coherent Claude visual gutter runs. Browser parity: `GET /sessions/:id/terminal/selection-text`. |
 | `get_process_stats` | -- | `Vec<ProcessStat>` | CPU% and RSS memory for TUIC and all child process trees |
+| `subscribe_terminal_grid` | `session_id, channel: Channel<Response>` | `u64` (epoch) | Register the grid-frame channel and install a fresh delivery gate (counting from zero). Returns the subscription epoch the client must carry on `ack_terminal_frame` and `unsubscribe_terminal_grid`. Frames are **raw bytes**, not JSON. Browser parity: `WS /sessions/:id/stream?format=grid` |
+| `ack_terminal_frame` | `session_id, epoch: u64, received: u64` | `()` | Report the total number of frames this client has received. The gate opens when the echo catches up with what was sent, which is what tells a fresh ack from a late one for an abandoned frame. An ack whose epoch is not the live subscription's is dropped. Browser parity: none — the WS path uses sequence numbers instead |
+| `unsubscribe_terminal_grid` | `session_id, epoch: u64` | `()` | Tear down the grid channel, gate and pending scroll. A non-matching epoch is ignored: a remount subscribes before the outgoing instance unsubscribes, and honouring the stale call would blank a mounted terminal. Browser parity: closing the WS |
+| `terminal_styled_rows` | `session_id, start, count` | `Result<Response, String>` (packed bytes) | A range of styled rows by absolute index, filling the client-side scroll cache. Raw bytes for the same reason as grid frames. Browser parity: `GET /sessions/:id/terminal/styled-rows` (`application/octet-stream`) |
+
+Every terminal grid **read** — the two rows above plus `terminal_get_block_rows`,
+`terminal_scroll_info`, `terminal_search`, `terminal_search_buffer`,
+`terminal_get_row_text`, `terminal_get_logical_line`, `terminal_get_lines`,
+`terminal_get_cursor_line`, `terminal_hyperlink_at` and
+`terminal_hyperlink_span` and `read_vt_log` — is an `async fn` that runs on the blocking pool via
+`pty::vt_try_read`, so it returns `Result<T, String>` rather than a bare `T`.
+The `Err` arm means the pool task itself failed; a session that is gone is still
+the old default (or a 404 over HTTP). See
+[`docs/backend/command-threading.md`](../backend/command-threading.md).
+
+MCP `session action=submit` deliberately has no new Tauri command. It is a
+request-scoped orchestration contract in `mcp_transport.rs`: it reuses the PTY
+injection claim, writer, input FSM, and output ring, then keeps the MCP response
+open for a bounded terminal-movement receipt. Desktop `write_pty` and
+`write_pty_parts` remain raw input primitives and make no acknowledgement claim.
 
 ## Generators (`generators.rs`)
 
@@ -107,7 +134,7 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `run_pr_review` | `repo_path, pr_number` | `PrReviewResult` | AI review of a PR diff (multi-turn engine, Main slot) → line-level findings |
 | `get_merged_prs` | `repo_path, since_tag?` | `Vec<MergedPr>` | Merged PRs via GraphQL, optionally since a tag's date (AI changelog source) |
 | `generate_changelog` | `repo_path, since_tag?` | `{markdown, json}` | AI changelog from merged PRs (headless slot, one-shot) |
-| `start_conflict_assist` | `repo_path, pr_number` | `ConflictAssistResult` | Worktree on PR head + rebase onto base; reports clean/conflicts + agent prompt (push gated, never auto-merge) |
+| `start_conflict_assist` | `repo_path, pr_number` | `ConflictAssistResult` | Worktree on PR head + rebase onto base; reports verified/unverified clean or conflicts, base provenance/warning, and agent prompt (push gated, never auto-merge) |
 | `run_improvement_scan` | `repo_path, focus` | `ImprovementScanResult` | One-shot Headless-slot scan of local repo context for improvement proposals (`focus`: `refactor`, `testing`, `perf`); emits `proposals-ready` |
 | `create_issue_from_proposal` | `repo_path, proposal` | `CreatedIssue` | Human-gated issue creation from an improvement proposal |
 | `fetch_ci_failure_logs` | `repo_path, branch` | `String` | Fetch failed-job logs for the branch's latest GitHub Actions head, including partially completed workflow runs |
@@ -120,7 +147,7 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `create_worktree` | `base_repo, branch_name` | `JSON` | Create git worktree |
 | `remove_worktree` | `repo_path, branch_name, delete_branch?, force?` | `{ branch_delete_warning?: string }` | Remove worktree; `delete_branch` (default true) controls whether the local branch is also deleted. If safe branch deletion fails after the worktree is removed, returns `branch_delete_warning` so the UI can report that the branch was kept. Archive script resolved from config (not IPC). |
 | `delete_local_branch` | `repo_path, branch_name` | `()` | Delete a local branch (and its worktree if linked). Refuses to delete the default branch. Uses safe `git branch -d` |
-| `check_worktree_dirty` | `repo_path, branch_name` | `bool` | Check if a branch's worktree has uncommitted changes. Returns false if no worktree exists |
+| `check_worktree_dirty` | `repo_path, branch_name` | `bool` | Check if a branch's worktree has uncommitted changes. Returns false if no worktree exists. When git cannot answer (the `worktree list` or `status` call fails) it returns an **error**, never `false` — callers that gate a destructive action must see the failure |
 | `get_worktree_paths` | `repo_path` | `HashMap<String,String>` | Worktree paths for repo |
 | `get_worktrees_dir` | -- | `String` | Worktrees base directory |
 | `generate_worktree_name_cmd` | `existing_names` | `String` | Generate unique name |
@@ -129,8 +156,8 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `detect_orphan_worktrees` | `repo_path` | `Vec<String>` | Detect worktrees in detached HEAD state (branch deleted) |
 | `remove_orphan_worktree` | `repo_path, worktree_path` | `()` | Remove an orphan worktree by filesystem path (validated against repo) |
 | `switch_branch` | `repo_path, branch_name` | `()` | Switch main worktree to a different branch (with dirty-state and process checks) |
-| `merge_and_archive_worktree` | `repo_path, branch_name` | `MergeResult` | Merge worktree branch into base and archive. If conflict cleanup abort fails, the error reports the repo may still be conflicted and includes the manual abort command. |
-| `finalize_merged_worktree` | `repo_path, branch_name, action` | `MergeResult` | Clean up worktree after merge. Delete action may include `branch_delete_warning` if the worktree was removed but safe branch deletion kept the branch. |
+| `merge_and_archive_worktree` | `repo_path, branch_name, target_branch, after_merge, force?` | `MergeArchiveResult` | Merge worktree branch into base and archive. A pre-flight counts the commits the target is missing and checks whether the worktree is dirty; both are returned so the caller can say what the merge actually carried. When `after_merge` is `archive` or `delete` and the worktree is **not known to be clean**, it returns `action: "needs_confirmation"` without touching anything — re-call with `force: true` to proceed. The commit count does not enter that decision: both cleanups end in `git worktree remove --force`, which destroys uncommitted work whether or not the branch carries commits. A dirty check that fails also blocks (`worktree_dirty` stays `false` because git never said "dirty"). If conflict cleanup abort fails, the error reports the repo may still be conflicted and includes the manual abort command. |
+| `finalize_merged_worktree` | `repo_path, branch_name, action, force?` | `MergeArchiveResult` | Clean up a merged worktree. Passes the **same** dirty-worktree gate as `merge_and_archive_worktree`: without `force` a worktree that is not known to be clean comes back as `action: "needs_confirmation"` instead of being wiped (`merged: true` — only the cleanup stopped, the merge already landed). Delete action may include `branch_delete_warning` if the worktree was removed but safe branch deletion kept the branch. |
 | `list_base_ref_options` | `repo_path` | `Vec<String>` | List valid base refs for worktree creation |
 | `run_setup_script` | `repo_path, worktree_path` | `()` | Run post-creation setup script in new worktree |
 | `generate_clone_branch_name_cmd` | `base_name, existing_names` | `String` | Generate hybrid branch name for clone worktree |
@@ -151,7 +178,7 @@ All commands are invoked from the frontend via `invoke(command, args)`. In brows
 | `load_repo_defaults` | -- | `RepoDefaultsConfig` | Load repo defaults |
 | `save_repo_defaults` | `config` | `()` | Save repo defaults |
 | `load_repositories` | -- | `JSON` | Load saved repositories |
-| `save_repositories` | `config` | `()` | Save repositories |
+| `save_repositories` | `config` (`mutationVersion: 1` keyed delta) | `()` | Apply repository/group/order/active-selection changes to the latest locked document; same-record conflicts are returned to the caller |
 | `load_prompt_library` | -- | `PromptLibraryConfig` | Load prompts |
 | `save_prompt_library` | `config` | `()` | Save prompts |
 | `load_notes` | -- | `JSON` | Load notes |
@@ -224,11 +251,11 @@ Conversational AI companion with terminal context injection. See [`docs/user-gui
 
 ### Chat Registry (`ai_chat_registry.rs`)
 
-Cross-window state synchronization for the AI Chat panel. The registry is the Rust-side source of truth; frontends subscribe via `Channel<ChatEvent>` for real-time projection.
+Cross-window state synchronization for the AI Chat panel, **as designed — not as it runs.** Nothing calls `fan_out` or any `ConversationState` setter, so the registry holds the empty default for every chat and no event is ever published. The frontend consumer was removed in story `600-d664`. Every command below still works; they just have no producer behind them, and the AI Chat panel is not a client of any of them. Wire a producer before treating this as a source of truth.
 
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
-| `chat_subscribe` | `chat_id, on_event: Channel<ChatEvent>` | `{ subscriptionId, snapshot }` | Subscribe to a chat's state changes. Returns current snapshot + subscription ID. Events: `snapshot`, `chunk { delta }`, `error { message }`, `cleared` |
+| `chat_subscribe` | `chat_id, on_event: Channel<ChatEvent>` | `{ subscriptionId, snapshot }` | Subscribe to a chat's state changes. Returns current snapshot + subscription ID. Events: `snapshot`, `chunk { delta }`, `error { message }`, `cleared`. **No frontend caller**: `ChatRegistry` has no producer, so the snapshot is always the empty default and no event ever follows. The AI chat panel stopped subscribing — applying that snapshot wiped the history it had just loaded. Wire a producer before using this. |
 | `chat_unsubscribe` | `chat_id, subscription_id` | `()` | Remove a subscriber (normal cleanup path) |
 | `chat_get_state` | `chat_id` | `ConversationStateSnapshot` | Read-only snapshot of a chat's current state |
 | `chat_push_message` | `chat_id, role, content` | `()` | Push a message to the registry and fan-out to subscribers |
@@ -303,7 +330,7 @@ Commands for managing upstream MCP servers proxied through FastAF's `/mcp` endpo
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
 | `load_mcp_upstreams` | -- | `UpstreamMcpConfig` | Load upstream config from `mcp-upstreams.json` |
-| `save_mcp_upstreams` | `config: UpstreamMcpConfig` | `()` | Validate, persist, and hot-reload upstream config. Errors if validation fails |
+| `save_mcp_upstreams` | `base: UpstreamMcpConfig, config: UpstreamMcpConfig` | `()` | Apply the caller's ID-keyed base-to-config delta to the latest locked `mcp-upstreams.json`, validate it, and hot-reload the exact persisted change. Removing a server or its optional `auth` field is an explicit deletion; unrelated concurrent changes are preserved |
 | `reconnect_mcp_upstream` | `name: String` | `()` | Disconnect and reconnect a single upstream by name. Useful after credential changes or transient failures |
 | `get_mcp_upstream_status` | -- | `Vec<UpstreamStatus>` | Get live status of all upstream MCP servers. Status values: `connecting`, `ready`, `circuit_open`, `disabled`, `failed`, `authenticating`, `needs_auth` |
 | `save_mcp_upstream_credential` | `name: String, token: String` | `()` | Store a Bearer token for an upstream in the OS keyring |
@@ -408,7 +435,8 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
-| `resolve_terminal_path` | `path` | `String` | Resolve terminal path |
+| `resolve_terminal_path` | `cwd, candidate` | `Option<ResolvedFilePath>` | Resolve one terminal path candidate against `cwd`; `null` on a miss |
+| `resolve_terminal_paths` | `cwd, candidates` | `Vec<Option<ResolvedFilePath>>` | Batched form, answered **positionally**: entry `i` is the result for `candidates[i]`. One IPC round-trip per terminal screen instead of one per candidate |
 | `list_directory` | `path` | `Vec<DirEntry>` | List directory contents |
 | `fs_read_file` | `path` | `String` | Read file contents |
 | `write_file` | `path, content` | `()` | Write file |
@@ -421,8 +449,12 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 | `fs_transfer_paths` | `destDir, paths, mode ("move"\|"copy"), allowRecursive` | `TransferResult { moved, skipped, errors, needs_confirm }` | Move/copy OS paths into a destination directory. Skips silently on name conflicts; returns `needs_confirm=true` (no-op) when a source is a directory and `allowRecursive=false`. Used by the drag-drop handler when dropping files onto a folder in the file browser. |
 | `add_to_gitignore` | `path, pattern` | `()` | Add pattern to .gitignore |
 | `search_files` | `path, query` | `Vec<SearchResult>` | Search files by name in directory |
-| `search_content` | `repoPath, query, caseSensitive?, useRegex?, wholeWord?, limit?` | `()` | Full-text content search; streams results progressively via `content-search-batch` events. Binary files and files >1 MB are skipped. Supports cancellation. |
-| `search_content_all` | `query, caseSensitive?, limit?` | `()` | Cross-repo BM25 content search over every ready index; streams via the same `content-search-batch` events with each match tagged `repo_path`. Only repos whose index is built participate (depends on Content Indexing strategy). Shares the cancellation slot with `search_content`. |
+| `search_content` | `repoPath, query, searchId, caseSensitive?, useRegex?, wholeWord?, limit?` | `()` | Full-text content search; streams results progressively via `content-search-batch` events, each echoing `searchId`. Binary files and files >1 MB are skipped. Supports cancellation. |
+| `search_content_all` | `query, searchId, caseSensitive?, limit?` | `()` | Cross-repo BM25 content search over every ready index; streams via the same `content-search-batch` events with each match tagged `repo_path` and every batch echoing `searchId`. Only repos whose index is built participate (depends on Content Indexing strategy). Shares the cancellation slot with `search_content`. |
+
+For both commands, every `ContentMatch.match_start`/`match_end` pair is a
+zero-based, end-exclusive UTF-16 code-unit range within `line_text`, matching
+JavaScript `String.slice` semantics for ASCII, accented text, and non-BMP emoji.
 
 ## Plugin Management (`plugins.rs`)
 
@@ -439,6 +471,7 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 | `install_plugin_from_folder` | `path` | `PluginManifest` | Install from local folder |
 | `register_loaded_plugin` | `plugin_id` | `()` | Register a plugin as loaded (for lifecycle tracking) |
 | `unregister_loaded_plugin` | `plugin_id` | `()` | Unregister a plugin (on unload/disable) |
+| `set_plugin_output_watchers` | `client_id`, `seq`, `watchers: [{ id, pattern, flags }]` | `{ applied, rejected }` | Replace the OutputWatcher set of one frontend — the patterns the PTY reader thread matches lines against. The frontend pushes its whole set on every add or remove; sets are per `client_id`, and `seq` orders the mutations so a stale sync answers `applied: false` and changes nothing. The frontend re-sends the same set every 30 s while it holds any watcher — the backend has no disconnect signal, so that heartbeat is what keeps a live set from being evicted and what recovers one that already was. `rejected` lists the ids the Rust `regex` crate cannot compile (lookaround, backreferences, a negated class escape inside a character class); those watchers keep matching in the WebView, which then receives every line. |
 
 ## Plugin Filesystem (`plugin_fs.rs`)
 
@@ -467,8 +500,30 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 | `mdkb_outline` | `repo_path, file_path` | `Vec<OutlineSymbol>` | Get symbol outline (functions, types) for a file |
 | `mdkb_goto_definition` | `repo_path, file_path, line, col?` | `DefinitionLocation?` | Find definition of symbol at position |
 | `mdkb_references` | `repo_path, symbol_name` | `Vec<ReferenceLocation>` | Find all callers of a symbol via code_graph |
+| `mdkb_code_find` | `repo_path, name, kind?` | `Vec<OutlineSymbol>` | Exact symbol lookup by name, optionally filtered by kind |
 | `install_mdkb` | — | `String` | Download and install mdkb binary |
 | `uninstall_mdkb` | — | `()` | Remove mdkb binary (errors for homebrew/cargo installs) |
+
+**Line numbers are 1-based on this boundary.** mdkb stores symbol ranges 0-based
+but takes a 1-based `line` as *input* to `symbol_at_position`. `mdkb_commands::editor_line`
+shifts every response so `line`/`line_start`/`line_end` reaching the frontend
+match CodeMirror's `doc.line(n)`. Request args (`mdkb_goto_definition`'s `line`)
+are already 1-based and pass through unchanged.
+
+**Each mdkb method has a different response shape** — do not assume "a JSON array
+of symbols":
+
+| mdkb hook method | `result` shape |
+|---|---|
+| `symbols_in_file` | `text` = stringified **bare array** |
+| `symbol_at_position` | `text` = stringified **object**, or the literal `"null"` |
+| `code_find` | `text` = stringified **envelope** `{total, showing, symbols}` |
+| `code_graph` | `text` = **prose for agents**; the symbols are a separate `symbols` array on `result` |
+
+`code_graph`'s `symbols` field was added after mdkb 3.7.17. Against an older
+daemon the field is absent and the call fails loudly — "no callers" is `symbols: []`,
+so an absent field can only mean a stale daemon and must never be reported as an
+empty result.
 
 ## Plugin CLI Execution (`plugin_exec.rs`)
 
@@ -510,6 +565,7 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 | `list_markdown_files` | `path` | `Vec<MarkdownFileEntry>` | List .md files in dir |
 | `read_file` | `path, file` | `String` | Read file contents |
 | `get_mcp_status` | -- | `JSON` | MCP server status (no token — use `get_connect_url` for QR) |
+| `mcp_confirm_response` | `request_id, confirmed` | `()` | Answer a pending `ui(action=confirm)`. HTTP: `POST /mcp/confirm-response`. Every client is shown the same request and the first answer wins, so an unknown or already-answered id is a no-op, not an error |
 | `get_connect_url` | `ip` | `String` | Build QR connect URL server-side (token stays in backend) |
 | `check_update_channel` | `channel` | `UpdateCheckResult` | Check beta/nightly channel for updates (hardcoded URLs, SSRF-safe) |
 | `clear_caches` | -- | `()` | Clear in-memory caches |
@@ -525,8 +581,7 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
-| `set_global_hotkey` | `combo: Option<String>` | `()` | Set or clear the OS-level global hotkey |
-| `get_global_hotkey` | — | `Option<String>` | Get the currently configured global hotkey |
+| `set_global_hotkey` | `combo: Option<String>` | `()` | Set or clear the OS-level global hotkey. There is no getter: the current combo is the `global_hotkey` field of `AppConfig`, read through `load_config`. |
 
 ## App Logger (`app_logger.rs`)
 
@@ -540,7 +595,7 @@ Uses incremental parsing with a file-size-based cache (`claude-usage-cache.json`
 
 | Command | Args | Returns | Description |
 |---------|------|---------|-------------|
-| `play_notification_sound` | `sound_type` | `()` | Play notification sound via Rust rodio (types: completion, question, error, info) |
+| `play_notification_sound` | `sound` | `()` | Play a Rust rodio notification sound (`question`, `completion`, `error`, `warning`, `info`, or `attention`) |
 | `block_sleep` | -- | `()` | Prevent system sleep |
 | `unblock_sleep` | -- | `()` | Allow system sleep |
 

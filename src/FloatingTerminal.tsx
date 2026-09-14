@@ -8,12 +8,9 @@ import { appLogger } from "./stores/appLogger";
 import { settingsStore } from "./stores/settings";
 import { terminalsStore } from "./stores/terminals";
 import { applyAppTheme, applyFontFamily, listenForThemeChanges, loadThemes, themesLoaded } from "./themes";
+import { FONT_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE } from "./utils/terminalZoom";
 import { syncVibrancy } from "./vibrancy";
 import { syncAppZoom } from "./zoom";
-
-const MIN_FONT_SIZE = 8;
-const MAX_FONT_SIZE = 32;
-const FONT_STEP = 2;
 
 /** Parse URL hash params: #/floating?sessionId=...&tabId=...&name=... */
 function getHashParams(): { sessionId: string; tabId: string; name: string } {

@@ -11,31 +11,31 @@ function createBranchSwitcherStore() {
 		query: "",
 	});
 
-	return {
-		state,
+	function open(): void {
+		setState("query", "");
+		setState("isOpen", true);
+	}
 
-		open(): void {
-			setState("query", "");
-			setState("isOpen", true);
-		},
+	function close(): void {
+		setState("isOpen", false);
+		setState("query", "");
+	}
 
-		close(): void {
-			setState("isOpen", false);
-			setState("query", "");
-		},
+	function toggle(): void {
+		if (state.isOpen) {
+			close();
+		} else {
+			open();
+		}
+	}
 
-		toggle(): void {
-			if (state.isOpen) {
-				this.close();
-			} else {
-				this.open();
-			}
-		},
+	function setQuery(query: string): void {
+		setState("query", query);
+	}
 
-		setQuery(query: string): void {
-			setState("query", query);
-		},
-	};
+	// Methods are plain closures, never `this`-bound: `toggle` is handed around as
+	// a bare reference (keyboard handler map), which would strip a `this` binding.
+	return { state, open, close, toggle, setQuery };
 }
 
 export const branchSwitcherStore = createBranchSwitcherStore();

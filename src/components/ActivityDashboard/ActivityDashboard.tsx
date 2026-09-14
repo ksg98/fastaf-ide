@@ -6,6 +6,7 @@ import { rateLimitStore } from "../../stores/ratelimit";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
 import {
+	displayTask,
 	effectiveActivityState,
 	isActivityWorking,
 	projectName,
@@ -80,6 +81,36 @@ export type TerminalRow = {
 	isPromoted: boolean;
 };
 
+/** Field-equality for a row. `status` is derived fresh on every build, so it is
+ *  the one member that must be compared by value rather than by reference. */
+function sameRow(a: TerminalRow, b: TerminalRow): boolean {
+	for (const key of Object.keys(a) as Array<keyof TerminalRow>) {
+		if (key === "status") continue;
+		if (a[key] !== b[key]) return false;
+	}
+	return a.status.label === b.status.label && a.status.className === b.status.className;
+}
+
+/** Rows are rendered through a reference-keyed `<For>`, and both producers
+ *  (the store memo below, the 1 Hz snapshot in panelAdapters/activity.tsx)
+ *  rebuild every row object from scratch on every tick — so an untouched
+ *  terminal's DOM subtree was torn down and recreated once a second, forever.
+ *  Hand the previous rows back in: unchanged ones keep their identity, and when
+ *  nothing at all moved `prev` is returned itself so the `<For>` does not re-run. */
+export function reconcileTerminalRows(next: TerminalRow[], prev?: readonly TerminalRow[]): TerminalRow[] {
+	const prevById = prev ? new Map(prev.map((r) => [r.id, r])) : undefined;
+	const rows = next.map((r) => {
+		const old = prevById?.get(r.id);
+		return old && sameRow(old, r) ? old : r;
+	});
+	// Positional, not just per-id: two reused rows that swapped places are still
+	// a changed list, and handing back `prev` would silently keep the old order.
+	if (prev && prev.length === rows.length && rows.every((r, i) => r === prev[i])) {
+		return prev as TerminalRow[];
+	}
+	return rows;
+}
+
 interface ActivityDashboardProps {
 	onSelect?: (id: string) => void;
 	onPromote?: (id: string) => void;
@@ -151,8 +182,7 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 			idleSince: term.idleSince,
 			lastPrompt: term.lastPrompt,
 			agentIntent: term.agentIntent,
-			// Claude Code spinner verbs are decorative garbage — suppress them
-			currentTask: term.agentType === "claude" ? null : term.currentTask,
+			currentTask: displayTask(term.currentTask, term.agentType),
 			activeSubTasks: term.activeSubTasks,
 			isActive: terminalsStore.state.activeId === id,
 			isPromoted: globalWorkspaceStore.isPromoted(id),
@@ -178,7 +208,11 @@ export const ActivityDashboard: Component<ActivityDashboardProps> = (props) => {
 		return reconcileActivityOrder(spine, terminalsStore.getAttachedIds(), isWorking);
 	});
 
-	const storeTerminals = createMemo(() => orderedIds().map(buildRow).filter(Boolean) as TerminalRow[]);
+	let prevRows: TerminalRow[] | undefined;
+	const storeTerminals = createMemo(() => {
+		prevRows = reconcileTerminalRows(orderedIds().map(buildRow).filter(Boolean) as TerminalRow[], prevRows);
+		return prevRows;
+	});
 
 	const terminals = () => (props.terminals ? props.terminals() : storeTerminals());
 

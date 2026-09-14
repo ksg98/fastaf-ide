@@ -78,7 +78,8 @@ pub fn load() -> VoiceConfig {
 }
 
 pub fn save(config: &VoiceConfig) -> Result<(), String> {
-    crate::config::save_json_config(VOICE_CONFIG_FILE, config)
+    let file: crate::config::ConfigFile<VoiceConfig> = crate::config::ConfigFile::new(VOICE_CONFIG_FILE);
+    file.save(config)
 }
 
 #[cfg(test)]

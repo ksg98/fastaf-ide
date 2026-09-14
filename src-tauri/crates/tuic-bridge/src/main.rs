@@ -21,12 +21,15 @@ static TUIC_SESSION_ENV: LazyLock<Option<String>> =
     LazyLock::new(|| std::env::var("TUIC_SESSION").ok().filter(|s| !s.is_empty()));
 
 const MCP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
 const MCP_WAIT_DEFAULT_MS: u64 = 60_000;
 const MCP_WAIT_MAX_MS: u64 = 300_000;
 /// Bounded transport overhead beyond the server-side wait. This covers HTTP
 /// framing and scheduler latency without turning unrelated calls into long
 /// hangs; the requested wait itself remains authoritative.
 const MCP_WAIT_RESPONSE_MARGIN_MS: u64 = 5_000;
+/// How long in-flight requests may keep running after stdin closes.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn wait_timeout_ms(request: &Value) -> Option<u64> {
     let name = request.pointer("/params/name").and_then(Value::as_str)?;
@@ -160,6 +163,15 @@ impl tokio::io::AsyncWrite for IpcStream {
 async fn connect_ipc() -> Result<IpcStream, String> {
     #[cfg(unix)]
     {
+        // Tests point the transport at a mock server on a temp socket.
+        #[cfg(test)]
+        if let Some(path) = tests::test_ipc_path() {
+            let stream = tokio::net::UnixStream::connect(&path)
+                .await
+                .map_err(|e| format!("connect {}: {e}", path.display()))?;
+            return Ok(IpcStream::Unix(stream));
+        }
+
         // Explicit override via environment variable
         if let Ok(explicit) = std::env::var("TUIC_SOCKET") {
             let path = std::path::PathBuf::from(&explicit);
@@ -189,15 +201,15 @@ async fn connect_ipc() -> Result<IpcStream, String> {
                 let Some(name_str) = name.to_str() else {
                     continue;
                 };
-                if name_str.starts_with("mcp-") && name_str.ends_with(".sock") {
-                    if let Ok(Ok(stream)) = tokio::time::timeout(
+                if name_str.starts_with("mcp-")
+                    && name_str.ends_with(".sock")
+                    && let Ok(Ok(stream)) = tokio::time::timeout(
                         std::time::Duration::from_secs(3),
                         tokio::net::UnixStream::connect(&entry.path()),
                     )
                     .await
-                    {
-                        return Ok(IpcStream::Unix(stream));
-                    }
+                {
+                    return Ok(IpcStream::Unix(stream));
                 }
             }
         }
@@ -232,24 +244,53 @@ fn tuic_session_header_line(tuic_session: Option<&str>) -> String {
     }
 }
 
+/// Project the protocol version carried by a stdio request into the HTTP
+/// transport header. Only the MCP date-revision grammar is reflected so an
+/// untrusted downstream string can never inject another header.
+fn request_protocol_version(body: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(body).ok();
+    let candidate = parsed
+        .as_ref()
+        .and_then(|request| {
+            request
+                .pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+                .or_else(|| request.pointer("/params/protocolVersion"))
+        })
+        .and_then(Value::as_str);
+    candidate
+        .filter(|version| {
+            version.len() == 10
+                && version.bytes().enumerate().all(|(index, byte)| {
+                    if matches!(index, 4 | 7) {
+                        byte == b'-'
+                    } else {
+                        byte.is_ascii_digit()
+                    }
+                })
+        })
+        .unwrap_or(LEGACY_PROTOCOL_VERSION)
+        .to_string()
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC helpers
 // ---------------------------------------------------------------------------
 
-/// Write a JSON line to stdout (MCP stdio transport delimiter is \n).
+/// Write one already-serialized JSON line to stdout (MCP stdio transport delimiter
+/// is \n). Concurrent request tasks share stdout, so the lock covers the whole
+/// line — a response can never be interleaved with another.
 /// Exits the process if stdout is closed — the MCP client is gone, nothing left to do.
-fn emit(json: &Value) {
+fn emit_raw(line: &str) {
     let mut stdout = io::stdout().lock();
-    if writeln!(
-        stdout,
-        "{}",
-        serde_json::to_string(json).unwrap_or_default()
-    )
-    .is_err()
-    {
+    if writeln!(stdout, "{line}").is_err() {
         std::process::exit(0);
     }
     let _ = stdout.flush();
+}
+
+/// Write a JSON line to stdout.
+fn emit(json: &Value) {
+    emit_raw(&serde_json::to_string(json).unwrap_or_default());
 }
 
 fn emit_tools_changed() {
@@ -272,7 +313,8 @@ async fn post_mcp(
     let mut stream = connect_ipc().await?;
 
     let mut headers = format!(
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nMCP-Protocol-Version: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        request_protocol_version(body),
         body.len()
     );
     if let Some(sid) = session_id {
@@ -360,11 +402,26 @@ async fn server_initialize() -> Result<(String, String), String> {
     let init_body = serde_json::json!({
         "jsonrpc": "2.0", "id": 0,
         "method": "initialize",
-        "params": { "protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": { "name": "tuic-bridge", "version": env!("CARGO_PKG_VERSION") } }
+        "params": { "protocolVersion": LEGACY_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": { "name": "tuic-bridge", "version": env!("CARGO_PKG_VERSION") } }
     });
     let (body, sid) = post_mcp(&serde_json::to_string(&init_body).unwrap(), None).await?;
     let sid = sid.ok_or_else(|| "server did not return mcp-session-id".to_string())?;
     Ok((sid, body))
+}
+
+/// Re-establish the upstream protocol session after TUIC restarts. Replaying
+/// the downstream initialize preserves client-specific server behavior (for
+/// example Grok's compact meta-tool surface) without exposing another response
+/// to the downstream client.
+async fn server_reinitialize(downstream_initialize: Option<String>) -> Result<String, String> {
+    let (mut sid, _) = server_initialize().await?;
+    if let Some(initialize) = downstream_initialize {
+        let (_, restored_sid) = post_mcp(&initialize, Some(&sid)).await?;
+        if let Some(restored_sid) = restored_sid {
+            sid = restored_sid;
+        }
+    }
+    Ok(sid)
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +433,28 @@ struct BridgeState {
     connected: AtomicBool,
     /// Handle to the SSE listener task — aborted and restarted on reconnect.
     sse_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Last initialize received from the stdio client. Replayed after an
+    /// upstream restart so TUIC restores client-specific session metadata.
+    downstream_initialize: Mutex<Option<String>>,
+    /// Serializes reconnect attempts. Requests run concurrently, so without this
+    /// every task that finds the bridge offline would fire its own `initialize`.
+    reconnect_lock: tokio::sync::Mutex<()>,
+}
+
+impl BridgeState {
+    fn new() -> Self {
+        Self {
+            session_id: Mutex::new(None),
+            connected: AtomicBool::new(false),
+            sse_handle: Mutex::new(None),
+            downstream_initialize: Mutex::new(None),
+            reconnect_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn downstream_initialize(&self) -> Option<String> {
+        self.downstream_initialize.lock().unwrap().clone()
+    }
 }
 
 /// Open a persistent GET /mcp SSE connection and forward server notifications to stdout.
@@ -475,6 +554,188 @@ fn emit_offline_response(method: &str, id: &Value) {
 }
 
 // ---------------------------------------------------------------------------
+// Request dispatch
+// ---------------------------------------------------------------------------
+
+/// Re-establish the upstream session, at most one attempt at a time.
+///
+/// Concurrent request tasks all observe the same `connected == false`, so the
+/// lock (plus the re-check after acquiring it) collapses their reconnect attempts
+/// into a single `initialize` instead of one per queued request.
+async fn ensure_connected(state: &Arc<BridgeState>) {
+    let _guard = state.reconnect_lock.lock().await;
+    if state.connected.load(Ordering::Acquire) {
+        return;
+    }
+    if let Ok(sid) = server_reinitialize(state.downstream_initialize()).await {
+        eprintln!("tuic-bridge: reconnected to TUIC");
+        *state.session_id.lock().unwrap() = Some(sid);
+        state.connected.store(true, Ordering::Release);
+        start_sse_listener(state);
+        emit_tools_changed();
+    }
+}
+
+/// Proxy one request to TUIC and forward its response to stdout.
+///
+/// Spawned per request by [`dispatch_loop`]: a blocking call (`agent wait` /
+/// `session wait` park server-side for up to 300s) must not delay the requests
+/// behind it. Awaiting this inline was head-of-line blocking — an unrelated
+/// `repo worktree_list` sent in the same parallel tool block inherited the whole
+/// wait, and its own 10s transport timeout only started once the wait returned.
+/// JSON-RPC responses may complete out of order; each carries its own `id`.
+async fn proxy_request(state: Arc<BridgeState>, line: String, method: String, id: Value) {
+    if !state.connected.load(Ordering::Acquire) {
+        ensure_connected(&state).await;
+    }
+    if !state.connected.load(Ordering::Acquire) {
+        emit_offline_response(&method, &id);
+        return;
+    }
+
+    let sid = state.session_id.lock().unwrap().clone();
+    match post_mcp(&line, sid.as_deref()).await {
+        Ok((body, new_sid)) => {
+            // Update session ID if server returned a new one — but only while the
+            // connection we borrowed is still the live one. The health loop can
+            // declare the bridge disconnected (and clear the session) while this
+            // request is in flight; writing our id back then would resurrect a
+            // session generation the reconnect path has already retired.
+            // DEFERRED (2026-07-31) — a connection epoch stamped on each request
+            // would close the remaining TOCTOU window. Not worth the machinery
+            // until an actual stale-session report appears: the server
+            // re-registers a stale session id on the next tools/call anyway.
+            if let Some(s) = new_sid
+                && state.connected.load(Ordering::Acquire)
+            {
+                *state.session_id.lock().unwrap() = Some(s);
+            }
+            // Forward raw JSON response to stdout
+            emit_raw(&body);
+        }
+        Err(e) => {
+            eprintln!("tuic-bridge: proxy error: {e}");
+            // A single request timeout is not proof that TUIC stopped.
+            // Preserve the MCP session/identity; the health loop applies
+            // the three-failure hysteresis and owns disconnect decisions.
+            emit(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32000,
+                    "message": format!("FastAF IPC request failed: {e}")
+                }
+            }));
+        }
+    }
+}
+
+/// Handle the downstream `initialize` inline (it establishes the session every
+/// later request depends on, so it must not race them).
+///
+/// Holds `reconnect_lock` for the whole exchange: being inline in the dispatch
+/// loop only orders it against *unread* stdin lines, not against requests already
+/// spawned. Sharing the lock with [`ensure_connected`] makes it the single owner
+/// of session establishment, so a request-triggered reconnect can't open a second
+/// upstream session concurrently and clobber `session_id`.
+async fn handle_initialize(state: &Arc<BridgeState>, line: String, id: Value) {
+    let _guard = state.reconnect_lock.lock().await;
+    *state.downstream_initialize.lock().unwrap() = Some(line.clone());
+    // Proxy to server when connected to get dynamic instructions.
+    // The server response includes intent protocol, active sessions, etc.
+    // Fall back to a minimal local response only when offline.
+    let proxied = if state.connected.load(Ordering::Acquire) || {
+        // Try lazy connect if not yet connected
+        if let Ok((sid, _)) = server_initialize().await {
+            eprintln!("tuic-bridge: connected to TUIC");
+            *state.session_id.lock().unwrap() = Some(sid);
+            state.connected.store(true, Ordering::Release);
+            start_sse_listener(state);
+            true
+        } else {
+            false
+        }
+    } {
+        let sid = state.session_id.lock().unwrap().clone();
+        match post_mcp(&line, sid.as_deref()).await {
+            Ok((body, new_sid)) => {
+                if let Some(s) = new_sid {
+                    *state.session_id.lock().unwrap() = Some(s);
+                }
+                // Parse server response, inject listChanged capability
+                // (the server doesn't advertise it but the bridge supports it)
+                if let Ok(mut resp) = serde_json::from_str::<Value>(&body) {
+                    resp["result"]["capabilities"]["tools"]["listChanged"] = Value::Bool(true);
+                    Some(resp)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                eprintln!("tuic-bridge: initialize proxy error: {e}");
+                state.connected.store(false, Ordering::Release);
+                *state.session_id.lock().unwrap() = None;
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    emit(&proxied.unwrap_or_else(|| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id,
+            "result": {
+                "protocolVersion": LEGACY_PROTOCOL_VERSION,
+                "capabilities": { "tools": { "listChanged": true } },
+                "serverInfo": { "name": "tuicommander", "version": env!("CARGO_PKG_VERSION") }
+            }
+        })
+    }));
+}
+
+/// Read stdio requests and dispatch them, keeping the reader free at all times.
+/// Returns once stdin is closed and every in-flight request has been answered.
+async fn dispatch_loop(
+    state: Arc<BridgeState>,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    let mut inflight = tokio::task::JoinSet::new();
+
+    while let Some(line) = rx.recv().await {
+        // Reap finished tasks so the set doesn't grow across a long session.
+        while inflight.try_join_next().is_some() {}
+
+        let request: Value = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("tuic-bridge: invalid JSON: {e}");
+                continue;
+            }
+        };
+
+        let method = request["method"].as_str().unwrap_or("").to_string();
+        let id = request.get("id").cloned().unwrap_or(Value::Null);
+
+        match method.as_str() {
+            "initialize" => handle_initialize(&state, line, id).await,
+            "notifications/initialized" => {} // Acknowledgment, no response
+            _ => {
+                inflight.spawn(proxy_request(Arc::clone(&state), line, method, id));
+            }
+        }
+    }
+
+    // stdin closed: the client is gone. Give in-flight requests a short grace to
+    // finish writing their responses, then let the JoinSet drop abort the rest —
+    // a pending 300s `agent wait` must not keep the process alive after EOF.
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, async {
+        while inflight.join_next().await.is_some() {}
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -486,11 +747,7 @@ async fn main() {
         ipc_endpoint()
     );
 
-    let state = Arc::new(BridgeState {
-        session_id: Mutex::new(None),
-        connected: AtomicBool::new(false),
-        sse_handle: Mutex::new(None),
-    });
+    let state = Arc::new(BridgeState::new());
 
     // Try initial connection
     match server_initialize().await {
@@ -543,21 +800,19 @@ async fn main() {
                 } else {
                     consecutive_failures = 0;
                 }
-            } else {
-                if let Ok((sid, _)) = server_initialize().await {
-                    eprintln!("tuic-bridge: reconnected to TUIC");
-                    *bg_state.session_id.lock().unwrap() = Some(sid);
-                    bg_state.connected.store(true, Ordering::Release);
-                    start_sse_listener(&bg_state);
-                    emit_tools_changed();
-                    consecutive_failures = 0;
-                }
+            } else if let Ok(sid) = server_reinitialize(bg_state.downstream_initialize()).await {
+                eprintln!("tuic-bridge: reconnected to TUIC");
+                *bg_state.session_id.lock().unwrap() = Some(sid);
+                bg_state.connected.store(true, Ordering::Release);
+                start_sse_listener(&bg_state);
+                emit_tools_changed();
+                consecutive_failures = 0;
             }
         }
     });
 
     // Stdin reader in blocking thread → channel → async handler
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     std::thread::spawn(move || {
         let stdin = io::stdin();
         for line in stdin.lock().lines() {
@@ -573,126 +828,266 @@ async fn main() {
         }
     });
 
-    while let Some(line) = rx.recv().await {
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("tuic-bridge: invalid JSON: {e}");
-                continue;
-            }
-        };
-
-        let method = request["method"].as_str().unwrap_or("");
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
-
-        match method {
-            "initialize" => {
-                // Proxy to server when connected to get dynamic instructions.
-                // The server response includes intent protocol, active sessions, etc.
-                // Fall back to a minimal local response only when offline.
-                let proxied = if state.connected.load(Ordering::Acquire) || {
-                    // Try lazy connect if not yet connected
-                    if let Ok((sid, _)) = server_initialize().await {
-                        eprintln!("tuic-bridge: connected to TUIC");
-                        *state.session_id.lock().unwrap() = Some(sid);
-                        state.connected.store(true, Ordering::Release);
-                        start_sse_listener(&state);
-                        true
-                    } else {
-                        false
-                    }
-                } {
-                    let sid = state.session_id.lock().unwrap().clone();
-                    match post_mcp(&line, sid.as_deref()).await {
-                        Ok((body, new_sid)) => {
-                            if let Some(s) = new_sid {
-                                *state.session_id.lock().unwrap() = Some(s);
-                            }
-                            // Parse server response, inject listChanged capability
-                            // (the server doesn't advertise it but the bridge supports it)
-                            if let Ok(mut resp) = serde_json::from_str::<Value>(&body) {
-                                resp["result"]["capabilities"]["tools"]["listChanged"] =
-                                    Value::Bool(true);
-                                Some(resp)
-                            } else {
-                                None
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("tuic-bridge: initialize proxy error: {e}");
-                            state.connected.store(false, Ordering::Release);
-                            *state.session_id.lock().unwrap() = None;
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                emit(&proxied.unwrap_or_else(|| serde_json::json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": {
-                        "protocolVersion": "2025-03-26",
-                        "capabilities": { "tools": { "listChanged": true } },
-                        "serverInfo": { "name": "tuicommander", "version": env!("CARGO_PKG_VERSION") }
-                    }
-                })));
-            }
-            "notifications/initialized" => {} // Acknowledgment, no response
-
-            // Proxy to server
-            _ => {
-                // Lazy reconnect attempt if disconnected
-                if !state.connected.load(Ordering::Acquire)
-                    && let Ok((sid, _)) = server_initialize().await
-                {
-                    eprintln!("tuic-bridge: reconnected to TUIC");
-                    *state.session_id.lock().unwrap() = Some(sid);
-                    state.connected.store(true, Ordering::Release);
-                    start_sse_listener(&state);
-                    emit_tools_changed();
-                }
-
-                if state.connected.load(Ordering::Acquire) {
-                    let sid = state.session_id.lock().unwrap().clone();
-                    match post_mcp(&line, sid.as_deref()).await {
-                        Ok((body, new_sid)) => {
-                            // Update session ID if server returned a new one
-                            if let Some(s) = new_sid {
-                                *state.session_id.lock().unwrap() = Some(s);
-                            }
-                            // Forward raw JSON response to stdout
-                            let mut stdout = io::stdout().lock();
-                            let _ = writeln!(stdout, "{body}");
-                            let _ = stdout.flush();
-                        }
-                        Err(e) => {
-                            eprintln!("tuic-bridge: proxy error: {e}");
-                            // A single request timeout is not proof that TUIC stopped.
-                            // Preserve the MCP session/identity; the health loop applies
-                            // the three-failure hysteresis and owns disconnect decisions.
-                            emit(&serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "error": {
-                                    "code": -32000,
-                                    "message": format!("FastAF IPC request failed: {e}")
-                                }
-                            }));
-                        }
-                    }
-                } else {
-                    emit_offline_response(method, &id);
-                }
-            }
-        }
-    }
+    dispatch_loop(state, rx).await;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{read_http_response, response_timeout, tuic_session_header_line};
-    use tokio::io::AsyncWriteExt;
+    use super::{
+        BridgeState, dispatch_loop, read_http_response, request_protocol_version, response_timeout,
+        tuic_session_header_line,
+    };
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Socket the mock IPC server listens on, read by `connect_ipc` under `cfg(test)`.
+    static TEST_IPC_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+    /// Serializes the tests that install a mock server (the path above is global).
+    /// Poisoning is ignored: a failing test must not cascade into the others.
+    static TEST_IPC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    pub(super) fn test_ipc_path() -> Option<PathBuf> {
+        TEST_IPC_PATH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Holds the serialization lock and clears the global socket path on drop, so a
+    /// panicking test leaves no mock installed for the next one.
+    struct MockGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        stats: Arc<MockStats>,
+    }
+
+    impl Drop for MockGuard {
+        fn drop(&mut self) {
+            *TEST_IPC_PATH.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    /// What the mock server observed, so tests can assert on real transport behavior.
+    #[derive(Default)]
+    struct MockStats {
+        /// Requests currently being served — the concurrency proof.
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+        initializes: AtomicUsize,
+        tool_calls: AtomicUsize,
+    }
+
+    /// Mock TUIC IPC endpoint. Answers `initialize` with a session id and any other
+    /// request with a JSON-RPC result, sleeping `slow_ms` when the body contains
+    /// `"slow"` so a test can hold one request open while sending the next.
+    async fn start_mock_ipc(slow_ms: u64) -> MockGuard {
+        let lock = TEST_IPC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mcp.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        *TEST_IPC_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(sock);
+
+        let stats = Arc::new(MockStats::default());
+        let server_stats = Arc::clone(&stats);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let stats = Arc::clone(&server_stats);
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 2048];
+                    // One request per connection (the bridge sends `Connection: close`).
+                    while let Ok(n) = stream.read(&mut chunk).await {
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    // The SSE listener opens a GET /mcp stream; only count RPC posts.
+                    if text.contains("\"initialize\"") {
+                        stats.initializes.fetch_add(1, Ordering::SeqCst);
+                    } else if text.contains("tools/call") {
+                        stats.tool_calls.fetch_add(1, Ordering::SeqCst);
+                    }
+
+                    let now = stats.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    stats.max_in_flight.fetch_max(now, Ordering::SeqCst);
+                    if text.contains("slow") {
+                        tokio::time::sleep(std::time::Duration::from_millis(slow_ms)).await;
+                    }
+                    stats.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+                    let body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nmcp-session-id: test-sid\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        MockGuard {
+            _lock: lock,
+            _dir: dir,
+            stats,
+        }
+    }
+
+    fn connected_state() -> Arc<BridgeState> {
+        let state = Arc::new(BridgeState::new());
+        *state.session_id.lock().unwrap() = Some("test-sid".to_string());
+        state.connected.store(true, Ordering::Release);
+        state
+    }
+
+    fn call(name: &str) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{"action":"list"}}}}}}"#
+        )
+    }
+
+    /// The regression: a long request must not hold the reader hostage. Two slow
+    /// (300ms) calls sent back-to-back finish in roughly one slow window, and the
+    /// server sees both open at once.
+    #[tokio::test]
+    async fn concurrent_requests_are_not_serialized() {
+        let mock = start_mock_ipc(300).await;
+        let stats = &mock.stats;
+        let state = connected_state();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tx.send(call("slow_wait")).unwrap();
+        tx.send(call("slow_other")).unwrap();
+        drop(tx);
+
+        let started = std::time::Instant::now();
+        dispatch_loop(state, rx).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(stats.tool_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            stats.max_in_flight.load(Ordering::SeqCst),
+            2,
+            "both requests must be in flight together — serialized dispatch is the bug"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(550),
+            "two 300ms calls took {elapsed:?}: they ran back-to-back, not concurrently"
+        );
+    }
+
+    /// A fast call sent behind a long one must not wait for it. Without concurrent
+    /// dispatch the fast call could only be served after the slow one returned.
+    #[tokio::test]
+    async fn fast_request_is_served_while_a_slow_one_is_pending() {
+        let mock = start_mock_ipc(400).await;
+        let stats = &mock.stats;
+        let state = connected_state();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tx.send(call("slow_wait")).unwrap();
+        tx.send(call("repo")).unwrap();
+        drop(tx);
+
+        let started = std::time::Instant::now();
+        dispatch_loop(state, rx).await;
+
+        assert_eq!(stats.tool_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.max_in_flight.load(Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(650),
+            "the fast call inherited the slow call's latency"
+        );
+    }
+
+    /// Concurrency must not turn a reconnect into an `initialize` storm: three
+    /// requests arriving while offline share a single re-initialize.
+    #[tokio::test]
+    async fn concurrent_requests_reconnect_only_once() {
+        let mock = start_mock_ipc(0).await;
+        let stats = &mock.stats;
+        // Offline: no session id, connected = false.
+        let state = Arc::new(BridgeState::new());
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        for _ in 0..3 {
+            tx.send(call("session")).unwrap();
+        }
+        drop(tx);
+
+        dispatch_loop(Arc::clone(&state), rx).await;
+
+        assert_eq!(
+            stats.initializes.load(Ordering::SeqCst),
+            1,
+            "each queued request fired its own initialize"
+        );
+        assert_eq!(stats.tool_calls.load(Ordering::SeqCst), 3);
+        assert!(state.connected.load(Ordering::Acquire));
+    }
+
+    /// `initialize` must not open a second upstream session while an already
+    /// spawned request is reconnecting. Both paths take `reconnect_lock`, so the
+    /// offline burst produces exactly one session establishment (+ the proxied
+    /// downstream initialize) instead of one per reconnect authority.
+    #[tokio::test]
+    async fn initialize_does_not_race_an_in_flight_reconnect() {
+        let mock = start_mock_ipc(150).await;
+        let stats = &mock.stats;
+        // Offline, so the spawned tool call triggers a reconnect of its own.
+        let state = Arc::new(BridgeState::new());
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tx.send(call("slow_session")).unwrap();
+        tx.send(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#.to_string())
+            .unwrap();
+        drop(tx);
+
+        dispatch_loop(Arc::clone(&state), rx).await;
+
+        assert_eq!(
+            stats.initializes.load(Ordering::SeqCst),
+            2,
+            "expected one session establishment + one proxied downstream initialize; \
+             more means initialize and the request path reconnected concurrently"
+        );
+        assert_eq!(stats.tool_calls.load(Ordering::SeqCst), 1);
+        assert!(state.connected.load(Ordering::Acquire));
+    }
+
+    /// `initialize` stays sequential: it establishes the session every later
+    /// request needs, so it is answered before the loop dispatches anything else.
+    #[tokio::test]
+    async fn initialize_is_handled_before_later_requests() {
+        let mock = start_mock_ipc(0).await;
+        let stats = &mock.stats;
+        let state = Arc::new(BridgeState::new());
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tx.send(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#.to_string())
+            .unwrap();
+        tx.send(call("session")).unwrap();
+        drop(tx);
+
+        dispatch_loop(Arc::clone(&state), rx).await;
+
+        // One initialize to open the upstream session + the proxied downstream one.
+        assert_eq!(stats.initializes.load(Ordering::SeqCst), 2);
+        assert_eq!(stats.tool_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            state.downstream_initialize().is_some(),
+            "the downstream initialize must be retained for replay after a restart"
+        );
+    }
 
     #[test]
     fn header_emitted_when_session_present() {
@@ -706,6 +1101,29 @@ mod tests {
     fn header_absent_without_session() {
         assert_eq!(tuic_session_header_line(None), "");
         assert_eq!(tuic_session_header_line(Some("")), "");
+    }
+
+    #[test]
+    fn request_protocol_version_projects_modern_meta_legacy_and_fallback() {
+        let modern =
+            r#"{"params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#;
+        assert_eq!(request_protocol_version(modern), "2026-07-28");
+
+        let legacy = r#"{"params":{"protocolVersion":"2025-11-25"}}"#;
+        assert_eq!(request_protocol_version(legacy), "2025-11-25");
+        assert_eq!(request_protocol_version("{}"), "2025-11-25");
+        assert_eq!(request_protocol_version("not json"), "2025-11-25");
+    }
+
+    #[test]
+    fn request_protocol_version_rejects_header_injection_and_bad_revisions() {
+        let injected = r#"{"params":{"protocolVersion":"2025-11-25\r\nX-Evil: true"}}"#;
+        let result = request_protocol_version(injected);
+        assert_eq!(result, "2025-11-25");
+        assert!(!result.contains(['\r', '\n', ':']));
+
+        let bad = r#"{"params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"latest"},"protocolVersion":"also-not-a-date"}}"#;
+        assert_eq!(request_protocol_version(bad), "2025-11-25");
     }
 
     #[test]

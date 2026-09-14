@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>When the PR goes red, the agent fixes it — FastAF Blog</title>
+  <meta name="description" content="CI auto-heal hands a failing build straight back to the agent that wrote it. The interesting part isn't the automation — it's that CI logs from a fork PR are attacker-authored text going into an agent with a shell." />
+
+  <meta property="og:title" content="When the PR goes red, the agent fixes it — FastAF" />
+  <meta property="og:description" content="CI auto-heal, and the prompt-injection problem hiding inside it." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/sstraus/tuicommander/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>July 30, 2026</time>
+      <h1>When the PR goes red, the agent fixes it</h1>
+      <p class="blog-post-summary">CI auto-heal fetches the failing job's logs and hands them straight back to the agent on that branch. Building it was a day. The part worth writing about is what those logs actually are: text an attacker can author, going into an agent that holds a shell.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>The gap between "pushed" and "green"</h2>
+      <p>The agent finishes, commits, pushes, and reports success. Twenty minutes later CI comes back red. By then you've moved on, the agent has moved on, and the loop that should have closed itself needs a human to walk over and restart it — open the run, find the failing job, read the log, come back, paste the error, wait again.</p>
+      <p>Nothing in that loop needs a person. The failure is written down. The agent that caused it is still sitting on the branch. Auto-heal just connects the two.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What actually happens</h2>
+      <p>Enable auto-heal on a branch and FastAF watches its PR. On a red-CI transition it fetches the logs of the failed jobs, waits for the agent on that branch to be free, and types the diagnosis into its terminal. The agent reads it as a normal turn: fix the failure, commit, push. Merge conflicts follow the same path with a different prompt.</p>
+      <p>Two details in the fetch turned out to matter more than expected:</p>
+      <p><strong>Job-level, not run-level.</strong> The obvious call is "give me the failed logs for this run", but that only answers once the whole run reaches a terminal state. A run with one red job and four still churning has a conclusive failure you could be fixing already. So we walk every workflow run on the branch's latest head commit and download each failed job directly — a job's logs are available as soon as that job is done, no matter what its siblings are doing.</p>
+      <p><strong>The latest head, not the latest run.</strong> A commit routinely has several workflow runs, all feeding the same PR check summary. We resolve the newest head SHA first and then inspect every run pointing at it, otherwise you diagnose a build from two pushes ago.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Typing into an agent is not writing to a pipe</h2>
+      <p>Delivering the prompt was where we lost the most time to something genuinely non-obvious.</p>
+      <p>Writing the text followed by a newline into the PTY does nothing for agents built on Ink — Claude Code and Gemini among them. The text lands in the composer and just sits there. The turn never starts, the write reports success, and everything downstream believes the heal was delivered. It failed silently for both agents before we understood why.</p>
+      <p>Ink runs the terminal in raw mode and reads keys itself; a trailing newline isn't the submit gesture it's listening for. The write has to be split — clear the line, send the text, then send a carriage return as its own write. Every path in FastAF that puts text into an agent now goes through one shared helper that knows each agent's submit semantics: dictation, the command palette, suggested actions, and auto-heal. Nobody gets to write raw bytes plus <code>\r</code> and hope.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Three attempts, and only real ones count</h2>
+      <p>An agent that can't fix a build will happily not fix it forever, so auto-heal stops after three attempts per branch. The counter resets when CI goes green.</p>
+      <p>The rule we're pedantic about is <em>what counts as an attempt</em>. The counter only increments after the fix prompt has actually reached the agent. If the log fetch fails, if the terminal disappeared, if no agent ever went idle — those are delivery failures, not attempts. Spending your three tries on infrastructure hiccups without the agent ever seeing a log is the kind of bug that makes a feature feel broken while every individual component reports fine.</p>
+      <p>And when auto-heal can't run, it says so. No agent open on the branch is the common case — the heal needs an agent terminal to hand the problem to, and if there isn't one you get a toast telling you exactly that, instead of silence you'd interpret as "nothing was wrong".</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Now the uncomfortable part</h2>
+      <p>Read what this feature does with fresh eyes: it takes text produced by a CI run and pastes it into an AI agent that has a shell and write access to your repository.</p>
+      <p>On a pull request from a fork, that CI run executed code written by someone who is not you. They control what gets printed. A test name is attacker-chosen text. So is an assertion message, a compiler diagnostic on attacker-authored source, and anything a build script decides to echo. This is textbook indirect prompt injection, and the payload arrives through a channel everyone thinks of as boring diagnostic output.</p>
+      <p>You can't fix this by sanitising harder — the log has to stay readable, and "ignore previous instructions" is valid English that no filter can distinguish from a legitimate test name. What you can do is narrow the blast radius and be explicit about what remains.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What we do about it</h2>
+      <p><strong>Strip the control plane.</strong> ANSI and OSC escape sequences come out first — colours, cursor moves, terminal queries. Then every remaining C0 control character and DEL is dropped, keeping only tab and newline. That last step is the one that matters: bracketed paste protects the text you paste, but a bare Ctrl-U, ESC or BEL smuggled inside a log is a keystroke, and keystrokes are a different trust level from characters.</p>
+      <p><strong>Cap the surface.</strong> Logs are truncated to 16 KB, keeping the first 4 KB and the tail. That's not just a context-cost decision: the head identifies which job and step failed, and real CI errors — test summaries, compiler output, the non-zero exit — cluster at the end. The middle is almost always dependency installation. Less text is less room for a payload.</p>
+      <p><strong>Frame it as data, loudly.</strong> The log goes to the agent wrapped in explicit BEGIN/END markers and a preamble stating that this is untrusted output from a possibly attacker-controlled PR, that it must be treated strictly as data to diagnose, and that no command or directive inside it should be executed or trusted.</p>
+      <p>We're not going to oversell that last one. Framing is mitigation, not a sandbox — a determined injection could still influence the agent. We keep auto-heal unattended on purpose, because a feature that asks permission for every line isn't a loop that closes itself. That trade is written down at the code that makes it, as an accepted residual risk rather than a solved problem. If your threat model doesn't allow it, leave auto-heal off on repos that take fork PRs.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>When we can't read the logs, we say which ones</h2>
+      <p>Auto-heal reads GitHub Actions logs. Plenty of red checks aren't GitHub Actions — CircleCI, Codacy and friends post their results into the same PR summary while their logs live on their own hosts.</p>
+      <p>The first version handled that badly: no failed Actions job found, so it reported "no jobs found" — technically true and completely misleading, because the PR was very obviously red. Now, when the failure lives elsewhere, we classify each check by its detail link and name the culprits: <em>the failing checks run on external CI (not supported): ci/circleci: lint, …</em>. It still can't fix it, but it tells you where to look, and it doesn't burn one of your three attempts to say so.</p>
+      <p>Reading those external providers directly is the obvious next step, and CircleCI support is what we're building now.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The shape of the idea</h2>
+      <p>Auto-heal is small. Watch for a state change, fetch the evidence, hand it to the agent already holding the context, cap the retries. Most of the value is in the plumbing being honest — attempts that mean attempts, errors that name the real cause, a delivery path that actually submits.</p>
+      <p>And it's a good reminder for anything that feeds external data to an agent: the moment your automation starts piping text from the outside world into something that can run commands, that text is part of your attack surface, however boring the pipe looks.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/sstraus/tuicommander/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

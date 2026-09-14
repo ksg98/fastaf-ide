@@ -95,6 +95,18 @@ describe("prNotificationsStore", () => {
 			});
 		});
 
+		it("returns the newest notification first — the bell reads top-down", () => {
+			testInScope(() => {
+				const now = vi.spyOn(Date, "now");
+				now.mockReturnValueOnce(1000).mockReturnValueOnce(2000).mockReturnValueOnce(3000);
+				prNotificationsStore.add(makeNotification({ prNumber: 1 }));
+				prNotificationsStore.add(makeNotification({ prNumber: 2 }));
+				prNotificationsStore.add(makeNotification({ prNumber: 3 }));
+				now.mockRestore();
+				expect(prNotificationsStore.getActive().map((n) => n.prNumber)).toEqual([3, 2, 1]);
+			});
+		});
+
 		it("allows same type for different PRs", () => {
 			testInScope(() => {
 				prNotificationsStore.add(makeNotification({ prNumber: 1 }));

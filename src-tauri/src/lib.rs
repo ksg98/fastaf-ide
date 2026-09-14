@@ -48,8 +48,10 @@ pub(crate) mod github_poller;
 #[cfg(feature = "desktop")]
 mod global_hotkey;
 pub(crate) mod import;
+pub(crate) mod grid_gate;
 pub(crate) mod improvement_scan;
 mod input_line_buffer;
+pub(crate) mod jsonc_edit;
 pub(crate) mod llm_api;
 pub(crate) mod mcp_http;
 #[allow(dead_code)] // Incremental build: wired in story 1196+ (OAuth flow/token/registry)
@@ -67,8 +69,11 @@ mod menu;
 #[cfg(feature = "desktop")]
 mod native_drag;
 #[cfg(feature = "desktop")]
+mod native_keys;
+#[cfg(feature = "desktop")]
 pub(crate) mod notification_sound;
 mod output_parser;
+pub(crate) mod output_watchers;
 #[cfg(feature = "desktop")]
 mod panel_window;
 pub(crate) mod plugin_credentials;
@@ -83,6 +88,7 @@ pub(crate) mod process_env;
 pub(crate) mod prompt;
 pub(crate) mod provider_registry;
 pub(crate) mod pty;
+pub(crate) mod pty_capture;
 pub(crate) mod push;
 pub(crate) mod registry;
 pub(crate) mod relay_client;
@@ -94,9 +100,8 @@ mod shell_integration;
 pub(crate) mod sleep_prevention;
 pub(crate) mod smart_prompt;
 pub(crate) mod state;
-#[cfg(feature = "desktop")]
-mod tab_shortcut;
 pub(crate) mod tailscale;
+pub(crate) mod tasks;
 pub(crate) mod terminal_grid;
 pub(crate) mod text_rank;
 pub(crate) mod themes;
@@ -272,8 +277,85 @@ fn ensure_window_visible(window: &WebviewWindow) {
 #[cfg(feature = "desktop")]
 /// Load configuration from cached AppState
 #[tauri::command]
-fn load_config(state: State<'_, Arc<AppState>>) -> config::AppConfig {
+async fn load_config(app: tauri::AppHandle) -> config::AppConfig {
+    let state = app.state::<Arc<AppState>>();
     state.config.read().clone()
+}
+
+#[cfg(feature = "desktop")]
+mod boot_commands {
+    use super::{config, provider_registry};
+
+    async fn load_boot_file<T, F>(name: &'static str, loader: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        tokio::task::spawn_blocking(loader)
+            .await
+            .map_err(|error| format!("{name} hydration task failed: {error}"))
+    }
+
+    #[tauri::command(rename = "load_repositories")]
+    pub(super) async fn load_repositories_async() -> Result<serde_json::Value, String> {
+        load_boot_file("repositories", config::load_repositories).await
+    }
+
+    #[tauri::command(rename = "load_ui_prefs")]
+    pub(super) async fn load_ui_prefs_async() -> Result<config::UIPrefsConfig, String> {
+        load_boot_file("UI preferences", config::load_ui_prefs).await
+    }
+
+    #[tauri::command(rename = "load_notification_config")]
+    pub(super) async fn load_notification_config_async()
+    -> Result<config::NotificationConfig, String> {
+        load_boot_file("notification config", config::load_notification_config).await
+    }
+
+    #[tauri::command(rename = "load_repo_settings")]
+    pub(super) async fn load_repo_settings_async() -> Result<config::RepoSettingsMap, String> {
+        load_boot_file("repository settings", config::load_repo_settings).await
+    }
+
+    #[tauri::command(rename = "load_repo_defaults")]
+    pub(super) async fn load_repo_defaults_async() -> Result<config::RepoDefaultsConfig, String> {
+        load_boot_file("repository defaults", config::load_repo_defaults).await
+    }
+
+    #[tauri::command(rename = "load_prompt_library")]
+    pub(super) async fn load_prompt_library_async() -> Result<config::PromptLibraryConfig, String> {
+        load_boot_file("prompt library", config::load_prompt_library).await
+    }
+
+    #[tauri::command(rename = "load_notes")]
+    pub(super) async fn load_notes_async() -> Result<serde_json::Value, String> {
+        load_boot_file("notes", config::load_notes).await?
+    }
+
+    #[tauri::command(rename = "load_activity")]
+    pub(super) async fn load_activity_async() -> Result<serde_json::Value, String> {
+        load_boot_file("activity", config::load_activity).await
+    }
+
+    #[tauri::command(rename = "load_keybindings")]
+    pub(super) async fn load_keybindings_async() -> Result<serde_json::Value, String> {
+        load_boot_file("keybindings", config::load_keybindings).await
+    }
+
+    #[tauri::command(rename = "load_agents_config")]
+    pub(super) async fn load_agents_config_async() -> Result<config::AgentsConfig, String> {
+        load_boot_file("agent config", config::load_agents_config).await
+    }
+
+    #[tauri::command(rename = "load_provider_registry")]
+    pub(super) async fn load_provider_registry_async()
+    -> Result<provider_registry::ProviderRegistry, String> {
+        load_boot_file(
+            "provider registry",
+            provider_registry::load_provider_registry,
+        )
+        .await
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -281,26 +363,15 @@ fn load_config(state: State<'_, Arc<AppState>>) -> config::AppConfig {
 /// if MCP / Remote Access settings changed (no app restart required).
 #[tauri::command]
 fn save_config(state: State<'_, Arc<AppState>>, config: config::AppConfig) -> Result<(), String> {
-    let old = state.config.read().clone();
-    let mut config = config;
-    config::preserve_redacted_app_config_secrets(&mut config, &old);
-    let server_changed = old.services.server.enabled != config.services.server.enabled
-        || old.services.server.port != config.services.server.port
-        || old.services.auth.username != config.services.auth.username
-        || old.services.auth.password_hash != config.services.auth.password_hash
-        || old.services.server.ipv6_enabled != config.services.server.ipv6_enabled;
+    // Serialized read-merge-persist: see config::commit_config_change. Two overlapping
+    // saves used to read the same snapshot and the loser's fields were silently dropped.
+    let effects = config::commit_config_change(state.inner(), move |_current| Ok(config))?;
 
-    let tools_changed = old.disabled_native_tools != config.disabled_native_tools
-        || old.collapse_tools != config.collapse_tools;
-
-    config::save_app_config(config.clone())?; // clone goes to disk
-    *state.config.write() = config; // move original into state
-
-    if tools_changed {
+    if effects.tools_changed {
         let _ = state.mcp_tools_changed.send(());
     }
 
-    if server_changed {
+    if effects.server_changed {
         restart_server(state.inner(), "remote-access configuration changed");
     }
 
@@ -339,6 +410,17 @@ fn screenshot_response(state: State<'_, Arc<AppState>>, request_id: String, data
     if let Some((_, sender)) = state.screenshot_responses.remove(&request_id) {
         let _ = sender.send(data);
     }
+}
+
+/// Answer a pending MCP confirmation. Pairs with `ui(action=confirm)`.
+///
+/// Every client is shown the same request, so this is a race by design and the
+/// first answer wins: a request already resolved (or expired) is a no-op rather
+/// than an error, because the loser of that race did nothing wrong.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn mcp_confirm_response(state: State<'_, Arc<AppState>>, request_id: String, confirmed: bool) {
+    crate::mcp_http::resolve_mcp_confirm(&state, &request_id, confirmed);
 }
 
 /// One IPv4 address found on a network interface.
@@ -701,15 +783,18 @@ pub(crate) fn read_file_impl(path: String, file: String) -> Result<String, Strin
 }
 
 #[cfg_attr(feature = "desktop", tauri::command)]
-fn read_file(path: String, file: String) -> Result<String, String> {
-    read_file_impl(path, file)
+async fn read_file(path: String, file: String) -> Result<String, String> {
+    fs::spawn_blocking_fs(move || read_file_impl(path, file)).await
 }
 
 /// Read a repo file for the CodeMirror editor, at the larger
 /// [`MAX_EDITOR_LARGE_FILE_SIZE`] cap. Same repo-containment check as `read_file`.
 #[cfg_attr(feature = "desktop", tauri::command)]
-fn read_editor_file(repo_path: String, file: String) -> Result<String, String> {
-    read_file_impl_with_limit(repo_path, file, MAX_EDITOR_LARGE_FILE_SIZE)
+async fn read_editor_file(repo_path: String, file: String) -> Result<String, String> {
+    fs::spawn_blocking_fs(move || {
+        read_file_impl_with_limit(repo_path, file, MAX_EDITOR_LARGE_FILE_SIZE)
+    })
+    .await
 }
 
 /// Read a file by absolute path (read-only, no repo constraint).
@@ -719,8 +804,12 @@ fn read_editor_file(repo_path: String, file: String) -> Result<String, String> {
 /// trigger macOS permission dialogs (TCC guards directory enumeration, not
 /// individual reads). The HTTP endpoint has its own repo-root check.
 #[cfg_attr(feature = "desktop", tauri::command)]
-fn read_external_file(path: String) -> Result<String, String> {
-    let p = std::path::Path::new(&path);
+async fn read_external_file(path: String) -> Result<String, String> {
+    fs::spawn_blocking_fs(move || read_external_file_impl(&path)).await
+}
+
+pub(crate) fn read_external_file_impl(path: &str) -> Result<String, String> {
+    let p = std::path::Path::new(path);
     if !p.is_absolute() {
         return Err("read_external_file requires an absolute path".to_string());
     }
@@ -740,8 +829,9 @@ pub(crate) fn read_external_file_with_limit(path: &str, limit: u64) -> Result<St
 /// Read an absolute-path file for the CodeMirror editor, at the larger
 /// [`MAX_EDITOR_LARGE_FILE_SIZE`] cap. The HTTP endpoint has its own repo-root check.
 #[cfg_attr(feature = "desktop", tauri::command)]
-fn read_editor_file_external(path: String) -> Result<String, String> {
-    read_external_file_with_limit(&path, MAX_EDITOR_LARGE_FILE_SIZE)
+async fn read_editor_file_external(path: String) -> Result<String, String> {
+    fs::spawn_blocking_fs(move || read_external_file_with_limit(&path, MAX_EDITOR_LARGE_FILE_SIZE))
+        .await
 }
 
 /// Write a file at an absolute path (used by the UI for files outside any registered repo,
@@ -750,7 +840,11 @@ fn read_editor_file_external(path: String) -> Result<String, String> {
 /// Target must be inside the user's home directory — see
 /// [`crate::fs::validate_external_write_path`] for the full rationale (story 1273-c95e).
 #[cfg_attr(feature = "desktop", tauri::command)]
-fn write_external_file(path: String, content: String) -> Result<(), String> {
+async fn write_external_file(path: String, content: String) -> Result<(), String> {
+    fs::spawn_blocking_fs(move || write_external_file_impl(path, content)).await
+}
+
+pub(crate) fn write_external_file_impl(path: String, content: String) -> Result<(), String> {
     let p = std::path::Path::new(&path);
     let home =
         dirs::home_dir().ok_or_else(|| "Could not resolve user home directory".to_string())?;
@@ -870,13 +964,7 @@ async fn deep_link_mcp_call(
 #[cfg(feature = "desktop")]
 #[tauri::command]
 fn regenerate_session_token(state: State<'_, Arc<AppState>>) {
-    let new_token = uuid::Uuid::new_v4().to_string();
-    *state.session_token.write() = new_token.clone();
-    // Persist so the new token survives restarts
-    let mut cfg = state.config.read().clone();
-    cfg.services.auth.session_token = new_token;
-    cfg.services.auth.session_token_exists = true;
-    if let Err(e) = config::save_app_config(cfg) {
+    if let Err(e) = config::rotate_session_token(state.inner()) {
         tracing::error!(
             source = "auth",
             "Failed to persist regenerated session token: {e}"
@@ -1089,6 +1177,36 @@ fn raise_fd_limit() {
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
 
+const TAILSCALE_DETECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn detect_tailscale_bounded<F>(detection: F) -> tailscale::TailscaleState
+where
+    F: std::future::Future<Output = tailscale::TailscaleState>,
+{
+    match tokio::time::timeout(TAILSCALE_DETECTION_TIMEOUT, detection).await {
+        Ok(state) => state,
+        Err(_) => {
+            tracing::warn!(
+                source = "tailscale",
+                timeout_ms = TAILSCALE_DETECTION_TIMEOUT.as_millis(),
+                "Tailscale detection timed out; starting the local server without TLS"
+            );
+            tailscale::TailscaleState::NotInstalled
+        }
+    }
+}
+
+fn boot_repo_paths(repositories: &serde_json::Value) -> Vec<String> {
+    repositories
+        .get("repos")
+        .and_then(|repos| repos.as_object())
+        .into_iter()
+        .flat_map(|repos| repos.iter())
+        .filter(|(_, repo)| repo.get("parked").and_then(|value| value.as_bool()) != Some(true))
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -1163,6 +1281,14 @@ pub fn run() {
     let state = Arc::new(app_state);
     state.wire_event_bus();
 
+    let relay_rx = if config.services.relay.enabled {
+        let (relay_tx, relay_rx) = tokio::sync::oneshot::channel();
+        *state.relay.shutdown.lock() = Some(relay_tx);
+        Some(relay_rx)
+    } else {
+        None
+    };
+
     // Always start HTTP API server (Unix socket is always on; TCP only if remote access enabled)
     // Tailscale detection + TLS provisioning happens inside the server thread (non-blocking to Tauri setup)
     {
@@ -1174,11 +1300,19 @@ pub fn run() {
             rt.block_on(async move {
                 spawn_background_tasks(&server_state);
 
+                if let Some(relay_rx) = relay_rx {
+                    let relay_state = server_state.clone();
+                    tokio::spawn(relay_client::run(relay_state, relay_rx));
+                }
+
                 // Detect Tailscale and provision TLS cert (async, doesn't block window render)
                 let tls_config = if remote_enabled {
-                    let ts_state = tokio::task::spawn_blocking(tailscale::detect)
-                        .await
-                        .unwrap_or(tailscale::TailscaleState::NotInstalled);
+                    let ts_state = detect_tailscale_bounded(async {
+                        tokio::task::spawn_blocking(tailscale::detect)
+                            .await
+                            .unwrap_or(tailscale::TailscaleState::NotInstalled)
+                    })
+                    .await;
                     tracing::info!(
                         source = "tailscale",
                         ?ts_state,
@@ -1238,20 +1372,9 @@ pub fn run() {
     // Skips agents the user explicitly disabled via Settings > Agents.
     agent_mcp::ensure_mcp_configs(&config.disabled_mcp_agents);
 
-    // Start relay client if configured
-    if config.services.relay.enabled {
-        let (relay_tx, relay_rx) = tokio::sync::oneshot::channel();
-        *state.relay.shutdown.lock() = Some(relay_tx);
-        let relay_state = state.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new()
-                .expect("Failed to create tokio runtime for relay client");
-            rt.block_on(relay_client::run(relay_state, relay_rx));
-        });
-    }
-
     sanitize_window_state();
 
+    let index_strategy = config.index_strategy.clone();
     let builder = tauri::Builder::default();
     let builder = plugins::register_plugin_protocol(builder);
     let builder = builder
@@ -1349,7 +1472,7 @@ pub fn run() {
     }));
 
     builder
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -1415,8 +1538,9 @@ pub fn run() {
                 // Install Fn/Globe key monitor for push-to-talk dictation
                 dictation::fn_key_monitor::install(app.handle().clone());
 
-                // Install Ctrl+Tab monitor (macOS swallows it before JS/WKWebView)
-                tab_shortcut::install(app.handle().clone());
+                // Install the native key monitor (macOS swallows Ctrl+Tab and F13-F20
+                // before JS/WKWebView ever sees them)
+                native_keys::install(app.handle().clone());
 
                 // Disable macOS press-and-hold accent popup so held keys repeat
                 // in the terminal's hidden input (vim j/l/i — issue #79)
@@ -1439,24 +1563,25 @@ pub fn run() {
             // (inotify) notify emulates recursion with a per-directory walk, so
             // registration is not free there (see issue #82 / repo_watcher.rs).
             let repos_json = config::load_repositories();
-            let mut known_repo_paths: Vec<String> = Vec::new();
-            if let Some(repos) = repos_json.get("repos").and_then(|r| r.as_object()) {
-                for repo_path in repos.keys() {
-                    known_repo_paths.push(repo_path.clone());
-                    if let Err(e) = repo_watcher::start_watching(repo_path, app_state) {
-                        app_logger::log_via_state(
-                            app_state,
-                            "warn",
-                            "app",
-                            &format!("[RepoWatcher] Failed to watch {repo_path}: {e}"),
-                        );
-                    }
+            let mut known_repo_paths = boot_repo_paths(&repos_json);
+            for repo_path in &known_repo_paths {
+                if let Err(e) = repo_watcher::start_watching(repo_path, app_state) {
+                    app_logger::log_via_state(
+                        app_state,
+                        "warn",
+                        "app",
+                        &format!("[RepoWatcher] Failed to watch {repo_path}: {e}"),
+                    );
                 }
             }
 
             // Auto-update CLI binary if installed
             #[cfg(feature = "desktop")]
-            tuic_cli::auto_update_cli();
+            tauri::async_runtime::spawn(async {
+                if let Err(error) = tokio::task::spawn_blocking(tuic_cli::auto_update_cli).await {
+                    tracing::warn!(source = "tuic_cli", "CLI auto-update task failed: {error}");
+                }
+            });
 
             // Pre-warm content indices based on index_strategy setting:
             // - "active_only": only the active repo at boot
@@ -1469,9 +1594,7 @@ pub fn run() {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_owned());
 
-                let strategy = config::load_app_config().index_strategy;
-
-                let repos_to_warm = match strategy.as_str() {
+                let repos_to_warm = match index_strategy.as_str() {
                     "all_sequential" => {
                         if let Some(ref active) = active_repo
                             && let Some(pos) = known_repo_paths.iter().position(|p| p == active)
@@ -1527,6 +1650,7 @@ pub fn run() {
             pty::create_pty_with_worktree,
             pty::list_worktrees,
             pty::write_pty,
+            pty::write_pty_parts,
             pty::get_input_buffer_content,
             pty::resize_pty,
             pty::set_ansi_colors,
@@ -1559,6 +1683,10 @@ pub fn run() {
             pty::get_session_metrics,
             pty::can_spawn_session,
             pty::list_active_sessions,
+            pty::enqueue_agent_command,
+            pty::clear_queued_agent_commands,
+            pty::list_queued_agent_commands,
+            pty::remove_queued_agent_command,
             pty::get_process_stats,
             pty::read_vt_log,
             pty::subscribe_terminal_grid,
@@ -1582,12 +1710,13 @@ pub fn run() {
             pty::terminal_hyperlink_at,
             pty::terminal_hyperlink_span,
             pty::set_session_visible,
-            pty::update_session_cwd,
             pty::set_session_name,
             pty::get_session_foreground_process,
             pty::get_session_leaf_pid,
             pty::has_foreground_process,
             pty::debug_agent_detection,
+            pty_capture::get_pty_capture,
+            pty_capture::set_pty_capture,
             load_config,
             save_config,
             themes::list_themes,
@@ -1751,14 +1880,13 @@ pub fn run() {
             voice::commands::voice_list_output_devices,
             dictation::stt_cloud::delete_dictation_stt_api_key,
             global_hotkey::set_global_hotkey,
-            global_hotkey::get_global_hotkey,
             config::load_app_config,
             config::save_app_config,
-            config::load_notification_config,
+            boot_commands::load_notification_config_async,
             config::save_notification_config,
-            config::load_ui_prefs,
+            boot_commands::load_ui_prefs_async,
             config::save_ui_prefs,
-            config::load_repo_settings,
+            boot_commands::load_repo_settings_async,
             config::save_repo_settings,
             config::set_branch_label,
             config::load_repo_local_config,
@@ -1774,33 +1902,35 @@ pub fn run() {
             mcp_oauth::commands::mcp_oauth_callback,
             mcp_oauth::commands::cancel_mcp_upstream_oauth,
             config::check_has_custom_settings,
-            config::load_repo_defaults,
+            boot_commands::load_repo_defaults_async,
             config::save_repo_defaults,
-            config::load_repositories,
+            boot_commands::load_repositories_async,
             config::save_repositories,
             config::load_pane_layout,
             config::save_pane_layout,
-            config::load_prompt_library,
+            boot_commands::load_prompt_library_async,
             config::save_prompt_library,
             config::load_ai_prompts,
             config::save_ai_prompts,
-            config::load_notes,
+            boot_commands::load_notes_async,
             config::save_notes,
             config::save_note_image,
             config::delete_note_assets,
             config::delete_note_assets_batch,
             config::get_note_images_dir,
-            config::load_activity,
+            boot_commands::load_activity_async,
             config::save_activity,
-            config::load_keybindings,
+            boot_commands::load_keybindings_async,
             config::save_keybindings,
-            config::load_agents_config,
+            boot_commands::load_agents_config_async,
             config::save_agents_config,
             agent_hook_commands::set_agent_hook_instrumentation,
             agent_hook_commands::get_agent_hook_state,
             agent_mcp::get_agent_mcp_status,
             agent_mcp::install_agent_mcp,
             agent_mcp::remove_agent_mcp,
+            agent_mcp::list_installed_mcp_integrations,
+            agent_mcp::remove_all_mcp_integrations,
             agent_mcp::get_agent_config_path,
             agent_mcp::get_mcp_bridge_info,
             prompt::extract_prompt_variables,
@@ -1810,7 +1940,7 @@ pub fn run() {
             prompt::resolve_prompt_variables,
             smart_prompt::execute_headless_prompt,
             smart_prompt::execute_shell_script,
-            provider_registry::load_provider_registry,
+            boot_commands::load_provider_registry_async,
             provider_registry::save_provider_registry,
             provider_registry::get_provider_api_key_exists,
             provider_registry::save_provider_api_key,
@@ -1856,6 +1986,7 @@ pub fn run() {
             sleep_prevention::block_sleep,
             sleep_prevention::unblock_sleep,
             fs::resolve_terminal_path,
+            fs::resolve_terminal_paths,
             fs::list_directory,
             fs::stat_path,
             fs::search_files,
@@ -1884,7 +2015,9 @@ pub fn run() {
             plugins::uninstall_plugin,
             plugins::register_loaded_plugin,
             plugins::unregister_loaded_plugin,
+            plugins::set_plugin_output_watchers,
             plugin_fs::plugin_read_file,
+            plugin_fs::plugin_read_files,
             plugin_fs::plugin_read_file_base64,
             plugin_fs::plugin_list_directory,
             plugin_fs::plugin_read_file_tail,
@@ -1894,6 +2027,7 @@ pub fn run() {
             plugin_fs::plugin_unwatch,
             plugin_fs::scan_build_artifacts,
             plugin_fs::delete_build_artifact,
+            plugin_fs::trim_build_artifact,
             plugin_http::plugin_http_fetch,
             plugin_pty::plugin_read_session_output,
             plugin_exec::plugin_exec_cli,
@@ -1904,6 +2038,7 @@ pub fn run() {
             claude_usage::get_claude_session_stats,
             claude_usage::get_claude_project_list,
             screenshot_response,
+            mcp_confirm_response,
             app_logger::push_log,
             app_logger::get_logs,
             app_logger::clear_logs,
@@ -2330,6 +2465,101 @@ pub async fn run_remote(port: u16) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn relay_does_not_own_a_second_tokio_runtime() {
+        let source = include_str!("lib.rs");
+        assert!(
+            !source.contains(&["fn relay_", "runtime()"].concat()),
+            "the relay task must run on the long-lived HTTP server runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn tailscale_detection_is_bounded_before_server_bind() {
+        let started = std::time::Instant::now();
+        let state = detect_tailscale_bounded(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            tailscale::TailscaleState::NotInstalled
+        })
+        .await;
+
+        assert_eq!(state, tailscale::TailscaleState::NotInstalled);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "a stalled tailscale status must not delay local socket and HTTP binding"
+        );
+    }
+
+    #[test]
+    fn boot_repo_paths_exclude_parked_repositories() {
+        let repositories = serde_json::json!({
+            "repos": {
+                "/active": { "parked": false },
+                "/legacy": {},
+                "/parked": { "parked": true }
+            }
+        });
+
+        let paths = boot_repo_paths(&repositories);
+
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|path| path == "/active"));
+        assert!(paths.iter().any(|path| path == "/legacy"));
+        assert!(!paths.iter().any(|path| path == "/parked"));
+    }
+
+    #[test]
+    fn splash_gating_hydration_commands_are_async() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("async fn load_config("));
+        for command in [
+            "load_repositories",
+            "load_ui_prefs",
+            "load_notification_config",
+            "load_repo_settings",
+            "load_repo_defaults",
+            "load_prompt_library",
+            "load_notes",
+            "load_activity",
+            "load_keybindings",
+            "load_agents_config",
+            "load_provider_registry",
+        ] {
+            assert!(
+                source.contains(&format!("pub(super) async fn {command}_async(")),
+                "{command} must yield to the async runtime during parallel hydration"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_auto_update_is_deferred_off_tauri_setup() {
+        let source = include_str!("lib.rs");
+        let deferred_call = ["spawn_blocking(tuic_cli::", "auto_update_cli)"].concat();
+        assert!(
+            source.contains(&deferred_call),
+            "CLI version probes and replacement must not block Tauri setup"
+        );
+    }
+
+    #[test]
+    fn desktop_setup_reuses_the_config_loaded_at_process_start() {
+        let source = include_str!("lib.rs");
+        let desktop_run = source
+            .split("pub fn run()")
+            .nth(1)
+            .expect("desktop run function")
+            .split("fn build_connect_url")
+            .next()
+            .expect("desktop run body");
+
+        assert_eq!(
+            desktop_run.matches("config::load_app_config()").count(),
+            1,
+            "setup must reuse the boot config instead of taking the file lock again for index_strategy"
+        );
+    }
+
     #[tokio::test]
     async fn initial_server_runtime_stays_alive_after_tcp_shutdown() {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -2411,7 +2641,7 @@ mod tests {
     fn editor_large_cap_exceeds_generic_cap() {
         // The editor reader must allow strictly larger files than the generic one,
         // otherwise the dedicated command is pointless.
-        assert!(MAX_EDITOR_LARGE_FILE_SIZE > MAX_EDITOR_FILE_SIZE);
+        const { assert!(MAX_EDITOR_LARGE_FILE_SIZE > MAX_EDITOR_FILE_SIZE) };
     }
 
     #[test]

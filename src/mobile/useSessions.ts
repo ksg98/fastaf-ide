@@ -1,7 +1,7 @@
 import { createSignal, onCleanup } from "solid-js";
-import { listen } from "../invoke";
 import { appLogger } from "../stores/appLogger";
-import { rpc } from "../transport";
+import { rpc, subscribeEvents } from "../transport";
+import { createVisibilityInterval } from "./utils/visibilityInterval";
 
 /** Server-side accumulated state for a session (matches Rust SessionState) */
 export interface SessionState {
@@ -63,8 +63,40 @@ export interface SessionInfo {
 const POLL_INTERVAL_MS = 3_000;
 
 /**
- * Thin hook that polls GET /sessions every 3s and subscribes to SSE for
- * real-time session create/close events between polls.
+ * Merge a freshly polled list into the previous one, reusing the previous object
+ * for every session whose payload is unchanged.
+ *
+ * The server rebuilds each `SessionInfo` per request, so a plain `setSessions`
+ * hands Solid brand-new objects 20 times a minute. `<For>` maps rows by
+ * reference, so every session card — and every memo derived from the list —
+ * would be torn down and rebuilt on each poll even when nothing moved.
+ *
+ * Returns `prev` itself when the two lists are equivalent, so an idle poll is
+ * fully inert. Comparison is by serialization: the payload comes from one serde
+ * struct, so key order is stable, and a handful of sessions costs microseconds
+ * against the DOM work it avoids.
+ */
+export function reconcileSessions(prev: SessionInfo[], next: SessionInfo[]): SessionInfo[] {
+	const byId = new Map(prev.map((s) => [s.session_id, s]));
+	let changed = prev.length !== next.length;
+
+	const merged = next.map((incoming, index) => {
+		const existing = byId.get(incoming.session_id);
+		if (existing && JSON.stringify(existing) === JSON.stringify(incoming)) {
+			// Same content, but possibly a different position in the list.
+			if (prev[index] !== existing) changed = true;
+			return existing;
+		}
+		changed = true;
+		return incoming;
+	});
+
+	return changed ? merged : prev;
+}
+
+/**
+ * Thin hook that polls GET /sessions every 3s while the page is visible, and
+ * subscribes to SSE for real-time session create/close events between polls.
  *
  * Returns reactive signals for the session list, loading state, and error.
  */
@@ -79,7 +111,7 @@ export function useSessions() {
 	async function fetchSessions() {
 		try {
 			const result = await rpc<SessionInfo[]>("list_active_sessions");
-			setSessions(result);
+			setSessions((prev) => reconcileSessions(prev, result));
 			setError(null);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -95,21 +127,25 @@ export function useSessions() {
 	// Initial fetch
 	fetchSessions();
 
-	// Poll every 3s
-	const timer = setInterval(fetchSessions, POLL_INTERVAL_MS);
-	onCleanup(() => clearInterval(timer));
+	// Poll every 3s, but only while the page is visible
+	createVisibilityInterval(fetchSessions, POLL_INTERVAL_MS);
 
-	// SSE subscription for real-time create/close events between polls
-	// This triggers an immediate refetch so the UI updates faster than the poll interval
-	const unlistenCreated = listen<{ session_id: string; cwd: string | null }>("session-created", () => fetchSessions());
-	const unlistenClosed = listen<{ session_id: string }>("session-closed", () => fetchSessions());
-
-	// SSE subscription for shell-state changes — updates session in-place
-	// without a full refetch, eliminating the 3s polling delay for idle/busy transitions.
-	const unlistenPtyParsed = listen<{ session_id: string; parsed: { type: string; state?: string } }>(
-		"pty-parsed",
-		(event) => {
-			const { session_id, parsed } = event.payload;
+	// One SSE subscription for the three event kinds this hook reacts to:
+	// create/close trigger an immediate refetch so the UI beats the poll
+	// interval, and shell-state updates a session in-place with no refetch at all.
+	//
+	// `subscribeEvents` turns these handler keys into the `?types=` query the
+	// /events endpoint filters on. Without it the client is sent — and has to
+	// JSON-parse — every event kind the backend publishes, the large majority of
+	// which the mobile UI has no handler for.
+	const unsubscribe = subscribeEvents({
+		"session-created": () => void fetchSessions(),
+		"session-closed": () => void fetchSessions(),
+		"pty-parsed": (payload) => {
+			const { session_id, parsed } = payload as {
+				session_id: string;
+				parsed: { type: string; state?: string };
+			};
 			if (parsed.type !== "shell-state" || !parsed.state) return;
 			setSessions((prev) =>
 				prev.map((s) =>
@@ -117,12 +153,10 @@ export function useSessions() {
 				),
 			);
 		},
-	);
+	});
 
 	onCleanup(() => {
-		unlistenCreated.then((fn) => fn()).catch(() => {});
-		unlistenClosed.then((fn) => fn()).catch(() => {});
-		unlistenPtyParsed.then((fn) => fn()).catch(() => {});
+		unsubscribe.then((fn) => fn()).catch(() => {});
 	});
 
 	/** Force an immediate refresh (sets refreshing=true while in-flight) */

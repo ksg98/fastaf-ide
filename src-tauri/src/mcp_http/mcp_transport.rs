@@ -6,7 +6,8 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use parking_lot::Mutex;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, PtySize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -88,6 +89,16 @@ fn detect_claude_code_client(client_name: Option<&str>) -> bool {
     client_name.is_some_and(|n| n.contains("claude") || n.contains("tuic-bridge"))
 }
 
+/// Grok accepts exactly one `__` delimiter in a qualified MCP tool id. TUIC's
+/// upstream names would become `tuicommander__upstream__tool` after Grok adds
+/// the server namespace, so expose the existing meta-tool surface for that
+/// client instead of letting it silently discard every proxied tool.
+fn client_requires_meta_tools(client_name: Option<&str>) -> bool {
+    client_name
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|name| name.starts_with("grok-shell-"))
+}
+
 /// Detect Claude Code from the User-Agent header when the MCP clientInfo is
 /// unavailable (e.g. after session auto-recovery following a TUIC restart).
 fn detect_claude_code_from_headers(headers: &HeaderMap) -> bool {
@@ -157,10 +168,15 @@ fn resolve_agent_type(client_name: Option<&str>) -> Option<&'static str> {
 /// the whole feature; per-agent is an escape hatch (default ON) to disable the
 /// marker on a specific agent where rendering or parsing misbehaves.
 fn resolve_marker_flags(state: &Arc<AppState>, client_name: Option<&str>) -> (bool, bool) {
+    marker_flags_for_agent(state, resolve_agent_type(client_name))
+}
+
+/// Same rule, keyed by agent type instead of by client name, so a caller that
+/// already knows the agent (a live session, the marker diagnostics) does not
+/// have to reverse-engineer a client name to ask the question (#4421).
+pub(crate) fn marker_flags_for_agent(state: &AppState, agent_type: Option<&str>) -> (bool, bool) {
     let global_intent = state.config.read().intent_tab_title;
     let global_suggest = state.config.read().suggest_followups;
-
-    let agent_type = resolve_agent_type(client_name);
 
     let agents_cfg = crate::config::load_agents_config();
     let agent_settings = agent_type.and_then(|t| agents_cfg.agents.get(t));
@@ -237,6 +253,61 @@ static PEER_IDENTITY_BIND_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::ne
 /// liveness: entries intentionally remain for up to one hour.
 const MCP_OWNER_ACTIVITY_GRACE: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// Takeover rejection is a *permanent* condition while the incumbent lives, and
+/// the loser retries every three seconds forever — one duplicated MCP
+/// registration produced 5004 identical WARN lines in a single day, burying
+/// every other log. Report the first rejection per claimant pair in full, then
+/// one periodic summary carrying the suppressed count.
+const TAKEOVER_REJECT_SUMMARY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Drop claimants idle for this long, so a long-lived app does not accumulate
+/// one entry per short-lived MCP session.
+const TAKEOVER_REJECT_ENTRY_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+struct TakeoverRejectLog {
+    suppressed: u64,
+    last_reported: std::time::Instant,
+}
+
+static TAKEOVER_REJECT_LOG: LazyLock<Mutex<HashMap<(String, String), TakeoverRejectLog>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Decide how to report one takeover rejection.
+///
+/// Returns `Some(suppressed_since_last_report)` when this occurrence must be
+/// logged at WARN — `Some(0)` is the first sighting of the pair — and `None`
+/// when it is a repeat that the caller should log at debug instead.
+fn takeover_rejection_report(tuic_session: &str, mcp_sid: &str) -> Option<u64> {
+    let now = std::time::Instant::now();
+    let mut log = TAKEOVER_REJECT_LOG.lock();
+
+    log.retain(|_, entry| now.duration_since(entry.last_reported) < TAKEOVER_REJECT_ENTRY_TTL);
+
+    match log.get_mut(&(tuic_session.to_string(), mcp_sid.to_string())) {
+        None => {
+            log.insert(
+                (tuic_session.to_string(), mcp_sid.to_string()),
+                TakeoverRejectLog {
+                    suppressed: 0,
+                    last_reported: now,
+                },
+            );
+            Some(0)
+        }
+        Some(entry) => {
+            if now.duration_since(entry.last_reported) >= TAKEOVER_REJECT_SUMMARY_INTERVAL {
+                let suppressed = entry.suppressed;
+                entry.suppressed = 0;
+                entry.last_reported = now;
+                Some(suppressed)
+            } else {
+                entry.suppressed += 1;
+                None
+            }
+        }
+    }
+}
+
 /// Cap for a peer message typed into a terminal. Longer messages become a
 /// pointer to the inbox rather than flooding the recipient's screen.
 const INJECT_MAX_BYTES: usize = 2048;
@@ -252,6 +323,39 @@ const PENDING_PARENT_PREFIX: &str = "pending-mcp:";
 
 fn pending_parent_id(mcp_session_id: &str) -> String {
     format!("{PENDING_PARENT_PREFIX}{mcp_session_id}")
+}
+
+/// Interval a client should poll a task handle at. Floored well above zero so a
+/// stuck orchestrator cannot hot-loop the server.
+const TASK_POLL_INTERVAL_MS: u64 = 1000;
+
+/// Owner recorded for a caller with no identity of any kind. `agent spawn` is
+/// loopback-only and per AGENTS.md the OS user is the auth boundary, so anonymous
+/// local callers share one bucket rather than being locked out of their own tasks.
+const ANONYMOUS_TASK_OWNER: &str = "loopback";
+
+/// Every identity the caller may legitimately claim, most specific first.
+///
+/// The first element stamps a new task; the whole set is what an ownership check
+/// accepts. Both matter: a caller that spawns before registering is stamped with
+/// its pending id, and once it auto-binds its specific identity changes — it must
+/// not lose the handle it was already given. `pending_parent_id` is the same alias
+/// `link_pending_children_to_parent` reconciles for child sessions.
+fn caller_task_identities(caller_tuic: Option<&str>, mcp_session_id: Option<&str>) -> Vec<String> {
+    let mut identities: Vec<String> = caller_tuic
+        .map(str::to_string)
+        .into_iter()
+        .chain(mcp_session_id.map(pending_parent_id))
+        .collect();
+    if identities.is_empty() {
+        identities.push(ANONYMOUS_TASK_OWNER.to_string());
+    }
+    identities
+}
+
+/// The identity a new task is stamped with.
+fn task_owner_identity(caller_tuic: Option<&str>, mcp_session_id: Option<&str>) -> String {
+    caller_task_identities(caller_tuic, mcp_session_id).swap_remove(0)
 }
 
 fn link_pending_children_to_parent(
@@ -271,10 +375,16 @@ fn link_pending_children_to_parent(
             .session_parent
             .insert(child.clone(), parent_tuic_session.to_string());
     }
-
     if let Some((_, messages)) = state.agent_inbox.remove(&pending_parent) {
         for message in messages {
-            state.push_agent_inbox(parent_tuic_session, message);
+            let message_id = message.id.clone();
+            let message_timestamp = state.push_agent_inbox(parent_tuic_session, message);
+            crate::pty::route_registered_orchestrator_mail(
+                state,
+                parent_tuic_session,
+                &message_id,
+                message_timestamp,
+            );
         }
     }
     if let Some((_, missed)) = state.agent_inbox_evictions.remove(&pending_parent) {
@@ -339,6 +449,10 @@ fn bind_peer_identity_locked(
         if remove_reverse {
             state.session_to_mcp.remove(tuic_session);
         }
+        // The retired bridge may still hold `agent wait` leases. They outlive its
+        // routing entries and keep beating terminal delivery, so the reconnected
+        // peer would go unwoken until they time out.
+        state.revoke_waiters_for_reconnect(tuic_session);
     }
 
     state.peer_agents.insert(
@@ -363,6 +477,16 @@ fn bind_peer_identity_locked(
     }
 }
 
+/// Who holds an identity when another protocol session asks for it.
+enum PeerIdentityOwnership {
+    /// Nothing live stands in the way. The payload is the stale prior owner,
+    /// whose routing entries and wait leases must be retired on the way in.
+    Vacant(Option<String>),
+    /// Another protocol session owns it and is still live. Whether that means
+    /// "share" or "refuse" is the caller's call, not this predicate's.
+    LiveOwner,
+}
+
 fn mcp_session_has_live_owner(state: &AppState, mcp_sid: &str) -> bool {
     let has_sse_subscriber = state
         .messaging_channels
@@ -377,14 +501,14 @@ fn mcp_session_has_live_owner(state: &AppState, mcp_sid: &str) -> bool {
         .is_some_and(|meta| meta.last_activity.elapsed() <= MCP_OWNER_ACTIVITY_GRACE)
 }
 
-/// Return the prior owner that may be reclaimed, or reject takeover while it is
-/// still live. The caller must hold `PEER_IDENTITY_BIND_LOCK` so the liveness
-/// decision and routing-map replacement form one critical section.
-fn reclaimable_prior_peer_owner_locked(
+/// Report who holds the identity. The caller must hold `PEER_IDENTITY_BIND_LOCK`
+/// so the liveness answer and the routing-map change it drives form one critical
+/// section.
+fn peer_identity_ownership_locked(
     state: &AppState,
     mcp_sid: &str,
     tuic_session: &str,
-) -> Result<Option<String>, String> {
+) -> PeerIdentityOwnership {
     let prior_mcp = state
         .peer_agents
         .get(tuic_session)
@@ -395,10 +519,145 @@ fn reclaimable_prior_peer_owner_locked(
         .as_deref()
         .is_some_and(|prior| mcp_session_has_live_owner(state, prior))
     {
-        return Err("tuic_session is already registered to another active MCP session".into());
+        return PeerIdentityOwnership::LiveOwner;
     }
 
-    Ok(prior_mcp)
+    PeerIdentityOwnership::Vacant(prior_mcp)
+}
+
+/// True when this protocol session already routes to the identity, which only
+/// happens after an earlier header assertion or registration bound the two.
+fn mcp_session_routes_to(state: &AppState, mcp_sid: &str, tuic_session: &str) -> bool {
+    state
+        .mcp_to_session
+        .get(mcp_sid)
+        .is_some_and(|bound| bound.value() == tuic_session)
+}
+
+/// Add a co-owner to an identity a live sibling already owns: routing entries
+/// only, so the sibling keeps delivery ownership. Two live bridges that traded
+/// ownership on every request would flip the delivery channel back and forth;
+/// the inbox is keyed by the PTY identity, so sharing the routes is enough for
+/// both to read the same mail.
+fn join_peer_identity_locked(state: &AppState, mcp_sid: &str, tuic_session: &str) {
+    state
+        .mcp_to_session
+        .insert(mcp_sid.to_string(), tuic_session.to_string());
+    let mut reverse = state
+        .session_to_mcp
+        .entry(tuic_session.to_string())
+        .or_default();
+    if !reverse.iter().any(|s| s == mcp_sid) {
+        reverse.push(mcp_sid.to_string());
+    }
+}
+
+/// Retire the identity a caller just abandoned by registering a different one.
+///
+/// Only a terminal-less identity is retired: it is a mailbox nobody can reach any
+/// more once its single owner has moved on, and leaving it behind is how
+/// `list_peers` accumulates addresses that silently swallow every message sent to
+/// them. Mail already buffered under it is carried over rather than dropped —
+/// those are the replies the caller went looking for in the first place. An
+/// abandoned identity that still owns a PTY is left alone; its terminal, not this
+/// registration, decides its lifetime.
+/// What a retire attempt actually did. The skip case used to be a silent early
+/// return, which is how mail addressed to a superseded identity sat unread with
+/// nobody told: `register` now reports it back to the caller.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum IdentityHandoff {
+    /// The prior identity was abandoned; its mail moved and was re-routed.
+    Migrated { messages: usize },
+    /// The prior identity still owns a live PTY, so it is a reachable peer rather
+    /// than an abandoned one. Migrating would take mail from a working agent.
+    SkippedLivePty { pending: usize },
+}
+
+fn retire_repaired_phantom_identity(
+    state: &AppState,
+    phantom: &str,
+    repaired: &str,
+) -> IdentityHandoff {
+    // The retire spans several maps, and `send` reads one of them (`peer_agents`)
+    // to decide whether a recipient exists before buffering. Both halves take
+    // `PEER_IDENTITY_BIND_LOCK` so a send can only land entirely before the
+    // retire — and be carried over with the rest of the inbox — or entirely
+    // after it, where the missing peer makes it an explicit refusal. Routing the
+    // carried mail happens after the guard drops: it wakes PTYs and must not
+    // hold an identity lock across that I/O.
+    let carried: Vec<(String, u64)> = {
+        let _bind_guard = PEER_IDENTITY_BIND_LOCK.lock();
+        if state.live_pty_for_peer(phantom).is_some() {
+            let pending = state
+                .agent_inbox
+                .get(phantom)
+                .map(|inbox| inbox.len())
+                .unwrap_or(0);
+            return IdentityHandoff::SkippedLivePty { pending };
+        }
+        let was_orchestrator = state.orchestrator_peers.remove(phantom).is_some();
+        if was_orchestrator {
+            let children: Vec<String> = state
+                .session_parent
+                .iter()
+                .filter(|entry| entry.value() == phantom)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for child in children {
+                state.session_parent.insert(child, repaired.to_string());
+            }
+            state.orchestrator_peers.insert(repaired.to_string());
+        }
+        // Drop the addressable identity before draining: a send blocked on the
+        // guard then finds no recipient instead of refilling the inbox we just
+        // emptied.
+        state.peer_agents.remove(phantom);
+        let carried = match state.agent_inbox.remove(phantom) {
+            Some((_, pending)) => pending
+                .into_iter()
+                .map(|message| {
+                    let message_id = message.id.clone();
+                    let message_timestamp = state.push_agent_inbox(repaired, message);
+                    (message_id, message_timestamp)
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        // The cursor indexes the mail we just moved, so it moves with it. `max`
+        // because the replacing identity may have read mail of its own already;
+        // a migrated message whose logical timestamp had to be bumped past the
+        // cursor is re-delivered once, which is the harmless direction to err in.
+        let phantom_cursor = state
+            .agent_read_cursor
+            .get(phantom)
+            .map(|cursor| *cursor.value())
+            .unwrap_or(0);
+        advance_agent_cursor(state, repaired, phantom_cursor);
+        drop_identity_buffers(state, phantom);
+        carried
+    };
+    let migrated = carried.len();
+    for (message_id, message_timestamp) in carried {
+        crate::pty::route_registered_orchestrator_mail(
+            state,
+            repaired,
+            &message_id,
+            message_timestamp,
+        );
+    }
+    tracing::info!(
+        source = "agent_msg",
+        event = "phantom_identity_retired",
+        phantom = %phantom,
+        repaired = %repaired,
+        "Retired a terminal-less identity its owner abandoned"
+    );
+    let _ = state
+        .event_bus
+        .send(crate::state::AppEvent::PeerUnregistered {
+            tuic_session: phantom.to_string(),
+        });
+    IdentityHandoff::Migrated { messages: migrated }
 }
 
 fn register_peer_identity(
@@ -410,9 +669,28 @@ fn register_peer_identity(
     registered_at: u64,
 ) -> Result<Option<String>, String> {
     let _bind_guard = PEER_IDENTITY_BIND_LOCK.lock();
-    let prior_mcp = reclaimable_prior_peer_owner_locked(state, mcp_sid, tuic_session)?;
-    bind_peer_identity_locked(state, mcp_sid, tuic_session, name, project, registered_at);
-    Ok(prior_mcp)
+    match peer_identity_ownership_locked(state, mcp_sid, tuic_session) {
+        PeerIdentityOwnership::Vacant(prior_mcp) => {
+            bind_peer_identity_locked(state, mcp_sid, tuic_session, name, project, registered_at);
+            Ok(prior_mcp)
+        }
+        // A session that already routes to the identity was bound to it by an
+        // earlier header assertion, so it is a sibling bridge inside the same
+        // PTY rather than a claimant — register is its rename, not a takeover.
+        PeerIdentityOwnership::LiveOwner if mcp_session_routes_to(state, mcp_sid, tuic_session) => {
+            join_peer_identity_locked(state, mcp_sid, tuic_session);
+            if let Some(mut peer) = state.peer_agents.get_mut(tuic_session) {
+                peer.name = name;
+                if project.is_some() {
+                    peer.project = project;
+                }
+            }
+            Ok(None)
+        }
+        PeerIdentityOwnership::LiveOwner => {
+            Err("tuic_session is already registered to another active MCP session".to_string())
+        }
+    }
 }
 
 /// Auto-bind an MCP session to its PTY identity from the `x-tuic-session` header
@@ -430,19 +708,30 @@ fn apply_initialize_identity(state: &AppState, mcp_sid: &str, header: Option<&st
     if !is_valid_uuid(tuic) {
         return false;
     }
+    // Steady state for a connected bridge: it already routes to the identity and
+    // already owns it, so both branches below would rewrite the values that are
+    // there. Every bridge asserts this header on a `ping` every 3s, so without
+    // this the liveness poll serialises N terminals on a process-global mutex to
+    // do nothing. Any disagreement between the maps still takes the lock.
+    if mcp_session_routes_to(state, mcp_sid, tuic)
+        && state
+            .peer_agents
+            .get(tuic)
+            .is_some_and(|peer| peer.mcp_session_id == mcp_sid)
+    {
+        return true;
+    }
     let _bind_guard = PEER_IDENTITY_BIND_LOCK.lock();
-    let prior_mcp = match reclaimable_prior_peer_owner_locked(state, mcp_sid, tuic) {
-        Ok(prior) => prior,
-        Err(error) => {
-            tracing::warn!(
-                source = "mcp_initialize",
-                event = "live_binding_takeover_rejected",
-                tuic_session = %tuic,
-                mcp_session = %mcp_sid,
-                error = %error,
-                "Rejected initialize identity takeover from a second live bridge"
-            );
-            return false;
+    // Only a process that inherited this PTY's `$TUIC_SESSION` can assert the
+    // header, so a second asserting bridge is a sibling inside that PTY, not a
+    // claimant from outside it — Codex opens two. It joins the identity's routing
+    // instead of taking it over; ownership stays with the bridge that has it, so
+    // two live siblings cannot trade the delivery channel on every request.
+    let prior_mcp = match peer_identity_ownership_locked(state, mcp_sid, tuic) {
+        PeerIdentityOwnership::Vacant(prior_mcp) => prior_mcp,
+        PeerIdentityOwnership::LiveOwner => {
+            join_peer_identity_locked(state, mcp_sid, tuic);
+            return true;
         }
     };
     let (name, project, registered_at) = match state.peer_agents.get(tuic) {
@@ -506,7 +795,9 @@ fn refresh_mcp_session(
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -519,20 +810,66 @@ fn refresh_mcp_session(
 /// expose tools while the client is starting, then forwards the client's own
 /// initialize with that session ID. Minting a second ID here would make the
 /// live-owner guard correctly reject the same bridge as an identity takeover.
-fn initialize_session_id(state: &AppState, headers: &HeaderMap) -> String {
-    headers
+fn initialize_session_id(state: &AppState, headers: &HeaderMap) -> (String, InitializeKind) {
+    let presented = headers
         .get(MCP_SESSION_HEADER)
         .and_then(|value| value.to_str().ok())
-        .filter(|session_id| is_valid_uuid(session_id))
-        .filter(|session_id| state.mcp_sessions.contains_key(*session_id))
-        .map(str::to_string)
-        .unwrap_or_else(|| Uuid::new_v4().to_string())
+        .filter(|session_id| is_valid_uuid(session_id));
+    match presented {
+        Some(sid) if state.mcp_sessions.contains_key(sid) => {
+            (sid.to_string(), InitializeKind::Resumed)
+        }
+        // The client came back holding a session id we no longer have — reaped by
+        // the idle sweep, or lost with a restart. It gets a new one and never
+        // learns why. This is the moment an agent reports "FastAF is back",
+        // so it is the one case that must not be silent.
+        Some(sid) => (
+            Uuid::new_v4().to_string(),
+            InitializeKind::Reconnected {
+                presented: sid.to_string(),
+            },
+        ),
+        None => (Uuid::new_v4().to_string(), InitializeKind::Fresh),
+    }
+}
+
+/// How a client arrived at `initialize`. Logged so a claim about the MCP
+/// connection dropping is checkable against the record instead of taken on trust:
+/// previously only the peer-binding takeover was logged, and only when a prior
+/// binding happened to exist, so an ordinary reconnect left no trace at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InitializeKind {
+    /// First contact: no session id presented.
+    Fresh,
+    /// Presented a session id we still hold — the same connection continuing.
+    Resumed,
+    /// Presented a session id we no longer hold. A new one was minted.
+    Reconnected { presented: String },
+}
+
+impl InitializeKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            InitializeKind::Fresh => "fresh",
+            InitializeKind::Resumed => "resumed",
+            InitializeKind::Reconnected { .. } => "reconnected",
+        }
+    }
 }
 
 /// Build server instructions for the MCP initialize response.
 /// Tells the connecting agent what tools are available, which repos are managed,
 /// and what sessions are currently active so it can orient itself.
 fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> String {
+    let collapse_tools = state.config.read().collapse_tools;
+    build_mcp_instructions_for_mode(state, client_name, collapse_tools)
+}
+
+fn build_mcp_instructions_for_mode(
+    state: &Arc<AppState>,
+    client_name: Option<&str>,
+    collapse_tools: bool,
+) -> String {
     let ver = env!("CARGO_PKG_VERSION");
     let mut out = String::with_capacity(2048);
 
@@ -552,7 +889,7 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
         "- `ack` — exactly once per MCP connection or reconnect, the first assistant message MUST start: `FastAF v{ver} is connected.` Never repeat it on each conversational turn.\n"
     ));
     if show_intent {
-        out.push_str("- `intent: <desc> (<title>)` on work-phase change. `<title>` ≤3 words, spaces not hyphens.\n");
+        out.push_str("- `intent: <desc> (<title>)` at the start of every user task and on each material work-phase change. Describe the work currently in progress in present tense; `<title>` ≤3 words, spaces not hyphens.\n");
     }
     if show_suggest {
         out.push_str("- `suggest:` — after task done: `suggest: [ A | B | C ]` — wrap the WHOLE list in one `[ … ]`, EXACTLY 3 items separated by `|`, each item ≤40 chars. The brackets bound the token (parsed even if it wraps); never emit 4+ items.\n");
@@ -560,7 +897,7 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
     out.push('\n');
 
     // ── Tools ────────────────────────────────────────────────────────
-    if state.config.read().collapse_tools {
+    if collapse_tools {
         // Speakeasy mode: discovery flow and domain context live in the
         // meta-tool descriptions, NOT here, so they don't compete with
         // protocol markers for the model's attention at turn 1.
@@ -569,8 +906,9 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
         out.push_str("**Worktrees:** never `git worktree add/remove` — always use `repo action=worktree_create` / `worktree_remove` so TUIC tracks the worktree and can spawn a PTY inside.\n\n");
     } else {
         out.push_str("## Tools\n\n");
-        out.push_str("- `session` (PTY panes, tmux-equivalent): list, create, input, output, status, wait, resize, close, kill, pause, resume, process_stats\n");
+        out.push_str("- `session` (PTY panes, tmux-equivalent): list, create, submit, input, output, status, wait, resize, close, kill, pause, resume, process_stats\n");
         out.push_str("- `agent` (AI peers + messaging): spawn, wait, detect, stats, metrics, register, list_peers, send, inbox\n");
+        out.push_str("- `task` (poll a spawn that outlives a wait): get, cancel\n");
         out.push_str("- `repo` (repos, PRs, worktrees): list, active, prs, status, worktree_list, worktree_create, worktree_remove\n");
         out.push_str("- `ui` (tabs, toasts, confirm dialogs): tab, toast, confirm\n");
         out.push_str("- `plugin_dev_guide`: plugin authoring reference\n\n");
@@ -578,15 +916,21 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
         out.push_str("**UI feedback:** `ui action=toast` on task done/blocking error · `ui action=confirm` BEFORE destructive ops (rm -rf, git reset --hard, force push, DROP TABLE) · `ui action=tab` for structured output >20 lines · `ui action=screenshot id=<panel-id>` to see rendered output (Read the returned path).\n\n");
     }
 
+    if collapse_tools {
+        out.push_str("**Submit:** `call_tool tool_name=session arguments={action:submit,session_id,input}` once; never split text/Enter; never poll.\n\n");
+    } else {
+        out.push_str("**Submit:** `session action=submit session_id=<id> input=<text>` once; never split text/Enter; never poll.\n\n");
+    }
+
     // ── Workflow (phase-grouped) ──────────────────────────────────────
     // 4 bullets by phase instead of 7 tool-by-tool steps. Details live in each
     // tool's description (JSON schema); this section gives the mental model.
     // Suppressed in collapse mode — concrete invocations go through call_tool.
-    if !state.config.read().collapse_tools {
+    if !collapse_tools {
         out.push_str("## Workflow\n\n");
         out.push_str("- **Discover:** `repo action=list|prs|active` · `agent action=detect`.\n");
         out.push_str("- **Spawn:** `session action=create` (shell) · `agent action=spawn` (AI) · `repo action=worktree_create` (isolated). `agent_type` resolves run config names first (case-insensitive), then agent binary names.\n");
-        out.push_str("- **Observe:** `session action=status|output` · `agent action=inbox`.\n");
+        out.push_str("- **Observe:** `session action=status|output` · `agent action=inbox` · `task action=get` for work longer than the 300s wait cap.\n");
         out.push_str(
             "- **Coordinate:** `agent action=register/send/inbox` for peer messaging.\n\n",
         );
@@ -610,7 +954,8 @@ fn build_mcp_instructions(state: &Arc<AppState>, client_name: Option<&str>) -> S
         out.push_str("There is no separate `swarm` action; multi-agent orchestration uses `agent` and `session` primitives.\n\n");
     }
     out.push_str("- **Identity:** managed PTYs auto-bind from `$TUIC_SESSION`. Headerless external callers use `agent action=register` without a UUID to receive an MCP-scoped identity; pass `tuic_session` only to reclaim an explicit stable UUID.\n");
-    out.push_str("- **Same repo:** `agent action=spawn` peers; wait with `agent action=wait since=<last_ms>`, then read `agent action=inbox`. Lifecycle notifications carry state only; workers must report results with `agent action=send`. Use `session output` only as an anomaly fallback when a child failed to send its result.\n");
+    out.push_str("- **Orchestrator role:** declare it with `agent action=register orchestrator=true`; use `false` to remove it. Spawn never infers the role. `mail_wake=managed_pty_lifecycle` is server-derived; external/headerless peers remain wait/inbox-only.\n");
+    out.push_str("- **Same repo:** `agent action=spawn` peers; wait with `agent action=wait`, then read `agent action=inbox`. Lifecycle notifications carry state only; workers must report results with `agent action=send`. Use `session output` only as an anomaly fallback when a child failed to send its result.\n");
     out.push_str("- **Isolated branches:** `repo action=worktree_create spawn_session=true`.\n");
     if is_claude_code {
         out.push_str("- **Single isolated task (CC only):** `repo action=worktree_create` then delegate via returned `cc_agent_hint` (absolute paths). ONLY valid use of native Agent/Task.\n");
@@ -668,8 +1013,7 @@ fn validate_mcp_repo_path(path: &str) -> Result<(), serde_json::Value> {
     super::validate_path_string(path).map_err(|msg| serde_json::json!({"error": msg}))
 }
 
-const SESSION_ACTIONS: &str =
-    "list, create, input, output, resize, close, kill, pause, resume, status, process_stats, wait";
+const SESSION_ACTIONS: &str = "list, create, submit, input, output, resize, close, kill, pause, resume, status, process_stats, wait";
 const AGENT_ACTIONS: &str =
     "spawn, detect, stats, metrics, register, list_peers, send, inbox, wait";
 const REPO_ACTIONS: &str =
@@ -688,8 +1032,9 @@ const LEGACY_UI_ACTIONS: &str = "tab";
 const LEGACY_NOTIFY_ACTIONS: &str = "toast, confirm";
 const LEGACY_MESSAGING_ACTIONS: &str = "register, list_peers, send, inbox";
 const LEGACY_DEBUG_ACTIONS: &str = "agent_detection, logs, sessions, invoke_js";
+const LEGACY_TASK_ACTIONS: &str = "get, cancel";
 
-/// Full MCP tool definitions — 7 base native tools + all `ai_terminal_*` tools.
+/// Full MCP tool definitions — 8 base native tools + all `ai_terminal_*` tools.
 ///
 /// This returns the unfiltered schema list. Public listing/search paths MUST
 /// route through [`filtered_native_tools`] to honour `disabled_native_tools`
@@ -699,13 +1044,14 @@ fn native_tool_definitions() -> serde_json::Value {
     let mut defs = serde_json::json!([
         {
             "name": "session",
-            "description": "PTY multiplexer (replaces tmux). Create terminals, send input (send-keys), read output (capture-pane), manage lifecycle.\n\nActions:\n- list: All active sessions and states in one call. Use for every global overview; never fan out per-session status calls. Returns display_name (assigned name), alias (independent repo-derived short address), is_caller, shell_state (PTY activity), and agent_state (starting|working|awaiting_input|idle|completed; completed requires suggest marker). Absent optional fields are omitted, not null.\n- create: New PTY. Returns {session_id}. Optional: cwd, shell, rows, cols.\n- input: Send text and/or special_key to a session.\n- output: Read terminal output. Returns {data, cursor, scrollback_lines, oldest_offset, exited, exit_code}. Use as an anomaly fallback for a child that failed to send its result, not as the normal orchestration channel. scrollback_lines = total lines in buffer (up to 10000); oldest_offset = first available line number. Patterns: (1) Snapshot: omit since_cursor, default limit=50 gives last 50 lines. (2) Delta read: since_cursor=<previous cursor> returns only new lines. (3) Navigate backwards: from_line=oldest_offset reads from the beginning of the buffer. (4) Arbitrary window: from_line=N, limit=50 reads any 50-line slice.\n- status: Session state; absent optional fields are omitted.\n- wait: Block (server-side) until session_id is idle or exited (until=idle|exited), or timeout_ms elapses. One cheap call instead of a status polling loop. Returns {met, timed_out, shell_state?, exit_code?}.\n- resize: Change PTY dimensions.\n- close: Graceful shutdown (Ctrl+C, waits).\n- kill: Force SIGKILL (use when close fails).\n- pause: Pause output buffering. resume: Resume.\n- process_stats: CPU% and RSS memory for TUIC and all child process trees. Returns {processes: [{session_id, name, pid, rss_kb, cpu_pct}]}. Use to diagnose high CPU/memory.",
+            "description": "PTY multiplexer (replaces tmux). Create terminals, send input (send-keys), read output (capture-pane), manage lifecycle.\n\nActions:\n- list: All active sessions and states in one call. Use for every global overview; never fan out per-session status calls. Returns display_name (assigned name), alias (independent repo-derived short address), is_caller, shell_state (PTY activity), and agent_state (starting|working|awaiting_input|idle|completed; completed requires suggest marker). Absent optional fields are omitted, not null.\n- create: New PTY. Returns {session_id}. Optional: cwd, shell, rows, cols.\n- submit: Submit one non-empty command to a confirmed-idle managed agent and wait internally for a bounded receipt. Use one call; never split text and Enter; never poll after it. Returns submission_id, submitted, write_state, acknowledged, retry_safe, turn_epoch, composer_state (tracked InputLineBuffer, not application state), and acknowledgement or a precise reason. Acknowledgement means child terminal movement after Enter, not semantic application acceptance. Never queues; partial composers, dialogs, busy agents, and older queued commands reject before writing.\n- input: Raw text/key compatibility surface. Send text and/or special_key; ok confirms PTY write only.\n- output: Read terminal output. Returns {data, cursor, scrollback_lines, oldest_offset, exited, exit_code}. Use as an anomaly fallback for a child that failed to send its result, not as the normal orchestration channel. scrollback_lines = total lines in buffer (up to 10000); oldest_offset = first available line number. Patterns: (1) Snapshot: omit since_cursor, default limit=50 gives last 50 lines. (2) Delta read: since_cursor=<previous cursor> returns only new lines. (3) Navigate backwards: from_line=oldest_offset reads from the beginning of the buffer. (4) Arbitrary window: from_line=N, limit=50 reads any 50-line slice.\n- status: Session state; absent optional fields are omitted.\n- wait: Block (server-side) until session_id is idle or exited (until=idle|exited), or timeout_ms elapses. One cheap call instead of a status polling loop. Returns {met, timed_out, shell_state?, exit_code?}.\n- resize: Change PTY dimensions.\n- close: Graceful shutdown (Ctrl+C, waits).\n- kill: Force SIGKILL (use when close fails).\n- pause: Pause output buffering. resume: Resume.\n- process_stats: CPU% and RSS memory for TUIC and all child process trees. Returns {processes: [{session_id, name, pid, rss_kb, cpu_pct}]}. Use to diagnose high CPU/memory.",
             "inputSchema": { "type": "object", "properties": {
-                "action": { "type": "string", "description": "One of: list, create, input, output, status, wait, resize, close, kill, pause, resume, process_stats" },
-                "session_id": { "type": "string", "description": "Session ID (required for input, output, resize, close, pause, resume, wait)" },
+                "action": { "type": "string", "description": "One of: list, create, submit, input, output, status, wait, resize, close, kill, pause, resume, process_stats" },
+                "session_id": { "type": "string", "description": "Session ID (required for submit, input, output, resize, close, pause, resume, wait)" },
                 "until": { "type": "string", "description": "Wait target: 'idle' or 'exited' (action=wait, default idle)" },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 300000, "description": "Max wait in ms (action=wait; default 60000, capped 300000). On timeout returns {timed_out:true}." },
-                "input": { "type": "string", "description": "Raw text to write (action=input)" },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 300000, "description": "action=submit: acknowledgement wait, clamped 250-10000ms, default 3000. action=wait: max wait, default 60000; values at or above 300000 run as 295000." },
+                "input": { "type": "string", "description": "Non-empty command (action=submit) or raw text (action=input)" },
+                "pty_description": { "type": ["string", "null"], "description": "Short orchestrator-supplied description shown above the PTY (action=submit or input)" },
                 "special_key": { "type": "string", "description": "Special key: enter, tab, ctrl+c, ctrl+d, ctrl+z, ctrl+l, ctrl+a, ctrl+e, ctrl+k, ctrl+u, ctrl+w, ctrl+r, up, down, left, right, home, end, backspace, delete, escape (action=input)" },
                 "rows": { "type": "integer", "description": "Terminal rows (action=create or resize)" },
                 "cols": { "type": "integer", "description": "Terminal cols (action=create or resize)" },
@@ -719,11 +1065,12 @@ fn native_tool_definitions() -> serde_json::Value {
         },
         {
             "name": "agent",
-            "description": "AI agent orchestration. There is no separate swarm action: use these agent/session primitives to spawn and coordinate managed peers.\n\nOrchestration in 5 lines:\n1. Managed PTYs auto-bind from $TUIC_SESSION. A headerless external caller calls register without tuic_session to receive an MCP-scoped UUID, or supplies an explicit stable UUID to reclaim it.\n2. Spawn a named peer: spawn name=worker prompt=<task> [agent_type=codex|gemini|...] → {session_id, name}.\n3. Wait for it: agent action=wait since=<ms> (new mail) or session action=wait session_id=<id> until=idle|exited. Cheap blocking call — do NOT poll in a loop.\n4. Talk to it: send to=<peer> message=<text>. Messages are TYPED into an idle peer's terminal (it wakes and acts); inbox is the fallback for busy peers.\n5. Lifecycle notifications carry state only. Every worker must report task output or blockers with send; use session output only if a child anomalously failed to send.\n\nActions:\n- spawn: Launch agent in new PTY (localhost only). Optional name is assigned before prompt delivery. Returns {session_id, name, monitor_with, peer_monitor_with?}.\n- wait: Block until new inbox mail (since=<ms>). Success inlines every retained fresh message (up to the 100-message inbox capacity) in chronological order plus next_since.\n- detect: Installed agents [{name, path, version}].\n- stats: {active_sessions, max_sessions, available_slots}.\n- metrics: Cumulative {total_spawned, total_failed, bytes_emitted, pauses_triggered}.\n- register: Bind an external/headerless caller, or rename/set the project of an auto-bound managed peer. tuic_session is optional; omission generates a stable identity for this MCP connection.\n- list_peers: List peers. Optional: project filter. Absent project is omitted.\n- send: Message a peer (requires to, message). Adds recipient_state={shell_state?,agent_state?} only for a real managed PTY.\n- inbox: Read messages. Optional: limit, since (logical unix-millis cursor).",
+            "description": "AI agent orchestration. There is no separate swarm action: use these agent/session primitives to spawn and coordinate managed peers.\n\nOrchestration in 5 lines:\n1. Managed PTYs auto-bind from $TUIC_SESSION. A headerless external caller calls register without tuic_session to receive an MCP-scoped UUID, or supplies an explicit stable UUID to reclaim it.\n2. Spawn a named peer: spawn name=worker prompt=<task> [agent_type=codex|gemini|...] → {session_id, name}.\n3. Wait for it: agent action=wait (new mail; omit since, the cursor is kept server-side) or session action=wait session_id=<id> until=idle|exited. Cheap blocking call — do NOT poll in a loop. Both cap at 300s: for work that runs longer, or across a reconnect, poll the spawn's task_id with task action=get instead — the outcome is recorded even with nobody waiting.\n4. Talk to it: send to=<peer> message=<text>. Ordinary managed agents keep direct delivery. A registered orchestrator keeps peer payloads in its inbox; only idle/completed lifecycle may submit a generic `agent action=inbox` wake.\n5. Lifecycle notifications carry state only. Every worker must report task output or blockers with send; use session output only if a child anomalously failed to send.\n\nActions:\n- spawn: Launch agent in new PTY (localhost only). Optional name is assigned before prompt delivery. Returns {session_id, name, task_id, poll_interval_ms, monitor_with, peer_monitor_with?}.\n- wait: Block until new inbox mail. Omit `since` — the server resumes from your last read position; pass it only to override (since=0 replays everything). Success inlines every retained fresh message (up to the 100-message inbox capacity) in chronological order. Every response carries next_since, timeout included. An active wait suppresses terminal wake.\n- detect: Installed agents [{name, path, version}].\n- stats: {active_sessions, max_sessions, available_slots}.\n- metrics: Cumulative {total_spawned, total_failed, bytes_emitted, pauses_triggered}.\n- register: Bind an external/headerless caller, or rename/set the project of an auto-bound managed peer. tuic_session is optional; omission generates a stable identity for this MCP connection. Reconnecting under a NEW uuid? Pass `replaces=<old_uuid>` or its inbox is stranded — the response reports superseded_identity, mail_migrated, and mail_stranded + identity_warning when the old identity still owns a live PTY (its mail is left alone). Check `terminal` in the response: false means nothing can be typed into you and no message can wake you — you must consume your own inbox with wait/inbox.\n- list_peers: List peers. Optional: project filter. Absent project is omitted.\n- send: Message a peer (requires to, message). Returns `delivered`: false means no active wait or safe wake surfaced it, so it remains inbox-only. `delivery_path` is the single source of truth for the route: waiter, generic/coalesced orchestrator wake, sse channel, terminal, or inbox-only. Adds recipient_state={shell_state?,agent_state?} only for a real managed PTY.\n- inbox: Read messages. Returns next_since. Optional: limit, since (omit to resume from the server-side cursor).",
             "inputSchema": { "type": "object", "properties": {
                 "action": { "type": "string", "description": "One of: spawn, wait, detect, stats, metrics, register, list_peers, send, inbox" },
-                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 300000, "description": "Max wait in ms (action=wait; default 60000, capped 300000). On timeout returns {timed_out:true}." },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 300000, "description": "Max wait in ms (action=wait; default 60000). Values at or above 300000 run as 295000 so the reply beats a 300s client-side tool-call deadline. On timeout returns {timed_out:true}." },
                 "prompt": { "type": "string", "description": "Task prompt for the agent (action=spawn)" },
+                "pty_description": { "type": ["string", "null"], "description": "Short description of the PTY task shown above the terminal (action=spawn)" },
                 "cwd": { "type": "string", "description": "Working directory (action=spawn)" },
                 "model": { "type": "string", "description": "Structured model flag; preserved when args is also set (action=spawn)" },
                 "print_mode": { "type": "boolean", "description": "false (default): visible TUI tab, observable via agent(inbox). true: headless, no tab. (action=spawn)" },
@@ -734,12 +1081,22 @@ fn native_tool_definitions() -> serde_json::Value {
                 "rows": { "type": "integer", "description": "Terminal rows (action=spawn)" },
                 "cols": { "type": "integer", "description": "Terminal cols (action=spawn)" },
                 "tuic_session": { "type": "string", "description": "Optional explicit stable UUID (action=register). Managed PTYs normally auto-bind; a headerless caller may omit this to receive an MCP-scoped UUID." },
+                "replaces": { "type": "string", "description": "Prior tuic_session this registration supersedes (action=register). Required to inherit the old identity's inbox when reconnecting under a new UUID — there is no implicit link across protocol sessions, and identity is never guessed. Ignored when that identity still owns a live PTY; the response then reports mail_stranded." },
                 "name": { "type": "string", "description": "Non-empty peer/session display name (action=spawn optional; action=register optional; default: 'agent')" },
                 "project": { "type": "string", "description": "Git repo root path (action=register optional, action=list_peers filter)" },
+                "orchestrator": { "type": "boolean", "description": "Explicitly enable or remove orchestrator inbox-only routing (action=register). Omission preserves the current role; spawning a child never infers it." },
                 "to": { "type": "string", "description": "Recipient tuic_session UUID (action=send, required)" },
                 "message": { "type": "string", "description": "Message content, max 64KB (action=send, required)" },
-                "since": { "type": "integer", "description": "Logical unix-millis cursor — return messages after this (action=inbox), or wake on mail newer than this (action=wait)" }
+                "since": { "type": "integer", "description": "Logical unix-millis cursor (action=inbox|wait). OMIT IT: the server remembers your last read position and resumes from there. Pass it only to override — since=0 deliberately replays the whole inbox. Every wait/inbox response carries next_since, including on timeout" }
             }, "required": ["action"] }
+        },
+        {
+            "name": "task",
+            "description": "Poll a long-running task handle without blocking. `agent action=spawn` returns a task_id; use it here instead of holding a wait open, which is capped at 300s and loses the outcome if the connection drops.\n\nThe outcome is recorded when the agent exits whether or not anyone was listening, so a reconnecting orchestrator can still collect it (for up to 24h).\n\nActions:\n- get: Current state. Returns {task_id, status, status_message?, result?, error_detail?, poll_interval_ms}. status is working|input_required|completed|failed|cancelled; the last three are final and never change again. A failed task reports why in error_detail, NOT in error — a top-level `error` always means the call itself failed. Poll no faster than poll_interval_ms.\n- cancel: Mark the task cancelled. Does NOT kill the agent — use session action=kill for that. A cancel is final: the agent's later exit cannot overwrite it.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "description": "One of: get, cancel" },
+                "task_id": { "type": "string", "description": "Task handle returned by agent action=spawn (required)" }
+            }, "required": ["action", "task_id"] }
         },
         {
             "name": "repo",
@@ -754,7 +1111,7 @@ fn native_tool_definitions() -> serde_json::Value {
         },
         {
             "name": "ui",
-            "description": "Control TUIC UI. Actions:\n- tab: open/update panel tab. Requires id, title, + html OR url.\n- toast: non-blocking notification. Requires title. Optional: message, level (info/warn/error), sound.\n- confirm: blocking dialog. Returns {confirmed}. Requires title.\n- screenshot: capture a panel as WebP. Requires id. Returns {path}. Read the path to view.\n\nURL schemes for tab:\n- http(s): loaded in sandboxed iframe.\n- file:///path: read via IPC and rendered as inline HTML (sandbox blocks direct file:// access).\n- tuic://edit/<path>?line=N: native code editor (no iframe). Prefix absolute paths with `//` (tuic://edit//Users/x/a.rs). Relative = active repo.\n- tuic://open/<path>: native markdown/preview tab.\n\nCustom schemes (vscode://) do NOT work in iframes.\n\nUse:\n- toast for done/error/long-job end; error=failure, warn=recoverable. Skip for micro-steps.\n- confirm BEFORE destructive ops (rm -rf, git reset --hard, force-push, DROP). Only proceed if confirmed.\n- tab http(s) for dashboards, reports, >20-line structured output.\n- tab tuic://edit to point user at source file+line (review, bug discussion) — beats pasting snippets.\n- screenshot to visually verify rendered HTML content in a panel you created.",
+            "description": "Control TUIC UI. Actions:\n- tab: open/update panel tab. Requires id, title, + html OR url.\n- toast: non-blocking notification. Requires title. Optional: message, level (info/warn/error), sound.\n- confirm: blocking dialog, shown on every client (desktop, browser, mobile PWA) plus a mobile push — the first answer wins. Returns {confirmed}, plus {reason} when it expired unanswered after 300s (treat that as a refusal, not a yes). Requires title.\n- screenshot: capture a panel as WebP. Requires id. Returns {path}. Read the path to view.\n\nURL schemes for tab:\n- http(s): loaded in sandboxed iframe.\n- file:///path: read via IPC and rendered as inline HTML (sandbox blocks direct file:// access).\n- tuic://edit/<path>?line=N: native code editor (no iframe). Prefix absolute paths with `//` (tuic://edit//Users/x/a.rs). Relative = active repo.\n- tuic://open/<path>: native markdown/preview tab.\n\nCustom schemes (vscode://) do NOT work in iframes.\n\nUse:\n- toast for done/error/long-job end; error=failure, warn=recoverable. Skip for micro-steps.\n- toast with sound=attention when you are working unattended and are BLOCKED on the user (question, approval, ambiguous requirement). It is the only sound that carries across a room; do not spend it on progress updates.\n- confirm BEFORE destructive ops (rm -rf, git reset --hard, force-push, DROP). Only proceed if confirmed.\n- tab http(s) for dashboards, reports, >20-line structured output.\n- tab tuic://edit to point user at source file+line (review, bug discussion) — beats pasting snippets.\n- screenshot to visually verify rendered HTML content in a panel you created.",
             "inputSchema": { "type": "object", "properties": {
                 "action": { "type": "string", "description": "One of: tab, toast, confirm, screenshot" },
                 "id": { "type": "string", "description": "Stable identifier for dedup — same id reuses existing tab (action=tab, required)" },
@@ -765,7 +1122,7 @@ fn native_tool_definitions() -> serde_json::Value {
                 "focus": { "type": "boolean", "description": "Switch to this tab after open/update (action=tab, default true). Pass false to update silently without stealing focus." },
                 "message": { "type": "string", "description": "Optional body text (action=toast/confirm)" },
                 "level": { "type": "string", "description": "Toast level: info, warn, error (default: info)" },
-                "sound": { "type": "boolean", "description": "Play a notification sound (action=toast, default: false). Each level has a distinct tone." }
+                "sound": { "description": "Audible signal for action=toast (default: none). true = the tone matching `level`. Or name one: question, completion, error, warning, info, attention. `attention` is a triangular G4→G4→E5 callback, unlike any other sound in the app — use it when you are running unattended and need the user back (a blocking question, a decision only they can make). Plays through the user's notification settings, so volume, output device and mutes are respected.", "anyOf": [{ "type": "boolean" }, { "type": "string", "enum": ["question", "completion", "error", "warning", "info", "attention"] }] }
             }, "required": ["action"] }
         },
         {
@@ -950,7 +1307,18 @@ fn merged_tool_definitions(
     state: &Arc<AppState>,
     mcp_session_id: Option<&str>,
 ) -> serde_json::Value {
-    if state.config.read().collapse_tools {
+    let force_meta_tools = mcp_session_id
+        .and_then(|sid| state.mcp_sessions.get(sid))
+        .is_some_and(|meta| meta.requires_meta_tools);
+    merged_tool_definitions_for_mode(state, mcp_session_id, force_meta_tools)
+}
+
+fn merged_tool_definitions_for_mode(
+    state: &Arc<AppState>,
+    mcp_session_id: Option<&str>,
+    force_meta_tools: bool,
+) -> serde_json::Value {
+    if force_meta_tools || state.config.read().collapse_tools {
         return meta_tool_definitions(state);
     }
 
@@ -1026,6 +1394,74 @@ fn require_string<'a>(
     args[field].as_str().ok_or_else(
         || serde_json::json!({"error": format!("Missing required parameter '{field}'")}),
     )
+}
+
+#[derive(Debug, PartialEq)]
+enum PtyDescriptionUpdate {
+    Unchanged,
+    Set(Option<String>),
+}
+
+const INFERRED_PTY_DESCRIPTION_MAX_CHARS: usize = 160;
+
+/// Parse the optional PTY description field. Omitted means unchanged; null or
+/// an empty/whitespace-only string clears the current description.
+fn parse_pty_description(
+    args: &serde_json::Value,
+) -> Result<PtyDescriptionUpdate, serde_json::Value> {
+    let Some(value) = args.get("pty_description") else {
+        return Ok(PtyDescriptionUpdate::Unchanged);
+    };
+    match value {
+        serde_json::Value::Null => Ok(PtyDescriptionUpdate::Set(None)),
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            Ok(PtyDescriptionUpdate::Set(
+                (!text.is_empty()).then(|| text.to_string()),
+            ))
+        }
+        _ => Err(serde_json::json!({
+            "error": "'pty_description' must be a string or null"
+        })),
+    }
+}
+
+/// Resolve the description for a newly orchestrated PTY. Callers with a rich
+/// orchestration surface can set or clear it explicitly; callers whose spawn
+/// schema only carries a task prompt still get a compact, display-only summary.
+/// This never changes the prompt delivered to the child.
+fn resolve_spawn_pty_description(update: PtyDescriptionUpdate, prompt: &str) -> Option<String> {
+    match update {
+        PtyDescriptionUpdate::Set(description) => description,
+        PtyDescriptionUpdate::Unchanged => {
+            let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+            if collapsed.is_empty() {
+                return None;
+            }
+
+            let mut chars = collapsed.chars();
+            let prefix: String = chars
+                .by_ref()
+                .take(INFERRED_PTY_DESCRIPTION_MAX_CHARS)
+                .collect();
+            if chars.next().is_none() {
+                Some(prefix)
+            } else {
+                let mut truncated: String = prefix
+                    .chars()
+                    .take(INFERRED_PTY_DESCRIPTION_MAX_CHARS - 1)
+                    .collect();
+                truncated.push('…');
+                Some(truncated)
+            }
+        }
+    }
+}
+
+fn apply_pty_description(state: &AppState, session_id: &str, description: PtyDescriptionUpdate) {
+    if let PtyDescriptionUpdate::Set(description) = description {
+        state.set_pty_description(session_id, description);
+    }
 }
 
 /// Extract path from args with guidance error
@@ -1206,6 +1642,36 @@ pub(crate) async fn handle_mcp_tool_call(
     )
 }
 
+/// Run a synchronous tool handler on the blocking pool.
+///
+/// The sync handlers reach genuinely blocking work: `session close`/`kill` wait on the
+/// child with `std::thread::sleep` (up to 200ms in `close_pty_core`/`kill_pty_core`),
+/// agent injection sleeps `INJECT_ENTER_GAP` between the payload and the Enter, and
+/// spawn/config paths issue blocking syscalls and disk I/O. Called inline from an async
+/// handler these park a tokio worker for the whole duration.
+async fn run_blocking_handler<F>(f: F) -> serde_json::Value
+where
+    F: FnOnce() -> serde_json::Value + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(value) => value,
+        Err(e) => serde_json::json!({
+            "error": format!("tool handler failed to complete: {e}")
+        }),
+    }
+}
+
+fn session_action_requires_blocking_pool(action: &str) -> bool {
+    matches!(
+        action,
+        "create" | "input" | "kill" | "close" | "process_stats"
+    )
+}
+
+fn agent_action_requires_blocking_pool(action: &str) -> bool {
+    matches!(action, "spawn" | "detect" | "send")
+}
+
 async fn handle_mcp_tool_call_with_context(
     state: &Arc<AppState>,
     addr: SocketAddr,
@@ -1233,9 +1699,10 @@ async fn handle_mcp_tool_call_with_context(
     match name {
         "session" => {
             // Executing / destructive session actions carry the same loopback
-            // restriction as `agent spawn`: `input` writes raw bytes to a PTY's stdin
+            // restriction as `agent spawn`: `submit` executes a managed-agent
+            // composer command, while `input` writes raw bytes to a PTY's stdin
             // (arbitrary command execution on a shell session, unfiltered context
-            // injection on an agent session), `create`/`kill`/`close` spawn or
+            // injection on an agent session). `create`/`kill`/`close` spawn or
             // destroy sessions, and `pause`/`resume` halt/resume output buffering
             // (a remote `pause` on any session is a DoS). A non-loopback MCP client
             // (authenticated remote, or admitted via lan_auth_bypass) must not reach
@@ -1247,6 +1714,12 @@ async fn handle_mcp_tool_call_with_context(
                 // Read-only blocking wait — needs the async runtime for its poll
                 // loop, so it can't live in the sync handle_session.
                 handle_session_wait(state, args).await
+            } else if action == "submit" && !addr.ip().is_loopback() {
+                serde_json::json!({
+                    "error": "This session action is restricted to localhost connections"
+                })
+            } else if action == "submit" {
+                handle_session_submit(state, args).await
             } else if matches!(
                 action,
                 "create" | "input" | "kill" | "close" | "pause" | "resume"
@@ -1255,13 +1728,34 @@ async fn handle_mcp_tool_call_with_context(
                 serde_json::json!({
                     "error": "This session action is restricted to localhost connections"
                 })
+            } else if session_action_requires_blocking_pool(action) {
+                let state = state.clone();
+                let args = args.clone();
+                let sid = mcp_session_id.map(str::to_owned);
+                run_blocking_handler(move || handle_session(&state, &args, sid.as_deref())).await
             } else {
                 handle_session(state, args, mcp_session_id)
             }
         }
         "agent" => {
-            if args["action"].as_str() == Some("wait") {
+            let action = args["action"].as_str().unwrap_or("");
+            if action == "wait" {
                 handle_agent_wait(state, args, mcp_session_id).await
+            } else if agent_action_requires_blocking_pool(action) {
+                let state = state.clone();
+                let args = args.clone();
+                let sid = mcp_session_id.map(str::to_owned);
+                let parent_cwd = managed_parent_cwd.map(str::to_owned);
+                run_blocking_handler(move || {
+                    handle_agent_unified_with_parent_cwd(
+                        &state,
+                        addr,
+                        &args,
+                        sid.as_deref(),
+                        parent_cwd.as_deref(),
+                    )
+                })
+                .await
             } else {
                 handle_agent_unified_with_parent_cwd(
                     state,
@@ -1272,12 +1766,22 @@ async fn handle_mcp_tool_call_with_context(
                 )
             }
         }
+        "task" => {
+            let state = state.clone();
+            let args = args.clone();
+            let sid = mcp_session_id.map(str::to_owned);
+            run_blocking_handler(move || handle_task(&state, addr, &args, sid.as_deref())).await
+        }
         "repo" => handle_repo(state, args, is_claude_code).await,
         "ui" => handle_ui_unified(state, addr, args, mcp_session_id).await,
         "plugin_dev_guide" => {
             serde_json::json!({"content": super::plugin_docs::PLUGIN_DOCS})
         }
-        "config" => handle_config(state, addr, args),
+        "config" => {
+            let state = state.clone();
+            let args = args.clone();
+            run_blocking_handler(move || handle_config(&state, addr, &args)).await
+        }
         "debug" => handle_debug_unified(state, addr, args),
         "search_tools" => handle_search_tools(state, args),
         "get_tool_schema" => handle_get_tool_schema(state, args),
@@ -1302,14 +1806,27 @@ async fn handle_mcp_tool_call_with_context(
 
 /// Default `wait` timeout when the caller omits `timeout_ms`.
 const WAIT_DEFAULT_MS: u64 = 60_000;
-/// Hard cap on a single server-side wait.
+/// Advertised cap on a single server-side wait — the number in the tool schema.
 const WAIT_MAX_MS: u64 = 300_000;
+/// Headroom between the advertised cap and the wait we actually run.
+///
+/// A client aborts its own `tools/call` on a deadline of its own, and at least
+/// one shipping client (Codex) uses exactly 300s — the same round number as our
+/// cap. A wait that runs the full `WAIT_MAX_MS` therefore answers right on that
+/// deadline and loses the race every time, turning the advertised maximum into a
+/// guaranteed error instead of `{timed_out:true}`. The bridge already reserves
+/// the same margin on its own response deadline. Kept client-agnostic on
+/// purpose: a per-client table would have to be maintained against every client
+/// release, and a wait that ends 5s early is indistinguishable to the caller.
+const WAIT_CLIENT_DEADLINE_MARGIN_MS: u64 = 5_000;
+/// The wait actually run for a caller asking for the cap or more.
+const WAIT_EFFECTIVE_MAX_MS: u64 = WAIT_MAX_MS - WAIT_CLIENT_DEADLINE_MARGIN_MS;
 
-/// Resolve the effective wait timeout: default when absent/zero, capped at the
-/// bridge-safe maximum.
+/// Resolve the effective wait timeout: default when absent/zero, capped so the
+/// reply beats the caller's own tool-call deadline.
 fn clamp_wait_timeout(requested: Option<u64>) -> u64 {
     match requested {
-        Some(ms) if ms > 0 => ms.min(WAIT_MAX_MS),
+        Some(ms) if ms > 0 => ms.min(WAIT_EFFECTIVE_MAX_MS),
         _ => WAIT_DEFAULT_MS,
     }
 }
@@ -1345,10 +1862,9 @@ fn session_wait_response(
             "until": until,
         });
     }
-    let shell_state = state
-        .shell_states
-        .get(session_id)
-        .map(|value| crate::pty::shell_state_str(value.load(std::sync::atomic::Ordering::Relaxed)));
+    let shell_state = state.shell_states.get(session_id).and_then(|value| {
+        crate::pty::shell_state_wire(value.load(std::sync::atomic::Ordering::Relaxed))
+    });
     let mut response = serde_json::json!({
         "met": true,
         "timed_out": false,
@@ -1386,6 +1902,17 @@ async fn handle_session_wait(state: &Arc<AppState>, args: &serde_json::Value) ->
         return serde_json::json!({"error": "wait 'until' must be 'idle' or 'exited'"});
     }
     let timeout_ms = clamp_wait_timeout(args["timeout_ms"].as_u64());
+    // Reject an unknown session BEFORE subscribing. `subscribe_pty_events` uses
+    // the DashMap entry API, so it CREATES a 256-slot broadcast channel for
+    // whatever id it is handed. Session teardown reaps that entry — but only for
+    // ids that were ever real sessions, so a caller passing made-up ids grew
+    // `pty_event_channels` with entries nothing will ever remove. It also spared
+    // the caller a pointless full-timeout block on a session that cannot exist.
+    if !state.sessions.contains_key(&session_id) {
+        return serde_json::json!({
+            "error": format!("Unknown session \"{session_id}\"")
+        });
+    }
     // Subscribe before checking current state. This closes the lost-wake window
     // without polling: an earlier transition is visible in state, while a later
     // one is retained by the per-session event receiver.
@@ -1411,6 +1938,254 @@ async fn handle_session_wait(state: &Arc<AppState>, args: &serde_json::Value) ->
     // a spurious timed_out response.
     let met = woke || session_wait_met(state, &session_id, until);
     session_wait_response(state, &session_id, until, met)
+}
+
+const SUBMIT_ACK_DEFAULT_MS: u64 = 3_000;
+const SUBMIT_ACK_MIN_MS: u64 = 250;
+const SUBMIT_ACK_MAX_MS: u64 = 10_000;
+const SUBMIT_ACK_CHECK_MS: u64 = 10;
+
+struct StartedSubmission {
+    submission_id: String,
+    session_id: String,
+    turn_epoch: u64,
+    acknowledgement_offset: u64,
+    timeout_ms: u64,
+}
+
+enum BeginSubmission {
+    Response(serde_json::Value),
+    Started(StartedSubmission),
+}
+
+fn submission_turn_epoch(state: &AppState, session_id: &str) -> u64 {
+    state
+        .session_states
+        .get(session_id)
+        .map(|session| session.turn_epoch)
+        .unwrap_or(0)
+}
+
+fn submission_output_offset(state: &AppState, session_id: &str) -> Option<u64> {
+    state
+        .output_buffers
+        .get(session_id)
+        .map(|buffer| buffer.lock().total_written)
+}
+
+fn begin_session_submit(state: &Arc<AppState>, args: &serde_json::Value) -> BeginSubmission {
+    let session_id = match require_session_id(args, "submit") {
+        Ok(id) => id.to_string(),
+        Err(error) => return BeginSubmission::Response(error),
+    };
+    let text = match args["input"].as_str() {
+        Some(text) if !text.is_empty() => text,
+        _ => {
+            return BeginSubmission::Response(serde_json::json!({
+                "error": "Action 'submit' requires non-empty 'input'"
+            }));
+        }
+    };
+    let submission_id = Uuid::new_v4().to_string();
+    let turn_epoch = submission_turn_epoch(state, &session_id);
+    if !state.sessions.contains_key(&session_id) {
+        return BeginSubmission::Response(serde_json::json!({
+            "status": "rejected",
+            "submission_id": submission_id,
+            "submitted": false,
+            "write_state": "not_started",
+            "acknowledged": false,
+            "retry_safe": true,
+            "reason": "session_not_found",
+            "turn_epoch": turn_epoch,
+            "composer_state": "unknown",
+        }));
+    }
+    if submission_output_offset(state, &session_id).is_none() {
+        return BeginSubmission::Response(serde_json::json!({
+            "status": "rejected",
+            "submission_id": submission_id,
+            "submitted": false,
+            "write_state": "not_started",
+            "acknowledged": false,
+            "retry_safe": true,
+            "reason": "observation_unavailable",
+            "turn_epoch": turn_epoch,
+            "composer_state": "unknown",
+        }));
+    }
+
+    match crate::pty::write_agent_submission_to_pty(state, &session_id, text) {
+        crate::pty::AgentSubmissionWrite::Rejected {
+            reason,
+            composer_state,
+        } => BeginSubmission::Response(serde_json::json!({
+            "status": "rejected",
+            "submission_id": submission_id,
+            "submitted": false,
+            "write_state": "not_started",
+            "acknowledged": false,
+            "retry_safe": true,
+            "reason": reason,
+            "turn_epoch": submission_turn_epoch(state, &session_id),
+            "composer_state": composer_state,
+        })),
+        crate::pty::AgentSubmissionWrite::Failed(detail) => {
+            BeginSubmission::Response(serde_json::json!({
+                "status": "write_failed",
+                "submission_id": submission_id,
+                "submitted": false,
+                "write_state": "not_started",
+                "acknowledged": false,
+                "retry_safe": true,
+                "reason": "pty_write_failed",
+                "detail": detail,
+                "turn_epoch": submission_turn_epoch(state, &session_id),
+                "composer_state": "empty",
+            }))
+        }
+        crate::pty::AgentSubmissionWrite::Uncertain(detail) => {
+            BeginSubmission::Response(serde_json::json!({
+                "status": "write_uncertain",
+                "submission_id": submission_id,
+                "submitted": false,
+                "write_state": "uncertain",
+                "acknowledged": false,
+                "retry_safe": false,
+                "reason": "pty_write_uncertain",
+                "detail": detail,
+                "turn_epoch": submission_turn_epoch(state, &session_id),
+                "composer_state": "unknown",
+            }))
+        }
+        crate::pty::AgentSubmissionWrite::Complete {
+            acknowledgement_offset,
+        } => {
+            // Reuse the same FSM path as raw MCP/HTTP input. The text and CR are
+            // bookkeeping boundaries only; the framed PTY bytes were written once
+            // above. This advances the authoritative turn epoch exactly once.
+            crate::pty_capture::record_input(&session_id, text.as_bytes());
+            crate::pty_capture::record_input(&session_id, b"\r");
+            super::session::apply_input_bookkeeping(state, &session_id, text);
+            super::session::apply_input_bookkeeping(state, &session_id, "\r");
+            let timeout_ms = args["timeout_ms"]
+                .as_u64()
+                .unwrap_or(SUBMIT_ACK_DEFAULT_MS)
+                .clamp(SUBMIT_ACK_MIN_MS, SUBMIT_ACK_MAX_MS);
+            BeginSubmission::Started(StartedSubmission {
+                submission_id,
+                session_id: session_id.clone(),
+                turn_epoch: submission_turn_epoch(state, &session_id),
+                acknowledgement_offset,
+                timeout_ms,
+            })
+        }
+    }
+}
+
+async fn handle_session_submit(
+    state: &Arc<AppState>,
+    args: &serde_json::Value,
+) -> serde_json::Value {
+    let pty_description = match parse_pty_description(args) {
+        Ok(description) => description,
+        Err(error) => return error,
+    };
+    let blocking_state = Arc::clone(state);
+    let blocking_args = args.clone();
+    let begin = match tokio::task::spawn_blocking(move || {
+        begin_session_submit(&blocking_state, &blocking_args)
+    })
+    .await
+    {
+        Ok(begin) => begin,
+        Err(error) => {
+            return serde_json::json!({
+                "error": format!("tool handler failed to complete: {error}")
+            });
+        }
+    };
+    let started = match begin {
+        BeginSubmission::Response(response) => return response,
+        BeginSubmission::Started(started) => started,
+    };
+    apply_pty_description(state, &started.session_id, pty_description);
+
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(started.timeout_ms);
+    loop {
+        let current_epoch = submission_turn_epoch(state, &started.session_id);
+        if current_epoch != started.turn_epoch {
+            return serde_json::json!({
+                "status": "superseded",
+                "submission_id": started.submission_id,
+                "submitted": true,
+                "write_state": "complete",
+                "acknowledged": false,
+                "retry_safe": false,
+                "reason": "turn_epoch_changed",
+                "turn_epoch": started.turn_epoch,
+                "current_turn_epoch": current_epoch,
+                "composer_state": "cleared",
+            });
+        }
+        if let Some(output_offset) = submission_output_offset(state, &started.session_id)
+            && output_offset > started.acknowledgement_offset
+        {
+            return serde_json::json!({
+                "status": "acknowledged",
+                "submission_id": started.submission_id,
+                "submitted": true,
+                "write_state": "complete",
+                "acknowledged": true,
+                "retry_safe": false,
+                "turn_epoch": started.turn_epoch,
+                "composer_state": "cleared",
+                "acknowledgement": {
+                    "kind": "terminal_movement",
+                    "screen_state": crate::pty::agent_submission_ack_kind(state, &started.session_id),
+                    "output_offset": output_offset,
+                },
+            });
+        }
+        if !state.sessions.contains_key(&started.session_id) {
+            let mut response = serde_json::json!({
+                "status": "session_ended",
+                "submission_id": started.submission_id,
+                "submitted": true,
+                "write_state": "complete",
+                "acknowledged": false,
+                "retry_safe": false,
+                "reason": "session_ended_before_ack",
+                "turn_epoch": started.turn_epoch,
+                "composer_state": "unknown",
+            });
+            if let Some(exit_code) = state.exit_codes.get(&started.session_id) {
+                response["exit_code"] = serde_json::json!(*exit_code.value());
+            }
+            return response;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return serde_json::json!({
+                "status": "ack_timeout",
+                "submission_id": started.submission_id,
+                "submitted": true,
+                "write_state": "complete",
+                "acknowledged": false,
+                "retry_safe": false,
+                "reason": "no_terminal_movement_after_enter",
+                "turn_epoch": started.turn_epoch,
+                "composer_state": "cleared",
+                "timeout_ms": started.timeout_ms,
+                "output_offset": submission_output_offset(state, &started.session_id),
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            SUBMIT_ACK_CHECK_MS.min((deadline - now).as_millis().max(1) as u64),
+        ))
+        .await;
+    }
 }
 
 /// `agent action=wait` — block until the caller's inbox has a message newer than
@@ -1479,12 +2254,19 @@ fn dispatch_waiter_handoff(state: &AppState, recipient: &str, message_ids: &[Str
         })
         .unwrap_or_default();
     for message in messages {
-        let framed = frame_peer_message(&message.from_name, &message.content);
-        if crate::pty::deliver_message_to_managed_pty(state, recipient, &framed) {
-            state.mark_terminal_delivery_dispatched(recipient, &message.id);
-        } else {
-            state.release_terminal_delivery(recipient, &message.id);
+        if crate::pty::route_registered_orchestrator_mail(
+            state,
+            recipient,
+            &message.id,
+            message.timestamp,
+        )
+        .is_some()
+        {
+            continue;
         }
+        let framed = frame_peer_message(&message.from_name, &message.content);
+        let outcome = crate::pty::deliver_message_to_managed_pty(state, recipient, &framed);
+        crate::pty::settle_terminal_delivery(state, recipient, &message.id, outcome);
     }
 }
 
@@ -1499,22 +2281,72 @@ fn bounded_agent_messages<'a>(
     page
 }
 
-fn agent_wait_success_response(finish: crate::state::AgentWaitFinish) -> serde_json::Value {
+/// Resolve the read position for a wait/inbox call.
+///
+/// An explicit `since` always wins — `since=0` is the deliberate "replay
+/// everything" escape hatch and must stay honoured. Omitting it resumes from the
+/// server-side cursor, so a caller that cannot thread the value (or that lost it
+/// to a timeout) no longer falls back to replaying the whole inbox.
+fn resolve_agent_since(state: &AppState, tuic_session: &str, args: &serde_json::Value) -> u64 {
+    match args["since"].as_u64() {
+        Some(explicit) => explicit,
+        None => state
+            .agent_read_cursor
+            .get(tuic_session)
+            .map(|entry| *entry.value())
+            .unwrap_or(0),
+    }
+}
+
+/// Drop every per-identity buffer that must not outlive a retired or torn-down
+/// peer. `agent_inbox` stays out on purpose: retire drains it into the replacing
+/// identity while teardown deletes it, so each caller owns that decision.
+///
+/// One function so the two teardown paths cannot disagree about the set — the
+/// read cursor was added to `AppState` and wired into neither, which left it
+/// growing without bound and let a replacing identity resume from zero.
+fn drop_identity_buffers(state: &AppState, tuic_session: &str) {
+    state.agent_inbox_evictions.remove(tuic_session);
+    state.active_agent_waiters.remove(tuic_session);
+    state.pending_injections.remove(tuic_session);
+    state.session_to_mcp.remove(tuic_session);
+    state.agent_read_cursor.remove(tuic_session);
+}
+
+/// Advance the stored read position. Never moves backwards: a deliberate replay
+/// (`since=0`) must not rewind the cursor for the next omitted-`since` call.
+fn advance_agent_cursor(state: &AppState, tuic_session: &str, cursor: u64) {
+    let mut entry = state
+        .agent_read_cursor
+        .entry(tuic_session.to_string())
+        .or_insert(0);
+    if cursor > *entry {
+        *entry = cursor;
+    }
+}
+
+fn agent_wait_success_response(
+    state: &AppState,
+    tuic_session: &str,
+    since: u64,
+    finish: crate::state::AgentWaitFinish,
+) -> serde_json::Value {
     let messages = bounded_agent_messages(finish.messages.iter(), AGENT_WAIT_INLINE_LIMIT);
-    let next_since = messages.iter().map(|message| message.timestamp).max();
-    let mut response = serde_json::json!({
+    // Fall back to the position we read from, so `next_since` is present even when
+    // the batch is empty — losing the cursor is what drove callers back to since=0.
+    let next_since = messages
+        .iter()
+        .map(|message| message.timestamp)
+        .max()
+        .unwrap_or(since);
+    advance_agent_cursor(state, tuic_session, next_since);
+    serde_json::json!({
         "met": true,
         "timed_out": false,
         "new_messages": finish.fresh_count,
         "messages": messages,
-    });
-    let object = response
-        .as_object_mut()
-        .expect("wait response is an object");
-    if let Some(next_since) = next_since {
-        object.insert("next_since".to_string(), serde_json::json!(next_since));
-    }
-    response
+        "next_since": next_since,
+    })
 }
 
 async fn handle_agent_wait(
@@ -1530,11 +2362,11 @@ async fn handle_agent_wait(
             return serde_json::json!({"error": "You are not registered. Identity normally auto-binds at initialize; ensure $TUIC_SESSION is set or call agent action=register."});
         }
     };
-    let since = args["since"].as_u64().unwrap_or(0);
+    let since = resolve_agent_since(state, &caller_tuic, args);
     let (mut active_wait, mut inbox_events) = ActiveAgentWaitGuard::new(state, &caller_tuic, since);
     let timeout_ms = clamp_wait_timeout(args["timeout_ms"].as_u64());
     if state.waiter_fresh_message_count(&caller_tuic, since) > 0 {
-        return agent_wait_success_response(active_wait.finish(true));
+        return agent_wait_success_response(state, &caller_tuic, since, active_wait.finish(true));
     }
     let woke = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
         loop {
@@ -1550,9 +2382,19 @@ async fn handle_agent_wait(
     .unwrap_or(false);
     let finish = active_wait.finish(true);
     if woke || finish.fresh_count > 0 {
-        return agent_wait_success_response(finish);
+        return agent_wait_success_response(state, &caller_tuic, since, finish);
     }
-    serde_json::json!({"met": false, "timed_out": true, "new_messages": 0})
+    // A timed-out wait must still hand back a usable cursor, or the caller has
+    // nothing to pass but `since=0`. Prefer the stored position over the requested
+    // one: a deliberate `since=0` replay that finds nothing new should resume from
+    // where reading actually got to, not send the caller back to the start.
+    let resume = state
+        .agent_read_cursor
+        .get(&caller_tuic)
+        .map(|entry| *entry.value())
+        .unwrap_or(0)
+        .max(since);
+    serde_json::json!({"met": false, "timed_out": true, "new_messages": 0, "next_since": resume})
 }
 
 fn handle_session(
@@ -1619,6 +2461,14 @@ fn handle_session(
                         object,
                         "display_name",
                         s.display_name.clone().map(serde_json::Value::String),
+                    );
+                    insert_optional_value(
+                        object,
+                        "pty_description",
+                        state
+                            .pty_descriptions
+                            .get(&id)
+                            .map(|value| serde_json::Value::String(value.value().clone())),
                     );
                     insert_optional_value(
                         object,
@@ -1708,8 +2558,22 @@ fn handle_session(
             } else {
                 None
             };
+            let pty_description = match parse_pty_description(args) {
+                Ok(description) => description,
+                Err(error) => return error,
+            };
+            if text.is_empty()
+                && key_seq.is_none()
+                && matches!(&pty_description, PtyDescriptionUpdate::Unchanged)
+            {
+                return serde_json::json!({"error": "Action 'input' requires 'input' (text), 'special_key', or 'pty_description'"});
+            }
             if text.is_empty() && key_seq.is_none() {
-                return serde_json::json!({"error": "Action 'input' requires 'input' (text) and/or 'special_key'"});
+                if !state.sessions.contains_key(session_id) {
+                    return serde_json::json!({"error": "Session not found"});
+                }
+                apply_pty_description(state, session_id, pty_description);
+                return serde_json::json!({"ok": true});
             }
             let agent_type = state
                 .session_states
@@ -1724,8 +2588,11 @@ fn handle_session(
                 if let Err(e) = crate::pty::write_agent_command_to_pty(state, session_id, text) {
                     return serde_json::json!({"error": e});
                 }
+                crate::pty_capture::record_input(session_id, text.as_bytes());
+                crate::pty_capture::record_input(session_id, b"\r");
                 super::session::apply_input_bookkeeping(state, session_id, text);
                 super::session::apply_input_bookkeeping(state, session_id, "\r");
+                apply_pty_description(state, session_id, pty_description);
                 return serde_json::json!({"ok": true});
             }
 
@@ -1751,14 +2618,18 @@ fn handle_session(
                 }
                 (true, None) => unreachable!("checked above: text.is_empty() && key_seq.is_none()"),
             }
+            apply_pty_description(state, session_id, pty_description);
             serde_json::json!({"ok": true})
         }
+        "submit" => serde_json::json!({
+            "error": "Action 'submit' requires the asynchronous MCP dispatch path"
+        }),
         "output" => {
             let session_id = match require_session_id(args, "output") {
                 Ok(id) => id,
                 Err(e) => return e,
             };
-            let limit = args["limit"].as_u64().unwrap_or(50) as usize;
+            let limit = (args["limit"].as_u64().unwrap_or(50) as usize).max(1);
 
             // Resolve the session's lifecycle state.
             //
@@ -2376,7 +3247,7 @@ async fn handle_worktree(
                 false,
             ) {
                 Ok(outcome) => {
-                    state.invalidate_repo_caches(&path);
+                    state.notify_worktree_removed(&path, &branch);
                     worktree_remove_success_response(outcome.branch_delete_warning)
                 }
                 Err(e) => serde_json::json!({"error": e}),
@@ -2474,12 +3345,16 @@ fn handle_agent_with_parent_cwd(
     };
     match action {
         "detect" => {
-            let known = ["claude", "codex", "aider", "goose"];
-            let results: Vec<serde_json::Value> = known
+            // Every agent TUIC can launch, not a hand-written subset — a new
+            // agent must not be invisible to an orchestrator. Undetected ones
+            // are dropped: `detect` answers "what can I spawn here", and a row
+            // of nulls is noise an orchestrator cannot act on.
+            let results: Vec<serde_json::Value> = crate::agent::KNOWN_AGENT_BINARIES
                 .iter()
-                .map(|name| {
+                .filter_map(|name| {
                     let det = crate::agent::detect_agent_binary(name.to_string());
-                    serde_json::json!({"name": name, "path": det.path, "version": det.version})
+                    det.path
+                        .map(|path| serde_json::json!({"name": name, "path": path, "version": det.version}))
                 })
                 .collect();
             serde_json::json!(results)
@@ -2492,6 +3367,10 @@ fn handle_agent_with_parent_cwd(
             let prompt = match args["prompt"].as_str() {
                 Some(p) => p.to_string(),
                 None => return serde_json::json!({"error": "Action 'spawn' requires 'prompt'"}),
+            };
+            let pty_description = match parse_pty_description(args) {
+                Ok(update) => resolve_spawn_pty_description(update, &prompt),
+                Err(error) => return error,
             };
             if state.sessions.len() >= MAX_CONCURRENT_SESSIONS {
                 return serde_json::json!({"error": "Max concurrent sessions reached"});
@@ -2556,16 +3435,6 @@ fn handle_agent_with_parent_cwd(
                 .unwrap_or_else(|| "agent".to_string());
 
             let session_id = Uuid::new_v4().to_string();
-            let pty_system = native_pty_system();
-            let pair = match pty_system.openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            }) {
-                Ok(p) => p,
-                Err(e) => return serde_json::json!({"error": format!("Failed to open PTY: {}", e)}),
-            };
 
             // Resolve caller's tuic_session from their MCP session via the O(1) reverse map.
             // Only set when caller is a registered peer — drives multi-agent context + TUIC_PARENT.
@@ -2739,11 +3608,20 @@ fn handle_agent_with_parent_cwd(
                 cmd.cwd(crate::cli::expand_tilde(cwd));
             }
 
-            let child = match pair.slave.spawn_command(cmd) {
-                Ok(c) => c,
-                Err(e) => {
-                    return serde_json::json!({"error": format!("Failed to spawn agent: {}", e)});
-                }
+            // The argv assembly above can bail out with an error response, so it
+            // cannot live inside the retry closure; the built command is cloned
+            // per attempt instead (`spawn_command` consumes it).
+            let (pair, child) = match crate::pty::spawn_pty_pair_with_retry(
+                PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                || cmd.clone(),
+            ) {
+                Ok(pair_and_child) => pair_and_child,
+                Err(e) => return serde_json::json!({"error": e}),
             };
             let writer = match pair.master.take_writer() {
                 Ok(w) => w,
@@ -2762,13 +3640,15 @@ fn handle_agent_with_parent_cwd(
             state.sessions.insert(
                 session_id.clone(),
                 Mutex::new(PtySession {
-                    writer,
+                    writer: Arc::new(Mutex::new(writer)),
                     master: pair.master,
                     _child: child,
                     paused: paused.clone(),
                     worktree: None,
                     cwd: effective_cwd.clone(),
                     display_name: requested_name.clone(),
+                    display_name_is_custom: false,
+                    is_remote: true,
                     shell: binary_path.clone(),
                 }),
             );
@@ -2814,24 +3694,22 @@ fn handle_agent_with_parent_cwd(
                     .pending_injections
                     .entry(session_id.clone())
                     .or_default()
-                    .push_back(initial_prompt);
+                    .push_back(crate::state::PendingInjection::peer_message(initial_prompt));
             }
             // Register grid_watch so format=grid WebSocket streams work for
             // MCP-spawned agent sessions (mirrors session.rs spawn_pty_session).
-            let (grid_watch_tx, _) = tokio::sync::watch::channel(Vec::new());
+            let grid_watch_tx = crate::grid_gate::new_grid_watch();
             state.grid_watch.insert(session_id.clone(), grid_watch_tx);
 
             // Broadcast session-created to SSE/WebSocket consumers
             let cwd_str = effective_cwd.clone();
             let agent_type_str = effective_agent_type.clone();
-            let _ = state
-                .event_bus
-                .send(crate::state::AppEvent::SessionCreated {
-                    session_id: session_id.clone(),
-                    cwd: cwd_str.clone(),
-                    agent_type: agent_type_str,
-                    display_name: requested_name.clone(),
-                });
+            state.emit_pty_event(crate::state::AppEvent::SessionCreated {
+                session_id: session_id.clone(),
+                cwd: cwd_str.clone(),
+                agent_type: agent_type_str,
+                display_name: requested_name.clone(),
+            });
 
             #[cfg(feature = "desktop")]
             {
@@ -2850,6 +3728,7 @@ fn handle_agent_with_parent_cwd(
                     );
                 }
             }
+            state.set_pty_description(&session_id, pty_description);
             spawn_reader_thread(reader, paused, session_id.clone(), state.clone(), None);
 
             // Every managed child is a peer immediately, independent of whether
@@ -2874,7 +3753,6 @@ fn handle_agent_with_parent_cwd(
                 .or_else(|| mcp_session_id.map(pending_parent_id))
             {
                 state.session_parent.insert(session_id.clone(), parent_id);
-
                 if state.pending_initial_prompts.contains_key(&session_id) {
                     let watchdog_state = Arc::clone(state);
                     let watchdog_session = session_id.clone();
@@ -2899,8 +3777,20 @@ fn handle_agent_with_parent_cwd(
             // peers and post {type:state_change} to the parent's inbox; the
             // result-via-send guidance lives in agent(register).workflow and the
             // compatibility output hint is explicitly marked anomaly-only.
+            // Durable handle for this spawn. Created only after the PTY is live, so
+            // every early return above (loopback guard, bad binary, spawn failure)
+            // leaves no task behind. Purely additive in the response: classic MCP
+            // clients that ignore `task_id` keep working exactly as before.
+            let task_id = state.tasks.create(
+                crate::tasks::TaskKind::AgentSpawn,
+                &task_owner_identity(caller_tuic.as_deref(), mcp_session_id),
+                Some(&session_id),
+            );
+
             let mut response = serde_json::json!({
                 "session_id": session_id,
+                "task_id": task_id,
+                "poll_interval_ms": TASK_POLL_INTERVAL_MS,
                 "name": peer_name,
                 "peer_registered": true,
                 "communication_ready": caller_tuic.is_some(),
@@ -2954,6 +3844,94 @@ fn handle_agent_with_parent_cwd(
     }
 }
 
+/// Poll or cancel a task handle. Non-blocking by design: this is what lifts the
+/// 300s ceiling on `agent wait`, so it must never wait on anything itself.
+fn handle_task(
+    state: &Arc<AppState>,
+    addr: SocketAddr,
+    args: &serde_json::Value,
+    mcp_session_id: Option<&str>,
+) -> serde_json::Value {
+    let action = match require_action(args, "task", LEGACY_TASK_ACTIONS) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let task_id = match require_string(args, "task_id") {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    if !matches!(action, "get" | "cancel") {
+        return serde_json::json!({"error": format!(
+            "Unknown action '{}' for tool 'task'. Available: {}", action, LEGACY_TASK_ACTIONS
+        )});
+    }
+
+    let caller_tuic: Option<String> =
+        mcp_session_id.and_then(|sid| state.mcp_to_session.get(sid).map(|e| e.value().clone()));
+    let identities = caller_task_identities(caller_tuic.as_deref(), mcp_session_id);
+
+    // A task handle is a capability over a spawned agent, so ownership is checked
+    // before any state is returned or mutated — one agent must not be able to
+    // inspect or cancel another's children.
+    let rec = match state.tasks.get(task_id) {
+        Some(rec) if identities.contains(&rec.owner) => rec,
+        Some(_) => {
+            return serde_json::json!({"error": "task_id is not owned by the calling identity"});
+        }
+        None => return serde_json::json!({"error": "unknown or expired task_id"}),
+    };
+
+    if action == "cancel" {
+        // Same loopback restriction as `agent spawn`: cancelling mutates another
+        // agent's orchestration state, so a remote MCP client must not reach it.
+        if !addr.ip().is_loopback() {
+            return serde_json::json!({
+                "error": "Task cancellation is restricted to localhost connections"
+            });
+        }
+        return match state.tasks.cancel(&rec.task_id) {
+            Ok(()) => serde_json::json!({
+                "task_id": rec.task_id,
+                "status": crate::tasks::TaskStatus::Cancelled.as_str(),
+                "cancelled": true,
+                "note": "The agent process is untouched — use session(action=kill) to stop it.",
+            }),
+            // Already finished: report the state that stands rather than an error,
+            // so a cancel racing the agent's exit is not a failure for the caller.
+            Err(crate::tasks::TaskError::Terminal(status)) => serde_json::json!({
+                "task_id": rec.task_id,
+                "status": status.as_str(),
+                "cancelled": false,
+                "note": "Task already finished; terminal states are immutable.",
+            }),
+            Err(crate::tasks::TaskError::NotFound) => {
+                serde_json::json!({"error": "unknown or expired task_id"})
+            }
+        };
+    }
+
+    // Absent optional fields are omitted, not null — same convention as session
+    // and agent responses.
+    let mut response = serde_json::json!({
+        "task_id": rec.task_id,
+        "status": rec.status.as_str(),
+        "poll_interval_ms": TASK_POLL_INTERVAL_MS,
+    });
+    let obj = response
+        .as_object_mut()
+        .expect("literal above is an object");
+    if let Some(message) = rec.status_message {
+        obj.insert("status_message".to_string(), serde_json::json!(message));
+    }
+    if let Some(result) = rec.result {
+        obj.insert("result".to_string(), result);
+    }
+    if let Some(error) = rec.error {
+        obj.insert("error_detail".to_string(), serde_json::json!(error));
+    }
+    response
+}
+
 fn resolve_registration_identity(
     state: &AppState,
     args: &serde_json::Value,
@@ -2972,10 +3950,26 @@ fn resolve_registration_identity(
                 "error": "tuic_session must be a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
             }));
         }
-        if current.as_deref().is_some_and(|bound| bound != explicit) {
-            return Err(serde_json::json!({
-                "error": "This MCP session is already bound to a different peer identity"
-            }));
+        // Authority, not mere difference. An identity that resolves to a live PTY
+        // outranks one that does not: the caller announcing its real `$TUIC_SESSION`
+        // after having registered an invented UUID is repairing itself, and refusing
+        // that leaves an orchestrator permanently unreachable through its terminal.
+        if let Some(bound) = current.as_deref().filter(|bound| *bound != explicit) {
+            if state.live_pty_for_peer(bound).is_some() {
+                return Err(serde_json::json!({
+                    "error": format!(
+                        "This MCP session is bound to '{bound}', which owns a live terminal. \
+                         That is your $TUIC_SESSION — register it instead of '{explicit}', \
+                         or omit tuic_session entirely. An identity with no PTY behind it \
+                         can never be typed into or woken."
+                    )
+                }));
+            }
+            if state.live_pty_for_peer(explicit).is_none() {
+                return Err(serde_json::json!({
+                    "error": "This MCP session is already bound to a different peer identity"
+                }));
+            }
         }
         return Ok((explicit.to_string(), false));
     }
@@ -3018,9 +4012,18 @@ fn handle_messaging(
             let mcp_sid = match mcp_session_id {
                 Some(sid) => sid.to_string(),
                 None => {
-                    return serde_json::json!({"error": "No MCP session — send an initialize request first"});
+                    // Reached by a stateless caller now that tools/call no longer
+                    // gates on the header (#0f44). Registration keys the identity on
+                    // the protocol session, so it cannot mint one from nothing —
+                    // say what to do instead of just stating the problem. Making
+                    // identity itself stateless is Phase E, not this step.
+                    return serde_json::json!({"error": "Registration needs an MCP protocol session, and this request carried no `mcp-session-id`. Run `initialize` first — managed PTYs auto-bind from $TUIC_SESSION. Tools that need no caller identity work without it."});
                 }
             };
+            let previously_bound = state
+                .mcp_to_session
+                .get(&mcp_sid)
+                .map(|entry| entry.value().clone());
             let (tuic_session, generated_identity) =
                 match resolve_registration_identity(state, args, &mcp_sid) {
                     Ok(identity) => identity,
@@ -3030,6 +4033,12 @@ fn handle_messaging(
                 .peer_agents
                 .get(&tuic_session)
                 .map(|peer| (peer.name.clone(), peer.project.clone()));
+            let orchestrator = args["orchestrator"].as_bool().unwrap_or_else(|| {
+                state.orchestrator_peers.contains(&tuic_session)
+                    || previously_bound
+                        .as_ref()
+                        .is_some_and(|prior| state.orchestrator_peers.contains(prior))
+            });
             let name = args["name"]
                 .as_str()
                 .map(str::to_string)
@@ -3054,7 +4063,29 @@ fn handle_messaging(
                 now_ms,
             ) {
                 Ok(prior) => prior,
-                Err(error) => return serde_json::json!({"error": error}),
+                Err(error) => {
+                    // A refused claimant retries; report the first sighting in
+                    // full and keep the repeats out of the log.
+                    match takeover_rejection_report(&tuic_session, &mcp_sid) {
+                        Some(suppressed) => tracing::warn!(
+                            source = "agent_msg",
+                            event = "live_binding_takeover_rejected",
+                            tuic_session = %tuic_session,
+                            mcp_session = %mcp_sid,
+                            suppressed_since_last_report = suppressed,
+                            error = %error,
+                            "Refused a register takeover of a live peer identity"
+                        ),
+                        None => tracing::debug!(
+                            source = "agent_msg",
+                            event = "live_binding_takeover_rejected",
+                            tuic_session = %tuic_session,
+                            mcp_session = %mcp_sid,
+                            "Refused a register takeover (repeat)"
+                        ),
+                    }
+                    return serde_json::json!({"error": error});
+                }
             };
             if let Some(prior_mcp) = prior_mcp {
                 tracing::warn!(
@@ -3065,6 +4096,30 @@ fn handle_messaging(
                     mcp_session = %mcp_sid,
                     "Reclaimed stale MCP peer binding after reconnect"
                 );
+            }
+            // Which prior identity is this registration superseding? The implicit
+            // answer only exists when the SAME protocol session rebinds. A caller
+            // that reconnects and registers a new UUID arrives with no link at all,
+            // so its old inbox used to be stranded with nobody told — it must say
+            // which identity it replaces. Guessing (by name, by project) is not an
+            // option: peer identity decides who may read whose mail.
+            let superseded = previously_bound
+                .filter(|prior| prior != &tuic_session)
+                .or_else(|| {
+                    args["replaces"]
+                        .as_str()
+                        .map(str::to_string)
+                        .filter(|prior| prior != &tuic_session)
+                        .filter(|prior| state.peer_agents.contains_key(prior))
+                });
+            let handoff = superseded
+                .as_ref()
+                .map(|phantom| retire_repaired_phantom_identity(state, phantom, &tuic_session));
+            if orchestrator {
+                state.orchestrator_peers.insert(tuic_session.clone());
+            } else {
+                state.orchestrator_peers.remove(&tuic_session);
+                state.clear_orchestrator_delivery(&tuic_session);
             }
             let linked_children = link_pending_children_to_parent(state, &mcp_sid, &tuic_session);
             // Identity bindings are security-relevant; record them (no message content).
@@ -3086,28 +4141,76 @@ fn handle_messaging(
             // static instructions can stay compact (AC1 token budget). Any agent
             // that registers immediately receives the operational details it needs
             // for spawn/monitor/cleanup.
-            serde_json::json!({
+            // Whether this identity has a terminal behind it. An identity that
+            // resolves to no live PTY is a mailbox and nothing more: no `send` can be
+            // typed into it and no wake can reach it, so it must say so instead of
+            // implying the peer is addressable in the usual sense. That silence is
+            // how a self-registered identity with no PTY (headerless bridge, agent
+            // launched outside TUIC, invented UUID) ended up losing every reply.
+            let has_terminal = state.live_pty_for_peer(&tuic_session).is_some();
+            let has_managed_lifecycle = state
+                .live_pty_for_peer(&tuic_session)
+                .and_then(|session_id| {
+                    state
+                        .session_states
+                        .get(&session_id)
+                        .map(|session| session.agent_type.is_some())
+                })
+                .unwrap_or(false);
+            let wake_capability = if orchestrator && has_managed_lifecycle {
+                "managed_pty_lifecycle"
+            } else {
+                "none"
+            };
+            let mut response = serde_json::json!({
                 "ok": true,
                 "tuic_session": tuic_session,
                 "name": name,
                 "linked_children": linked_children,
                 "identity_generated": generated_identity,
-                "identity": if generated_identity {
-                    "This headerless caller now has an MCP-scoped UUID. It is stable for this MCP connection and requires no PTY. Supply an explicit UUID on a future connection when cross-reconnect identity stability is required."
+                "terminal": has_terminal,
+                "orchestrator": orchestrator,
+                "mail_wake": wake_capability,
+                "identity": if !has_terminal {
+                    "This identity has NO terminal behind it: nothing can be typed into it and no message can wake it. Incoming mail only lands in your inbox, so you MUST consume it yourself — `agent action=wait` (blocking) or `agent action=inbox`. To be reachable through a terminal, run inside a TUIC-managed PTY so the bridge asserts its $TUIC_SESSION, or let TUIC spawn you with agent action=spawn."
+                } else if generated_identity {
+                    "This headerless caller now has an MCP-scoped UUID. It is stable for this MCP connection. Supply an explicit UUID on a future connection when cross-reconnect identity stability is required."
                 } else {
                     "This MCP session is bound to its managed or explicitly supplied stable UUID."
                 },
                 "workflow": {
                     "spawn_same_repo": "agent action=spawn prompt=<task> cwd=<repo_path> — returns {session_id, monitor_with, peer_monitor_with?, wait_with}. As orchestrator, prefer wait/inbox over raw session output to avoid token burn.",
                     "spawn_isolated": "repo action=worktree_create path=<repo> branch=<name> spawn_session=true — worktree + PTY in one call.",
-                    "monitor": "Use blocking waits instead of polling: agent action=wait since=<last_ms> (wakes on new mail) or session action=wait session_id=<id> until=idle|exited. Task results arrive through agent send/inbox. Use session output only as an anomaly fallback when a child failed to send.",
-                    "auto_state_change": "Spawned peers auto-post state only: {type:state_change, state:idle|completed|exited, session_id, exit_code?}. This is not task output. Every child must report its result or blocker with agent action=send; use session output only when a child anomalously failed to send.",
-                    "send": "agent action=send to=<peer_tuic_session> message=<text, max 64KB>. The message is always buffered in the inbox and is TYPED into an idle peer's terminal so it acts immediately; a busy peer gets it on its next idle transition. Response `accepted=true` confirms delivery acceptance; `delivered_via_channel` only reports the optional SSE path.",
+                    "monitor": "Use blocking waits instead of polling: agent action=wait (wakes on new mail; the cursor is kept server-side) or session action=wait session_id=<id> until=idle|exited. Task results arrive through agent send/inbox. Use session output only as an anomaly fallback when a child failed to send.",
+                    "auto_state_change": "Spawned peers auto-post state only: {type:state_change, state:idle|completed|exited|awaiting_input, session_id, exit_code?, prompt?}. This is not task output. awaiting_input means the child hit an interactive prompt and is parked with nobody at its keyboard — it will NOT progress until you answer it with session action=input (the `prompt` field carries the question). Every child must report its result or blocker with agent action=send; use session output only when a child anomalously failed to send.",
+                    "send": "agent action=send to=<peer_tuic_session> message=<text, max 64KB>. The message is always buffered in the inbox. A peer explicitly registered with orchestrator=true keeps payloads out of its active turn and composer; managed idle/completed lifecycle may submit one coalesced, payload-free wake instructing `agent action=inbox`, while working, external, or unknown state stays inbox-only. An active agent wait owns delivery and suppresses that wake. Check `delivered` and `delivery_path` (the only route field); `accepted=true` only confirms buffering.",
                     "list_peers": "agent action=list_peers project=<optional filter> — see who else is connected.",
                     "conflict_control": "Use send/inbox to serialize shared-file edits: child sends 'claim <path>', orchestrator replies 'ack'/'deny'; child sends 'release <path>' on commit. Orchestrator is the arbiter — children never ack each other directly.",
                     "cleanup": "On MCP session close, peer routes and inbox are drained. Managed PTY lifecycle remains separate; an MCP-scoped external identity has no PTY to reap."
                 }
-            })
+            });
+            // Say what happened to the superseded identity's mail. Both outcomes were
+            // silent before: a migration looked like nothing happened, and a skip left
+            // messages addressed to the old UUID unread with no wake and no notice.
+            if let (Some(prior), Some(handoff)) = (superseded.as_deref(), handoff) {
+                let object = response
+                    .as_object_mut()
+                    .expect("register response is an object");
+                object.insert("superseded_identity".to_string(), serde_json::json!(prior));
+                match handoff {
+                    IdentityHandoff::Migrated { messages } => {
+                        object.insert("mail_migrated".to_string(), serde_json::json!(messages));
+                    }
+                    IdentityHandoff::SkippedLivePty { pending } => {
+                        object.insert("mail_migrated".to_string(), serde_json::json!(0));
+                        object.insert("mail_stranded".to_string(), serde_json::json!(pending));
+                        object.insert("identity_warning".to_string(), serde_json::json!(format!(
+                            "'{prior}' still owns a live PTY, so it is a reachable peer and its mail was NOT moved: {pending} message(s) remain addressed to it. Taking them would strand a working agent. Read them as that identity, or have it hand over by registering from its own session."
+                        )));
+                    }
+                }
+            }
+            response
         }
         "list_peers" => {
             let project_filter = args["project"].as_str();
@@ -3127,6 +4230,22 @@ fn handle_messaging(
                         "tuic_session": p.tuic_session,
                         "name": p.name,
                         "registered_at": p.registered_at,
+                        "orchestrator": state.orchestrator_peers.contains(&p.tuic_session),
+                        "mail_wake": if state.orchestrator_peers.contains(&p.tuic_session)
+                            && state
+                                .live_pty_for_peer(&p.tuic_session)
+                                .and_then(|session_id| {
+                                    state
+                                        .session_states
+                                        .get(&session_id)
+                                        .map(|session| session.agent_type.is_some())
+                                })
+                                .unwrap_or(false)
+                        {
+                            "managed_pty_lifecycle"
+                        } else {
+                            "none"
+                        },
                     });
                     insert_optional_value(
                         peer.as_object_mut().expect("peer entry is an object"),
@@ -3165,13 +4284,9 @@ fn handle_messaging(
                 }) {
                 Some(s) => s,
                 None => {
-                    return serde_json::json!({"error": "You are not registered. Register first with messaging action=register"});
+                    return serde_json::json!({"error": "You are not registered. Register first with agent action=register"});
                 }
             };
-            // Check recipient exists
-            if !state.peer_agents.contains_key(to) {
-                return serde_json::json!({"error": format!("Recipient '{}' is not registered. Use list_peers to find valid targets.", to)});
-            }
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -3190,8 +4305,102 @@ fn handle_messaging(
             // Buffer first, then assign exactly one wake-up owner. Assignment preserves
             // a claim made by a concurrent waiter between these two operations.
             // External peers without a live SSE subscriber remain inbox-only.
-            state.push_agent_inbox(to, msg);
-            let managed_recipient = state.sessions.contains_key(to);
+            //
+            // The existence check and the buffering are one critical section under
+            // the identity lock: `retire_repaired_phantom_identity` deletes the
+            // recipient and drains its inbox under the same guard, so a message can
+            // never be filed under an identity that is removed a moment later.
+            let message_timestamp = {
+                let _bind_guard = PEER_IDENTITY_BIND_LOCK.lock();
+                if !state.peer_agents.contains_key(to) {
+                    return serde_json::json!({"error": format!("Recipient '{}' is not registered. Use list_peers to find valid targets.", to)});
+                }
+                state.push_agent_inbox(to, msg)
+            };
+            // Resolve, do not compare. A self-registering agent announces its
+            // `$TUIC_SESSION`, which is not the key its PTY was filed under, so the
+            // old `sessions.contains_key(to)` answered "no terminal" for every peer
+            // that had not been spawned by the server itself.
+            let live_pty = state.live_pty_for_peer(to);
+            let managed_recipient = live_pty.is_some();
+            if let Some(assignment) = crate::pty::route_registered_orchestrator_mail(
+                state,
+                to,
+                &msg_id,
+                message_timestamp,
+            ) {
+                use crate::state::OrchestratorDeliveryAssignment;
+
+                let (delivered, delivery_path) = match assignment {
+                    OrchestratorDeliveryAssignment::Waiter => (true, "waiter_and_inbox"),
+                    OrchestratorDeliveryAssignment::WakeSubmitted => {
+                        (true, "wake_notification_and_inbox")
+                    }
+                    // Unreachable for a peer `send`: its own payload is in the
+                    // covered window, which disqualifies the lifecycle summary.
+                    // Mapped anyway so the two never drift.
+                    OrchestratorDeliveryAssignment::WakeSummarySubmitted => {
+                        (true, "lifecycle_summary_and_inbox")
+                    }
+                    OrchestratorDeliveryAssignment::WakeCoalesced => {
+                        (true, "coalesced_wake_and_inbox")
+                    }
+                    OrchestratorDeliveryAssignment::InboxOnly => (false, "inbox_only"),
+                };
+                tracing::info!(
+                    source = "agent_msg",
+                    event = "send",
+                    from = %sender_tuic,
+                    from_name = %sender_name,
+                    to = %to,
+                    bytes = message.len(),
+                    delivered_via_channel = false,
+                    message_id = %msg_id,
+                    "Peer message routed to orchestrator inbox"
+                );
+                let mut response = serde_json::json!({
+                    "ok": true,
+                    "accepted": true,
+                    "message_id": msg_id,
+                    "buffered_in_inbox": true,
+                    "delivered": delivered,
+                    // See the note on the other send response: `delivery_path` is the
+                    // single source of truth for the route. This branch used to
+                    // hardcode `delivered_via_channel: false` next to a `delivered:
+                    // true` — factually correct, and unreadable.
+                    "delivery_path": delivery_path,
+                });
+                if !delivered {
+                    let object = response
+                        .as_object_mut()
+                        .expect("send response is an object");
+                    object.insert(
+                        "warning".to_string(),
+                        serde_json::json!(if managed_recipient {
+                            "The orchestrator is not authoritatively idle/completed and has no active wait. The message remains inbox-only until it reads the inbox."
+                        } else {
+                            "Recipient has NO terminal and no active wait: nothing will wake it. The message stays in its inbox until it calls agent action=wait/inbox. If you need an answer, do not block on it."
+                        }),
+                    );
+                    object.insert(
+                        "recipient_has_terminal".to_string(),
+                        serde_json::json!(managed_recipient),
+                    );
+                }
+                insert_optional_value(
+                    response
+                        .as_object_mut()
+                        .expect("send response is an object"),
+                    "recipient_state",
+                    live_pty
+                        .as_deref()
+                        .and_then(|pty_session| managed_recipient_state(state, pty_session)),
+                );
+                return response;
+            }
+            // The channel-eligibility probe reads agent lifecycle state, which is
+            // filed under the PTY key like everything else.
+            let channel_pty = live_pty.clone();
             let recipient_mcp_sid = state.peer_agents.get(to).map(|p| p.mcp_session_id.clone());
             let notification = serde_json::json!({
                 "jsonrpc": "2.0",
@@ -3216,7 +4425,7 @@ fn handle_messaging(
                     };
                     if !recipient_supports_active_claude_channel(
                         state,
-                        to,
+                        channel_pty.as_deref().unwrap_or(to),
                         mcp_sid,
                         managed_recipient,
                     ) {
@@ -3248,23 +4457,31 @@ fn handle_messaging(
             }
 
             #[cfg(unix)]
-            if managed_recipient && let Err(e) = crate::pty::wake_session(state, to) {
-                tracing::debug!(session = %to, error = %e, "Wake on message delivery failed");
+            if let Some(pty_session) = live_pty.as_deref()
+                && let Err(e) = crate::pty::wake_session(state, pty_session)
+            {
+                tracing::debug!(session = %pty_session, error = %e, "Wake on message delivery failed");
             }
             // Event-driven wake: type the message into an idle recipient's terminal
             // so it acts without polling. Skip when already pushed over the SSE
             // channel (Claude Code consumes that notification itself, so PTY
             // injection would double-deliver). The inbox always holds the
             // authoritative copy.
-            let pty_dispatched = terminal_owned && !pushed && {
-                let framed = frame_peer_message(&sender_name, message);
-                crate::pty::deliver_message_to_managed_pty(state, to, &framed)
-            };
-            if pty_dispatched {
-                state.mark_terminal_delivery_dispatched(to, &msg_id);
-            } else if terminal_owned && !pushed {
-                state.release_terminal_delivery(to, &msg_id);
-                inbox_only = true;
+            let terminal_outcome =
+                live_pty
+                    .as_ref()
+                    .filter(|_| terminal_owned && !pushed)
+                    .map(|pty_session| {
+                        let framed = frame_peer_message(&sender_name, message);
+                        crate::pty::deliver_message_to_managed_pty(state, pty_session, &framed)
+                    });
+            if let Some(outcome) = terminal_outcome {
+                crate::pty::settle_terminal_delivery(state, to, &msg_id, outcome);
+                // Only a session that cannot take the message at all falls back to
+                // the inbox. `Queued` is still a terminal delivery — it types on the
+                // recipient's next idle transition — so reporting it as inbox_only
+                // would understate what happens.
+                inbox_only = outcome == crate::pty::PtyDelivery::Unavailable;
             }
             // Forensic trail: sender, recipient, size, and delivery path — but never the
             // content (it can be up to 64 KB and may carry sensitive coordination text).
@@ -3284,7 +4501,18 @@ fn handle_messaging(
                 "accepted": true,
                 "message_id": msg_id,
                 "buffered_in_inbox": true,
-                "delivered_via_channel": pushed,
+                // `delivered` answers the only question the sender actually has:
+                // will anything surface this message? A waiter consumed it, the SSE
+                // channel took it, or the terminal typed/queued it — those reach the
+                // recipient. `inbox_only` does not: it means no waiter, no channel and
+                // no live terminal, so the message sits unread until the recipient
+                // polls. Reporting that as a bare `ok` is how an orchestrator's reply
+                // vanished while both sides believed delivery had happened.
+                "delivered": !inbox_only,
+                // No `delivered_via_channel` here: it reported one sub-route (SSE)
+                // but read as a delivery verdict, so `false` alongside a confirming
+                // `delivery_path` was pure ambiguity. `delivery_path` names the SSE
+                // case as `sse_channel_and_inbox` and subsumes it.
                 "delivery_path": if waiter_owned {
                     "waiter_and_inbox"
                 } else if pushed {
@@ -3295,12 +4523,31 @@ fn handle_messaging(
                     "terminal_or_queued_and_inbox"
                 },
             });
+            if inbox_only {
+                let object = response
+                    .as_object_mut()
+                    .expect("send response is an object");
+                object.insert(
+                    "warning".to_string(),
+                    serde_json::json!(if managed_recipient {
+                        "Recipient has a terminal but could not take the message and has no active wait — it stays in the inbox until the recipient reads it."
+                    } else {
+                        "Recipient has NO terminal and no active wait: nothing will wake it. The message stays in its inbox until it calls agent action=wait/inbox. If you need an answer, do not block on it."
+                    }),
+                );
+                object.insert(
+                    "recipient_has_terminal".to_string(),
+                    serde_json::json!(managed_recipient),
+                );
+            }
             insert_optional_value(
                 response
                     .as_object_mut()
                     .expect("send response is an object"),
                 "recipient_state",
-                managed_recipient_state(state, to),
+                live_pty
+                    .as_deref()
+                    .and_then(|pty_session| managed_recipient_state(state, pty_session)),
             );
             response
         }
@@ -3312,28 +4559,31 @@ fn handle_messaging(
             {
                 Some(ts) => ts,
                 None => {
-                    return serde_json::json!({"error": "You are not registered. Register first with messaging action=register"});
+                    return serde_json::json!({"error": "You are not registered. Register first with agent action=register"});
                 }
             };
             let limit = args["limit"].as_u64().unwrap_or(50) as usize;
-            let since = args["since"].as_u64().unwrap_or(0);
-            let messages: Vec<crate::state::AgentMessage> = state
-                .agent_inbox
-                .get(&tuic_session)
-                .map(|inbox| {
-                    bounded_agent_messages(
-                        inbox.iter().filter(|message| message.timestamp > since),
-                        limit,
-                    )
-                })
-                .unwrap_or_default();
+            let since = resolve_agent_since(state, &tuic_session, args);
+            let messages = state.observe_agent_inbox(&tuic_session, since, limit);
+            // Same contract as wait: always hand back a usable cursor, falling back
+            // to the position we read from when the batch is empty.
+            let next_since = messages
+                .iter()
+                .map(|message| message.timestamp)
+                .max()
+                .unwrap_or(since);
+            advance_agent_cursor(state, &tuic_session, next_since);
             // Consume and reset eviction counter (so caller knows since last read)
             let missed_count = state
                 .agent_inbox_evictions
                 .remove(&tuic_session)
                 .map(|(_, n)| n)
                 .unwrap_or(0);
-            let mut resp = serde_json::json!({"messages": messages, "count": messages.len()});
+            let mut resp = serde_json::json!({
+                "messages": messages,
+                "count": messages.len(),
+                "next_since": next_since,
+            });
             if missed_count > 0 {
                 resp["missed_count"] = serde_json::json!(missed_count);
             }
@@ -3388,27 +4638,23 @@ fn handle_config(
                     return serde_json::json!({"error": "Action 'save' requires 'config' object"});
                 }
             };
-            let mut config: crate::config::AppConfig =
-                match serde_json::from_value(config_val.clone()) {
-                    Ok(c) => c,
-                    Err(e) => return serde_json::json!({"error": format!("Invalid config: {}", e)}),
-                };
-            // Preserve server-managed secrets
-            {
-                let current = state.config.read();
-                crate::config::preserve_redacted_app_config_secrets(&mut config, &current);
-            }
-            match crate::config::save_app_config(config.clone()) {
-                Ok(()) => {
-                    let (old_disabled, old_collapse) = {
-                        let c = state.config.read();
-                        (c.disabled_native_tools.clone(), c.collapse_tools)
-                    };
-                    *state.config.write() = config.clone();
-                    if old_disabled != config.disabled_native_tools
-                        || old_collapse != config.collapse_tools
-                    {
+            // The schema advertises "config fields to save", so callers legitimately
+            // send a subset. Merge it onto the live config — deserializing the
+            // payload on its own would default every omitted field away.
+            // The merge runs inside the config write lock so it applies to the config as
+            // it is at write time — this handler already runs on the blocking pool.
+            match crate::config::commit_config_change(state, |current| {
+                crate::config::merge_partial_app_config(current, config_val.clone())
+            }) {
+                Ok(effects) => {
+                    if effects.tools_changed {
                         let _ = state.mcp_tools_changed.send(());
+                    }
+                    if effects.server_changed {
+                        super::restart_after_server_settings_change(
+                            state,
+                            "remote-access configuration changed over MCP",
+                        );
                     }
                     serde_json::json!({"ok": true})
                 }
@@ -3755,6 +5001,40 @@ fn handle_workspace(state: &Arc<AppState>, args: &serde_json::Value) -> serde_js
     }
 }
 
+/// The TUIC session behind an MCP call, when the caller is bound to a PTY.
+/// `None` for an unbound caller — never guess one, a wrong id would send a
+/// toast click to somebody else's terminal.
+fn resolve_mcp_origin_session(
+    state: &Arc<AppState>,
+    mcp_session_id: Option<&str>,
+) -> Option<String> {
+    mcp_session_id.and_then(|mcp_sid| state.mcp_to_session.get(mcp_sid).map(|s| s.value().clone()))
+}
+
+fn resolve_mcp_origin_repo_path(
+    state: &Arc<AppState>,
+    mcp_session_id: Option<&str>,
+) -> Option<String> {
+    let caller_tuic = resolve_mcp_origin_session(state, mcp_session_id);
+    caller_tuic
+        .as_ref()
+        .and_then(|tuic| {
+            state
+                .peer_agents
+                .get(tuic)
+                .and_then(|p| p.project.clone())
+                .or_else(|| state.sessions.get(tuic).and_then(|s| s.lock().cwd.clone()))
+        })
+        .or_else(|| {
+            mcp_session_id.and_then(|sid| {
+                state
+                    .mcp_sessions
+                    .get(sid)
+                    .and_then(|m| m.repo_path.clone())
+            })
+        })
+}
+
 fn handle_ui(
     state: &Arc<AppState>,
     args: &serde_json::Value,
@@ -3803,23 +5083,7 @@ fn handle_ui(
             // repo happens to have focus in the frontend.
             let caller_tuic = mcp_session_id
                 .and_then(|mcp_sid| state.mcp_to_session.get(mcp_sid).map(|s| s.value().clone()));
-            let origin_repo_path: Option<String> = caller_tuic
-                .as_ref()
-                .and_then(|tuic| {
-                    state
-                        .peer_agents
-                        .get(tuic)
-                        .and_then(|p| p.project.clone())
-                        .or_else(|| state.sessions.get(tuic).and_then(|s| s.lock().cwd.clone()))
-                })
-                .or_else(|| {
-                    mcp_session_id.and_then(|sid| {
-                        state
-                            .mcp_sessions
-                            .get(sid)
-                            .and_then(|m| m.repo_path.clone())
-                    })
-                });
+            let origin_repo_path = resolve_mcp_origin_repo_path(state, mcp_session_id);
             let mut payload = serde_json::json!({
                 "id": id,
                 "title": title,
@@ -3865,10 +5129,57 @@ fn handle_ui(
     }
 }
 
+/// Sounds an MCP caller may request by name. `attention` is the callback added for
+/// autonomous agents that need the user back at the keyboard; the rest are the
+/// tones already wired into the app's own notifications, exposed so a caller can
+/// borrow the meaning the user has already learned.
+const TOAST_SOUNDS: [&str; 6] = [
+    "question",
+    "completion",
+    "error",
+    "warning",
+    "info",
+    "attention",
+];
+
+/// Resolve the `sound` argument of `ui action=toast` into a notification sound
+/// name, or `None` for a silent toast.
+///
+/// `true` keeps meaning "the sound that matches this level" — but it now
+/// resolves to a real `NotificationSound` rather than a toast-local tone, so a
+/// muted sound or a chosen output device is honoured either way. A name lets the
+/// caller override that, which is the whole point of `attention`: the level says
+/// how bad it is, the sound says how hard to pull on the user's sleeve.
+fn resolve_toast_sound(
+    sound: &serde_json::Value,
+    level: &str,
+) -> Result<Option<String>, serde_json::Value> {
+    match sound {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Bool(false) => Ok(None),
+        serde_json::Value::Bool(true) => Ok(Some(
+            match level {
+                "warn" => "warning",
+                "error" => "error",
+                _ => "info",
+            }
+            .to_string(),
+        )),
+        serde_json::Value::String(name) if TOAST_SOUNDS.contains(&name.as_str()) => {
+            Ok(Some(name.clone()))
+        }
+        other => Err(serde_json::json!({"error": format!(
+            "Invalid sound {}. Use true/false or one of: {}",
+            other,
+            TOAST_SOUNDS.join(", ")
+        )})),
+    }
+}
+
 fn handle_notify(
     state: &Arc<AppState>,
-    addr: SocketAddr,
     args: &serde_json::Value,
+    mcp_session_id: Option<&str>,
 ) -> serde_json::Value {
     let action = match require_action(args, "notify", LEGACY_NOTIFY_ACTIONS) {
         Ok(a) => a,
@@ -3890,51 +5201,40 @@ fn handle_notify(
                     )});
                 }
             };
-            let sound = args["sound"].as_bool().unwrap_or(false);
+            let sound = match resolve_toast_sound(&args["sound"], &level) {
+                Ok(sound) => sound,
+                Err(e) => return e,
+            };
+            let origin_repo_path = resolve_mcp_origin_repo_path(state, mcp_session_id);
+            let origin_session_id = resolve_mcp_origin_session(state, mcp_session_id);
+            // Dual-emit. The bus only reaches SSE clients (browser/PWA); the
+            // desktop WebView listens on the Tauri bridge and there is no
+            // bus→window forwarder, so a bus-only send made this tool a no-op on
+            // the very client the user is usually sitting in front of.
+            #[cfg(feature = "desktop")]
+            if let Some(ref app) = *state.app_handle.read() {
+                use tauri::Emitter;
+                let _ = app.emit(
+                    "mcp-toast",
+                    serde_json::json!({
+                        "title": title,
+                        "message": message,
+                        "level": level,
+                        "sound": sound,
+                        "origin_repo_path": origin_repo_path,
+                        "origin_session_id": origin_session_id,
+                    }),
+                );
+            }
             let _ = state.event_bus.send(crate::state::AppEvent::McpToast {
                 title,
                 message,
                 level,
                 sound,
+                origin_repo_path,
+                origin_session_id,
             });
             serde_json::json!({"ok": true})
-        }
-        "confirm" => {
-            #[cfg(not(feature = "desktop"))]
-            {
-                serde_json::json!({"error": "Action 'confirm' requires desktop feature"})
-            }
-            #[cfg(feature = "desktop")]
-            {
-                if !addr.ip().is_loopback() {
-                    return serde_json::json!({"error": "Action 'confirm' is restricted to localhost connections"});
-                }
-                let title = match args["title"].as_str() {
-                    Some(t) => t.to_string(),
-                    None => {
-                        return serde_json::json!({"error": "Action 'confirm' requires 'title'"});
-                    }
-                };
-                let message = args["message"].as_str().unwrap_or("").to_string();
-
-                let app_handle = state.app_handle.read();
-                let handle = match app_handle.as_ref() {
-                    Some(h) => h,
-                    None => {
-                        return serde_json::json!({"error": "App handle not available (headless mode)"});
-                    }
-                };
-
-                use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-                let confirmed = handle
-                    .dialog()
-                    .message(&message)
-                    .title(&title)
-                    .buttons(MessageDialogButtons::OkCancel)
-                    .blocking_show();
-
-                serde_json::json!({"confirmed": confirmed})
-            }
         }
         other => serde_json::json!({"error": format!(
             "Unknown action '{}' for tool 'notify'. Available: {}", other, LEGACY_NOTIFY_ACTIONS
@@ -3942,16 +5242,122 @@ fn handle_notify(
     }
 }
 
+/// How long a confirmation waits for a human before it gives up.
+///
+/// Matches the MCP wait ceiling used elsewhere. A native dialog waited forever,
+/// which is only tolerable when the human is guaranteed to be at the machine —
+/// the whole point of routing this through the clients is that they may not be.
+const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Ask the human a yes/no question and wait for the answer.
+///
+/// The request goes to **every** client — desktop WebView, browser, mobile PWA —
+/// plus a mobile push, and the first answer wins. It used to be a native OS
+/// dialog, which meant an agent asking to confirm a destructive operation blocked
+/// until someone walked back to the machine: unanswerable, and therefore blocking,
+/// for a human working remotely.
+///
+/// A request nobody answers within [`CONFIRM_TIMEOUT`] resolves as *not* confirmed
+/// and says so, so the caller can tell silence apart from a deliberate refusal.
+async fn handle_confirm(
+    state: &Arc<AppState>,
+    addr: SocketAddr,
+    args: &serde_json::Value,
+    mcp_session_id: Option<&str>,
+) -> serde_json::Value {
+    if !addr.ip().is_loopback() {
+        return serde_json::json!({"error": "Action 'confirm' is restricted to localhost connections"});
+    }
+    let title = match args["title"].as_str() {
+        Some(t) => t.to_string(),
+        None => return serde_json::json!({"error": "Action 'confirm' requires 'title'"}),
+    };
+    let message = args["message"].as_str().unwrap_or("").to_string();
+    let origin_repo_path = resolve_mcp_origin_repo_path(state, mcp_session_id);
+    let origin_session_id = resolve_mcp_origin_session(state, mcp_session_id);
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state.confirm_responses.insert(request_id.clone(), tx);
+
+    // Dual-emit, same reason as the toast above: the bus only reaches SSE
+    // clients, and there is no bus→window forwarder for the desktop WebView.
+    #[cfg(feature = "desktop")]
+    if let Some(ref app) = *state.app_handle.read() {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "mcp-confirm",
+            serde_json::json!({
+                "request_id": request_id,
+                "title": title,
+                "message": message,
+                "origin_repo_path": origin_repo_path,
+                "origin_session_id": origin_session_id,
+            }),
+        );
+    }
+    let _ = state.event_bus.send(crate::state::AppEvent::McpConfirm {
+        request_id: request_id.clone(),
+        title: title.clone(),
+        message: message.clone(),
+        origin_repo_path,
+        origin_session_id: origin_session_id.clone(),
+    });
+
+    // A PWA that is not open receives nothing over SSE, so push is the only way
+    // a remote human learns an agent is waiting on them.
+    let url = match origin_session_id {
+        Some(ref sid) => format!("/mobile/session/{sid}"),
+        None => "/mobile".to_string(),
+    };
+    let body = if message.is_empty() {
+        title.clone()
+    } else {
+        format!("{title} — {message}")
+    };
+    crate::state::AppState::send_mobile_push_url(state, url, &body);
+
+    let confirmed = match tokio::time::timeout(CONFIRM_TIMEOUT, rx).await {
+        Ok(Ok(answer)) => answer,
+        // Sender dropped without answering, or nobody answered in time. Both are
+        // "no human said yes", which is the safe reading for a destructive op.
+        _ => {
+            state.confirm_responses.remove(&request_id);
+            let _ = state
+                .event_bus
+                .send(crate::state::AppEvent::McpConfirmResolved {
+                    request_id: request_id.clone(),
+                    confirmed: false,
+                });
+            #[cfg(feature = "desktop")]
+            if let Some(ref app) = *state.app_handle.read() {
+                use tauri::Emitter;
+                let _ = app.emit(
+                    "mcp-confirm-resolved",
+                    serde_json::json!({ "request_id": request_id, "confirmed": false }),
+                );
+            }
+            return serde_json::json!({
+                "confirmed": false,
+                "reason": format!("no answer within {}s", CONFIRM_TIMEOUT.as_secs()),
+            });
+        }
+    };
+    serde_json::json!({"confirmed": confirmed})
+}
+
 // ---------------------------------------------------------------------------
 // Knowledge (cross-repo mdkb fan-out)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Streamable HTTP transport (MCP spec 2025-03-26)
+// Streamable HTTP transport (legacy MCP spec 2025-11-25)
 // Single /mcp endpoint — POST for JSON-RPC, GET for SSE notifications, DELETE ends session
 // ---------------------------------------------------------------------------
 
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2026-07-28", "2025-11-25", "2025-03-26"];
+const LEGACY_PROTOCOL_VERSION: &str = SUPPORTED_PROTOCOL_VERSIONS[1];
 
 /// Resolve a filesystem path to one of the known repo roots, picking the longest
 /// matching prefix that respects path-component boundaries (so `/foo/bar` does
@@ -3978,9 +5384,10 @@ pub(super) async fn mcp_post(
 
     match method {
         "initialize" => {
-            let session_id = initialize_session_id(&state, &headers);
+            let (session_id, init_kind) = initialize_session_id(&state, &headers);
             let client_name = body["params"]["clientInfo"]["name"].as_str();
             let is_claude_code = detect_claude_code_client(client_name);
+            let requires_meta_tools = client_requires_meta_tools(client_name);
 
             // Extract repo_path from MCP initialize roots[0].uri (file:// URI)
             let repo_path = body["params"]["roots"]
@@ -4001,6 +5408,7 @@ pub(super) async fn mcp_post(
             if let Some(mut meta) = state.mcp_sessions.get_mut(&session_id) {
                 meta.last_activity = now;
                 meta.is_claude_code = is_claude_code;
+                meta.requires_meta_tools = requires_meta_tools;
                 if repo_path.is_some() {
                     meta.repo_path = repo_path;
                 }
@@ -4010,7 +5418,9 @@ pub(super) async fn mcp_post(
                     crate::state::McpSessionMeta {
                         last_activity: now,
                         is_claude_code,
+                        requires_meta_tools,
                         has_sse_stream: false,
+                        sse_generation: 0,
                         repo_path,
                     },
                 );
@@ -4026,13 +5436,31 @@ pub(super) async fn mcp_post(
                 .and_then(|v| v.to_str().ok());
             apply_initialize_identity(&state, &session_id, tuic_session_header);
 
-            let instructions = build_mcp_instructions(&state, client_name);
+            // One record per handshake. `initialize` happens once per client
+            // connection, so this is not a hot path, and it is the only evidence
+            // that an agent's MCP connection actually dropped and came back.
+            tracing::info!(
+                source = "mcp_initialize",
+                event = init_kind.as_str(),
+                client = client_name.unwrap_or("unknown"),
+                mcp_session = %session_id,
+                tuic_session = tuic_session_header.unwrap_or(""),
+                presented_session = match &init_kind {
+                    InitializeKind::Reconnected { presented } => presented.as_str(),
+                    _ => "",
+                },
+                "MCP initialize"
+            );
+
+            let effective_collapse = state.config.read().collapse_tools || requires_meta_tools;
+            let instructions =
+                build_mcp_instructions_for_mode(&state, client_name, effective_collapse);
 
             let response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": "2025-03-26",
+                    "protocolVersion": LEGACY_PROTOCOL_VERSION,
                     "capabilities": {
                         "tools": {},
                         "experimental": { "claude/channel": {} }
@@ -4121,33 +5549,26 @@ pub(super) async fn mcp_post(
         }
 
         "tools/call" => {
-            // Validate MCP session. If the session ID is stale (e.g. app restarted, or
-            // long-lived client like Claude Code lost its session), auto-recover by
-            // re-registering the session instead of returning an error.
+            // Identity is resolved per call, not demanded up front. A caller that
+            // sends the header gets its session refreshed — stale ids (app restart,
+            // or a long-lived client like Claude Code that lost its session)
+            // auto-recover rather than erroring. A caller that sends none is served
+            // anyway: most tools need no identity, and the ones that do already
+            // refuse with guidance the caller can act on, which a blanket -32600
+            // never gave them.
             let is_cc_ua = detect_claude_code_from_headers(&headers);
-            let session_valid = headers
+            if let Some(sid) = headers
                 .get(MCP_SESSION_HEADER)
                 .and_then(|v| v.to_str().ok())
-                .map(|sid| {
-                    refresh_mcp_session(
-                        &state,
-                        sid,
-                        is_cc_ua,
-                        headers
-                            .get(TUIC_SESSION_HEADER)
-                            .and_then(|v| v.to_str().ok()),
-                    );
-                    true
-                })
-                .unwrap_or(false);
-            if !session_valid {
-                // No session header at all — reject
-                let response = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": { "code": -32600, "message": "mcp-session-id header required. Call initialize first." }
-                });
-                return Json(response).into_response();
+            {
+                refresh_mcp_session(
+                    &state,
+                    sid,
+                    is_cc_ua,
+                    headers
+                        .get(TUIC_SESSION_HEADER)
+                        .and_then(|v| v.to_str().ok()),
+                );
             }
 
             let params = body
@@ -4172,9 +5593,14 @@ pub(super) async fn mcp_post(
             );
 
             // Route upstream-prefixed tools ({upstream}__{tool}) via the proxy registry.
-            // Native tools (no "__") go through the sync handler via spawn_blocking.
-            let allowed = resolve_allowed_upstreams(&state, session_id_str.as_deref());
+            // Native tools (no "__") dispatch through handle_mcp_tool_call_with_context,
+            // which puts each blocking sync handler on the blocking pool itself
+            // (see run_blocking_handler) — this call site does not wrap anything.
             let (result, is_error) = if tool_name.contains("__") {
+                // Resolving the allowlist reads and parses repo-settings.json from
+                // disk. Only a proxied call consults it, so a native call must not
+                // pay for it.
+                let allowed = resolve_allowed_upstreams(&state, session_id_str.as_deref());
                 match state
                     .mcp_upstream_registry
                     .proxy_tool_call_for_repo(&tool_name, args.clone(), allowed.as_deref())
@@ -4224,6 +5650,62 @@ pub(super) async fn mcp_post(
     }
 }
 
+/// Streams are numbered from one counter for the whole process, never from the
+/// session. A session id can be removed and auto-recovered while an older stream
+/// for the previous incarnation is still draining; a per-session counter would
+/// restart at zero and hand that stale stream a number the new one also holds,
+/// and its teardown would then close the replacement.
+fn next_sse_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Releases the per-session SSE resources whenever the stream goes away —
+/// normal end, client disconnect, or server shutdown alike. Owned by the stream
+/// generator so it runs on drop; the only path a disconnect actually takes.
+///
+/// A half-open stream can still be alive when its own reconnect is accepted, so
+/// the release is conditional: the guard only clears the session it still owns.
+/// Unconditional cleanup let the older stream's drop remove the sender the new
+/// stream had just subscribed to, which closed the replacement immediately.
+///
+/// Lock order is `mcp_sessions` → `messaging_channels`, here and in `mcp_get`.
+/// Nothing may hold a `messaging_channels` reference while taking `mcp_sessions`.
+struct SseStreamTeardown {
+    state: Arc<AppState>,
+    mcp_sid: String,
+    generation: u64,
+}
+
+impl Drop for SseStreamTeardown {
+    fn drop(&mut self) {
+        use dashmap::mapref::entry::Entry;
+
+        // The session entry is held across the channel removal: releasing it
+        // first would let a reconnect take ownership and subscribe in between,
+        // and this drop would then remove the sender out from under it.
+        //
+        // `entry` rather than `get_mut` because the absent case needs the hold
+        // just as much: DELETE or the reaper can remove the session while this
+        // stream is still draining, and `get_mut` returning `None` releases the
+        // shard before the removal below. A reconnect landing in that window
+        // recreates the session, subscribes to a fresh sender, and then loses it
+        // to this drop. Only `entry` keeps the shard locked over an absent key.
+        match self.state.mcp_sessions.entry(self.mcp_sid.clone()) {
+            // Superseded: a newer stream owns the session and its channel.
+            Entry::Occupied(meta) if meta.get().sse_generation != self.generation => {}
+            Entry::Occupied(mut meta) => {
+                meta.get_mut().has_sse_stream = false;
+                self.state.messaging_channels.remove(&self.mcp_sid);
+            }
+            // The session itself is gone; nobody is left to own the channel.
+            Entry::Vacant(_) => {
+                self.state.messaging_channels.remove(&self.mcp_sid);
+            }
+        }
+    }
+}
+
 /// GET /mcp — SSE stream for MCP server→client notifications (tools/list_changed, channel messages).
 /// Requires a valid `mcp-session-id` header (established via POST /mcp initialize).
 pub(super) async fn mcp_get(
@@ -4236,52 +5718,60 @@ pub(super) async fn mcp_get(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let is_cc_ua = detect_claude_code_from_headers(&headers);
-    let session_valid = session_id
-        .as_deref()
-        .map(|sid| {
-            if !state.mcp_sessions.contains_key(sid) {
-                tracing::warn!(
-                    "MCP SSE session auto-recovered (stale session_id: {sid}); \
-                 is_claude_code={is_cc_ua} (from User-Agent)"
-                );
-                let now = std::time::Instant::now();
-                state.mcp_sessions.insert(
-                    sid.to_string(),
-                    crate::state::McpSessionMeta {
-                        last_activity: now,
-                        is_claude_code: is_cc_ua,
-                        has_sse_stream: false,
-                        repo_path: None,
-                    },
-                );
-            }
-            // Mark this session as having an active SSE stream
-            if let Some(mut meta) = state.mcp_sessions.get_mut(sid) {
-                meta.has_sse_stream = true;
-            }
-            true
-        })
-        .unwrap_or(false);
-    if !session_valid {
+    let Some(sid) = session_id else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let sid = session_id.unwrap(); // safe: session_valid=true implies Some
+    };
 
-    // Create or subscribe to per-session messaging channel
-    let msg_rx = {
+    if !state.mcp_sessions.contains_key(&sid) {
+        tracing::warn!(
+            "MCP SSE session auto-recovered (stale session_id: {sid}); \
+             is_claude_code={is_cc_ua} (from User-Agent)"
+        );
+        state.mcp_sessions.insert(
+            sid.clone(),
+            crate::state::McpSessionMeta {
+                last_activity: std::time::Instant::now(),
+                is_claude_code: is_cc_ua,
+                requires_meta_tools: false,
+                has_sse_stream: false,
+                sse_generation: 0,
+                repo_path: None,
+            },
+        );
+    }
+
+    // Take ownership of the session and subscribe to its channel under one hold
+    // of the session entry — the same one the teardown takes. Split apart, a
+    // superseded stream's teardown could pass its generation check, then remove
+    // the sender *after* this stream had already subscribed to it, and the
+    // replacement would open onto a closed channel.
+    let (generation, msg_rx) = {
+        let Some(mut meta) = state.mcp_sessions.get_mut(&sid) else {
+            // Removed between the insert above and here (DELETE /mcp, reaper).
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        meta.has_sse_stream = true;
+        meta.sse_generation = next_sse_generation();
         let tx = state
             .messaging_channels
             .entry(sid.clone())
             .or_insert_with(|| tokio::sync::broadcast::channel(64).0);
-        tx.subscribe()
+        (meta.sse_generation, tx.subscribe())
     };
 
     let mut tools_rx = state.mcp_tools_changed.subscribe();
     let mut msg_rx = msg_rx;
-    let cleanup_state = state.clone();
-    let cleanup_sid = sid.clone();
+    // Teardown hangs off a drop guard, not off code after the loop. A client that
+    // walks away has axum drop the response body mid-`select!`, so anything
+    // trailing the loop never runs and every reconnect would leak a sender.
+    let cleanup = SseStreamTeardown {
+        state: state.clone(),
+        mcp_sid: sid.clone(),
+        generation,
+    };
 
     let stream = async_stream::stream! {
+        let _cleanup = cleanup;
         loop {
             tokio::select! {
                 result = tools_rx.recv() => {
@@ -4313,11 +5803,6 @@ pub(super) async fn mcp_get(
                 }
             }
         }
-        // SSE stream ended — mark session as no longer having SSE
-        if let Some(mut meta) = cleanup_state.mcp_sessions.get_mut(&cleanup_sid) {
-            meta.has_sse_stream = false;
-        }
-        cleanup_state.messaging_channels.remove(&cleanup_sid);
     };
 
     axum::response::sse::Sse::new(stream)
@@ -4344,7 +5829,48 @@ pub(super) async fn mcp_delete(
         .and_then(|v| v.to_str().ok())
     {
         state.mcp_sessions.remove(sid);
-        // Clean up peer agents and inboxes for this MCP session
+        // Now that an identity can have co-owners, teardown has to read the
+        // survivor list and act on it as one step: a bridge joining in the middle
+        // would otherwise re-create the routes this loop is about to delete and be
+        // left pointing at an identity that no longer exists. Same lock as the
+        // binds, so a join lands entirely before or entirely after the teardown.
+        // No `.await` inside — the guard never crosses a suspension point.
+        let _bind_guard = PEER_IDENTITY_BIND_LOCK.lock();
+        // Routes belong to the protocol session, so a sibling bridge that never
+        // became delivery owner still drops its own — otherwise its mapping
+        // outlives it and keeps resolving to an identity it no longer serves.
+        state.mcp_to_session.remove(sid);
+        let routed: Vec<String> = state
+            .session_to_mcp
+            .iter()
+            .filter(|entry| entry.value().iter().any(|mapped| mapped == sid))
+            .map(|entry| entry.key().clone())
+            .collect();
+        for tuic in &routed {
+            let survivors = match state.session_to_mcp.get_mut(tuic) {
+                Some(mut reverse) => {
+                    reverse.retain(|mapped_sid| mapped_sid != sid);
+                    reverse.clone()
+                }
+                None => Vec::new(),
+            };
+            match survivors.first() {
+                // Another bridge in this PTY is still reading the identity, so
+                // hand it the delivery ownership rather than tearing down a
+                // mailbox and a role that are still in use.
+                Some(next_owner) => {
+                    if let Some(mut peer) = state.peer_agents.get_mut(tuic)
+                        && peer.mcp_session_id == sid
+                    {
+                        peer.mcp_session_id = next_owner.clone();
+                    }
+                }
+                None => {
+                    state.session_to_mcp.remove(tuic);
+                }
+            }
+        }
+        // Clean up peer agents and inboxes left with no protocol session at all.
         let removed_tuic: Vec<String> = state
             .peer_agents
             .iter()
@@ -4353,22 +5879,9 @@ pub(super) async fn mcp_delete(
             .collect();
         for tuic in &removed_tuic {
             state.peer_agents.remove(tuic);
+            state.orchestrator_peers.remove(tuic);
             state.agent_inbox.remove(tuic);
-            state.agent_inbox_evictions.remove(tuic);
-            state.active_agent_waiters.remove(tuic);
-            state.pending_injections.remove(tuic);
-            state
-                .mcp_to_session
-                .remove_if(sid, |_, mapped| mapped == tuic);
-            let remove_reverse = if let Some(mut reverse) = state.session_to_mcp.get_mut(tuic) {
-                reverse.retain(|mapped_sid| mapped_sid != sid);
-                reverse.is_empty()
-            } else {
-                false
-            };
-            if remove_reverse {
-                state.session_to_mcp.remove(tuic);
-            }
+            drop_identity_buffers(&state, tuic);
             let _ = state
                 .event_bus
                 .send(crate::state::AppEvent::PeerUnregistered {
@@ -4474,7 +5987,11 @@ async fn handle_ui_unified(
     };
     match action {
         "tab" => handle_ui(state, args, mcp_session_id),
-        "toast" | "confirm" => handle_notify(state, addr, &remap_action(args, action)),
+        "toast" => handle_notify(state, &remap_action(args, action), mcp_session_id),
+        // Waits for the human, but only on a oneshot — no blocking-pool worker is
+        // held, so a confirmation left unanswered costs a pending task and nothing
+        // else.
+        "confirm" => handle_confirm(state, addr, args, mcp_session_id).await,
         "screenshot" => handle_screenshot(state, addr, args).await,
         other => serde_json::json!({"error": format!(
             "Unknown action '{}' for tool 'ui'. Available: {}", other, UI_ACTIONS
@@ -4969,6 +6486,80 @@ mod tests {
         format!("http://127.0.0.1:{port}/mcp")
     }
 
+    #[test]
+    fn pty_description_field_is_optional_replacement_or_clear() {
+        assert!(matches!(
+            parse_pty_description(&serde_json::json!({})),
+            Ok(PtyDescriptionUpdate::Unchanged)
+        ));
+        assert_eq!(
+            parse_pty_description(&serde_json::json!({"pty_description": "  Run checks  "})),
+            Ok(PtyDescriptionUpdate::Set(Some("Run checks".to_string())))
+        );
+        assert_eq!(
+            parse_pty_description(&serde_json::json!({"pty_description": ""})),
+            Ok(PtyDescriptionUpdate::Set(None))
+        );
+        assert_eq!(
+            parse_pty_description(&serde_json::json!({"pty_description": null})),
+            Ok(PtyDescriptionUpdate::Set(None))
+        );
+        assert!(parse_pty_description(&serde_json::json!({"pty_description": 7})).is_err());
+    }
+
+    #[test]
+    fn spawn_description_preserves_explicit_value_or_clear() {
+        assert_eq!(
+            resolve_spawn_pty_description(
+                PtyDescriptionUpdate::Set(Some("Focused task".to_string())),
+                "Longer prompt that must not replace the explicit description",
+            ),
+            Some("Focused task".to_string())
+        );
+        assert_eq!(
+            resolve_spawn_pty_description(
+                PtyDescriptionUpdate::Set(None),
+                "Prompt must not override an explicit clear",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn spawn_description_falls_back_to_compact_prompt_metadata() {
+        assert_eq!(
+            resolve_spawn_pty_description(
+                PtyDescriptionUpdate::Unchanged,
+                "  Audit all Cargo manifests\n\twithout changing files.  ",
+            ),
+            Some("Audit all Cargo manifests without changing files.".to_string())
+        );
+
+        let long_prompt = "è".repeat(INFERRED_PTY_DESCRIPTION_MAX_CHARS + 20);
+        let inferred = resolve_spawn_pty_description(PtyDescriptionUpdate::Unchanged, &long_prompt)
+            .expect("non-empty prompt produces a description");
+        assert_eq!(inferred.chars().count(), INFERRED_PTY_DESCRIPTION_MAX_CHARS);
+        assert!(inferred.ends_with('…'));
+        assert_eq!(
+            resolve_spawn_pty_description(PtyDescriptionUpdate::Unchanged, " \n\t "),
+            None
+        );
+    }
+
+    #[test]
+    fn mcp_instructions_request_current_intent_at_task_start_and_phase_changes() {
+        let state = test_state();
+        let instructions = build_mcp_instructions_for_mode(&state, None, true);
+
+        assert!(instructions.contains("at the start of every user task"));
+        assert!(instructions.contains("on each material work-phase change"));
+        assert!(instructions.contains("currently in progress in present tense"));
+
+        state.config.write().intent_tab_title = false;
+        let disabled = build_mcp_instructions_for_mode(&state, None, true);
+        assert!(!disabled.contains("`intent: <desc> (<title>)`"));
+    }
+
     async fn post_test_tool_call(
         state: Arc<AppState>,
         session_id: &str,
@@ -4994,6 +6585,119 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // --- stateless tools/call (#0f44) ---
+
+    async fn post_tool_call_with_headers(
+        state: Arc<AppState>,
+        headers: HeaderMap,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> (HeaderMap, serde_json::Value) {
+        let response = mcp_post(
+            State(state),
+            ConnectInfo(loopback_addr()),
+            headers,
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}
+            })),
+        )
+        .await
+        .into_response();
+        let resp_headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (resp_headers, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// The blanket `mcp-session-id` rejection was the single blocker to stateless
+    /// operation — it refused calls that need no identity at all, including our own
+    /// curl probes against :9877.
+    #[tokio::test]
+    async fn a_tool_that_needs_no_identity_works_without_a_session_header() {
+        let state = test_state();
+        let (_, body) = post_tool_call_with_headers(
+            state,
+            HeaderMap::new(),
+            "plugin_dev_guide",
+            serde_json::json!({}),
+        )
+        .await;
+
+        assert!(
+            body.get("error").is_none(),
+            "a session-independent tool must not be gated on identity: {body}"
+        );
+        assert!(
+            body["result"]["content"][0]["text"].is_string(),
+            "the tool must actually have run: {body}"
+        );
+    }
+
+    /// Identity-scoped actions must still refuse — but with the guidance the caller
+    /// needs, not a bare protocol code it cannot act on.
+    #[tokio::test]
+    async fn an_identity_scoped_action_without_identity_explains_how_to_get_one() {
+        let state = test_state();
+        let (_, body) = post_tool_call_with_headers(
+            state,
+            HeaderMap::new(),
+            "agent",
+            serde_json::json!({"action": "register"}),
+        )
+        .await;
+
+        assert!(
+            body.get("error").is_none(),
+            "the refusal belongs in the tool result, not as a JSON-RPC protocol error: {body}"
+        );
+        let text = body["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            text.contains("initialize") && text.contains("mcp-session-id"),
+            "the error must name what is missing AND how to get it: {text}"
+        );
+        assert!(
+            !text.contains("-32600"),
+            "a bare protocol code is not actionable: {text}"
+        );
+    }
+
+    /// Legacy clients must be untouched: the header they send is still refreshed
+    /// into `mcp_sessions` and echoed back on the response.
+    #[tokio::test]
+    async fn a_legacy_client_still_gets_its_session_refreshed_and_echoed() {
+        let state = test_state();
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_SESSION_HEADER, "mcp-legacy-c1".parse().unwrap());
+
+        let (resp_headers, body) = post_tool_call_with_headers(
+            Arc::clone(&state),
+            headers,
+            "plugin_dev_guide",
+            serde_json::json!({}),
+        )
+        .await;
+
+        assert!(body.get("error").is_none(), "{body}");
+        assert_eq!(
+            resp_headers
+                .get(MCP_SESSION_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("mcp-legacy-c1"),
+            "the session header must still be echoed"
+        );
+        assert!(
+            state.mcp_sessions.contains_key("mcp-legacy-c1"),
+            "a stale or first-seen session must still be (re-)registered on tools/call"
+        );
     }
 
     #[test]
@@ -5069,6 +6773,79 @@ mod tests {
             .unwrap(),
             native
         );
+    }
+
+    /// `#[tokio::test]` gives a current-thread runtime: exactly one worker. A sync tool
+    /// handler invoked inline owns that worker for its whole duration, so no other task
+    /// can run — which is what made `session close`/`kill` (200ms of `std::thread::sleep`)
+    /// and agent injection (`INJECT_ENTER_GAP`) stall the whole MCP server.
+    ///
+    /// Here the blocking closure waits for a flag that only a spawned async task can set.
+    /// Routed through `spawn_blocking` the task gets its turn and the flag flips; called
+    /// inline the closure spins to its deadline and reports no progress.
+    #[tokio::test]
+    async fn run_blocking_handler_lets_other_tasks_progress() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let signal = Arc::new(AtomicBool::new(false));
+
+        let setter = signal.clone();
+        tokio::spawn(async move {
+            setter.store(true, Ordering::SeqCst);
+        });
+
+        let observed = signal.clone();
+        let result = run_blocking_handler(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !observed.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            serde_json::json!({"saw_progress": observed.load(Ordering::SeqCst)})
+        })
+        .await;
+
+        assert_eq!(
+            result["saw_progress"], true,
+            "sync tool handlers must run on the blocking pool — running them inline parks the runtime worker"
+        );
+    }
+
+    /// A panicking sync handler must surface as a tool error, not abort the request task.
+    #[tokio::test]
+    async fn run_blocking_handler_reports_a_panicking_handler_as_an_error() {
+        let result = run_blocking_handler(|| panic!("handler exploded")).await;
+        assert!(
+            result["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("failed to complete"),
+            "expected an error envelope, got {result}"
+        );
+    }
+
+    #[test]
+    fn only_genuinely_blocking_session_and_agent_actions_are_offloaded() {
+        for action in [
+            "list", "submit", "output", "status", "pause", "resume", "unknown",
+        ] {
+            assert!(!session_action_requires_blocking_pool(action), "{action}");
+        }
+        for action in ["create", "input", "kill", "close", "process_stats"] {
+            assert!(session_action_requires_blocking_pool(action), "{action}");
+        }
+        for action in [
+            "register",
+            "list_peers",
+            "inbox",
+            "stats",
+            "metrics",
+            "unknown",
+        ] {
+            assert!(!agent_action_requires_blocking_pool(action), "{action}");
+        }
+        for action in ["spawn", "detect", "send"] {
+            assert!(agent_action_requires_blocking_pool(action), "{action}");
+        }
     }
 
     #[tokio::test]
@@ -5167,9 +6944,57 @@ mod tests {
         assert_eq!(warned["branch_delete_warning"], "branch retained");
     }
 
+    #[tokio::test]
+    async fn github_dispatch_reports_missing_and_unknown_actions() {
+        let state = test_state();
+
+        let missing = handle_github(&state, &serde_json::json!({})).await;
+        assert!(missing["error"].as_str().unwrap().contains("action"));
+
+        let unknown = handle_github(&state, &serde_json::json!({"action": "explode"})).await;
+        let error = unknown["error"].as_str().unwrap();
+        assert!(error.contains("Unknown action 'explode'"));
+        for action in ["prs", "status", "issues", "close_issue", "reopen_issue"] {
+            assert!(
+                error.contains(action),
+                "available actions omitted {action}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn github_dispatch_validates_required_paths_before_io() {
+        let state = test_state();
+
+        for action in ["prs", "issues", "close_issue", "reopen_issue"] {
+            let response = handle_github(&state, &serde_json::json!({"action": action})).await;
+            assert!(
+                response["error"].as_str().unwrap().contains("path"),
+                "{action} must reject a missing path: {response}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn github_issue_mutations_require_a_nonzero_issue_number() {
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy();
+
+        for action in ["close_issue", "reopen_issue"] {
+            let response =
+                handle_github(&state, &serde_json::json!({"action": action, "path": path})).await;
+            assert_eq!(
+                response["error"], "Missing required parameter: issue_number",
+                "{action} must validate issue_number before network access"
+            );
+        }
+    }
+
     fn test_state() -> Arc<AppState> {
         let state = Arc::new(AppState {
             sessions: dashmap::DashMap::new(),
+            live_pty_by_tuic_session: dashmap::DashMap::new(),
             data_dir: std::env::temp_dir().join("test-tuic-data"),
             worktrees_dir: std::env::temp_dir().join("test-worktrees"),
             metrics: crate::SessionMetrics::new(),
@@ -5206,11 +7031,12 @@ mod tests {
             #[cfg(feature = "desktop")]
             grid_channels: dashmap::DashMap::new(),
             grid_watch: dashmap::DashMap::new(),
-            grid_frame_in_flight: dashmap::DashMap::new(),
+            grid_gates: dashmap::DashMap::new(),
             pending_scroll: dashmap::DashMap::new(),
             kitty_states: dashmap::DashMap::new(),
             input_buffers: dashmap::DashMap::new(),
             last_prompts: dashmap::DashMap::new(),
+            pty_descriptions: dashmap::DashMap::new(),
             silence_states: dashmap::DashMap::new(),
             claude_usage_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
             log_buffer: std::sync::Arc::new(parking_lot::Mutex::new(
@@ -5218,7 +7044,9 @@ mod tests {
             )),
             event_bus: tokio::sync::broadcast::channel(256).0,
             event_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sse_filters: Default::default(),
             session_states: dashmap::DashMap::new(),
+            session_state_events: crate::state::SessionStateEventQueue::new(),
             mcp_upstream_registry: std::sync::Arc::new(
                 crate::mcp_proxy::registry::UpstreamRegistry::new(),
             ),
@@ -5246,13 +7074,17 @@ mod tests {
             exit_codes: dashmap::DashMap::new(),
             shell_state_since_ms: dashmap::DashMap::new(),
             loaded_plugins: dashmap::DashMap::new(),
+            plugin_output_watchers: parking_lot::RwLock::new(Default::default()),
             relay: crate::state::RelayState::new(),
             peer_agents: dashmap::DashMap::new(),
             agent_inbox: dashmap::DashMap::new(),
             agent_inbox_evictions: dashmap::DashMap::new(),
+            agent_read_cursor: dashmap::DashMap::new(),
+            marker_stats: dashmap::DashMap::new(),
             pending_injections: dashmap::DashMap::new(),
             pending_initial_prompts: dashmap::DashMap::new(),
             active_agent_waiters: dashmap::DashMap::new(),
+            orchestrator_peers: dashmap::DashSet::new(),
             session_html_tabs: dashmap::DashMap::new(),
             mcp_to_session: dashmap::DashMap::new(),
             session_to_mcp: dashmap::DashMap::new(),
@@ -5279,6 +7111,7 @@ mod tests {
             trigger_classifier: crate::ai_agent::triggers::TriggerClassifier::new(),
             ai_suggestions_enabled: dashmap::DashMap::new(),
             grid_frame_dirty: dashmap::DashMap::new(),
+            sync_update_active: dashmap::DashMap::new(),
             tunnel_manager: {
                 let audit = std::sync::Arc::new(parking_lot::Mutex::new(
                     crate::tunnels::audit::AuditLog::open(
@@ -5294,8 +7127,10 @@ mod tests {
                 )
                 .unwrap(),
             )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskRegistry::new()),
             connections_lock: tokio::sync::Mutex::new(()),
             screenshot_responses: dashmap::DashMap::new(),
+            confirm_responses: dashmap::DashMap::new(),
             standby_sessions: dashmap::DashMap::new(),
             process_snapshot_cache: crate::pty::ProcessSnapshotCache::default(),
             hot_repo_paths: parking_lot::RwLock::new(std::collections::HashSet::new()),
@@ -5467,6 +7302,14 @@ mod tests {
 
     // ── initialize auto-identity tests (Step 1) ─────────────────────
 
+    /// Spawn binary for tests that read state belonging to the child *after* the
+    /// spawn returns — its inbox, its peer entry, its parent link, its task
+    /// status. `/usr/bin/true` exits before the first read and the exit cleanup
+    /// deletes the very state under test, so those tests only passed by winning a
+    /// race. `/bin/cat` blocks on stdin; every test using it kills the session at
+    /// the end. Tests that only read the spawn response keep `/usr/bin/true`.
+    const LONG_LIVED_TEST_BINARY: &str = "/bin/cat";
+
     const TEST_UUID_A: &str = "550e8400-e29b-41d4-a716-446655440a01";
     const TEST_UUID_B: &str = "550e8400-e29b-41d4-a716-446655440a02";
 
@@ -5491,16 +7334,339 @@ mod tests {
         state.sessions.insert(
             session_id.to_string(),
             parking_lot::Mutex::new(PtySession {
-                writer,
+                writer: Arc::new(parking_lot::Mutex::new(writer)),
                 master: pair.master,
                 _child: child,
                 paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 worktree: None,
                 cwd: Some(cwd.to_string()),
                 display_name: None,
+                display_name_is_custom: false,
+                is_remote: false,
                 shell: "true".to_string(),
             }),
         );
+    }
+
+    #[cfg(unix)]
+    struct SubmissionRecordingWriter {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    #[cfg(unix)]
+    impl std::io::Write for SubmissionRecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Install the smallest raw-mode adapter around the production submission
+    /// state machine: a recording PTY writer plus the real composer, lifecycle,
+    /// turn-epoch, queue, and child-output ring owned by AppState.
+    #[cfg(unix)]
+    fn install_atomic_submit_test_session(
+        state: &Arc<AppState>,
+        session_id: &str,
+    ) -> Arc<std::sync::Mutex<Vec<u8>>> {
+        insert_managed_test_session(state, session_id, "/tmp");
+        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer: Box<dyn std::io::Write + Send> = Box::new(SubmissionRecordingWriter {
+            bytes: Arc::clone(&bytes),
+        });
+        state.sessions.get(session_id).unwrap().lock().writer =
+            Arc::new(parking_lot::Mutex::new(writer));
+        state.session_states.insert(
+            session_id.to_string(),
+            crate::state::SessionState {
+                agent_type: Some("codex".to_string()),
+                ..Default::default()
+            },
+        );
+        state.shell_states.insert(
+            session_id.to_string(),
+            std::sync::atomic::AtomicU8::new(crate::pty::SHELL_IDLE),
+        );
+        let mut silence = crate::pty::SilenceState::new();
+        silence.confirm_idle();
+        state.silence_states.insert(
+            session_id.to_string(),
+            Arc::new(parking_lot::Mutex::new(silence)),
+        );
+        state.output_buffers.insert(
+            session_id.to_string(),
+            parking_lot::Mutex::new(OutputRingBuffer::new(4096)),
+        );
+        bytes
+    }
+
+    #[cfg(unix)]
+    async fn submit_with_child_movement(
+        state: &Arc<AppState>,
+        session_id: &str,
+        input: &str,
+        bytes: &Arc<std::sync::Mutex<Vec<u8>>>,
+    ) -> serde_json::Value {
+        let call_state = Arc::clone(state);
+        let args = serde_json::json!({
+            "action": "submit",
+            "session_id": session_id,
+            "input": input,
+            "timeout_ms": 1_000,
+        });
+        let call = tokio::spawn(async move {
+            handle_mcp_tool_call(&call_state, loopback_addr(), "session", &args, None).await
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if bytes.lock().unwrap().last() == Some(&b'\r') {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "submit did not finish its framed PTY write"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        state
+            .output_buffers
+            .get(session_id)
+            .unwrap()
+            .lock()
+            .write(b"child moved");
+        call.await.unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_submit_returns_acknowledged_receipt_in_the_same_call() {
+        let state = test_state();
+        let session_id = "submit-ack";
+        let bytes = install_atomic_submit_test_session(&state, session_id);
+
+        let response =
+            submit_with_child_movement(&state, session_id, "inspect the repository", &bytes).await;
+
+        assert_eq!(response["status"], "acknowledged");
+        assert_eq!(response["submitted"], true);
+        assert_eq!(response["write_state"], "complete");
+        assert_eq!(response["acknowledged"], true);
+        assert_eq!(response["retry_safe"], false);
+        assert_eq!(response["turn_epoch"], 1);
+        assert_eq!(response["composer_state"], "cleared");
+        assert_eq!(response["acknowledgement"]["kind"], "terminal_movement");
+        assert_eq!(
+            response["acknowledgement"]["screen_state"],
+            "terminal_output"
+        );
+        assert_eq!(response["acknowledgement"]["output_offset"], 11);
+        Uuid::parse_str(response["submission_id"].as_str().unwrap()).unwrap();
+        let keys: std::collections::BTreeSet<_> = response
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "acknowledged",
+                "acknowledgement",
+                "composer_state",
+                "retry_safe",
+                "status",
+                "submission_id",
+                "submitted",
+                "turn_epoch",
+                "write_state",
+            ])
+        );
+        assert_eq!(
+            bytes.lock().unwrap().as_slice(),
+            b"\x15inspect the repository\r"
+        );
+        assert_eq!(
+            state
+                .input_buffers
+                .get(session_id)
+                .unwrap()
+                .lock()
+                .content(),
+            ""
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_submit_write_only_cannot_false_positive_and_times_out() {
+        let state = test_state();
+        let session_id = "submit-timeout";
+        let bytes = install_atomic_submit_test_session(&state, session_id);
+
+        let response = handle_mcp_tool_call(
+            &state,
+            loopback_addr(),
+            "session",
+            &serde_json::json!({
+                "action": "submit",
+                "session_id": session_id,
+                "input": "no child output",
+                "timeout_ms": 1,
+            }),
+            None,
+        )
+        .await;
+
+        assert_eq!(bytes.lock().unwrap().as_slice(), b"\x15no child output\r");
+        assert_eq!(
+            state
+                .output_buffers
+                .get(session_id)
+                .unwrap()
+                .lock()
+                .total_written,
+            0,
+            "FastAF's own write must not move the child-output receipt boundary"
+        );
+        assert_eq!(response["status"], "ack_timeout");
+        assert_eq!(response["submitted"], true);
+        assert_eq!(response["acknowledged"], false);
+        assert_eq!(response["retry_safe"], false);
+        assert_eq!(response["reason"], "no_terminal_movement_after_enter");
+        assert_eq!(response["timeout_ms"], SUBMIT_ACK_MIN_MS);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_submit_rejects_a_preexisting_partial_composer() {
+        let state = test_state();
+        let session_id = "submit-partial";
+        let bytes = install_atomic_submit_test_session(&state, session_id);
+        let mut composer = crate::input_line_buffer::InputLineBuffer::new();
+        composer.feed("Boss draft");
+        state
+            .input_buffers
+            .insert(session_id.to_string(), parking_lot::Mutex::new(composer));
+
+        let response = handle_mcp_tool_call(
+            &state,
+            loopback_addr(),
+            "session",
+            &serde_json::json!({
+                "action": "submit",
+                "session_id": session_id,
+                "input": "replacement",
+            }),
+            None,
+        )
+        .await;
+
+        assert_eq!(response["status"], "rejected");
+        assert_eq!(response["submitted"], false);
+        assert_eq!(response["write_state"], "not_started");
+        assert_eq!(response["retry_safe"], true);
+        assert_eq!(response["reason"], "partial_composer");
+        assert_eq!(response["composer_state"], "partial");
+        assert!(bytes.lock().unwrap().is_empty());
+        assert_eq!(
+            state
+                .input_buffers
+                .get(session_id)
+                .unwrap()
+                .lock()
+                .content(),
+            "Boss draft"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_submit_slash_clear_uses_the_same_receipt_and_fsm() {
+        let state = test_state();
+        let session_id = "submit-clear";
+        let bytes = install_atomic_submit_test_session(&state, session_id);
+
+        let response = submit_with_child_movement(&state, session_id, "/clear", &bytes).await;
+
+        assert_eq!(response["status"], "acknowledged");
+        assert_eq!(response["turn_epoch"], 1);
+        assert_eq!(bytes.lock().unwrap().as_slice(), b"\x15/clear\r");
+        assert!(
+            !state
+                .slash_mode
+                .get(session_id)
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert_eq!(
+            state
+                .input_buffers
+                .get(session_id)
+                .unwrap()
+                .lock()
+                .content(),
+            ""
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_input_remains_a_raw_write_only_compatibility_surface() {
+        let state = test_state();
+        let session_id = "input-compat";
+        let bytes = install_atomic_submit_test_session(&state, session_id);
+
+        let response = handle_session(
+            &state,
+            &serde_json::json!({
+                "action": "input",
+                "session_id": session_id,
+                "input": "literal draft",
+            }),
+            None,
+        );
+
+        assert_eq!(response, serde_json::json!({"ok": true}));
+        assert_eq!(bytes.lock().unwrap().as_slice(), b"literal draft");
+        assert_eq!(state.session_states.get(session_id).unwrap().turn_epoch, 0);
+        assert_eq!(
+            state
+                .input_buffers
+                .get(session_id)
+                .unwrap()
+                .lock()
+                .content(),
+            "literal draft"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_submit_is_rejected_before_io_for_non_loopback_callers() {
+        let state = test_state();
+
+        let response = handle_mcp_tool_call(
+            &state,
+            non_loopback_addr(),
+            "session",
+            &serde_json::json!({
+                "action": "submit",
+                "session_id": "remote-target",
+                "input": "must not run",
+            }),
+            None,
+        )
+        .await;
+
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("restricted to localhost"))
+        );
+        assert!(state.sessions.is_empty());
     }
 
     #[test]
@@ -5530,6 +7696,57 @@ mod tests {
         );
     }
 
+    /// A client that comes back holding a reaped session id used to be
+    /// indistinguishable from a first-time client: both silently received a fresh
+    /// UUID. That is precisely the moment an agent announces "FastAF is
+    /// back", so the three arrivals must be told apart or the claim stays
+    /// unfalsifiable — the peer-binding takeover warn only fires when a prior
+    /// binding happened to exist, which a reaped session no longer has.
+    #[test]
+    fn initialize_tells_a_reconnect_apart_from_a_first_contact() {
+        let state = test_state();
+        let live = "11111111-1111-4111-8111-111111111111";
+        state.mcp_sessions.insert(
+            live.to_string(),
+            crate::state::McpSessionMeta {
+                last_activity: std::time::Instant::now(),
+                is_claude_code: false,
+                requires_meta_tools: false,
+                has_sse_stream: false,
+                sse_generation: 0,
+                repo_path: None,
+            },
+        );
+
+        let with_session = |sid: Option<&str>| {
+            let mut headers = HeaderMap::new();
+            if let Some(sid) = sid {
+                headers.insert(MCP_SESSION_HEADER, sid.parse().unwrap());
+            }
+            initialize_session_id(&state, &headers)
+        };
+
+        let (id, kind) = with_session(None);
+        assert_eq!(kind, InitializeKind::Fresh);
+        assert!(is_valid_uuid(&id), "a first contact still gets an id");
+
+        let (id, kind) = with_session(Some(live));
+        assert_eq!(kind, InitializeKind::Resumed, "same connection continuing");
+        assert_eq!(id, live, "a live session id must be kept, not re-minted");
+
+        let reaped = "22222222-2222-4222-8222-222222222222";
+        let (id, kind) = with_session(Some(reaped));
+        assert_eq!(
+            kind,
+            InitializeKind::Reconnected {
+                presented: reaped.to_string()
+            },
+            "a session id we no longer hold is a reconnect, and the log must name it"
+        );
+        assert_ne!(id, reaped, "the stale id is replaced");
+        assert_eq!(kind.as_str(), "reconnected");
+    }
+
     #[test]
     fn initialize_identity_ignores_invalid_or_missing_header() {
         let state = test_state();
@@ -5545,7 +7762,108 @@ mod tests {
     }
 
     #[test]
-    fn initialize_identity_rejects_takeover_of_live_owner() {
+    fn takeover_rejection_reports_first_then_suppresses_repeats() {
+        // A duplicated MCP registration retries every 3s forever. The first
+        // rejection must be visible; the rest must not bury the log.
+        let pair = ("takeover-tuic-a", "takeover-mcp-a");
+
+        assert_eq!(
+            takeover_rejection_report(pair.0, pair.1),
+            Some(0),
+            "first sighting of a claimant pair must be reported in full"
+        );
+
+        for _ in 0..2000 {
+            assert!(
+                takeover_rejection_report(pair.0, pair.1).is_none(),
+                "repeats inside the summary window must not reach WARN"
+            );
+        }
+    }
+
+    #[test]
+    fn takeover_rejection_reports_each_distinct_pair() {
+        // Suppression is per claimant: a genuinely new offender must never be
+        // hidden by an unrelated pair already in its silent window.
+        assert_eq!(takeover_rejection_report("tuic-x", "mcp-1"), Some(0));
+        assert!(takeover_rejection_report("tuic-x", "mcp-1").is_none());
+
+        assert_eq!(
+            takeover_rejection_report("tuic-x", "mcp-2"),
+            Some(0),
+            "a different claiming MCP session is a distinct event"
+        );
+        assert_eq!(
+            takeover_rejection_report("tuic-y", "mcp-1"),
+            Some(0),
+            "a different TUIC identity is a distinct event"
+        );
+    }
+
+    #[test]
+    fn takeover_rejection_summary_carries_suppressed_count() {
+        let pair = ("takeover-tuic-b", "takeover-mcp-b");
+        assert_eq!(takeover_rejection_report(pair.0, pair.1), Some(0));
+
+        for _ in 0..7 {
+            assert!(takeover_rejection_report(pair.0, pair.1).is_none());
+        }
+
+        // Force the summary window open without sleeping 5 minutes.
+        {
+            let mut log = TAKEOVER_REJECT_LOG.lock();
+            let entry = log
+                .get_mut(&(pair.0.to_string(), pair.1.to_string()))
+                .expect("entry recorded on first sighting");
+            entry.last_reported -= TAKEOVER_REJECT_SUMMARY_INTERVAL;
+        }
+
+        assert_eq!(
+            takeover_rejection_report(pair.0, pair.1),
+            Some(7),
+            "the summary must state how many occurrences were swallowed"
+        );
+        assert!(
+            takeover_rejection_report(pair.0, pair.1).is_none(),
+            "counter resets after a summary — the next window starts silent"
+        );
+    }
+
+    #[test]
+    fn takeover_rejection_forgets_idle_claimants() {
+        // Without eviction a long-lived app leaks one entry per short-lived
+        // MCP session.
+        let pair = ("takeover-tuic-c", "takeover-mcp-c");
+        assert_eq!(takeover_rejection_report(pair.0, pair.1), Some(0));
+
+        {
+            let mut log = TAKEOVER_REJECT_LOG.lock();
+            let entry = log
+                .get_mut(&(pair.0.to_string(), pair.1.to_string()))
+                .expect("entry recorded on first sighting");
+            entry.last_reported -= TAKEOVER_REJECT_ENTRY_TTL;
+        }
+
+        assert_eq!(
+            takeover_rejection_report(pair.0, pair.1),
+            Some(0),
+            "an evicted pair is reported as new, not as a suppressed repeat"
+        );
+        assert!(
+            !TAKEOVER_REJECT_LOG.lock().contains_key(&(
+                "takeover-tuic-c".to_string(),
+                "stale-never-seen".to_string()
+            )),
+            "eviction must not resurrect unrelated keys"
+        );
+    }
+
+    /// Codex opens two bridge processes inside one PTY. Both inherit the same
+    /// `$TUIC_SESSION`, so both assert the same header — they are one agent, not
+    /// competing claimants. The second must become routable instead of being
+    /// locked out, or every tool call it makes reports "not registered".
+    #[test]
+    fn initialize_identity_joins_live_sibling_bridge_in_same_pty() {
         let state = test_state();
         assert!(apply_initialize_identity(
             &state,
@@ -5555,30 +7873,100 @@ mod tests {
         live_mcp_session(&state, "mcp-live");
 
         assert!(
-            !apply_initialize_identity(&state, "mcp-claimant", Some(TEST_UUID_A)),
-            "a second bridge must not steal a live TUIC identity during initialize"
+            apply_initialize_identity(&state, "mcp-sibling", Some(TEST_UUID_A)),
+            "a second bridge asserting the same $TUIC_SESSION must join the identity"
         );
         assert_eq!(
-            state.peer_agents.get(TEST_UUID_A).unwrap().mcp_session_id,
-            "mcp-live"
+            state
+                .mcp_to_session
+                .get("mcp-sibling")
+                .map(|entry| entry.value().clone()),
+            Some(TEST_UUID_A.to_string()),
+            "the sibling needs a forward route or inbox/send stay unreachable"
         );
         assert_eq!(
             state
                 .mcp_to_session
                 .get("mcp-live")
                 .map(|entry| entry.value().clone()),
-            Some(TEST_UUID_A.to_string())
+            Some(TEST_UUID_A.to_string()),
+            "joining must not evict the bridge that was already routed"
         );
-        assert!(
-            state.mcp_to_session.get("mcp-claimant").is_none(),
-            "rejected claimant must gain no forward route"
+        assert_eq!(
+            state.peer_agents.get(TEST_UUID_A).unwrap().mcp_session_id,
+            "mcp-live",
+            "delivery ownership stays put: two live siblings must not trade it \
+             back and forth on every request"
         );
         assert_eq!(
             state
                 .session_to_mcp
                 .get(TEST_UUID_A)
                 .map(|entry| entry.clone()),
-            Some(vec!["mcp-live".to_string()])
+            Some(vec!["mcp-live".to_string(), "mcp-sibling".to_string()])
+        );
+    }
+
+    /// The joined sibling is the bridge the agent actually talks through, so the
+    /// rename it performs must land instead of being refused as a takeover.
+    #[test]
+    fn register_from_joined_sibling_bridge_renames_shared_identity() {
+        let state = test_state();
+        apply_initialize_identity(&state, "mcp-live", Some(TEST_UUID_A));
+        live_mcp_session(&state, "mcp-live");
+        apply_initialize_identity(&state, "mcp-sibling", Some(TEST_UUID_A));
+
+        let registered = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_A, "name": "rose-root-orchestrator"
+            }),
+            Some("mcp-sibling"),
+        );
+
+        assert_eq!(
+            registered["ok"], true,
+            "a co-owner of the identity must not be refused: {registered}"
+        );
+        assert_eq!(
+            state.peer_agents.get(TEST_UUID_A).unwrap().name,
+            "rose-root-orchestrator"
+        );
+        assert_eq!(
+            state.peer_agents.get(TEST_UUID_A).unwrap().mcp_session_id,
+            "mcp-live",
+            "a rename must not move delivery ownership"
+        );
+    }
+
+    /// The guard still has a job: a session with no route to the identity and no
+    /// header behind it is a stranger, not a sibling.
+    #[test]
+    fn register_rejects_takeover_from_unrouted_session_while_owner_is_live() {
+        let state = test_state();
+        apply_initialize_identity(&state, "mcp-live", Some(TEST_UUID_A));
+        live_mcp_session(&state, "mcp-live");
+
+        let rejected = handle_messaging(
+            &state,
+            &serde_json::json!({"action": "register", "tuic_session": TEST_UUID_A}),
+            Some("mcp-stranger"),
+        );
+
+        assert!(
+            rejected["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("already registered to another active MCP session"),
+            "an unrouted claimant must still be refused: {rejected}"
+        );
+        assert_eq!(
+            state.peer_agents.get(TEST_UUID_A).unwrap().mcp_session_id,
+            "mcp-live"
+        );
+        assert!(
+            !state.mcp_to_session.contains_key("mcp-stranger"),
+            "a rejected claimant must gain no forward route"
         );
     }
 
@@ -5597,7 +7985,9 @@ mod tests {
                     - MCP_OWNER_ACTIVITY_GRACE
                     - std::time::Duration::from_secs(1),
                 is_claude_code: false,
+                requires_meta_tools: false,
                 has_sse_stream: true,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -5648,7 +8038,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: true,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -5700,6 +8092,10 @@ mod tests {
             "the live SSE owner must retain its peer binding"
         );
 
+        // The `/usr/bin/true` spawns still in this module were audited: each one
+        // reads only the spawn response, or asserts that a *refused* spawn left
+        // nothing behind. Anything that reads state owned by a living child uses
+        // `LONG_LIVED_TEST_BINARY` instead — see its comment for why.
         let spawned = handle_agent(
             &state,
             "127.0.0.1:1".parse().unwrap(),
@@ -5722,6 +8118,501 @@ mod tests {
         assert!(spawned.get("error").is_none(), "spawn failed: {spawned}");
         assert_eq!(spawned["communication_ready"], true);
         assert_eq!(spawned["parent_session_id"], TEST_UUID_A);
+    }
+
+    /// Compatibility bar for the task handle: a classic MCP client parses the
+    /// spawn response by field name, so `task_id`/`poll_interval_ms` may only be
+    /// *added* — no pre-existing field may disappear or change type.
+    // Needs a runtime: the spawn path arms the initial-prompt watchdog and the
+    // reader thread through tokio.
+    #[tokio::test]
+    async fn spawn_response_adds_the_task_handle_without_touching_existing_fields() {
+        let state = test_state();
+        let spawned = handle_agent(
+            &state,
+            "127.0.0.1:1".parse().unwrap(),
+            &serde_json::json!({
+                "action": "spawn",
+                "prompt": "task handle additivity",
+                "binary_path": LONG_LIVED_TEST_BINARY,
+                "cwd": "/tmp",
+            }),
+            Some("mcp-classic"),
+        );
+        if spawned["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("Failed to open PTY"))
+        {
+            eprintln!("Skipping: PTY unavailable");
+            return;
+        }
+        assert!(spawned.get("error").is_none(), "spawn failed: {spawned}");
+
+        // Every field a pre-task client already read, with its original type.
+        for key in [
+            "session_id",
+            "name",
+            "send_to",
+            "monitor_with",
+            "status_with",
+            "wait_with",
+        ] {
+            assert!(
+                spawned[key].is_string(),
+                "{key} must still be a string: {spawned}"
+            );
+        }
+        for key in ["peer_registered", "communication_ready"] {
+            assert!(
+                spawned[key].is_boolean(),
+                "{key} must still be a boolean: {spawned}"
+            );
+        }
+        assert!(spawned["server_ts"].is_u64(), "server_ts must stay numeric");
+
+        // The additions.
+        let task_id = spawned["task_id"]
+            .as_str()
+            .expect("task_id must be a string");
+        assert_eq!(spawned["poll_interval_ms"], TASK_POLL_INTERVAL_MS);
+        const {
+            assert!(
+                TASK_POLL_INTERVAL_MS >= 1000,
+                "a lower floor lets a stuck orchestrator hot-loop the server"
+            )
+        };
+
+        // The handle must actually resolve, be owned by this caller, and track the
+        // session that was spawned.
+        let rec = state.tasks.get(task_id).expect("task must exist");
+        assert_eq!(rec.status, crate::tasks::TaskStatus::Working);
+        assert_eq!(rec.kind, crate::tasks::TaskKind::AgentSpawn);
+        assert_eq!(rec.owner, pending_parent_id("mcp-classic"));
+        assert_eq!(
+            rec.session_id.as_deref(),
+            spawned["session_id"].as_str(),
+            "the task must point at the spawned session"
+        );
+        drop(rec);
+
+        handle_session(
+            &state,
+            &serde_json::json!({
+                "action": "kill", "session_id": spawned["session_id"].as_str().unwrap()
+            }),
+            None,
+        );
+    }
+
+    /// The loopback guard runs before anything is allocated — a rejected caller
+    /// must not leave a task behind for someone else to poll.
+    #[test]
+    fn a_rejected_remote_spawn_creates_no_task() {
+        let state = test_state();
+        let rejected = handle_agent(
+            &state,
+            "8.8.8.8:1234".parse().unwrap(),
+            &serde_json::json!({
+                "action": "spawn",
+                "prompt": "remote caller",
+                "binary_path": "/usr/bin/true",
+            }),
+            Some("mcp-remote"),
+        );
+
+        assert!(
+            rejected["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("restricted to localhost")),
+            "a remote spawn must be refused: {rejected}"
+        );
+        assert!(rejected.get("task_id").is_none());
+        assert_eq!(state.tasks.len(), 0, "no task may outlive a refused spawn");
+    }
+
+    /// A spawn that never reaches the PTY (bad binary) must also leave no task.
+    #[test]
+    fn a_failed_spawn_creates_no_task() {
+        let state = test_state();
+        let failed = handle_agent(
+            &state,
+            "127.0.0.1:1".parse().unwrap(),
+            &serde_json::json!({
+                "action": "spawn",
+                "prompt": "bad binary",
+                "binary_path": "/nonexistent/definitely-not-a-binary",
+            }),
+            Some("mcp-classic"),
+        );
+
+        assert!(failed["error"].is_string(), "spawn must fail: {failed}");
+        assert_eq!(state.tasks.len(), 0, "no task may outlive a failed spawn");
+    }
+
+    /// The point of the handle: the outcome is recorded when the agent exits, even
+    /// though nobody was waiting. A clean exit completes; a non-zero exit fails.
+    #[test]
+    fn a_session_exit_drives_its_task_to_a_terminal_state() {
+        use crate::tasks::{TaskKind, TaskStatus};
+
+        let state = test_state();
+
+        let clean = state
+            .tasks
+            .create(TaskKind::AgentSpawn, "owner", Some("sess-clean"));
+        state.exit_codes.insert("sess-clean".to_string(), 0);
+        crate::pty::mark_session_exited("sess-clean", &state);
+        let rec = state.tasks.get(&clean).expect("task must survive");
+        assert_eq!(rec.status, TaskStatus::Completed);
+        assert_eq!(rec.result.as_ref().unwrap()["exit_code"], 0);
+
+        let broken = state
+            .tasks
+            .create(TaskKind::AgentSpawn, "owner", Some("sess-broken"));
+        state.exit_codes.insert("sess-broken".to_string(), 137);
+        crate::pty::mark_session_exited("sess-broken", &state);
+        let rec = state.tasks.get(&broken).expect("task must survive");
+        assert_eq!(rec.status, TaskStatus::Failed);
+        assert!(
+            rec.error.as_deref().is_some_and(|e| e.contains("137")),
+            "the exit code must reach the caller: {:?}",
+            rec.error
+        );
+    }
+
+    // --- task tool ---
+
+    fn task_call(
+        state: &Arc<AppState>,
+        addr: &str,
+        args: serde_json::Value,
+        mcp_sid: Option<&str>,
+    ) -> serde_json::Value {
+        handle_task(state, addr.parse().unwrap(), &args, mcp_sid)
+    }
+
+    /// The whole point of the handle: poll the outcome without holding a wait
+    /// open. `get` must answer immediately at every stage of the task's life.
+    #[test]
+    fn task_get_reports_each_stage_without_blocking() {
+        use crate::tasks::{TaskKind, TaskStatus, TaskUpdate};
+
+        let state = test_state();
+        let id = state
+            .tasks
+            .create(TaskKind::AgentSpawn, "peer-a", Some("sess-1"));
+        state
+            .mcp_to_session
+            .insert("mcp-a".to_string(), "peer-a".to_string());
+
+        let working = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "get", "task_id": id}),
+            Some("mcp-a"),
+        );
+        assert_eq!(working["status"], "working");
+        assert_eq!(working["poll_interval_ms"], TASK_POLL_INTERVAL_MS);
+        assert!(
+            working.get("result").is_none() && working.get("status_message").is_none(),
+            "absent optional fields are omitted, not null: {working}"
+        );
+
+        state
+            .tasks
+            .set_status(
+                &id,
+                TaskStatus::Completed,
+                TaskUpdate {
+                    result: Some(serde_json::json!({"exit_code": 0})),
+                    status_message: Some("done".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("transition");
+
+        let done = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "get", "task_id": id}),
+            Some("mcp-a"),
+        );
+        assert_eq!(done["status"], "completed");
+        assert_eq!(done["result"]["exit_code"], 0);
+        assert_eq!(done["status_message"], "done");
+    }
+
+    /// A failed task must not report its reason under `error`: every handler in
+    /// this transport uses a top-level `error` to mean "the call failed", so a
+    /// client would read a successful poll as a broken call.
+    #[test]
+    fn task_get_reports_a_failure_under_error_detail_not_error() {
+        use crate::tasks::{TaskKind, TaskStatus, TaskUpdate};
+
+        let state = test_state();
+        let id = state.tasks.create(TaskKind::AgentSpawn, "peer-a", None);
+        state
+            .mcp_to_session
+            .insert("mcp-a".to_string(), "peer-a".to_string());
+        state
+            .tasks
+            .set_status(
+                &id,
+                TaskStatus::Failed,
+                TaskUpdate {
+                    error: Some("agent session exited with code 137".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("transition");
+
+        let failed = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "get", "task_id": id}),
+            Some("mcp-a"),
+        );
+        assert_eq!(failed["status"], "failed");
+        assert!(
+            failed.get("error").is_none(),
+            "a successful poll must not carry a top-level error: {failed}"
+        );
+        assert_eq!(failed["error_detail"], "agent session exited with code 137");
+    }
+
+    /// A task handle is a capability over a spawned agent — one agent must not be
+    /// able to inspect or cancel another's children.
+    #[test]
+    fn a_task_owned_by_another_identity_is_refused() {
+        use crate::tasks::TaskKind;
+
+        let state = test_state();
+        let id = state.tasks.create(TaskKind::AgentSpawn, "peer-a", None);
+        state
+            .mcp_to_session
+            .insert("mcp-b".to_string(), "peer-b".to_string());
+
+        for action in ["get", "cancel"] {
+            let refused = task_call(
+                &state,
+                "127.0.0.1:1",
+                serde_json::json!({"action": action, "task_id": id}),
+                Some("mcp-b"),
+            );
+            assert!(
+                refused["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("not owned")),
+                "{action} must be refused: {refused}"
+            );
+        }
+        assert_eq!(
+            state.tasks.get(&id).unwrap().status,
+            crate::tasks::TaskStatus::Working,
+            "a refused cancel must not have mutated the task"
+        );
+    }
+
+    /// An orchestrator that spawns before it registers is stamped with its pending
+    /// id; auto-binding afterwards changes its specific identity, and it must not
+    /// lose the handle it was already handed.
+    #[test]
+    fn a_handle_survives_the_caller_binding_a_tuic_identity_later() {
+        use crate::tasks::TaskKind;
+
+        let state = test_state();
+        // Spawned while unbound: owner is the pending alias.
+        let id = state.tasks.create(
+            TaskKind::AgentSpawn,
+            &task_owner_identity(None, Some("mcp-late")),
+            None,
+        );
+        assert_eq!(
+            state.tasks.get(&id).unwrap().owner,
+            pending_parent_id("mcp-late")
+        );
+
+        // Now it binds a real TUIC identity on the same MCP session.
+        state
+            .mcp_to_session
+            .insert("mcp-late".to_string(), TEST_UUID_A.to_string());
+
+        let got = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "get", "task_id": id}),
+            Some("mcp-late"),
+        );
+        assert_eq!(
+            got["status"], "working",
+            "own handle must stay reachable: {got}"
+        );
+    }
+
+    #[test]
+    fn task_cancel_is_final_and_leaves_the_agent_running() {
+        use crate::tasks::{TaskKind, TaskStatus};
+
+        let state = test_state();
+        let id = state
+            .tasks
+            .create(TaskKind::AgentSpawn, "peer-a", Some("sess-1"));
+        state
+            .mcp_to_session
+            .insert("mcp-a".to_string(), "peer-a".to_string());
+
+        let cancelled = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "cancel", "task_id": id}),
+            Some("mcp-a"),
+        );
+        assert_eq!(cancelled["cancelled"], true);
+        assert_eq!(cancelled["status"], "cancelled");
+        assert!(
+            cancelled["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("session(action=kill)")),
+            "the caller must be told the process is still alive: {cancelled}"
+        );
+
+        // A second cancel is not an error — it reports the state that stands, so a
+        // cancel racing the agent's exit never looks like a failure.
+        let again = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "cancel", "task_id": id}),
+            Some("mcp-a"),
+        );
+        assert_eq!(again["cancelled"], false);
+        assert_eq!(again["status"], "cancelled");
+        assert!(again.get("error").is_none());
+        assert_eq!(state.tasks.get(&id).unwrap().status, TaskStatus::Cancelled);
+    }
+
+    /// `agent spawn` is loopback-only, so cancelling one must be too — otherwise a
+    /// remote client could halt another agent's orchestration.
+    #[test]
+    fn a_remote_caller_cannot_cancel_but_may_still_poll() {
+        use crate::tasks::{TaskKind, TaskStatus};
+
+        let state = test_state();
+        let id = state.tasks.create(TaskKind::AgentSpawn, "peer-a", None);
+        state
+            .mcp_to_session
+            .insert("mcp-a".to_string(), "peer-a".to_string());
+
+        let refused = task_call(
+            &state,
+            "8.8.8.8:1234",
+            serde_json::json!({"action": "cancel", "task_id": id}),
+            Some("mcp-a"),
+        );
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("restricted to localhost")),
+            "{refused}"
+        );
+        assert_eq!(state.tasks.get(&id).unwrap().status, TaskStatus::Working);
+
+        // Reading is monitoring, not control — it stays open, like session status.
+        let polled = task_call(
+            &state,
+            "8.8.8.8:1234",
+            serde_json::json!({"action": "get", "task_id": id}),
+            Some("mcp-a"),
+        );
+        assert_eq!(polled["status"], "working");
+    }
+
+    #[test]
+    fn task_rejects_an_unknown_id_and_a_bad_action() {
+        let state = test_state();
+
+        let unknown = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "get", "task_id": "no-such-task"}),
+            Some("mcp-a"),
+        );
+        assert!(
+            unknown["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("unknown or expired")),
+            "{unknown}"
+        );
+
+        let no_id = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "get"}),
+            Some("mcp-a"),
+        );
+        assert!(
+            no_id["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("task_id"))
+        );
+
+        let bad = task_call(
+            &state,
+            "127.0.0.1:1",
+            serde_json::json!({"action": "explode", "task_id": "x"}),
+            Some("mcp-a"),
+        );
+        assert!(
+            bad["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("get, cancel")),
+            "the error must list the available actions: {bad}"
+        );
+    }
+
+    /// Per docs/sync-matrix.md a tool-surface change must land in the listing AND
+    /// the search corpus — a tool missing from the latter is invisible under
+    /// `collapse_tools` and to lazy discovery.
+    #[test]
+    fn the_task_tool_is_listed_and_searchable() {
+        let state = test_state();
+
+        let listed = merged_tool_definitions(&state, None);
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "task"),
+            "task must appear in tools/list"
+        );
+        assert!(
+            searchable_tool_definitions(&state)
+                .iter()
+                .any(|t| t["name"] == "task"),
+            "task must appear in the search corpus"
+        );
+    }
+
+    /// A cancel that races the agent's exit must stick — terminal immutability
+    /// means the exit path cannot rewrite it as completed.
+    #[test]
+    fn a_cancelled_task_is_not_resurrected_by_the_session_exit() {
+        use crate::tasks::{TaskKind, TaskStatus};
+
+        let state = test_state();
+        let id = state
+            .tasks
+            .create(TaskKind::AgentSpawn, "owner", Some("sess-cancel"));
+        state.tasks.cancel(&id).expect("cancel");
+
+        state.exit_codes.insert("sess-cancel".to_string(), 0);
+        crate::pty::mark_session_exited("sess-cancel", &state);
+
+        assert_eq!(
+            state.tasks.get(&id).unwrap().status,
+            TaskStatus::Cancelled,
+            "the exit must not overwrite an orchestrator's cancel"
+        );
     }
 
     #[test]
@@ -5752,7 +8643,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: false,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -5852,6 +8745,256 @@ mod tests {
         assert!(!state.session_to_mcp.contains_key(&generated));
     }
 
+    /// The read cursor is per-identity state like the inbox it indexes, so it has
+    /// to travel with the mail. Left behind, the replacing identity starts at 0
+    /// and its first `inbox` hands back every migrated message as if it were new.
+    #[test]
+    fn replaces_carries_the_read_cursor_so_migrated_mail_is_not_replayed() {
+        let state = test_state();
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_B, "name": "root"
+            }),
+            Some("mcp-old-connection"),
+        );
+        state.push_agent_inbox(
+            TEST_UUID_B,
+            crate::state::AgentMessage {
+                id: "msg-already-read".to_string(),
+                from_tuic_session: "worker".to_string(),
+                from_name: "worker".to_string(),
+                content: "results".to_string(),
+                timestamp: 1,
+                delivered_via_channel: false,
+            },
+        );
+        let first_read = handle_messaging(
+            &state,
+            &serde_json::json!({"action": "inbox"}),
+            Some("mcp-old-connection"),
+        );
+        assert_eq!(first_read["count"], 1, "the old identity read its mail");
+
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register",
+                "tuic_session": TEST_UUID_A,
+                "name": "root",
+                "replaces": TEST_UUID_B,
+            }),
+            Some("mcp-new-connection"),
+        );
+
+        let after_handoff = handle_messaging(
+            &state,
+            &serde_json::json!({"action": "inbox"}),
+            Some("mcp-new-connection"),
+        );
+        assert_eq!(
+            after_handoff["count"], 0,
+            "mail the superseded identity had already read must not come back as new"
+        );
+        assert!(
+            !state.agent_read_cursor.contains_key(TEST_UUID_B),
+            "a retired identity must not leave its cursor behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn ending_an_mcp_session_drops_the_read_cursor_with_the_inbox() {
+        let state = test_state();
+        let registered = handle_messaging(
+            &state,
+            &serde_json::json!({"action": "register"}),
+            Some("mcp-cursor-teardown"),
+        );
+        let generated = registered["tuic_session"].as_str().unwrap().to_string();
+        state.push_agent_inbox(
+            &generated,
+            crate::state::AgentMessage {
+                id: "msg-read".to_string(),
+                from_tuic_session: "worker".to_string(),
+                from_name: "worker".to_string(),
+                content: "results".to_string(),
+                timestamp: 1,
+                delivered_via_channel: false,
+            },
+        );
+        handle_messaging(
+            &state,
+            &serde_json::json!({"action": "inbox"}),
+            Some("mcp-cursor-teardown"),
+        );
+        assert!(state.agent_read_cursor.contains_key(&generated));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_SESSION_HEADER, "mcp-cursor-teardown".parse().unwrap());
+        let _ = mcp_delete(State(Arc::clone(&state)), headers).await;
+
+        assert!(
+            !state.agent_read_cursor.contains_key(&generated),
+            "the cursor indexes an inbox that teardown just deleted — it cannot outlive it"
+        );
+    }
+
+    fn join_two_bridges_to_one_pty(state: &Arc<AppState>) {
+        apply_initialize_identity(state, "mcp-primary", Some(TEST_UUID_A));
+        live_mcp_session(state, "mcp-primary");
+        apply_initialize_identity(state, "mcp-sibling", Some(TEST_UUID_A));
+        live_mcp_session(state, "mcp-sibling");
+        state.orchestrator_peers.insert(TEST_UUID_A.to_string());
+        state.push_agent_inbox(
+            TEST_UUID_A,
+            crate::state::AgentMessage {
+                id: "msg-shared".to_string(),
+                from_tuic_session: "worker".to_string(),
+                from_name: "worker".to_string(),
+                content: "preflight done".to_string(),
+                timestamp: 1,
+                delivered_via_channel: false,
+            },
+        );
+    }
+
+    async fn end_mcp_session(state: &Arc<AppState>, sid: &str) {
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_SESSION_HEADER, sid.parse().unwrap());
+        let _ = mcp_delete(State(Arc::clone(state)), headers).await;
+    }
+
+    /// The reported symptom: the agent talks through the second bridge, so a
+    /// locked-out sibling answers "You are not registered" to every inbox read
+    /// while its mail piles up under the identity it cannot reach.
+    #[test]
+    fn joined_sibling_bridge_reads_the_shared_inbox() {
+        let state = test_state();
+        join_two_bridges_to_one_pty(&state);
+
+        let inbox = handle_messaging(
+            &state,
+            &serde_json::json!({"action": "inbox", "since": 0}),
+            Some("mcp-sibling"),
+        );
+
+        assert!(
+            inbox.get("error").is_none(),
+            "a joined sibling must not be told it is unregistered: {inbox}"
+        );
+        assert_eq!(
+            inbox["messages"][0]["id"], "msg-shared",
+            "both bridges in one PTY read the same mailbox: {inbox}"
+        );
+    }
+
+    /// The inbox and the orchestrator role belong to the PTY, not to one protocol
+    /// session. When one of two bridges in that PTY goes away, tearing the identity
+    /// down would strand the sibling that is still reading it.
+    #[tokio::test]
+    async fn ending_one_co_owner_keeps_the_identity_for_the_sibling() {
+        let state = test_state();
+        join_two_bridges_to_one_pty(&state);
+
+        end_mcp_session(&state, "mcp-primary").await;
+
+        assert_eq!(
+            state
+                .peer_agents
+                .get(TEST_UUID_A)
+                .map(|peer| peer.mcp_session_id.clone()),
+            Some("mcp-sibling".to_string()),
+            "the surviving co-owner must be promoted to delivery owner"
+        );
+        assert!(
+            state
+                .agent_inbox
+                .get(TEST_UUID_A)
+                .is_some_and(|inbox| inbox.iter().any(|m| m.id == "msg-shared")),
+            "buffered mail must survive: the sibling has not read it yet"
+        );
+        assert!(
+            state.orchestrator_peers.contains(TEST_UUID_A),
+            "the orchestrator role belongs to the PTY, not to the departed bridge"
+        );
+        assert_eq!(
+            state
+                .session_to_mcp
+                .get(TEST_UUID_A)
+                .map(|entry| entry.clone()),
+            Some(vec!["mcp-sibling".to_string()]),
+            "the departed session must drop its own route"
+        );
+        assert!(!state.mcp_to_session.contains_key("mcp-primary"));
+    }
+
+    /// A bridge joining while the last co-owner tears the identity down must not
+    /// end up holding a route to a peer that no longer exists — that is the shape
+    /// of every silent-delivery-loss bug in this module.
+    #[tokio::test]
+    async fn joining_a_bridge_while_the_owner_tears_down_leaves_no_dangling_route() {
+        for round in 0..200 {
+            let state = test_state();
+            apply_initialize_identity(&state, "mcp-primary", Some(TEST_UUID_A));
+            live_mcp_session(&state, "mcp-primary");
+
+            let joiner_state = Arc::clone(&state);
+            let joiner = tokio::task::spawn_blocking(move || {
+                apply_initialize_identity(&joiner_state, "mcp-joiner", Some(TEST_UUID_A));
+            });
+            end_mcp_session(&state, "mcp-primary").await;
+            joiner.await.expect("joining task panicked");
+
+            if state.mcp_to_session.contains_key("mcp-joiner") {
+                assert!(
+                    state.peer_agents.contains_key(TEST_UUID_A),
+                    "round {round}: the joiner kept a route to an identity that was torn down"
+                );
+                assert!(
+                    state
+                        .session_to_mcp
+                        .get(TEST_UUID_A)
+                        .is_some_and(|reverse| reverse.iter().any(|s| s == "mcp-joiner")),
+                    "round {round}: forward route with no reverse entry to clean it up"
+                );
+            } else {
+                assert!(
+                    !state.peer_agents.contains_key(TEST_UUID_A),
+                    "round {round}: identity survived with nobody routed to it"
+                );
+            }
+        }
+    }
+
+    /// A co-owner that never became delivery owner still has to clean up after
+    /// itself, and the last one out tears the identity down as before.
+    #[tokio::test]
+    async fn ending_the_last_co_owner_removes_the_identity() {
+        let state = test_state();
+        join_two_bridges_to_one_pty(&state);
+
+        end_mcp_session(&state, "mcp-sibling").await;
+        assert!(
+            state.peer_agents.contains_key(TEST_UUID_A),
+            "a non-owner leaving must not retire the identity"
+        );
+        assert!(!state.mcp_to_session.contains_key("mcp-sibling"));
+        assert_eq!(
+            state
+                .session_to_mcp
+                .get(TEST_UUID_A)
+                .map(|entry| entry.clone()),
+            Some(vec!["mcp-primary".to_string()])
+        );
+
+        end_mcp_session(&state, "mcp-primary").await;
+        assert!(!state.peer_agents.contains_key(TEST_UUID_A));
+        assert!(!state.agent_inbox.contains_key(TEST_UUID_A));
+        assert!(!state.orchestrator_peers.contains(TEST_UUID_A));
+        assert!(!state.session_to_mcp.contains_key(TEST_UUID_A));
+        assert!(!state.mcp_to_session.contains_key("mcp-primary"));
+    }
+
     #[test]
     fn register_renames_auto_bound_caller_without_hijack_rejection() {
         // After the initialize auto-bind, the SAME mcp session may still call
@@ -5865,7 +9008,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: false,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -5878,6 +9023,414 @@ mod tests {
         );
         assert_eq!(r["ok"], true, "self-rename after auto-bind must succeed");
         assert_eq!(state.peer_agents.get(TEST_UUID_A).unwrap().name, "renamed");
+    }
+
+    /// An agent that registered a made-up UUID must be able to repair itself by
+    /// announcing the `$TUIC_SESSION` TUIC actually injected. The bound identity
+    /// resolves to no terminal; the announced one does. Refusing the real identity
+    /// to protect the phantom is how an orchestrator loses every reply it is owed.
+    #[cfg(unix)]
+    #[test]
+    fn register_accepts_the_real_identity_over_a_bound_phantom() {
+        let state = test_state();
+        let mcp = "mcp-self-repair";
+        insert_managed_test_session(&state, "pty-repair", "/tmp");
+        state.bind_live_pty(TEST_UUID_A, "pty-repair");
+
+        // First registration files the caller under a fabricated identity.
+        let phantom = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_B, "name": "orchestrator"
+            }),
+            Some(mcp),
+        );
+        assert_eq!(phantom["ok"], true);
+        assert_eq!(phantom["terminal"], false, "the phantom has no terminal");
+
+        // Self-repair: same MCP session announces the identity that owns the PTY.
+        let repaired = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_A, "name": "orchestrator"
+            }),
+            Some(mcp),
+        );
+        assert_eq!(
+            repaired["ok"], true,
+            "an identity backed by a live PTY must win over a bound one that is not: {repaired}"
+        );
+        assert_eq!(
+            repaired["terminal"], true,
+            "after the repair the peer must report a terminal: {repaired}"
+        );
+        assert_eq!(
+            state
+                .mcp_to_session
+                .get(mcp)
+                .map(|e| e.value().clone())
+                .unwrap_or_default(),
+            TEST_UUID_A,
+            "routing must follow the repaired identity"
+        );
+    }
+
+    /// The mirror case: a caller already bound to an identity that owns a PTY may
+    /// not wander off to an invented one, and the refusal must name the identity
+    /// it should be using instead of just stating that something is bound.
+    #[cfg(unix)]
+    #[test]
+    fn register_rejects_a_fabricated_identity_and_names_the_real_one() {
+        let state = test_state();
+        let mcp = "mcp-fabricator";
+        insert_managed_test_session(&state, "pty-real", "/tmp");
+        state.bind_live_pty(TEST_UUID_A, "pty-real");
+        apply_initialize_identity(&state, mcp, Some(TEST_UUID_A));
+
+        let rejected = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_B, "name": "orchestrator"
+            }),
+            Some(mcp),
+        );
+        let error = rejected["error"].as_str().unwrap_or_default();
+        assert!(
+            !error.is_empty(),
+            "a fabricated identity must not be accepted while a real one is bound: {rejected}"
+        );
+        assert!(
+            error.contains(TEST_UUID_A),
+            "the refusal must name the identity to use, got: {error}"
+        );
+        assert_eq!(
+            state
+                .mcp_to_session
+                .get(mcp)
+                .map(|e| e.value().clone())
+                .unwrap_or_default(),
+            TEST_UUID_A,
+            "the real binding must survive the rejected call"
+        );
+    }
+
+    /// Repairing an identity must not strand the mail already sent to the phantom —
+    /// those are exactly the replies the caller was missing — and must not leave the
+    /// dead address in `list_peers` for workers to keep writing to.
+    #[cfg(unix)]
+    #[test]
+    fn repairing_an_identity_carries_its_mail_over_and_retires_the_phantom() {
+        let state = test_state();
+        let mcp = "mcp-carryover";
+        insert_managed_test_session(&state, "pty-carryover", "/tmp");
+        state.bind_live_pty(TEST_UUID_A, "pty-carryover");
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_B, "name": "orchestrator"
+            }),
+            Some(mcp),
+        );
+        state.push_agent_inbox(
+            TEST_UUID_B,
+            crate::state::AgentMessage {
+                id: "msg-stranded".to_string(),
+                from_tuic_session: "worker".to_string(),
+                from_name: "worker".to_string(),
+                content: "findings ready".to_string(),
+                timestamp: 1,
+                delivered_via_channel: false,
+            },
+        );
+
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_A, "name": "orchestrator"
+            }),
+            Some(mcp),
+        );
+
+        assert!(
+            state.peer_agents.get(TEST_UUID_B).is_none(),
+            "the abandoned terminal-less identity must not stay addressable"
+        );
+        let carried = state
+            .agent_inbox
+            .get(TEST_UUID_A)
+            .map(|inbox| inbox.iter().any(|m| m.content == "findings ready"))
+            .unwrap_or(false);
+        assert!(
+            carried,
+            "mail buffered under the phantom must survive the repair"
+        );
+    }
+
+    /// A caller that reconnects and registers a NEW uuid arrives with no implicit
+    /// link to its old identity, so its inbox used to be stranded with nobody told.
+    /// `replaces` is how it says which identity it supersedes — guessing by name
+    /// is not an option, since peer identity decides who may read whose mail.
+    #[test]
+    fn replaces_carries_mail_over_from_a_new_protocol_session() {
+        let state = test_state();
+        insert_managed_test_session(&state, "pty-replaces", "/tmp");
+        state.bind_live_pty(TEST_UUID_A, "pty-replaces");
+        // The old identity registers on its own (now gone) connection.
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_B, "name": "root"
+            }),
+            Some("mcp-old-connection"),
+        );
+        state.push_agent_inbox(
+            TEST_UUID_B,
+            crate::state::AgentMessage {
+                id: "msg-orphan".to_string(),
+                from_tuic_session: "worker".to_string(),
+                from_name: "worker".to_string(),
+                content: "results".to_string(),
+                timestamp: 1,
+                delivered_via_channel: false,
+            },
+        );
+
+        // A different protocol session claims the new identity: previously_bound is
+        // None here, so only `replaces` can tie the two together.
+        let response = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register",
+                "tuic_session": TEST_UUID_A,
+                "name": "root",
+                "replaces": TEST_UUID_B,
+            }),
+            Some("mcp-new-connection"),
+        );
+
+        assert_eq!(response["superseded_identity"], TEST_UUID_B);
+        assert_eq!(response["mail_migrated"], 1);
+        assert!(state.peer_agents.get(TEST_UUID_B).is_none());
+        let carried = state
+            .agent_inbox
+            .get(TEST_UUID_A)
+            .map(|inbox| inbox.iter().any(|m| m.content == "results"))
+            .unwrap_or(false);
+        assert!(carried, "orphaned mail must reach the replacing identity");
+    }
+
+    /// The other half of the contract: an identity that still owns a live PTY is a
+    /// reachable peer, not an abandoned one. Taking its mail would strand a working
+    /// agent — so nothing moves, and the caller is told in so many words instead of
+    /// the silent early return this used to be.
+    #[cfg(unix)]
+    #[test]
+    fn replaces_refuses_to_take_mail_from_a_live_identity_and_says_so() {
+        let state = test_state();
+        insert_managed_test_session(&state, "pty-new", "/tmp");
+        state.bind_live_pty(TEST_UUID_A, "pty-new");
+        insert_managed_test_session(&state, "pty-still-alive", "/tmp");
+        state.bind_live_pty(TEST_UUID_B, "pty-still-alive");
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_B, "name": "root"
+            }),
+            Some("mcp-live-owner"),
+        );
+        state.push_agent_inbox(
+            TEST_UUID_B,
+            crate::state::AgentMessage {
+                id: "msg-theirs".to_string(),
+                from_tuic_session: "worker".to_string(),
+                from_name: "worker".to_string(),
+                content: "not yours".to_string(),
+                timestamp: 1,
+                delivered_via_channel: false,
+            },
+        );
+
+        let response = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register",
+                "tuic_session": TEST_UUID_A,
+                "name": "root",
+                "replaces": TEST_UUID_B,
+            }),
+            Some("mcp-claimant"),
+        );
+
+        assert_eq!(response["mail_migrated"], 0);
+        assert_eq!(response["mail_stranded"], 1);
+        assert!(
+            response["identity_warning"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("live PTY"),
+            "the skip must be reported, not silent: {:?}",
+            response["identity_warning"]
+        );
+        let kept = state
+            .agent_inbox
+            .get(TEST_UUID_B)
+            .map(|inbox| inbox.iter().any(|m| m.content == "not yours"))
+            .unwrap_or(false);
+        assert!(kept, "a live peer keeps its own mail");
+        assert!(
+            state.peer_agents.get(TEST_UUID_B).is_some(),
+            "a live peer must stay addressable"
+        );
+    }
+
+    /// `delivered_via_channel` reported one sub-route but read as a delivery
+    /// verdict, so `false` next to a confirming `delivery_path` was pure noise.
+    /// `delivery_path` is now the single source of truth for the route.
+    #[test]
+    fn send_reports_the_route_only_through_delivery_path() {
+        let state = test_state();
+        handle_messaging(
+            &state,
+            &serde_json::json!({"action": "register", "tuic_session": TEST_UUID_A, "name": "sender"}),
+            Some("mcp-route-sender"),
+        );
+        handle_messaging(
+            &state,
+            &serde_json::json!({"action": "register", "tuic_session": TEST_UUID_B, "name": "peer"}),
+            Some("mcp-route-peer"),
+        );
+
+        let result = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "send", "to": TEST_UUID_B, "message": "hello"
+            }),
+            Some("mcp-route-sender"),
+        );
+
+        assert_eq!(result["delivery_path"], "inbox_only");
+        assert!(
+            result.get("delivered_via_channel").is_none(),
+            "the ambiguous field must be gone from the send response: {result:?}"
+        );
+    }
+
+    /// A `send` landing in the middle of the retire must not vanish. The retire
+    /// mutates several maps; without a shared critical section a message could
+    /// be buffered under an identity that is deleted a moment later, which is
+    /// exactly the silent drop the repair set out to end. Either the message
+    /// reaches the repaired inbox, or the send is refused — never neither.
+    #[test]
+    fn a_send_racing_the_retire_is_never_silently_dropped() {
+        const ROUNDS: usize = 300;
+
+        for round in 0..ROUNDS {
+            let state = test_state();
+            let sender = TEST_UUID_A;
+            let phantom = TEST_UUID_B;
+            let repaired = "550e8400-e29b-41d4-a716-446655440a03";
+            register_peer(&state, sender, "sender", "mcp-sender");
+            register_peer(&state, phantom, "phantom", "mcp-phantom");
+            register_peer(&state, repaired, "repaired", "mcp-repaired");
+
+            let send_state = Arc::clone(&state);
+            let content = format!("payload-{round}");
+            let sent = content.clone();
+            let sender_thread = std::thread::spawn(move || {
+                handle_messaging(
+                    &send_state,
+                    &serde_json::json!({
+                        "action": "send", "to": phantom, "message": sent
+                    }),
+                    Some("mcp-sender"),
+                )
+            });
+
+            let retire_state = Arc::clone(&state);
+            let retire_thread = std::thread::spawn(move || {
+                retire_repaired_phantom_identity(&retire_state, phantom, repaired);
+            });
+
+            let send_result = sender_thread.join().expect("send thread panicked");
+            retire_thread.join().expect("retire thread panicked");
+
+            let accepted = send_result.get("error").is_none();
+            let in_repaired = state
+                .agent_inbox
+                .get(repaired)
+                .map(|inbox| inbox.iter().any(|m| m.content == content))
+                .unwrap_or(false);
+            let stranded = state
+                .agent_inbox
+                .get(phantom)
+                .map(|inbox| inbox.iter().any(|m| m.content == content))
+                .unwrap_or(false);
+
+            assert!(
+                !stranded,
+                "round {round}: message left in the retired phantom's inbox, addressable by nobody"
+            );
+            if accepted {
+                assert!(
+                    in_repaired,
+                    "round {round}: send reported success but the message reached no inbox"
+                );
+            }
+        }
+    }
+
+    /// After the repair the peer is addressable in the normal sense: `send` must
+    /// resolve it to the live PTY rather than parking the message in the inbox.
+    #[cfg(unix)]
+    #[test]
+    fn send_reaches_a_repaired_peer_through_its_terminal() {
+        let state = test_state();
+        insert_managed_test_session(&state, "pty-addressable", "/tmp");
+        state.shell_states.insert(
+            "pty-addressable".to_string(),
+            std::sync::atomic::AtomicU8::new(crate::pty::SHELL_IDLE),
+        );
+        state.session_states.insert(
+            "pty-addressable".to_string(),
+            crate::state::SessionState {
+                agent_type: Some("codex".to_string()),
+                ..Default::default()
+            },
+        );
+        state.bind_live_pty(TEST_UUID_A, "pty-addressable");
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_B, "name": "orchestrator"
+            }),
+            Some("mcp-recipient"),
+        );
+        handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register", "tuic_session": TEST_UUID_A, "name": "orchestrator"
+            }),
+            Some("mcp-recipient"),
+        );
+
+        let sender_tuic = "550e8400-e29b-41d4-a716-4466554400c1";
+        register_peer(&state, sender_tuic, "worker", "mcp-worker");
+        let sent = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "send", "to": TEST_UUID_A, "message": "findings ready"
+            }),
+            Some("mcp-worker"),
+        );
+        assert_eq!(sent["delivered"], true, "delivery must succeed: {sent}");
+        assert_eq!(
+            sent["delivery_path"], "terminal_or_queued_and_inbox",
+            "the message must go to the terminal, not sit in the inbox: {sent}"
+        );
+        assert_eq!(
+            sent["recipient_state"]["shell_state"], "idle",
+            "recipient_state is only reported for a real managed PTY: {sent}"
+        );
     }
 
     #[test]
@@ -5912,11 +9465,40 @@ mod tests {
         assert_eq!(clamp_wait_timeout(Some(1_000)), 1_000, "in-range preserved");
         assert_eq!(
             clamp_wait_timeout(Some(300_001)),
-            WAIT_MAX_MS,
-            "over-cap clamped at five minutes"
+            WAIT_EFFECTIVE_MAX_MS,
+            "over-cap clamped"
         );
         assert_eq!(WAIT_DEFAULT_MS, 60_000);
         assert_eq!(WAIT_MAX_MS, 300_000);
+    }
+
+    /// A caller that asks for the advertised maximum must get an answer, not a
+    /// client-side abort. Codex ends a tools/call at exactly 300s, so a wait that
+    /// runs the full 300000 ms loses that race every time.
+    #[test]
+    fn the_advertised_maximum_wait_answers_before_a_client_deadline() {
+        assert_eq!(
+            clamp_wait_timeout(Some(WAIT_MAX_MS)),
+            WAIT_EFFECTIVE_MAX_MS,
+            "asking for the documented maximum must not run to the client's ceiling"
+        );
+        const {
+            assert!(
+                WAIT_EFFECTIVE_MAX_MS < WAIT_MAX_MS,
+                "the effective cap has to leave the client room to receive the reply"
+            )
+        };
+        const {
+            assert!(
+                WAIT_MAX_MS - WAIT_EFFECTIVE_MAX_MS >= 5_000,
+                "margin must at least match the bridge's own response margin"
+            )
+        };
+        assert_eq!(
+            clamp_wait_timeout(Some(WAIT_EFFECTIVE_MAX_MS - 1)),
+            WAIT_EFFECTIVE_MAX_MS - 1,
+            "a request below the effective cap is untouched"
+        );
     }
 
     #[test]
@@ -5943,10 +9525,14 @@ mod tests {
         );
     }
 
+    /// `wait` now requires a real session (see below), so these tests register one.
+    /// `#[cfg(unix)]` follows `insert_managed_test_session`, which opens a real PTY.
+    #[cfg(unix)]
     #[tokio::test]
     async fn session_wait_returns_immediately_when_already_idle() {
         use std::sync::atomic::AtomicU8;
         let state = test_state();
+        insert_managed_test_session(&state, "s", "/tmp");
         state
             .shell_states
             .insert("s".to_string(), AtomicU8::new(crate::pty::SHELL_IDLE));
@@ -5959,10 +9545,12 @@ mod tests {
         assert_eq!(r["timed_out"], false);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn mcp_delivery_regression_session_wait_times_out_with_flag() {
         use std::sync::atomic::AtomicU8;
         let state = test_state();
+        insert_managed_test_session(&state, "s", "/tmp");
         state
             .shell_states
             .insert("s".to_string(), AtomicU8::new(crate::pty::SHELL_BUSY));
@@ -5975,11 +9563,46 @@ mod tests {
         assert_eq!(r["timed_out"], true);
     }
 
+    /// `subscribe_pty_events` CREATES the channel for whatever id it is handed,
+    /// and teardown only reaps ids that were real sessions — so an unvalidated
+    /// `wait` let a caller grow `pty_event_channels` with entries nothing would
+    /// ever remove, one 256-slot broadcast channel per made-up id. It also blocked
+    /// the caller for the full timeout on a session that cannot exist.
+    #[tokio::test]
+    async fn session_wait_rejects_an_unknown_session_without_subscribing() {
+        let state = test_state();
+        let started = std::time::Instant::now();
+
+        let r = handle_session_wait(
+            &state,
+            &serde_json::json!({"action":"wait","session_id":"never-existed","until":"idle","timeout_ms":5_000}),
+        )
+        .await;
+
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Unknown session"),
+            "unexpected response: {r}"
+        );
+        assert!(
+            state.pty_event_channels.is_empty(),
+            "an unknown id must not leave a broadcast channel behind"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "it must fail fast, not block for the full timeout"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn mcp_delivery_regression_session_wait_wakes_from_pty_event_without_polling() {
         use std::sync::atomic::{AtomicU8, Ordering};
 
         let state = test_state();
+        insert_managed_test_session(&state, "event-session", "/tmp");
         state.shell_states.insert(
             "event-session".to_string(),
             AtomicU8::new(crate::pty::SHELL_BUSY),
@@ -6005,7 +9628,7 @@ mod tests {
             .store(crate::pty::SHELL_IDLE, Ordering::Release);
         state.emit_pty_event(crate::state::AppEvent::PtyParsed {
             session_id: "event-session".to_string(),
-            parsed: serde_json::json!({"type": "shell-state", "state": "idle"}),
+            parsed: serde_json::json!({"type": "shell-state", "state": "idle"}).into(),
         });
 
         let response = waiter.await.unwrap();
@@ -6043,7 +9666,13 @@ mod tests {
         assert_eq!(r["messages"][0]["from_name"], "lead");
         assert_eq!(r["messages"][0]["content"], "go");
         assert_eq!(r["messages"][0]["timestamp"], 5_000);
-        assert_eq!(r["messages"][0]["delivered_via_channel"], false);
+        // The recipient is holding the message; which sub-route carried it is
+        // server-side forensics, and a `false` here read as "not delivered" is
+        // the same ambiguity that removed the field from the send response.
+        assert!(
+            r["messages"][0].get("delivered_via_channel").is_none(),
+            "delivered_via_channel must not reach the recipient"
+        );
         assert!(
             r.get("hint").is_none(),
             "steady-state success needs no hint"
@@ -6141,7 +9770,99 @@ mod tests {
         assert_eq!(replay["timed_out"], true);
         assert_eq!(replay["new_messages"], 0);
         assert!(replay.get("messages").is_none());
-        assert!(replay.get("next_since").is_none());
+        // A timed-out replay still answers with a usable cursor — and with the
+        // position reading actually reached, not the `since=0` it was asked with.
+        // Losing the cursor here is what drove callers back to replaying everything.
+        assert_eq!(replay["next_since"], 5_000);
+    }
+
+    /// The point of the server-side cursor: a caller that never threads `since`
+    /// must not keep re-reading the same mail. Before this, an omitted `since`
+    /// defaulted to 0 and replayed the whole inbox on every call.
+    #[tokio::test]
+    async fn omitting_since_resumes_from_the_server_cursor() {
+        let state = test_state();
+        apply_initialize_identity(&state, "mcp-w-cursor", Some(TEST_UUID_A));
+        let push = |id: &str, timestamp: u64| {
+            state.push_agent_inbox(
+                TEST_UUID_A,
+                crate::state::AgentMessage {
+                    id: id.into(),
+                    from_tuic_session: "lead".into(),
+                    from_name: "lead".into(),
+                    content: "payload".into(),
+                    timestamp,
+                    delivered_via_channel: false,
+                },
+            );
+        };
+        push("m-1", 1_000);
+
+        let first = handle_agent_wait(
+            &state,
+            &serde_json::json!({"action": "wait", "timeout_ms": 1}),
+            Some("mcp-w-cursor"),
+        )
+        .await;
+        assert_eq!(first["new_messages"], 1);
+        assert_eq!(first["next_since"], 1_000);
+
+        push("m-2", 2_000);
+        let second = handle_agent_wait(
+            &state,
+            &serde_json::json!({"action": "wait", "timeout_ms": 1}),
+            Some("mcp-w-cursor"),
+        )
+        .await;
+        assert_eq!(
+            second["new_messages"], 1,
+            "only the new message — the cursor moved past m-1"
+        );
+        assert_eq!(second["messages"][0]["id"], "m-2");
+        assert_eq!(second["next_since"], 2_000);
+    }
+
+    /// `since=0` stays the deliberate replay escape hatch, and must not rewind the
+    /// stored cursor for the next omitted-`since` caller.
+    #[tokio::test]
+    async fn explicit_since_overrides_the_cursor_without_rewinding_it() {
+        let state = test_state();
+        apply_initialize_identity(&state, "mcp-w-override", Some(TEST_UUID_A));
+        state.push_agent_inbox(
+            TEST_UUID_A,
+            crate::state::AgentMessage {
+                id: "m-only".into(),
+                from_tuic_session: "lead".into(),
+                from_name: "lead".into(),
+                content: "payload".into(),
+                timestamp: 7_000,
+                delivered_via_channel: false,
+            },
+        );
+
+        let inbox = handle_messaging(
+            &state,
+            &serde_json::json!({"action": "inbox"}),
+            Some("mcp-w-override"),
+        );
+        assert_eq!(inbox["count"], 1);
+        assert_eq!(inbox["next_since"], 7_000);
+
+        let replay = handle_messaging(
+            &state,
+            &serde_json::json!({"action": "inbox", "since": 0}),
+            Some("mcp-w-override"),
+        );
+        assert_eq!(replay["count"], 1, "since=0 still replays on demand");
+
+        assert_eq!(
+            state
+                .agent_read_cursor
+                .get(TEST_UUID_A)
+                .map(|entry| *entry.value()),
+            Some(7_000),
+            "a replay must not rewind the stored cursor"
+        );
     }
 
     #[tokio::test]
@@ -6229,7 +9950,12 @@ mod tests {
         let state = test_state();
         let args = serde_json::json!({"action": "register", "tuic_session": "550e8400-e29b-41d4-a716-446655440a01"});
         let result = handle_messaging(&state, &args, None);
-        assert!(result["error"].as_str().unwrap().contains("MCP session"));
+        // Still refused — but since tools/call no longer gates on the header, this
+        // message is what a stateless caller actually sees, so it must name a way
+        // out rather than just state the problem (#0f44).
+        let error = result["error"].as_str().unwrap();
+        assert!(error.contains("mcp-session-id"), "{error}");
+        assert!(error.contains("initialize"), "{error}");
     }
 
     #[test]
@@ -6322,7 +10048,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -6447,7 +10175,9 @@ mod tests {
                     - MCP_OWNER_ACTIVITY_GRACE
                     - std::time::Duration::from_secs(1),
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: true, // historical flag alone is not live ownership
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -6511,6 +10241,7 @@ mod tests {
         session_id: &str,
         agent_type: &str,
     ) -> std::sync::mpsc::Receiver<String> {
+        use portable_pty::native_pty_system;
         use std::io::Read;
 
         let pair = native_pty_system()
@@ -6535,13 +10266,15 @@ mod tests {
         state.sessions.insert(
             session_id.to_string(),
             Mutex::new(PtySession {
-                writer,
+                writer: Arc::new(Mutex::new(writer)),
                 master: pair.master,
                 _child: child,
                 paused: Arc::new(AtomicBool::new(false)),
                 worktree: None,
                 cwd: None,
                 display_name: Some("submission-probe".to_string()),
+                display_name_is_custom: false,
+                is_remote: true,
                 shell: "/bin/sh".to_string(),
             }),
         );
@@ -6699,7 +10432,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: true,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -6720,7 +10455,6 @@ mod tests {
             Some("mcp-sender"),
         );
 
-        assert_eq!(result["delivered_via_channel"], false);
         assert_eq!(result["delivery_path"], "terminal_or_queued_and_inbox");
         assert!(
             matches!(
@@ -6755,6 +10489,156 @@ mod tests {
         assert_eq!(snapshot.turn_epoch, 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn idle_orchestrator_receives_only_generic_mail_wake() {
+        let state = test_state();
+        register_peer(&state, TEST_UUID_A, "sender", "mcp-sender");
+        register_peer(&state, TEST_UUID_B, "orchestrator", "mcp-recipient");
+        state.orchestrator_peers.insert(TEST_UUID_B.to_string());
+        let submitted_output =
+            install_completed_agent_submission_probe(&state, TEST_UUID_B, "codex");
+
+        let result = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "send",
+                "to": TEST_UUID_B,
+                "message": "secret peer payload",
+            }),
+            Some("mcp-sender"),
+        );
+
+        assert_eq!(result["delivery_path"], "wake_notification_and_inbox");
+        let output = submitted_output
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("generic wake should submit a new turn");
+        assert!(output.contains("message available"), "{output:?}");
+        assert!(output.contains("agent action=inbox"), "{output:?}");
+        assert!(
+            !output.contains("secret peer payload"),
+            "the peer payload must remain inbox-only: {output:?}"
+        );
+        assert_eq!(
+            state.agent_inbox.get(TEST_UUID_B).unwrap()[0].content,
+            "secret peer payload"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn idle_orchestrator_reads_child_lifecycle_off_the_notice_itself() {
+        let state = test_state();
+        register_peer(&state, TEST_UUID_B, "orchestrator", "mcp-recipient");
+        state.orchestrator_peers.insert(TEST_UUID_B.to_string());
+        state
+            .session_parent
+            .insert(TEST_UUID_A.to_string(), TEST_UUID_B.to_string());
+        let submitted_output =
+            install_completed_agent_submission_probe(&state, TEST_UUID_B, "codex");
+
+        crate::pty::push_state_change_to_parent(
+            &state,
+            TEST_UUID_A,
+            serde_json::json!({
+                "type": "state_change",
+                "state": "exited",
+                "session_id": TEST_UUID_A,
+                "exit_code": 0,
+            }),
+        );
+
+        let output = submitted_output
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a lifecycle notice should submit a new turn");
+        assert!(
+            output.contains(&format!(
+                "child agent {} exited (exit 0)",
+                &TEST_UUID_A[..8]
+            )),
+            "{output:?}"
+        );
+        assert!(
+            !output.contains("message available"),
+            "a lifecycle-only window must not cost an inbox round-trip: {output:?}"
+        );
+        assert_eq!(
+            state.agent_inbox.get(TEST_UUID_B).unwrap().len(),
+            1,
+            "the inbox copy stays authoritative and auditable"
+        );
+        assert_eq!(
+            state.orchestrator_wake_needed_through(TEST_UUID_B),
+            None,
+            "the notice acknowledged itself"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_orchestrator_is_inbox_only_even_with_claude_channel() {
+        let state = test_state();
+        register_peer(&state, TEST_UUID_A, "sender", "mcp-sender");
+        register_peer(&state, TEST_UUID_B, "orchestrator", "mcp-recipient");
+        state.orchestrator_peers.insert(TEST_UUID_B.to_string());
+        state.mcp_sessions.insert(
+            "mcp-recipient".to_string(),
+            crate::state::McpSessionMeta {
+                last_activity: std::time::Instant::now(),
+                is_claude_code: true,
+                requires_meta_tools: false,
+                has_sse_stream: true,
+                sse_generation: 0,
+                repo_path: None,
+            },
+        );
+        let (channel, mut receiver) = tokio::sync::broadcast::channel(4);
+        state
+            .messaging_channels
+            .insert("mcp-recipient".to_string(), channel);
+        let _submitted_output =
+            install_completed_agent_submission_probe(&state, TEST_UUID_B, "claude");
+        state
+            .session_states
+            .get_mut(TEST_UUID_B)
+            .unwrap()
+            .suggested_actions = None;
+        state
+            .silence_states
+            .get(TEST_UUID_B)
+            .unwrap()
+            .lock()
+            .reset_suggest_memory();
+        state.shell_states.insert(
+            TEST_UUID_B.to_string(),
+            std::sync::atomic::AtomicU8::new(crate::pty::SHELL_BUSY),
+        );
+
+        let result = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "send",
+                "to": TEST_UUID_B,
+                "message": "do not steer the active turn",
+            }),
+            Some("mcp-sender"),
+        );
+
+        assert_eq!(result["delivery_path"], "inbox_only");
+        assert_eq!(result["delivered"], false);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(
+            state
+                .pending_injections
+                .get(TEST_UUID_B)
+                .is_none_or(|pending| pending.is_empty()),
+            "busy orchestrator mail must not be queued for a later idle transition"
+        );
+    }
+
     #[test]
     fn mcp_delivery_regression_working_claude_keeps_sse_turn_delivery() {
         let state = test_state();
@@ -6765,7 +10649,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: true,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -6801,7 +10687,6 @@ mod tests {
             Some("mcp-sender"),
         );
 
-        assert_eq!(result["delivered_via_channel"], true);
         assert_eq!(result["delivery_path"], "sse_channel_and_inbox");
         assert!(receiver.try_recv().is_ok());
         let snapshot = state.session_state_with_shell(TEST_UUID_B).unwrap();
@@ -6846,7 +10731,6 @@ mod tests {
 
         assert_eq!(result["accepted"], true);
         assert_eq!(result["delivery_path"], "inbox_only");
-        assert_eq!(result["delivered_via_channel"], false);
         let snapshot = state.session_state_with_shell(TEST_UUID_B).unwrap();
         assert_eq!(snapshot.agent_state.as_deref(), Some("completed"));
         assert_eq!(snapshot.turn_epoch, 0);
@@ -6870,7 +10754,9 @@ mod tests {
                 // its managed terminal is actually Codex. The PTY type is the
                 // authoritative cross-check for channel-turn support.
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: true,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -6892,7 +10778,6 @@ mod tests {
         );
 
         assert_eq!(result["accepted"], true);
-        assert_eq!(result["delivered_via_channel"], false);
         assert_eq!(result["delivery_path"], "terminal_or_queued_and_inbox");
         assert!(
             matches!(
@@ -7182,6 +11067,7 @@ mod tests {
             vec![
                 "session",
                 "agent",
+                "task",
                 "repo",
                 "ui",
                 "plugin_dev_guide",
@@ -7201,7 +11087,7 @@ mod tests {
                 "ai_terminal_run_command",
                 "ai_terminal_drive_agent",
             ],
-            "native_tool_definitions must return 7 base tools + 13 ai_terminal_* tools in order"
+            "native_tool_definitions must return 8 base tools + 13 ai_terminal_* tools in order"
         );
     }
 
@@ -7272,8 +11158,12 @@ mod tests {
         );
         assert!(desc.contains("wait"), "must mention the wait primitive");
         assert!(
-            desc.to_lowercase().contains("typed into"),
-            "must explain push-into-terminal delivery"
+            desc.contains("Ordinary managed agents keep direct delivery"),
+            "must preserve ordinary managed-agent delivery"
+        );
+        assert!(
+            desc.contains("generic `agent action=inbox` wake"),
+            "must explain payload-free orchestrator wake delivery"
         );
         assert!(
             desc.contains("do NOT poll"),
@@ -7416,6 +11306,78 @@ mod tests {
 
         assert_eq!(names.len(), 3);
         assert_eq!(names, vec!["search_tools", "get_tool_schema", "call_tool"]);
+    }
+
+    #[test]
+    fn grok_session_uses_meta_tools_without_mutating_global_config() {
+        let state = test_state();
+        assert!(!state.config.read().collapse_tools);
+        state.mcp_sessions.insert(
+            "grok-session".to_string(),
+            crate::state::McpSessionMeta {
+                last_activity: std::time::Instant::now(),
+                is_claude_code: false,
+                requires_meta_tools: true,
+                has_sse_stream: false,
+                sse_generation: 0,
+                repo_path: None,
+            },
+        );
+
+        let merged = merged_tool_definitions(&state, Some("grok-session"));
+        assert_eq!(
+            tool_names(&merged),
+            vec!["search_tools", "get_tool_schema", "call_tool"]
+        );
+        assert!(!state.config.read().collapse_tools);
+    }
+
+    #[test]
+    fn grok_client_requires_meta_tools() {
+        assert!(client_requires_meta_tools(Some("grok-shell-tuicommander")));
+        assert!(client_requires_meta_tools(Some("GROK-SHELL-tuicommander")));
+        assert!(!client_requires_meta_tools(Some("claude-code")));
+        assert!(!client_requires_meta_tools(Some(
+            "not-grok-shell-tuicommander"
+        )));
+        assert!(!client_requires_meta_tools(None));
+    }
+
+    #[tokio::test]
+    async fn unsupported_server_discover_is_the_deliberate_fallback_boundary() {
+        let response = mcp_post(
+            State(test_state()),
+            ConnectInfo("127.0.0.1:0".parse().unwrap()),
+            HeaderMap::new(),
+            Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "server/discover",
+                "params": {
+                    "_meta": {
+                        "io.modelcontextprotocol/clientInfo": {
+                            "name": "probe-client",
+                            "version": "1.0.0"
+                        }
+                    }
+                }
+            })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "error": { "code": -32601, "message": "Method not found: server/discover" }
+            })
+        );
     }
 
     /// Sanity check on the token-reduction claim for lazy tool loading.
@@ -7835,6 +11797,181 @@ mod tests {
         );
     }
 
+    /// `sound` is what an unattended agent uses to reach a user who is not
+    /// watching, so every accepted form must resolve to a real notification
+    /// sound: silence is silence, `true` still means "match the level", and a
+    /// name (notably `attention`) overrides it.
+    #[test]
+    fn toast_sound_resolves_to_a_notification_sound_or_silence() {
+        use serde_json::json;
+        for (value, level, expected) in [
+            (json!(null), "info", None),
+            (json!(false), "error", None),
+            (json!(true), "info", Some("info")),
+            (json!(true), "warn", Some("warning")),
+            (json!(true), "error", Some("error")),
+            (json!("attention"), "info", Some("attention")),
+            (json!("question"), "error", Some("question")),
+        ] {
+            assert_eq!(
+                resolve_toast_sound(&value, level).expect("valid sound"),
+                expected.map(str::to_string),
+                "sound={value} level={level}"
+            );
+        }
+    }
+
+    /// A typo must not silently produce a silent toast — the agent would believe
+    /// it had rung a bell that never rang.
+    #[test]
+    fn toast_sound_rejects_unknown_names() {
+        let err = resolve_toast_sound(&serde_json::json!("buzzer"), "info")
+            .expect_err("unknown sound must be rejected");
+        let message = err["error"].as_str().expect("error message");
+        assert!(
+            message.contains("attention"),
+            "lists the valid names: {message}"
+        );
+        assert!(resolve_toast_sound(&serde_json::json!(3), "info").is_err());
+    }
+
+    #[tokio::test]
+    async fn ui_toast_puts_the_resolved_sound_on_the_bus() {
+        let state = test_state();
+        let mut rx = state.event_bus.subscribe();
+        let r = handle_mcp_tool_call(
+            &state,
+            loopback_addr(),
+            "ui",
+            &serde_json::json!({
+                "action": "toast",
+                "title": "need you",
+                "level": "warn",
+                "sound": "attention",
+            }),
+            None,
+        )
+        .await;
+        assert!(!r["error"].is_string(), "toast should succeed, got: {r}");
+        match rx.try_recv().expect("McpToast on the bus") {
+            crate::state::AppEvent::McpToast { sound, level, .. } => {
+                assert_eq!(sound.as_deref(), Some("attention"));
+                assert_eq!(level, "warn", "the callback does not change the severity");
+            }
+            other => panic!("expected McpToast, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ui_toast_includes_origin_repo_path_from_peer_agent() {
+        use crate::state::PeerAgent;
+        let state = test_state();
+        let mcp_sid = "mcp-toast-origin".to_string();
+        let tuic = "00000000-0000-0000-0000-000000000003".to_string();
+        state.mcp_to_session.insert(mcp_sid.clone(), tuic.clone());
+        state.peer_agents.insert(
+            tuic.clone(),
+            PeerAgent {
+                tuic_session: tuic,
+                mcp_session_id: mcp_sid.clone(),
+                name: "codex".to_string(),
+                project: Some("/Gits/personal/tuicommander".to_string()),
+                registered_at: 0,
+            },
+        );
+
+        let mut rx = state.event_bus.subscribe();
+        let result = handle_mcp_tool_call(
+            &state,
+            loopback_addr(),
+            "ui",
+            &serde_json::json!({
+                "action": "toast",
+                "title": "done",
+            }),
+            Some(&mcp_sid),
+        )
+        .await;
+        assert_eq!(result["ok"], true);
+
+        match rx.try_recv().expect("McpToast on the bus") {
+            crate::state::AppEvent::McpToast {
+                origin_repo_path, ..
+            } => assert_eq!(
+                origin_repo_path.as_deref(),
+                Some("/Gits/personal/tuicommander")
+            ),
+            other => panic!("expected McpToast, got {other:?}"),
+        }
+    }
+
+    /// The repo path alone cannot navigate: several tabs share a repo. Clicking
+    /// the toast has to land on the exact terminal that raised it, so the event
+    /// carries the caller's TUIC session id too.
+    #[tokio::test]
+    async fn ui_toast_includes_origin_session_id_from_peer_agent() {
+        use crate::state::PeerAgent;
+        let state = test_state();
+        let mcp_sid = "mcp-toast-origin-session".to_string();
+        let tuic = "00000000-0000-0000-0000-000000000004".to_string();
+        state.mcp_to_session.insert(mcp_sid.clone(), tuic.clone());
+        state.peer_agents.insert(
+            tuic.clone(),
+            PeerAgent {
+                tuic_session: tuic.clone(),
+                mcp_session_id: mcp_sid.clone(),
+                name: "codex".to_string(),
+                project: Some("/Gits/personal/tuicommander".to_string()),
+                registered_at: 0,
+            },
+        );
+
+        let mut rx = state.event_bus.subscribe();
+        let result = handle_mcp_tool_call(
+            &state,
+            loopback_addr(),
+            "ui",
+            &serde_json::json!({
+                "action": "toast",
+                "title": "done",
+            }),
+            Some(&mcp_sid),
+        )
+        .await;
+        assert_eq!(result["ok"], true);
+
+        match rx.try_recv().expect("McpToast on the bus") {
+            crate::state::AppEvent::McpToast {
+                origin_session_id, ..
+            } => assert_eq!(origin_session_id.as_deref(), Some(tuic.as_str())),
+            other => panic!("expected McpToast, got {other:?}"),
+        }
+    }
+
+    /// An unbound caller (no PTY behind the MCP session) must not invent one:
+    /// a wrong id would send the click to somebody else's terminal.
+    #[tokio::test]
+    async fn ui_toast_omits_origin_session_id_for_unbound_caller() {
+        let state = test_state();
+        let mut rx = state.event_bus.subscribe();
+        let result = handle_mcp_tool_call(
+            &state,
+            loopback_addr(),
+            "ui",
+            &serde_json::json!({ "action": "toast", "title": "done" }),
+            Some("mcp-toast-unbound"),
+        )
+        .await;
+        assert_eq!(result["ok"], true);
+
+        match rx.try_recv().expect("McpToast on the bus") {
+            crate::state::AppEvent::McpToast {
+                origin_session_id, ..
+            } => assert_eq!(origin_session_id, None),
+            other => panic!("expected McpToast, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn handle_mcp_tool_call_routes_debug_sessions() {
         let state = test_state();
@@ -7927,6 +12064,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn initialize_instructions_pin_the_one_call_submit_rule_in_both_modes() {
+        let state = test_state();
+        let classic = build_mcp_instructions_for_mode(&state, None, false);
+        let collapsed = build_mcp_instructions_for_mode(&state, None, true);
+
+        assert!(classic.contains(
+            "**Submit:** `session action=submit session_id=<id> input=<text>` once; never split text/Enter; never poll."
+        ));
+        assert!(collapsed.contains(
+            "**Submit:** `call_tool tool_name=session arguments={action:submit,session_id,input}` once; never split text/Enter; never poll."
+        ));
+        assert!(!classic.contains("text then"));
+        assert!(!collapsed.contains("status after"));
+    }
+
     // ---- Swarm Layer 4: MCP tool descriptions (#1165-b124) -------------------
 
     #[test]
@@ -7949,6 +12102,47 @@ mod tests {
         assert!(
             action_enum.contains("status"),
             "session action enum must include status"
+        );
+    }
+
+    #[test]
+    fn session_submit_schema_pins_receipt_and_raw_input_semantics() {
+        let defs = native_tool_definitions();
+        let session = defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "session")
+            .unwrap();
+        let description = session["description"].as_str().unwrap();
+        let properties = &session["inputSchema"]["properties"];
+
+        assert!(
+            description.contains("Use one call; never split text and Enter; never poll after it.")
+        );
+        assert!(description.contains(
+            "Acknowledgement means child terminal movement after Enter, not semantic application acceptance."
+        ));
+        assert!(
+            description.contains("composer_state (tracked InputLineBuffer, not application state)")
+        );
+        assert!(description.contains(
+            "Never queues; partial composers, dialogs, busy agents, and older queued commands reject before writing."
+        ));
+        assert!(description.contains(
+            "input: Raw text/key compatibility surface. Send text and/or special_key; ok confirms PTY write only."
+        ));
+        assert_eq!(
+            properties["action"]["description"],
+            "One of: list, create, submit, input, output, status, wait, resize, close, kill, pause, resume, process_stats"
+        );
+        assert_eq!(
+            properties["input"]["description"],
+            "Non-empty command (action=submit) or raw text (action=input)"
+        );
+        assert_eq!(
+            properties["timeout_ms"]["description"],
+            "action=submit: acknowledgement wait, clamped 250-10000ms, default 3000. action=wait: max wait, default 60000; values at or above 300000 run as 295000."
         );
     }
 
@@ -8252,13 +12446,15 @@ mod tests {
         state.sessions.insert(
             tuic.clone(),
             parking_lot::Mutex::new(PtySession {
-                writer,
+                writer: Arc::new(parking_lot::Mutex::new(writer)),
                 master: pair.master,
                 _child: child,
                 paused: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 worktree: None,
                 cwd: Some("/Gits/personal/beta".to_string()),
                 display_name: None,
+                display_name_is_custom: false,
+                is_remote: false,
                 shell: "true".to_string(),
             }),
         );
@@ -8295,7 +12491,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: Some("/Gits/personal/gamma".to_string()),
             },
         );
@@ -8686,14 +12884,25 @@ mod tests {
         );
     }
 
+    /// A timeout response must not carry a redundant `hint`. This used to force
+    /// the timeout with a nonexistent session id — that path now returns an error
+    /// instead of blocking, so the timeout is forced with a real busy session,
+    /// which is what a timeout actually means.
+    #[cfg(unix)]
     #[tokio::test]
     async fn session_wait_timeout_has_no_redundant_hint() {
+        use std::sync::atomic::AtomicU8;
         let state = test_state();
+        insert_managed_test_session(&state, "busy-session", "/tmp");
+        state.shell_states.insert(
+            "busy-session".to_string(),
+            AtomicU8::new(crate::pty::SHELL_BUSY),
+        );
         let response = handle_session_wait(
             &state,
             &serde_json::json!({
                 "action": "wait",
-                "session_id": "missing-session",
+                "session_id": "busy-session",
                 "timeout_ms": 1,
             }),
         )
@@ -9013,6 +13222,201 @@ mod tests {
         );
     }
 
+    // --- ui(action=confirm): answerable from any client, not just the desktop ---
+
+    /// Wait for `handle_confirm` to publish its request, and return the id.
+    ///
+    /// The handler registers the pending entry before it awaits, so polling the
+    /// registry is enough — no need to reach into the event bus for the id.
+    async fn await_pending_confirm(state: &Arc<AppState>) -> String {
+        for _ in 0..200 {
+            if let Some(entry) = state.confirm_responses.iter().next() {
+                return entry.key().clone();
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("confirm request was never registered");
+    }
+
+    #[tokio::test]
+    async fn confirm_returns_the_answer_a_client_gave() {
+        let state = test_state();
+        let addr = "127.0.0.1:0".parse().unwrap();
+
+        let answering = state.clone();
+        tokio::spawn(async move {
+            let id = await_pending_confirm(&answering).await;
+            crate::mcp_http::resolve_mcp_confirm(&answering, &id, true);
+        });
+
+        let result = handle_confirm(
+            &state,
+            addr,
+            &serde_json::json!({"title": "Delete branch?", "message": "git branch -D wip"}),
+            None,
+        )
+        .await;
+
+        assert_eq!(result["confirmed"], true);
+        assert!(
+            result.get("reason").is_none(),
+            "a real answer must not be reported as a timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_reaches_every_client_over_the_event_bus() {
+        let state = test_state();
+        let addr = "127.0.0.1:0".parse().unwrap();
+        // Subscribing before the call is what a remote SSE client does; without
+        // this bus hop a phone would never learn an agent is waiting on it.
+        let mut rx = state.event_bus.subscribe();
+
+        let answering = state.clone();
+        tokio::spawn(async move {
+            let id = await_pending_confirm(&answering).await;
+            crate::mcp_http::resolve_mcp_confirm(&answering, &id, false);
+        });
+
+        let _ = handle_confirm(
+            &state,
+            addr,
+            &serde_json::json!({"title": "Force push?", "message": "to main"}),
+            None,
+        )
+        .await;
+
+        let mut saw_request = None;
+        let mut saw_resolution = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::state::AppEvent::McpConfirm {
+                    request_id,
+                    title,
+                    message,
+                    ..
+                } => {
+                    assert_eq!(title, "Force push?");
+                    assert_eq!(message, "to main");
+                    saw_request = Some(request_id);
+                }
+                crate::state::AppEvent::McpConfirmResolved {
+                    request_id,
+                    confirmed,
+                } => {
+                    assert_eq!(Some(&request_id), saw_request.as_ref());
+                    assert!(!confirmed);
+                    saw_resolution = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_request.is_some(), "no request reached the bus");
+        assert!(
+            saw_resolution,
+            "clients that did not answer are never told to dismiss the dialog"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirm_gives_up_when_nobody_answers() {
+        let state = test_state();
+        let addr = "127.0.0.1:0".parse().unwrap();
+
+        let result = handle_confirm(
+            &state,
+            addr,
+            &serde_json::json!({"title": "Drop the table?"}),
+            None,
+        )
+        .await;
+
+        // Silence is not consent: a destructive op nobody approved must read as
+        // refused, and say why so the caller can tell it from a real "no".
+        assert_eq!(result["confirmed"], false);
+        assert!(
+            result["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("no answer")),
+            "timeout must be distinguishable from a refusal: {result}"
+        );
+        assert!(
+            state.confirm_responses.is_empty(),
+            "an expired request must not leak its registry entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn answering_a_confirm_twice_resolves_it_once() {
+        let state = test_state();
+        let addr = "127.0.0.1:0".parse().unwrap();
+        let mut rx = state.event_bus.subscribe();
+
+        let answering = state.clone();
+        tokio::spawn(async move {
+            let id = await_pending_confirm(&answering).await;
+            // Every client races to answer the same request. The loser must be a
+            // no-op, not an error and not a second resolution.
+            crate::mcp_http::resolve_mcp_confirm(&answering, &id, true);
+            crate::mcp_http::resolve_mcp_confirm(&answering, &id, false);
+        });
+
+        let result = handle_confirm(
+            &state,
+            addr,
+            &serde_json::json!({"title": "Proceed?"}),
+            None,
+        )
+        .await;
+
+        assert_eq!(result["confirmed"], true);
+        let resolutions = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| matches!(e, crate::state::AppEvent::McpConfirmResolved { .. }))
+            .count();
+        assert_eq!(resolutions, 1, "the losing answer must not re-broadcast");
+    }
+
+    #[tokio::test]
+    async fn confirm_refuses_a_non_loopback_caller() {
+        let state = test_state();
+        let addr = "192.168.1.50:9876".parse().unwrap();
+
+        let result = handle_confirm(
+            &state,
+            addr,
+            &serde_json::json!({"title": "Proceed?"}),
+            None,
+        )
+        .await;
+
+        assert!(
+            result["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("localhost"))
+        );
+        assert!(state.confirm_responses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn confirm_requires_a_title() {
+        let state = test_state();
+        let addr = "127.0.0.1:0".parse().unwrap();
+
+        let result = handle_confirm(
+            &state,
+            addr,
+            &serde_json::json!({"message": "no title"}),
+            None,
+        )
+        .await;
+
+        assert!(
+            result["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("title"))
+        );
+    }
+
     // --- spawn auto-registration + inbox pre-init ---
 
     #[cfg(unix)]
@@ -9033,7 +13437,7 @@ mod tests {
             &serde_json::json!({
                 "action": "spawn",
                 "prompt": "hello",
-                "binary_path": "/usr/bin/true",
+                "binary_path": LONG_LIVED_TEST_BINARY,
                 "cwd": "/tmp",
             }),
             Some("mcp-orch"),
@@ -9042,7 +13446,7 @@ mod tests {
         if result
             .get("error")
             .and_then(|e| e.as_str())
-            .map_or(false, |e| e.contains("Failed to open PTY"))
+            .is_some_and(|e| e.contains("Failed to open PTY"))
         {
             eprintln!("Skipping: PTY not available in this environment");
             return;
@@ -9064,6 +13468,12 @@ mod tests {
         assert!(
             sessions.contains(&session_id),
             "child {session_id} not in list_peers: {sessions:?}"
+        );
+
+        handle_session(
+            &state,
+            &serde_json::json!({"action": "kill", "session_id": session_id}),
+            None,
         );
     }
 
@@ -9087,7 +13497,7 @@ mod tests {
                 "action": "spawn",
                 "name": "linux-primary",
                 "prompt": "hello",
-                "binary_path": "/usr/bin/true",
+                "binary_path": LONG_LIVED_TEST_BINARY,
                 "cwd": "/tmp",
             }),
             Some("mcp-orch"),
@@ -9178,6 +13588,12 @@ mod tests {
             caller["is_caller"], true,
             "the caller's managed PTY must be explicit so it is never self-closed"
         );
+
+        handle_session(
+            &state,
+            &serde_json::json!({"action": "kill", "session_id": session_id}),
+            None,
+        );
     }
 
     #[test]
@@ -9220,7 +13636,7 @@ mod tests {
             &serde_json::json!({
                 "action": "spawn",
                 "prompt": "hello",
-                "binary_path": "/usr/bin/true",
+                "binary_path": LONG_LIVED_TEST_BINARY,
                 "cwd": "/tmp",
             }),
             Some("mcp-orch"),
@@ -9229,7 +13645,7 @@ mod tests {
         if result
             .get("error")
             .and_then(|e| e.as_str())
-            .map_or(false, |e| e.contains("Failed to open PTY"))
+            .is_some_and(|e| e.contains("Failed to open PTY"))
         {
             eprintln!("Skipping: PTY not available in this environment");
             return;
@@ -9240,6 +13656,12 @@ mod tests {
         assert!(
             state.agent_inbox.contains_key(session_id),
             "child inbox must be pre-initialized after spawn"
+        );
+
+        handle_session(
+            &state,
+            &serde_json::json!({"action": "kill", "session_id": session_id}),
+            None,
         );
     }
 
@@ -9263,7 +13685,7 @@ mod tests {
         if result
             .get("error")
             .and_then(|e| e.as_str())
-            .map_or(false, |e| e.contains("Failed to open PTY"))
+            .is_some_and(|e| e.contains("Failed to open PTY"))
         {
             eprintln!("Skipping: PTY not available in this environment");
             return;
@@ -9501,7 +13923,7 @@ mod tests {
             &serde_json::json!({
                 "action": "spawn",
                 "prompt": "hello",
-                "binary_path": "/usr/bin/true",
+                "binary_path": LONG_LIVED_TEST_BINARY,
                 "cwd": "/tmp",
             }),
             Some("mcp-orch"),
@@ -9553,6 +13975,12 @@ mod tests {
             state.agent_inbox.contains_key(session_id),
             "every managed child must have an inbox immediately after spawn"
         );
+
+        handle_session(
+            &state,
+            &serde_json::json!({"action": "kill", "session_id": session_id}),
+            None,
+        );
     }
 
     #[cfg(unix)]
@@ -9568,7 +13996,7 @@ mod tests {
             &serde_json::json!({
                 "action": "spawn",
                 "prompt": "hello",
-                "binary_path": "/usr/bin/true",
+                "binary_path": LONG_LIVED_TEST_BINARY,
                 "cwd": "/tmp",
             }),
             Some(parent_mcp),
@@ -9597,7 +14025,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now(),
                 is_claude_code: false,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -9638,7 +14068,7 @@ mod tests {
             &serde_json::json!({
                 "action": "spawn",
                 "prompt": "report with agent send",
-                "binary_path": "/usr/bin/true",
+                "binary_path": LONG_LIVED_TEST_BINARY,
                 "cwd": "/tmp",
             }),
             Some(parent_mcp),
@@ -9651,6 +14081,14 @@ mod tests {
         assert_eq!(ready_child["parent_session_id"], parent_tuic);
         let ready_child_id = ready_child["session_id"].as_str().unwrap();
         assert!(state.agent_inbox.contains_key(ready_child_id));
+
+        for session_id in [child, ready_child_id] {
+            handle_session(
+                &state,
+                &serde_json::json!({"action": "kill", "session_id": session_id}),
+                None,
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -9803,9 +14241,7 @@ mod tests {
             Some("mcp-reg-test"),
         );
         assert!(
-            result["error"]
-                .as_str()
-                .map_or(false, |e| e.contains("UUID")),
+            result["error"].as_str().is_some_and(|e| e.contains("UUID")),
             "register with non-UUID tuic_session must fail: {result}"
         );
     }
@@ -9867,6 +14303,128 @@ mod tests {
         assert_eq!(inbox.len(), 1, "recipient should have 1 buffered message");
         assert_eq!(inbox[0].from_tuic_session, sender_tuic);
         assert_eq!(inbox[0].from_name, "alice");
+    }
+
+    /// A peer with no terminal must be told so at registration. Silence here is
+    /// what let an agent launched outside a TUIC PTY believe it was addressable:
+    /// it registered, mail arrived, and nothing ever surfaced it.
+    #[test]
+    fn register_reports_no_terminal_for_a_peer_without_a_pty() {
+        let state = test_state();
+        let result = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "register",
+                "tuic_session": "550e8400-e29b-41d4-a716-4466554400a1",
+                "name": "orphan",
+            }),
+            Some("mcp-orphan"),
+        );
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["terminal"], false,
+            "an identity with no live PTY must report terminal=false: {result}"
+        );
+        let identity = result["identity"].as_str().unwrap_or_default();
+        assert!(
+            identity.contains("NO terminal"),
+            "the identity note must state the consequence, got: {identity}"
+        );
+        assert!(
+            identity.contains("agent action=wait") || identity.contains("agent action=inbox"),
+            "it must name the way out (consume your own inbox), got: {identity}"
+        );
+    }
+
+    /// `send` to a terminal-less peer is accepted but NOT delivered: the sender must
+    /// be able to tell "it will act on this" from "it will never see this".
+    #[test]
+    fn send_to_a_peer_without_a_terminal_reports_not_delivered() {
+        let state = test_state();
+        let sender_mcp = "mcp-undeliverable-sender";
+        let sender_tuic = "550e8400-e29b-41d4-a716-4466554400b0";
+        let recipient_mcp = "mcp-undeliverable-recipient";
+        let recipient_tuic = "550e8400-e29b-41d4-a716-4466554400b1";
+        register_peer(&state, sender_tuic, "alice", sender_mcp);
+        register_peer(&state, recipient_tuic, "phantom", recipient_mcp);
+
+        let result = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "send",
+                "to": recipient_tuic,
+                "message": "did you finish?",
+            }),
+            Some(sender_mcp),
+        );
+        // The mail is stored — that part did succeed.
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["accepted"], true);
+        assert_eq!(result["buffered_in_inbox"], true);
+        assert_eq!(result["delivery_path"], "inbox_only");
+        // …but nothing will surface it.
+        assert_eq!(
+            result["delivered"], false,
+            "inbox_only must not be reported as delivered: {result}"
+        );
+        assert_eq!(result["recipient_has_terminal"], false);
+        let warning = result["warning"].as_str().unwrap_or_default();
+        assert!(
+            warning.contains("NO terminal"),
+            "the warning must say the recipient cannot be woken, got: {warning}"
+        );
+    }
+
+    /// The counterpart: a waiter consumed the message, so `delivered` is true and no
+    /// warning is attached. Guards against flagging healthy deliveries.
+    #[tokio::test]
+    async fn send_claimed_by_a_waiter_reports_delivered_without_warning() {
+        let state = test_state();
+        let sender_mcp = "mcp-waiter-sender";
+        let sender_tuic = "550e8400-e29b-41d4-a716-4466554400c0";
+        let recipient_mcp = "mcp-waiter-recipient";
+        let recipient_tuic = "550e8400-e29b-41d4-a716-4466554400c1";
+        register_peer(&state, sender_tuic, "alice", sender_mcp);
+        register_peer(&state, recipient_tuic, "root", recipient_mcp);
+
+        let waiting_state = Arc::clone(&state);
+        let recipient = recipient_tuic.to_string();
+        let waiter = tokio::spawn(async move {
+            handle_agent_wait(
+                &waiting_state,
+                &serde_json::json!({"action": "wait", "timeout_ms": 5_000}),
+                Some("mcp-waiter-recipient"),
+            )
+            .await
+            .get("met")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+            .as_bool()
+            .unwrap_or(false)
+                && !recipient.is_empty()
+        });
+        // Let the wait register its lease before sending.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let result = handle_messaging(
+            &state,
+            &serde_json::json!({
+                "action": "send",
+                "to": recipient_tuic,
+                "message": "here is the result",
+            }),
+            Some(sender_mcp),
+        );
+        assert_eq!(result["delivery_path"], "waiter_and_inbox");
+        assert_eq!(
+            result["delivered"], true,
+            "a waiter-owned message is delivered: {result}"
+        );
+        assert!(
+            result.get("warning").is_none(),
+            "a healthy delivery must carry no warning: {result}"
+        );
+        assert!(waiter.await.expect("waiter task"), "the wait must wake");
     }
 
     #[tokio::test]
@@ -9977,7 +14535,7 @@ mod tests {
         assert!(
             result["error"]
                 .as_str()
-                .map_or(false, |e| e.contains("not registered")),
+                .is_some_and(|e| e.contains("not registered")),
             "send from unregistered MCP session must error: {result}"
         );
     }
@@ -10670,7 +15228,7 @@ mod tests {
         assert!(
             result["error"]
                 .as_str()
-                .map_or(false, |e| e.contains("not registered")),
+                .is_some_and(|e| e.contains("not registered")),
             "inbox call from unregistered MCP session must error: {result}"
         );
     }
@@ -11035,7 +15593,7 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 if let Some((_, sender)) = state2.screenshot_responses.remove("") {
                     // Won't match — we need the actual request_id.
-                    state2.screenshot_responses.insert("".to_string(), sender);
+                    state2.screenshot_responses.insert(String::new(), sender);
                 }
                 // Check all entries
                 let keys: Vec<_> = state2
@@ -11097,6 +15655,335 @@ mod tests {
         assert!(
             err.contains("localhost"),
             "Non-loopback should be rejected, got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE stream teardown (F66)
+    // -----------------------------------------------------------------------
+
+    fn insert_sse_session(state: &Arc<AppState>) -> String {
+        let sid = uuid::Uuid::new_v4().to_string();
+        state.mcp_sessions.insert(
+            sid.clone(),
+            crate::state::McpSessionMeta {
+                last_activity: std::time::Instant::now(),
+                is_claude_code: false,
+                requires_meta_tools: false,
+                has_sse_stream: false,
+                sse_generation: 0,
+                repo_path: None,
+            },
+        );
+        sid
+    }
+
+    /// A client that walks away is the normal way a `GET /mcp` stream ends: axum
+    /// drops the response body, so nothing after the `select!` loop ever runs.
+    /// Teardown has to hang off the drop, otherwise every reconnect leaves a
+    /// broadcast sender behind and `messaging_channels` only ever grows.
+    #[tokio::test]
+    async fn dropping_the_sse_response_evicts_the_session_messaging_channel() {
+        let state = test_state();
+        let sid = insert_sse_session(&state);
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_SESSION_HEADER, sid.parse().unwrap());
+
+        let response = mcp_get(State(state.clone()), headers).await.into_response();
+        assert!(
+            state.messaging_channels.contains_key(&sid),
+            "subscribing must have created the per-session channel"
+        );
+        assert!(
+            state
+                .mcp_sessions
+                .get(&sid)
+                .is_some_and(|meta| meta.has_sse_stream),
+            "the session must be flagged as streaming while the response is alive"
+        );
+
+        drop(response);
+        assert!(
+            !state.messaging_channels.contains_key(&sid),
+            "dropping the stream must evict the messaging channel"
+        );
+        assert!(
+            state
+                .mcp_sessions
+                .get(&sid)
+                .is_some_and(|meta| !meta.has_sse_stream),
+            "dropping the stream must clear has_sse_stream"
+        );
+    }
+
+    /// A reconnect can be accepted while the stream it replaces is still
+    /// half-open. Teardown used to release the session unconditionally, so the
+    /// older stream's drop removed the sender the replacement had just
+    /// subscribed to: the new stream saw `Closed` and every later server
+    /// message was lost.
+    #[tokio::test]
+    async fn dropping_a_superseded_sse_stream_leaves_its_replacement_alive() {
+        let state = test_state();
+        let sid = insert_sse_session(&state);
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_SESSION_HEADER, sid.parse().unwrap());
+
+        let first = mcp_get(State(state.clone()), headers.clone())
+            .await
+            .into_response();
+        let second = mcp_get(State(state.clone()), headers).await.into_response();
+
+        // The replacement holds a receiver on the session's sender.
+        let mut rx = state
+            .messaging_channels
+            .get(&sid)
+            .expect("the replacement must have a channel")
+            .subscribe();
+
+        drop(first);
+        assert!(
+            state.messaging_channels.contains_key(&sid),
+            "the superseded stream must not evict the live stream's channel"
+        );
+        assert!(
+            state
+                .mcp_sessions
+                .get(&sid)
+                .is_some_and(|meta| meta.has_sse_stream),
+            "the session is still streaming through the replacement"
+        );
+        assert!(
+            !matches!(
+                rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ),
+            "the replacement's receiver must still be open"
+        );
+
+        // The owner's own teardown still releases everything.
+        drop(second);
+        assert!(!state.messaging_channels.contains_key(&sid));
+        assert!(
+            state
+                .mcp_sessions
+                .get(&sid)
+                .is_some_and(|meta| !meta.has_sse_stream)
+        );
+    }
+
+    /// Generations come from one process-wide counter, not from the session.
+    /// A `DELETE /mcp` can retire a session id while its stream is still
+    /// half-open, and the next `GET` auto-recovers that id from scratch — a
+    /// per-session counter would restart at zero and reissue the number the
+    /// half-open stream still holds, whose teardown would then close the new one.
+    #[tokio::test]
+    async fn a_recreated_session_does_not_reissue_a_live_stream_s_generation() {
+        let state = test_state();
+        let sid = insert_sse_session(&state);
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_SESSION_HEADER, sid.parse().unwrap());
+
+        let first = mcp_get(State(state.clone()), headers.clone())
+            .await
+            .into_response();
+        // DELETE /mcp retires the session while `first` is still draining.
+        state.mcp_sessions.remove(&sid);
+        // The same id comes back and is auto-recovered from scratch.
+        let second = mcp_get(State(state.clone()), headers).await.into_response();
+
+        let mut rx = state
+            .messaging_channels
+            .get(&sid)
+            .expect("the new stream must have a channel")
+            .subscribe();
+
+        drop(first);
+        assert!(
+            state.messaging_channels.contains_key(&sid),
+            "the retired stream must not release the recreated session"
+        );
+        assert!(
+            !matches!(
+                rx.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ),
+            "the new stream's receiver must still be open"
+        );
+        drop(second);
+        assert!(!state.messaging_channels.contains_key(&sid));
+    }
+
+    /// The generation check protects the *present* session. When `DELETE /mcp`
+    /// or the reaper has already retired the id, there is no generation to
+    /// compare and teardown removes the channel outright — so that removal must
+    /// still be serialized against a reconnect, which recreates the session and
+    /// subscribes to a fresh sender. `get_mut` returning `None` cannot do it: it
+    /// releases the shard first, and a `GET` landing in that window gets its
+    /// brand-new sender deleted underneath it. Only holding the shard over the
+    /// absent key does, so that is what this asserts — the race window itself is
+    /// nanoseconds wide and cannot be hit on demand.
+    #[test]
+    fn teardown_of_a_retired_session_holds_it_across_the_channel_removal() {
+        use dashmap::try_result::TryResult;
+
+        let state = test_state();
+        let sid = insert_sse_session(&state);
+        let mut headers = HeaderMap::new();
+        headers.insert(MCP_SESSION_HEADER, sid.parse().unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let first = rt
+            .block_on(mcp_get(State(state.clone()), headers))
+            .into_response();
+
+        // DELETE /mcp retires the id: teardown will take the absent-key path.
+        state.mcp_sessions.remove(&sid);
+
+        // Hold the channel's shard so the removal inside teardown has to wait
+        // there, with whatever it took on the session map still held.
+        let channel_shard = state.messaging_channels.entry(sid.clone());
+
+        let dropper = std::thread::spawn(move || drop(first));
+
+        let mut held = false;
+        for _ in 0..200 {
+            if matches!(state.mcp_sessions.try_get(&sid), TryResult::Locked) {
+                // A momentary `get_mut` on an absent key also locks the shard,
+                // so a single observation proves nothing — the hold has to last.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                held = matches!(state.mcp_sessions.try_get(&sid), TryResult::Locked);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            held,
+            "teardown must still own the retired session while it removes the channel"
+        );
+
+        drop(channel_shard);
+        dropper.join().expect("teardown thread");
+        assert!(
+            !state.messaging_channels.contains_key(&sid),
+            "with nobody left to own it, the channel is still released"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Bridge liveness poll (F60)
+    // -----------------------------------------------------------------------
+
+    /// Every bridge pings every 3s and asserts `x-tuic-session` on that ping.
+    /// An already-bound bridge has nothing to bind, so the poll must not queue
+    /// behind the process-global identity lock — with one bridge per agent
+    /// terminal that is N/3 acquisitions per second to rewrite identical values.
+    #[test]
+    fn ping_from_an_already_bound_bridge_does_not_take_the_identity_lock() {
+        let state = test_state();
+        let sid = insert_sse_session(&state);
+        let tuic = uuid::Uuid::new_v4().to_string();
+        // Bind the identity the way initialize does, before we take the guard.
+        assert!(apply_initialize_identity(&state, &sid, Some(tuic.as_str())));
+
+        // Hold the identity lock, then let the bridge ping. A ping that needs the
+        // lock cannot answer until we let go.
+        let guard = PEER_IDENTITY_BIND_LOCK.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ping_state = state.clone();
+        let ping_sid = sid.clone();
+        let ping_tuic = tuic.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let mut headers = HeaderMap::new();
+            headers.insert(MCP_SESSION_HEADER, ping_sid.parse().unwrap());
+            headers.insert(TUIC_SESSION_HEADER, ping_tuic.parse().unwrap());
+            let response = rt.block_on(async {
+                mcp_post(
+                    State(ping_state),
+                    ConnectInfo(loopback_addr()),
+                    headers,
+                    Json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": 0, "method": "ping"
+                    })),
+                )
+                .await
+                .into_response()
+            });
+            let _ = tx.send(response.status());
+        });
+
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(2));
+        drop(guard);
+        assert_eq!(
+            outcome.ok(),
+            Some(StatusCode::OK),
+            "ping blocked on PEER_IDENTITY_BIND_LOCK"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-repo upstream allowlist resolution (F62)
+    // -----------------------------------------------------------------------
+
+    /// A native tool never consults the per-repo upstream allowlist, so it must
+    /// not pay for loading it. Proven by making `repo-settings.json` a reader-less
+    /// FIFO: `read_to_string` blocks in `open()`, so any call that still touches
+    /// the file never answers.
+    #[cfg(unix)]
+    #[test]
+    fn a_native_tool_call_does_not_read_repo_settings() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fifo = dir.path().join("repo-settings.json");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) },
+            0,
+            "mkfifo failed"
+        );
+        let _config_guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        let state = test_state();
+        let sid = uuid::Uuid::new_v4().to_string();
+        state.mcp_sessions.insert(
+            sid.clone(),
+            crate::state::McpSessionMeta {
+                last_activity: std::time::Instant::now(),
+                is_claude_code: false,
+                requires_meta_tools: false,
+                // A repo_path is what makes the allowlist lookup reach the disk.
+                repo_path: Some("/test/repo".to_string()),
+                has_sse_stream: false,
+                sse_generation: 0,
+            },
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let call_state = state.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let body = rt.block_on(post_test_tool_call(
+                call_state,
+                &sid,
+                "definitely_not_a_native_tool",
+                serde_json::json!({}),
+            ));
+            let _ = tx.send(body);
+        });
+
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(3));
+        assert!(
+            outcome.is_ok(),
+            "a native tool call blocked on reading repo-settings.json"
         );
     }
 }

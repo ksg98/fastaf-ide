@@ -70,6 +70,19 @@ export function isSystemReservedKey(e: KeyboardEvent, mac: boolean): boolean {
 }
 
 /**
+ * Ctrl+punctuation → control character. Module scope, not a literal rebuilt
+ * inside the hot path: `keyToSequence` runs on every keydown.
+ */
+const CTRL_PUNCT: Record<string, number> = {
+	"@": 0x00,
+	"[": 0x1b,
+	"\\": 0x1c,
+	"]": 0x1d,
+	"^": 0x1e,
+	_: 0x1f,
+};
+
+/**
  * Convert a KeyboardEvent to the terminal escape sequence string to send to the PTY.
  * Returns null if the key should not be handled (modifier-only, Meta/Cmd).
  */
@@ -120,16 +133,8 @@ export function keyToSequence(e: KeyboardEvent): string | null {
 		if (code >= 0x61 && code <= 0x7a) {
 			return String.fromCharCode(code - 0x60);
 		}
-		const ctrlPunct: Record<string, number> = {
-			"@": 0x00,
-			"[": 0x1b,
-			"\\": 0x1c,
-			"]": 0x1d,
-			"^": 0x1e,
-			_: 0x1f,
-		};
-		if (e.key in ctrlPunct) {
-			return String.fromCharCode(ctrlPunct[e.key]);
+		if (e.key in CTRL_PUNCT) {
+			return String.fromCharCode(CTRL_PUNCT[e.key]);
 		}
 	}
 
@@ -301,4 +306,43 @@ export function cmdSequenceForKey(e: KeyboardEvent): string | null {
 		default:
 			return null;
 	}
+}
+
+/**
+ * Whether a pointer event landed inside a canvas's own box.
+ *
+ * The mouse handlers live on `document`, so every terminal sees every move —
+ * including ones over another terminal, or over no terminal at all. A hidden
+ * terminal shrinks its canvas to 1x1 and `canvasToGrid` clamps, so an unbounded
+ * handler reports cell (0,0) into a PTY the pointer never touched.
+ */
+export function isPointerInsideRect(
+	e: { clientX: number; clientY: number },
+	rect: { left: number; top: number; width: number; height: number },
+): boolean {
+	return (
+		e.clientX >= rect.left &&
+		e.clientX < rect.left + rect.width &&
+		e.clientY >= rect.top &&
+		e.clientY < rect.top + rect.height
+	);
+}
+
+/**
+ * Whether a mouse-report release must go out, given where the pointer is and
+ * which buttons this canvas reported down.
+ *
+ * Bounding the release by pointer position alone is wrong in one direction: the
+ * press leaves from a canvas `mousedown`, the release from a `document`
+ * `mouseup`, and a press-inside/drag-out/release-outside gesture never lands
+ * back inside. In normal mouse mode no later report follows, so the application
+ * stays logically held on a button the user let go of. A release answering a
+ * press THIS canvas sent is not a spurious report — it is the other half of one.
+ */
+export function shouldReportMouseUp(
+	reportedDown: ReadonlySet<number>,
+	button: number,
+	pointerInside: boolean,
+): boolean {
+	return pointerInside || reportedDown.has(button);
 }

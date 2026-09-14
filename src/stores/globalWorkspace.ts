@@ -3,6 +3,10 @@ import { allLeafIds, type PaneGroup, type PaneLayoutState, paneLayoutStore, remo
 import { savedPaneLayouts } from "./savedPaneLayouts";
 import { terminalsStore } from "./terminals";
 
+/** Scope key for the hand-promoted workspace — the one this store has always
+ *  had. Repo paths are the other keys (#e767). */
+export const MANUAL_SCOPE = "__manual__";
+
 let globalGroupCounter = 0;
 function nextGlobalGroupId(): string {
 	return `gw${++globalGroupCounter}`;
@@ -98,11 +102,30 @@ function createGlobalWorkspaceStore() {
 	const [isActive, setIsActive] = createSignal(false);
 	const [promotedVersion, setPromotedVersion] = createSignal(0);
 
-	// Plain JS set — not in SolidJS store to avoid proxy issues
-	const promoted = new Set<string>();
+	/** One workspace per scope. `__manual__` is the hand-promoted workspace this
+	 *  store has always been; every other key is a repo path whose worktrees are
+	 *  auto-consolidated (#e767).
+	 *
+	 *  Keyed rather than exclusive because Boss picked "one layout per repo":
+	 *  turning consolidation on for repo B must not cost repo A its arrangement,
+	 *  and neither may disturb the manual workspace, which is a separate feature
+	 *  that only shares this machinery. */
+	interface Workspace {
+		layout: PaneLayoutState | null;
+		// Plain JS set — not in SolidJS store to avoid proxy issues
+		promoted: Set<string>;
+	}
+	const workspaces = new Map<string, Workspace>();
+	let scope: string = MANUAL_SCOPE;
 
-	// Global workspace layout (separate from paneLayoutStore)
-	let layout: PaneLayoutState | null = null;
+	function workspace(key: string = scope): Workspace {
+		let ws = workspaces.get(key);
+		if (!ws) {
+			ws = { layout: null, promoted: new Set() };
+			workspaces.set(key, ws);
+		}
+		return ws;
+	}
 
 	// Saved repo layout key for restore on auto-deactivation
 	let savedRepoLayoutKey: string | null = null;
@@ -113,8 +136,9 @@ function createGlobalWorkspaceStore() {
 
 	/** Sync the background layout to paneLayoutStore if global workspace is active */
 	function syncToPaneStore(): void {
-		if (isActive() && layout) {
-			paneLayoutStore.restore(layout);
+		const current = workspace().layout;
+		if (isActive() && current) {
+			paneLayoutStore.restore(current);
 		}
 	}
 
@@ -136,7 +160,7 @@ function createGlobalWorkspaceStore() {
 
 	/** Auto-deactivate when no promoted terminals remain */
 	function autoDeactivate(): void {
-		layout = null;
+		workspace().layout = null;
 		setIsActive(false);
 		restoreRepoLayout();
 	}
@@ -162,16 +186,18 @@ function createGlobalWorkspaceStore() {
 			setIsActive(true);
 
 			// Restore global layout (or reset if none)
-			if (layout) {
-				paneLayoutStore.restore(layout);
+			const current = workspace().layout;
+			if (current) {
+				paneLayoutStore.restore(current);
 				// Restore focus to a promoted terminal too. TerminalArea gates pane
 				// visibility on terminalsStore.activeId, so without this the workspace
 				// shows no terminal until the user clicks a tab — e.g. after a repo
 				// round-trip, which reset activeId to a repo terminal. Mirrors
 				// handleBranchSelect, which setActive()s after restoring a layout.
-				const activeGroup = layout.activeGroupId ? layout.groups[layout.activeGroupId] : undefined;
+				const activeGroup = current.activeGroupId ? current.groups[current.activeGroupId] : undefined;
 				const activeTab = activeGroup?.activeTabId;
-				const target = activeTab && promoted.has(activeTab) ? activeTab : [...promoted][0];
+				const members = workspace().promoted;
+				const target = activeTab && members.has(activeTab) ? activeTab : [...members][0];
 				if (target) terminalsStore.setActive(target);
 			} else {
 				paneLayoutStore.reset();
@@ -187,7 +213,7 @@ function createGlobalWorkspaceStore() {
 
 			// Save global layout (serialize any non-empty layout, not just split)
 			const serialized = paneLayoutStore.serialize();
-			layout = serialized.root ? serialized : null;
+			workspace().layout = serialized.root ? serialized : null;
 
 			setIsActive(false);
 
@@ -203,12 +229,13 @@ function createGlobalWorkspaceStore() {
 		 * Adds it as a tab to the active group (no auto-split).
 		 */
 		promote(termId: string): boolean {
-			if (promoted.has(termId)) return true;
+			const ws = workspace();
+			if (ws.promoted.has(termId)) return true;
 
-			const updated = addTerminalToLayout(layout, termId);
+			const updated = addTerminalToLayout(ws.layout, termId);
 
-			promoted.add(termId);
-			layout = updated;
+			ws.promoted.add(termId);
+			ws.layout = updated;
 			bumpPromoted();
 			syncToPaneStore();
 			return true;
@@ -216,16 +243,17 @@ function createGlobalWorkspaceStore() {
 
 		/** Remove a terminal from the global workspace. Auto-deactivates when empty. */
 		unpromote(termId: string): void {
-			if (!promoted.has(termId)) return;
-			promoted.delete(termId);
+			const ws = workspace();
+			if (!ws.promoted.has(termId)) return;
+			ws.promoted.delete(termId);
 
-			if (layout) {
-				layout = removeTerminalFromLayout(layout, termId);
+			if (ws.layout) {
+				ws.layout = removeTerminalFromLayout(ws.layout, termId);
 			}
 
 			bumpPromoted();
 
-			if (isActive() && promoted.size === 0) {
+			if (isActive() && ws.promoted.size === 0) {
 				autoDeactivate();
 			} else {
 				syncToPaneStore();
@@ -235,12 +263,12 @@ function createGlobalWorkspaceStore() {
 		/** Check if a terminal is promoted */
 		isPromoted(termId: string): boolean {
 			promotedVersion(); // subscribe
-			return promoted.has(termId);
+			return workspace().promoted.has(termId);
 		},
 
 		/** Toggle promote/unpromote a terminal */
 		togglePromote(termId: string): void {
-			if (promoted.has(termId)) {
+			if (workspace().promoted.has(termId)) {
 				this.unpromote(termId);
 			} else {
 				this.promote(termId);
@@ -250,27 +278,33 @@ function createGlobalWorkspaceStore() {
 		/** Get all promoted terminal IDs */
 		getPromotedIds(): string[] {
 			promotedVersion(); // subscribe
-			return [...promoted];
+			return [...workspace().promoted];
 		},
 
 		/** Whether any terminals are promoted */
 		hasPromoted(): boolean {
 			promotedVersion(); // subscribe
-			return promoted.size > 0;
+			return workspace().promoted.size > 0;
 		},
 
 		/** Handle terminal removal — auto-unpromote and auto-deactivate if needed */
 		onTerminalRemoved(termId: string): void {
-			if (!promoted.has(termId)) return;
-			promoted.delete(termId);
-
-			if (layout) {
-				layout = removeTerminalFromLayout(layout, termId);
+			// A closed terminal has to leave EVERY workspace that holds it: an
+			// auto-consolidated repo scope is usually not the visible one, and a
+			// pane pointing at a dead terminal survives the next scope switch.
+			let touched = false;
+			for (const ws of workspaces.values()) {
+				if (!ws.promoted.delete(termId)) continue;
+				touched = true;
+				if (ws.layout) {
+					ws.layout = removeTerminalFromLayout(ws.layout, termId);
+				}
 			}
+			if (!touched) return;
 
 			bumpPromoted();
 			if (isActive()) {
-				if (promoted.size === 0) {
+				if (workspace().promoted.size === 0) {
 					autoDeactivate();
 				} else {
 					syncToPaneStore();
@@ -280,12 +314,74 @@ function createGlobalWorkspaceStore() {
 
 		/** Get the global workspace layout */
 		getLayout(): PaneLayoutState | null {
-			return layout;
+			return workspace().layout;
 		},
 
 		/** Set the global workspace layout */
 		setLayout(newLayout: PaneLayoutState | null): void {
-			layout = newLayout ? structuredClone(newLayout) : null;
+			workspace().layout = newLayout ? structuredClone(newLayout) : null;
+		},
+
+		/** Which workspace the promote/layout methods currently address. */
+		getScope(): string {
+			promotedVersion(); // subscribe
+			return scope;
+		},
+
+		/** Point the store at another workspace, swapping the visible layout when
+		 *  one is on screen. */
+		setScope(key: string): void {
+			if (key === scope) return;
+			if (isActive()) {
+				const serialized = paneLayoutStore.serialize();
+				workspace().layout = serialized.root ? serialized : null;
+			}
+			scope = key;
+			bumpPromoted();
+			syncToPaneStore();
+		},
+
+		/** Members of a scope without switching to it. */
+		getScopeMembers(key: string): string[] {
+			promotedVersion(); // subscribe
+			return [...workspace(key).promoted];
+		},
+
+		/** Layout of a scope without switching to it. */
+		getScopeLayout(key: string): PaneLayoutState | null {
+			return workspace(key).layout;
+		},
+
+		/**
+		 * Make `key`'s workspace hold exactly `termIds` — the auto-consolidation
+		 * entry point (#e767).
+		 *
+		 * Declarative on purpose: the caller recomputes the repo's worktree
+		 * terminals and hands over the whole set, so a worktree created, removed
+		 * or archived between calls needs no separate event. Idempotent, so it is
+		 * safe to drive from an effect that re-runs on unrelated store writes.
+		 */
+		syncScopeMembers(key: string, termIds: string[]): void {
+			const ws = workspace(key);
+			const wanted = new Set(termIds);
+			let changed = false;
+
+			for (const existing of [...ws.promoted]) {
+				if (wanted.has(existing)) continue;
+				ws.promoted.delete(existing);
+				if (ws.layout) ws.layout = removeTerminalFromLayout(ws.layout, existing);
+				changed = true;
+			}
+			for (const wantedId of termIds) {
+				if (ws.promoted.has(wantedId)) continue;
+				ws.promoted.add(wantedId);
+				ws.layout = addTerminalToLayout(ws.layout, wantedId);
+				changed = true;
+			}
+
+			if (!changed) return;
+			bumpPromoted();
+			if (key === scope) syncToPaneStore();
 		},
 	};
 }

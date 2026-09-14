@@ -1,10 +1,15 @@
 /**
  * WebSocket bridges for the high-frequency AI token streams in browser/PWA mode
- * (event-bridge plan Step 5). These are the browser parity for the desktop Tauri
- * `Channel` transports: `start_conversation` (conversation tokens) and
- * `chat_subscribe` (chat registry). The backend WS handlers live in
- * `src-tauri/src/mcp_http/ai_stream.rs` and emit byte-identical frames, so the
- * same store handlers (`applyConversationEvent`/`applyRegistryEvent`) consume them.
+ * (event-bridge plan Step 5). Browser parity for the desktop Tauri `Channel`
+ * transport of `start_conversation`: the backend WS handler in
+ * `src-tauri/src/mcp_http/ai_stream.rs` emits byte-identical frames, so the same
+ * store handler (`applyConversationEvent`) consumes them.
+ *
+ * The chat-registry counterpart (`chat_subscribe`, `/ai/chat/{id}/stream`) had a
+ * client here too. It was removed with its consumer: the registry has no
+ * producer, so the stream only ever delivered an empty snapshot, and applying it
+ * wiped the history just read from disk. Restore it only together with a
+ * producer.
  */
 
 /** Build a ws(s):// URL for the current origin (mirrors the PTY stream WS). */
@@ -82,13 +87,4 @@ export function openConversationStream<T>(
 		onOpen: (ws) => ws.send(JSON.stringify(params)),
 		onClose,
 	});
-}
-
-/**
- * Open the chat registry stream WS (browser parity for `chat_subscribe`). The
- * first frame is a snapshot; subsequent frames are live chat events. Returns a
- * disposer that closes the WS (= unsubscribe).
- */
-export function openChatStream<T>(chatId: string, onEvent: (event: T) => void): () => void {
-	return openJsonStream<T>(aiWsUrl(`/ai/chat/${encodeURIComponent(chatId)}/stream`), onEvent);
 }

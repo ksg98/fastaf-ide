@@ -127,7 +127,7 @@ pub(crate) fn load_config() -> WatcherConfig {
 }
 
 pub(crate) fn save_config(config: &WatcherConfig) -> Result<(), String> {
-    crate::config::save_json_config(CONFIG_FILE, config)
+    crate::config::ConfigFile::<WatcherConfig>::new(CONFIG_FILE).save(config)
 }
 
 // ── Validation ──────────────────────────────────────────────────

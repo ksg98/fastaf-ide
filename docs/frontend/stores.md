@@ -26,6 +26,7 @@ interface TerminalData {
   nameIsCustom: boolean;            // When true, OSC/status-line title changes are ignored
   fontSize: number;
   cwd: string | null;               // Current working directory (from OSC 7)
+  repoPath: string | null;          // Owning repo — the record. null = parked guess (see terminalOwnership)
   awaitingInput: AwaitingInputType; // "question" | "error" | null
   awaitingInputConfident: boolean;  // High-confidence detection — don't clear on idle→busy
   shellState: ShellState;           // "busy" | "idle" | null
@@ -341,6 +342,20 @@ interface Note {
 
 ## Other Stores
 
+### conversationStore (`conversationStore.ts`)
+
+Owns the per-terminal AI Chat and autonomous-agent conversation state. Each
+terminal key has independent messages, streaming state, conversation ID, usage,
+tool calls, and approval state; the exported accessors follow the active terminal.
+
+Conversation persistence always uses the shared `invoke` transport: desktop calls
+the Tauri IPC commands, while browser/PWA clients use the matching HTTP routes with
+the same request and response shapes. Messages autosave after a 500 ms debounce,
+terminal close performs an immediate save, and initialization restores the newest
+saved conversation for the terminal session. History list, load, and delete use the
+same transport path. A load is discarded if the local message array changed while
+the backend read was in flight, preventing stale history from erasing a newer turn.
+
 ### repoSettingsStore (`repoSettings.ts`)
 Per-repository settings (base branch, scripts, worktree options).
 
@@ -348,7 +363,9 @@ Per-repository settings (base branch, scripts, worktree options).
 Panel visibility (sidebar, diff, markdown, notes, file browser), sidebar width, dropdown state, loading state.
 
 ### notificationsStore (`notifications.ts`)
-Notification sound preferences and playback.
+Notification sound preferences and playback. Remote orchestration muting uses
+the terminal's backend-preserved `isRemote` origin; completion lifecycle code
+sets a per-busy-cycle latch before playback so idle and exit cannot both chime.
 
 ### dictationStore (`dictation.ts`)
 Whisper dictation config, model management, recording state.
@@ -412,6 +429,42 @@ Session activity history and timeline data.
 ### branchSwitcher (`branchSwitcher.ts`)
 Branch switch state and loading indicators.
 
+### terminalOwnership (`terminalOwnership.ts`)
+Which repo owns a terminal. `TerminalData.repoPath` is the record; the branch
+`terminals[]` arrays are a display index derived from it, so a wrong placement is
+repairable instead of permanent. `null` means no registered repo claimed the cwd —
+the tab is parked in whatever repo was active so it stays visible, and the null
+marks the placement as a guess.
+
+| Function | Use |
+|---|---|
+| `reconcileTerminalOwnership(terminalId?)` | Ask "who owns this?" again. For answers that genuinely changed: repos loaded, one added or removed, a worktree appeared, a branch renamed. Omit the id to sweep every terminal. |
+| `reclaimParkedTerminal(terminalId)` | The only thing an OSC 7 cwd change may trigger. No-op unless `repoPath === null`. |
+
+**A `cd` does not re-home an owned tab.** The tab belongs to the repo it was
+opened in; the directory the shell sits in does not revoke that. Calling the full
+reconcile from the cwd handler moved tabs out from under the user, because three
+states answer "where am I" and only one moved: `activeRepoPath` stayed put, so the
+sidebar and the tab bar (which filters on it) kept showing the old repo while the
+tab left the strip — and `TerminalArea` renders on `terminalsStore.activeId` alone,
+so the pane went on drawing a terminal belonging to a repo nobody had selected.
+Agents `cd` across repos constantly, which is why it read as the app switching repo
+on its own. Only a parked tab is settled by a `cd`, because for it the question was
+still open.
+
+**Parking says which repo is missing.** An MCP-spawned agent inherits its parent's
+cwd, so sessions land in worktrees of repos the user never registered; the tab was
+then filed under whichever repo had focus, and the only trace was a warning naming
+the cwd. `unregisteredRepoRootFor(cwd)` (`utils/repoOwnership.ts`) turns that cwd
+into the directory to register — `…/gate-os__wt/poc-0001` → `…/gate-os` via the
+`__wt` convention, otherwise the path itself — and `assignSessionToRepoBranch`
+puts it in the warning and in one deduped toast. It is a guess for the user to act
+on, never a placement: `resolveRepoOwnerIn` remains the single answer to "who owns
+this tab", and registering the repo lets `reconcileTerminalOwnership` move the tab
+home by itself. Auto-registering instead was rejected — `addRepository` calls
+`setActive()`, which would yank the user's focused repo from a background event,
+the exact failure the paragraph above describes.
+
 ### contextMenuActionsStore (`contextMenuActionsStore.ts`)
 Dynamic context menu action registration.
 
@@ -429,6 +482,24 @@ Default settings applied to newly added repositories.
 
 ### tabManager (`tabManager.ts`)
 Tab ordering, branch-key mapping, and tab persistence logic.
+
+**Exclusive pane activation.** TerminalArea renders terminals, diffs, markdown and
+editors as four independent `For` lists, each marking its pane `active` from its
+OWN store's `activeId` — so "only one pane shows" is a cross-store invariant.
+`createTabManager` registers a deactivator per store (`registerPaneDeactivator`);
+`terminals.ts` registers its own since it doesn't use the factory. Activating a
+tab — `setActive(id)` with a non-null id, or `_addTab` — calls
+`activatePaneExclusively(storeName)`, which clears every other store's `activeId`.
+`setActive(null)` and the `_addTabBackground` variants are local: a background
+open must not yank the user out of the pane they're in.
+
+Call sites therefore must NOT hand-roll `setActive(null)` on the other stores.
+This replaced the `useTabActivationSync` hook, which enforced the same rule from
+deferred `on(activeId)` effects: an effect keyed on a *change* cannot enforce an
+invariant that has to hold on every activation *request*, so re-activating an
+already-active tab (Edit on a file whose editor tab was already the active one)
+wrote the same value, fired nothing, and left the other pane rendered underneath.
+Pinned by `src/__tests__/stores/paneExclusivity.test.ts`.
 
 ### appLogger (`appLogger.ts`)
 Centralized logging — replaces direct `console.*` calls. Writes to ring buffer, forwards to console, and surfaces in ErrorLogPanel.

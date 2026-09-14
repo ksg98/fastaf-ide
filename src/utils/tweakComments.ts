@@ -339,11 +339,23 @@ export function generateTweakCommentId(): string {
  * `sourceLine` is the 0-based line number in the raw markdown source,
  * injected as `data-source-line` by the ContentRenderer preprocessor.
  * `mark` is one of: `" "` (unchecked), `"x"` (checked), `"~"` (in-progress).
+ *
+ * `sourceCol` addresses one exact `[` on the line and is supplied for whole-cell
+ * checkboxes in tables, where a single row can carry several. Without it the
+ * leading list-item checkbox is rewritten, which is the only one a list line has.
  */
-export function toggleCheckbox(source: string, sourceLine: number, mark: " " | "x" | "~"): string {
+export function toggleCheckbox(source: string, sourceLine: number, mark: " " | "x" | "~", sourceCol?: number): string {
 	const lines = source.split("\n");
 	if (sourceLine < 0 || sourceLine >= lines.length) return source;
 	const line = lines[sourceLine];
+	if (sourceCol != null) {
+		// Refuse unless the column really holds a `[x]`: a stale coordinate from a
+		// source edited under the rendered DOM must not corrupt an unrelated span.
+		if (line[sourceCol] !== "[" || line[sourceCol + 2] !== "]") return source;
+		if (!/^[ xX~]$/.test(line[sourceCol + 1] ?? "")) return source;
+		lines[sourceLine] = `${line.slice(0, sourceCol)}[${mark}]${line.slice(sourceCol + 3)}`;
+		return lines.join("\n");
+	}
 	const m = /^(\s*[-*+]\s+)\[([ xX~])\]/.exec(line);
 	if (!m) return source;
 	lines[sourceLine] = `${m[1]}[${mark}]${line.slice(m[0].length)}`;

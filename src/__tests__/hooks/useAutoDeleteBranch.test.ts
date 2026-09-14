@@ -3,13 +3,15 @@ import "../mocks/tauri";
 import { createRoot } from "solid-js";
 import { mockInvoke } from "../mocks/tauri";
 
-const { mockSetOnPrTerminal, mockGetEffective, mockGet, mockBumpRevision, mockConfirm } = vi.hoisted(() => ({
-	mockSetOnPrTerminal: vi.fn(),
-	mockGetEffective: vi.fn(),
-	mockGet: vi.fn(),
-	mockBumpRevision: vi.fn(),
-	mockConfirm: vi.fn(),
-}));
+const { mockSetOnPrTerminal, mockGetEffective, mockGet, mockBumpRevision, mockBumpGitRevision, mockConfirm } =
+	vi.hoisted(() => ({
+		mockSetOnPrTerminal: vi.fn(),
+		mockGetEffective: vi.fn(),
+		mockGet: vi.fn(),
+		mockBumpRevision: vi.fn(),
+		mockBumpGitRevision: vi.fn(),
+		mockConfirm: vi.fn(),
+	}));
 
 vi.mock("../../stores/github", () => ({
 	githubStore: {
@@ -27,6 +29,7 @@ vi.mock("../../stores/repositories", () => ({
 	repositoriesStore: {
 		get: mockGet,
 		bumpRevision: mockBumpRevision,
+		bumpGitRevision: mockBumpGitRevision,
 	},
 }));
 
@@ -123,7 +126,7 @@ describe("useAutoDeleteBranch", () => {
 		});
 
 		expect(mockConfirm).not.toHaveBeenCalled();
-		expect(mockBumpRevision).toHaveBeenCalledWith("/repo1");
+		expect(mockBumpGitRevision).toHaveBeenCalledWith("/repo1");
 		dispose?.();
 	});
 

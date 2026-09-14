@@ -5,17 +5,34 @@
 //! lives in `mcp-upstreams.json`, separate from the main `AppConfig`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::config::{load_json_config, save_json_config};
+use crate::config::{ConfigFile, load_json_config};
 
 pub(crate) const UPSTREAMS_FILE: &str = "mcp-upstreams.json";
+
+/// Orders each in-process upstream commit through its live-registry update.
+///
+/// The blocking config and advisory file locks are acquired only inside
+/// `persist_upstream_delta` and released before `apply_config_diff` awaits. This
+/// async mutex remains held across both stages so a later commit cannot apply its
+/// runtime diff before an earlier commit and then be overwritten by that stale diff.
+static UPSTREAM_SAVE_SEQUENCE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Top-level wrapper for the upstream config file.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct UpstreamMcpConfig {
     #[serde(default)]
     pub(crate) servers: Vec<UpstreamMcpServer>,
+}
+
+/// Transport-neutral save request. `base` is the configuration the caller loaded;
+/// `config` is its desired result. The backend derives the semantic delta and applies
+/// it to the latest locked file rather than replacing that file with `config`.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct UpstreamMcpSaveRequest {
+    pub(crate) base: UpstreamMcpConfig,
+    pub(crate) config: UpstreamMcpConfig,
 }
 
 /// A single upstream MCP server configuration.
@@ -282,6 +299,174 @@ pub(crate) async fn auto_connect_saved_upstreams(state: &crate::state::AppState)
 // Persistence (Tauri commands)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+struct UpstreamMcpDelta {
+    removed_ids: HashSet<String>,
+    added: Vec<UpstreamMcpServer>,
+    server_patches: HashMap<String, serde_json::Value>,
+    desired_order: Option<Vec<String>>,
+}
+
+fn index_servers<'a>(
+    config: &'a UpstreamMcpConfig,
+    label: &str,
+) -> Result<HashMap<&'a str, &'a UpstreamMcpServer>, String> {
+    let mut by_id = HashMap::new();
+    for server in &config.servers {
+        if by_id.insert(server.id.as_str(), server).is_some() {
+            return Err(format!(
+                "Duplicate upstream id '{}' in {label} configuration",
+                server.id
+            ));
+        }
+    }
+    Ok(by_id)
+}
+
+fn derive_upstream_delta(
+    base: &UpstreamMcpConfig,
+    desired: &UpstreamMcpConfig,
+) -> Result<UpstreamMcpDelta, String> {
+    let base_by_id = index_servers(base, "base")?;
+    let desired_by_id = index_servers(desired, "requested")?;
+
+    let removed_ids = base_by_id
+        .keys()
+        .filter(|id| !desired_by_id.contains_key::<str>(**id))
+        .map(|id| (*id).to_string())
+        .collect();
+    let added = desired
+        .servers
+        .iter()
+        .filter(|server| !base_by_id.contains_key(server.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut server_patches = HashMap::new();
+    for server in &desired.servers {
+        let Some(base_server) = base_by_id.get(server.id.as_str()) else {
+            continue;
+        };
+        let base_json = serde_json::to_value(*base_server)
+            .map_err(|e| format!("Could not serialize base upstream '{}': {e}", server.id))?;
+        let desired_json = serde_json::to_value(server).map_err(|e| {
+            format!(
+                "Could not serialize requested upstream '{}': {e}",
+                server.id
+            )
+        })?;
+        if let Some(delta) = crate::config::json_merge_delta(&base_json, &desired_json) {
+            server_patches.insert(server.id.clone(), delta);
+        }
+    }
+
+    let desired_ids = desired
+        .servers
+        .iter()
+        .map(|server| server.id.clone())
+        .collect::<Vec<_>>();
+    let retained_base_order = base
+        .servers
+        .iter()
+        .filter(|server| desired_by_id.contains_key(server.id.as_str()))
+        .map(|server| server.id.as_str())
+        .collect::<Vec<_>>();
+    let retained_desired_order = desired
+        .servers
+        .iter()
+        .filter(|server| base_by_id.contains_key(server.id.as_str()))
+        .map(|server| server.id.as_str())
+        .collect::<Vec<_>>();
+    let desired_order =
+        (!added.is_empty() || retained_base_order != retained_desired_order).then_some(desired_ids);
+
+    Ok(UpstreamMcpDelta {
+        removed_ids,
+        added,
+        server_patches,
+        desired_order,
+    })
+}
+
+impl UpstreamMcpDelta {
+    fn apply(self, latest: &mut UpstreamMcpConfig) -> Result<(), String> {
+        latest
+            .servers
+            .retain(|server| !self.removed_ids.contains(&server.id));
+
+        for server in &mut latest.servers {
+            let Some(patch) = self.server_patches.get(&server.id) else {
+                continue;
+            };
+            let mut json = serde_json::to_value(&*server)
+                .map_err(|e| format!("Could not serialize upstream '{}': {e}", server.id))?;
+            crate::config::merge_json_value(&mut json, patch.clone());
+            *server = serde_json::from_value(json)
+                .map_err(|e| format!("Invalid upstream delta for '{}': {e}", server.id))?;
+        }
+
+        for server in self.added {
+            if latest.servers.iter().any(|current| current.id == server.id) {
+                return Err(format!(
+                    "Upstream id '{}' was added concurrently; reload before adding it again",
+                    server.id
+                ));
+            }
+            latest.servers.push(server);
+        }
+
+        if let Some(desired_order) = self.desired_order {
+            let current_order = latest
+                .servers
+                .iter()
+                .map(|server| server.id.clone())
+                .collect::<Vec<_>>();
+            let mut by_id = latest
+                .servers
+                .drain(..)
+                .map(|server| (server.id.clone(), server))
+                .collect::<HashMap<_, _>>();
+            for id in desired_order.into_iter().chain(current_order) {
+                if let Some(server) = by_id.remove(&id) {
+                    latest.servers.push(server);
+                }
+            }
+            // Defensive only: duplicate IDs are rejected before deriving a delta, but
+            // retain any unforeseen entry rather than silently deleting user config.
+            latest.servers.extend(by_id.into_values());
+        }
+
+        Ok(())
+    }
+}
+
+fn persist_upstream_delta(
+    base: &UpstreamMcpConfig,
+    desired: &UpstreamMcpConfig,
+    self_port: u16,
+) -> Result<(UpstreamMcpConfig, UpstreamMcpConfig), String> {
+    let delta = derive_upstream_delta(base, desired)?;
+    ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE).update_with_strict(move |latest| {
+        index_servers(latest, "current")?;
+        let old = latest.clone();
+        delta.apply(latest)?;
+        let errors = validate_upstream_config(latest, self_port);
+        if !errors.is_empty() {
+            return Err(format!(
+                "Invalid upstream config: {}",
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        let new = latest.clone();
+        let changed = old != new;
+        Ok(((old, new), changed))
+    })
+}
+
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn load_mcp_upstreams() -> UpstreamMcpConfig {
     load_json_config(UPSTREAMS_FILE)
@@ -290,23 +475,54 @@ pub(crate) fn load_mcp_upstreams() -> UpstreamMcpConfig {
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub(crate) async fn save_mcp_upstreams(
+    base: UpstreamMcpConfig,
     config: UpstreamMcpConfig,
     state: tauri::State<'_, std::sync::Arc<crate::state::AppState>>,
 ) -> Result<(), String> {
+    save_mcp_upstreams_inner(base, config, state.inner()).await
+}
+
+pub(crate) async fn save_mcp_upstreams_inner(
+    base: UpstreamMcpConfig,
+    config: UpstreamMcpConfig,
+    state: &crate::state::AppState,
+) -> Result<(), String> {
     let self_port = state.config.read().services.server.port;
-    let errors = validate_upstream_config(&config, self_port);
-    if !errors.is_empty() {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return Err(msgs.join("; "));
-    }
+    persist_and_apply_upstream_delta(
+        base,
+        config,
+        self_port,
+        &state.mcp_upstream_registry,
+        || std::future::ready(()),
+    )
+    .await
+}
 
-    // Load old config to compute the diff for hot-reload
-    let old_config: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
-    save_json_config(UPSTREAMS_FILE, &config)?;
+async fn persist_and_apply_upstream_delta<F, Fut>(
+    base: UpstreamMcpConfig,
+    config: UpstreamMcpConfig,
+    self_port: u16,
+    registry: &crate::mcp_proxy::registry::UpstreamRegistry,
+    before_apply: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let _sequence = UPSTREAM_SAVE_SEQUENCE.lock().await;
+    let (old_config, config) =
+        tokio::task::spawn_blocking(move || persist_upstream_delta(&base, &config, self_port))
+            .await
+            .map_err(|e| format!("Upstream config save task failed: {e}"))??;
 
-    // Apply diff to the live registry (no server restart needed)
-    state
-        .mcp_upstream_registry
+    // The test hook deterministically pressures the persist/apply boundary. In
+    // production it is an immediately-ready future.
+    before_apply().await;
+
+    // Apply the exact locked pre/post diff to the live registry (no server restart
+    // needed). The blocking file lock is released, while the async sequence lock
+    // keeps this diff ordered with later commits from this process.
+    registry
         .apply_config_diff(&old_config, &config, self_port)
         .await;
 
@@ -327,14 +543,20 @@ pub(crate) fn clear_upstream_auth(name: &str) -> Result<(), String> {
 }
 
 fn set_upstream_auth(name: &str, auth: Option<UpstreamAuth>) -> Result<(), String> {
-    let mut config: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
-    let entry = config
-        .servers
-        .iter_mut()
-        .find(|s| s.name == name)
-        .ok_or_else(|| format!("Upstream '{name}' not found in {UPSTREAMS_FILE}"))?;
-    entry.auth = auth;
-    save_json_config(UPSTREAMS_FILE, &config)
+    let found =
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE).update_with_strict(|config| {
+            match config.servers.iter_mut().find(|s| s.name == name) {
+                Some(entry) => {
+                    entry.auth = auth;
+                    Ok((true, true))
+                }
+                None => Ok((false, false)),
+            }
+        })?;
+    if !found {
+        return Err(format!("Upstream '{name}' not found in {UPSTREAMS_FILE}"));
+    }
+    Ok(())
 }
 
 /// Set per-project upstream MCP allowlist. `None` clears the override
@@ -1122,6 +1344,201 @@ mod tests {
         assert_eq!(config, loaded);
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn stale_ui_delta_preserves_a_concurrent_oauth_auth_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        let server = http_server("alpha", "https://a.example.com/mcp");
+        let base = UpstreamMcpConfig {
+            servers: vec![server.clone()],
+        };
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&base)
+            .unwrap();
+
+        // The popup changes only enabled from the stale base while OAuth/DCR writes
+        // auth after that base was loaded but before the popup save reaches disk.
+        let mut desired_server = server;
+        desired_server.enabled = false;
+        let desired = UpstreamMcpConfig {
+            servers: vec![desired_server],
+        };
+        let concurrent_auth = UpstreamAuth::OAuth2 {
+            client_id: "fresh-dcr-id".into(),
+            client_secret: None,
+            scopes: vec!["read".into()],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        };
+        update_upstream_auth("alpha", concurrent_auth.clone()).unwrap();
+
+        persist_upstream_delta(&base, &desired, 3845).expect("apply stale UI delta");
+
+        let saved: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+        assert!(!saved.servers[0].enabled, "requested toggle was not saved");
+        assert_eq!(
+            saved.servers[0].auth,
+            Some(concurrent_auth),
+            "stale whole-document UI save erased the concurrent OAuth/DCR update"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn upstream_delta_applies_intentional_removal_without_losing_a_concurrent_addition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        let alpha = http_server("alpha", "https://a.example.com/mcp");
+        let beta = http_server("beta", "https://b.example.com/mcp");
+        let gamma = http_server("gamma", "https://g.example.com/mcp");
+        let base = UpstreamMcpConfig {
+            servers: vec![alpha.clone(), beta.clone()],
+        };
+        let desired = UpstreamMcpConfig {
+            servers: vec![alpha],
+        };
+        let latest = UpstreamMcpConfig {
+            servers: vec![base.servers[0].clone(), beta, gamma],
+        };
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&latest)
+            .unwrap();
+
+        persist_upstream_delta(&base, &desired, 3845).expect("apply removal delta");
+
+        let saved: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+        let names = saved
+            .servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["alpha", "gamma"]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn upstream_delta_treats_removed_auth_key_as_an_intentional_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        let mut server = http_server("alpha", "https://a.example.com/mcp");
+        server.auth = Some(UpstreamAuth::OAuth2 {
+            client_id: "old-id".into(),
+            client_secret: None,
+            scopes: vec![],
+            authorization_endpoint: None,
+            token_endpoint: None,
+        });
+        let base = UpstreamMcpConfig {
+            servers: vec![server.clone()],
+        };
+        let mut desired_server = server;
+        desired_server.auth = None;
+        let desired = UpstreamMcpConfig {
+            servers: vec![desired_server],
+        };
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&base)
+            .unwrap();
+
+        persist_upstream_delta(&base, &desired, 3845).expect("apply auth clear");
+
+        let saved: UpstreamMcpConfig = load_json_config(UPSTREAMS_FILE);
+        assert!(saved.servers[0].auth.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn concurrent_saves_keep_live_registry_in_disk_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        let registry = std::sync::Arc::new(UpstreamRegistry::new());
+        let initial = UpstreamMcpConfig::default();
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&initial)
+            .unwrap();
+
+        let alpha = disabled_http_server("alpha", "http://127.0.0.1:1/mcp");
+        let after_first = UpstreamMcpConfig {
+            servers: vec![alpha],
+        };
+        let beta = disabled_http_server("beta", "http://127.0.0.1:2/mcp");
+        let after_second = UpstreamMcpConfig {
+            servers: vec![beta],
+        };
+
+        let first_persisted = std::sync::Arc::new(tokio::sync::Notify::new());
+        let allow_first_apply = std::sync::Arc::new(tokio::sync::Notify::new());
+        let first = tokio::spawn({
+            let registry = std::sync::Arc::clone(&registry);
+            let first_persisted = std::sync::Arc::clone(&first_persisted);
+            let allow_first_apply = std::sync::Arc::clone(&allow_first_apply);
+            let initial = initial.clone();
+            let after_first = after_first.clone();
+            async move {
+                persist_and_apply_upstream_delta(
+                    initial,
+                    after_first,
+                    3845,
+                    &registry,
+                    move || async move {
+                        first_persisted.notify_one();
+                        allow_first_apply.notified().await;
+                    },
+                )
+                .await
+            }
+        });
+
+        first_persisted.notified().await;
+        assert_eq!(load_mcp_upstreams(), after_first);
+        assert!(
+            UPSTREAM_SAVE_SEQUENCE.try_lock().is_err(),
+            "the first save released ordering before applying its live diff"
+        );
+
+        // Poll the second save while the first is paused after persistence. The
+        // sequence mutex queues it before it can persist B -> C, preventing the
+        // historical apply order C then stale B.
+        let second = persist_and_apply_upstream_delta(
+            after_first.clone(),
+            after_second.clone(),
+            3845,
+            &registry,
+            || std::future::ready(()),
+        );
+        tokio::pin!(second);
+        tokio::select! {
+            biased;
+            result = &mut second => panic!("second save bypassed the first: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        assert_eq!(
+            load_mcp_upstreams(),
+            after_first,
+            "second save persisted before the first live diff was allowed"
+        );
+
+        allow_first_apply.notify_one();
+        first.await.unwrap().unwrap();
+        second.await.unwrap();
+
+        let saved = load_mcp_upstreams();
+        assert_eq!(saved, after_second);
+        let mut live_names = registry.upstream_names();
+        live_names.sort();
+        let mut saved_names = saved
+            .servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect::<Vec<_>>();
+        saved_names.sort();
+        assert_eq!(
+            live_names, saved_names,
+            "live upstream registry diverged from the final on-disk config"
+        );
+    }
+
     // -- update_upstream_auth --
 
     #[test]
@@ -1139,7 +1556,9 @@ mod tests {
         let config = UpstreamMcpConfig {
             servers: vec![server_a, server_b.clone()],
         };
-        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&config)
+            .unwrap();
 
         // Write OAuth auth to beta
         let new_auth = UpstreamAuth::OAuth2 {
@@ -1171,7 +1590,9 @@ mod tests {
         let config = UpstreamMcpConfig {
             servers: vec![http_server("alpha", "https://a.example.com/mcp")],
         };
-        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&config)
+            .unwrap();
 
         let auth = UpstreamAuth::OAuth2 {
             client_id: "x".into(),
@@ -1202,7 +1623,9 @@ mod tests {
         let config = UpstreamMcpConfig {
             servers: vec![server],
         };
-        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&config)
+            .unwrap();
 
         clear_upstream_auth("delta").unwrap();
 
@@ -1228,7 +1651,9 @@ mod tests {
         let config = UpstreamMcpConfig {
             servers: vec![server],
         };
-        save_json_config(UPSTREAMS_FILE, &config).unwrap();
+        ConfigFile::<UpstreamMcpConfig>::new(UPSTREAMS_FILE)
+            .save(&config)
+            .unwrap();
 
         let new_auth = UpstreamAuth::OAuth2 {
             client_id: "new-id".into(),

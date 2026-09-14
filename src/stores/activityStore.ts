@@ -109,8 +109,10 @@ function createActivityStore() {
 				} else {
 					s.items.push(full);
 				}
+				// Splice the overflow off the front rather than replacing the array,
+				// for the same reason as removeItem.
 				if (s.items.length > 500) {
-					s.items = s.items.slice(-500);
+					s.items.splice(0, s.items.length - 500);
 				}
 			}),
 		);
@@ -118,7 +120,15 @@ function createActivityStore() {
 	}
 
 	function removeItem(id: string): void {
-		setState("items", (prev) => prev.filter((i) => i.id !== id));
+		// Splice, not filter-into-a-new-array: handing the store a fresh array
+		// invalidates every consumer of the list, including the rows that were not
+		// touched. A splice only notifies what actually moved.
+		setState(
+			produce((s) => {
+				const idx = s.items.findIndex((i) => i.id === id);
+				if (idx >= 0) s.items.splice(idx, 1);
+			}),
+		);
 		saveActivity(state.items);
 	}
 
@@ -167,13 +177,33 @@ function createActivityStore() {
 		return state.items.filter((i) => !i.dismissed);
 	}
 
+	/** Is this item one the popover would show for that section and repo? */
+	function isVisibleIn(item: ActivityItem, sectionId: string, repoPath?: string): boolean {
+		if (item.sectionId !== sectionId || item.dismissed) return false;
+		// When filtering by repo: include items that match OR have no repoPath set
+		if (repoPath !== undefined && item.repoPath) return item.repoPath === repoPath;
+		return true;
+	}
+
+	/** Newest first — the bell reads top-down, so the latest message must lead. */
 	function getForSection(sectionId: string, repoPath?: string): ActivityItem[] {
-		return state.items.filter((i) => {
-			if (i.sectionId !== sectionId || i.dismissed) return false;
-			// When filtering by repo: include items that match OR have no repoPath set
-			if (repoPath !== undefined && i.repoPath) return i.repoPath === repoPath;
-			return true;
-		});
+		return state.items.filter((i) => isVisibleIn(i, sectionId, repoPath)).sort((a, b) => b.createdAt - a.createdAt);
+	}
+
+	/**
+	 * How many items the popover would show across these sections. The badge wants
+	 * one number, so it walks the items once and never sorts — asking each section
+	 * for its list instead cost a scan and a sort per section, both discarded for
+	 * a `.length`.
+	 */
+	function countActiveInSections(sectionIds: string[], repoPath?: string): number {
+		if (sectionIds.length === 0) return 0;
+		const wanted = new Set(sectionIds);
+		let count = 0;
+		for (const item of state.items) {
+			if (wanted.has(item.sectionId) && isVisibleIn(item, item.sectionId, repoPath)) count++;
+		}
+		return count;
 	}
 
 	function getLastItem(repoPath?: string): ActivityItem | null {
@@ -222,6 +252,7 @@ function createActivityStore() {
 		dismissSection,
 		getActive,
 		getForSection,
+		countActiveInSections,
 		getLastItem,
 		flushSave,
 		clearAll,

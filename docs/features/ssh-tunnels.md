@@ -21,6 +21,14 @@ The **TunnelManager** orchestrates multiple **TunnelSupervisor** instances, one 
 6. On process exit, classify the exit reason from stderr patterns and exit code
 7. If retryable, wait the backoff delay and loop; otherwise, stop
 
+Tunnel starts claim a tokenized reservation before the first await. The
+reservation is removed automatically if the start future fails or is cancelled,
+but only when its token still owns the slot; a later start with the same profile
+ID cannot be erased by an older cancelled future. Stop during startup removes
+the reservation, prevents late supervisor publication, and suppresses the
+`Started` audit record. `Started` is written only after the live handle is
+published successfully.
+
 ### Shutdown
 
 `TunnelSupervisor::stop()` sends a signal via a `oneshot` channel. The supervision loop catches this at any `tokio::select!` point and performs graceful shutdown:

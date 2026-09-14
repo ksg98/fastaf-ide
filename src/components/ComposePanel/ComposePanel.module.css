@@ -42,6 +42,139 @@
   user-select: none;
 }
 
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.queueBadge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: var(--font-xs);
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+
+.queueBadge:hover {
+  color: var(--fg-primary);
+  border-color: var(--fg-muted);
+}
+
+.queueBadgeOpen {
+  color: var(--fg-primary);
+  border-color: var(--fg-muted);
+}
+
+.queueChevron {
+  transition: transform 0.12s ease-out;
+}
+
+.queueChevronOpen {
+  transform: rotate(180deg);
+}
+
+.queueList {
+  max-height: 120px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  flex-shrink: 0;
+}
+
+.queueListHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 12px;
+  color: var(--fg-muted);
+  user-select: none;
+}
+
+.queueClearAll {
+  border: none;
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  padding: 0;
+}
+
+.queueClearAll:hover {
+  color: var(--error);
+}
+
+.queueItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 12px;
+  color: var(--fg-primary);
+}
+
+.queueItem:hover {
+  background: var(--bg-tertiary);
+}
+
+.queueItemText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.queueItemRemove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.queueItemRemove:hover {
+  color: var(--error);
+}
+
+.queueButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.queueButton:hover {
+  color: var(--fg-primary);
+  border-color: var(--fg-muted);
+}
+
 .sendButton {
   display: flex;
   align-items: center;

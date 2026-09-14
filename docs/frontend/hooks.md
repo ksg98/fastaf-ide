@@ -37,6 +37,7 @@ Low-level PTY session management. Wraps Tauri PTY commands.
 | `createSession(config)` | Create PTY session, returns session ID |
 | `createSessionWithWorktree(ptyConfig, wtConfig)` | Create worktree + PTY |
 | `write(sessionId, data)` | Write to PTY |
+| `sendCommand(sessionId, text, agentType, submit?)` | Insert through the shared command path; optionally withhold Enter for review |
 | `resize(sessionId, rows, cols)` | Resize PTY |
 | `pause(sessionId)` | Pause reader thread |
 | `resume(sessionId)` | Resume reader thread |
@@ -46,6 +47,18 @@ Low-level PTY session management. Wraps Tauri PTY commands.
 | `listWorktrees()` | List managed worktrees |
 | `getWorktreesDir()` | Get worktrees directory |
 | `listActiveSessions()` | List all active sessions |
+
+---
+
+## useSmartPrompts
+
+**File:** `src/hooks/useSmartPrompts.ts`
+
+Resolves Smart Prompt variables and routes inject, shell, headless, and API
+execution. For inject mode, explicit Insert/Run choices take precedence over
+`autoExecute`; prompts without that persisted field retain their legacy target
+default. Only actions that will submit are idle-gated. PTY delivery always uses
+`usePty.sendCommand`, including review-only fallback with `submit=false`.
 
 ---
 
@@ -137,6 +150,33 @@ interface ShortcutHandlers {
 ```
 
 Returns cleanup function to remove listener on unmount.
+
+---
+
+## useNativeKeyCombo
+
+**File:** `src/hooks/useNativeKeyCombo.ts`
+
+Feeds natively-captured keys into a shortcut recorder. macOS never delivers `F13`–`F20`
+to WKWebView, so a `keydown` listener sees nothing at all and those keys look unbindable
+even though `keyEventToCombo`, `validateGlobalHotkeyCombo` and the `global-hotkey` crate
+all accept them. `src-tauri/src/native_keys.rs` catches them with an `NSEvent` monitor and
+re-emits `native-key-down`; this hook turns that back into the same combo string the DOM
+path produces.
+
+```typescript
+useNativeKeyCombo(active: () => boolean, onCombo: (combo: string) => void): void
+export function nativeKeyToCombo(payload: NativeKeyDown): string
+```
+
+- The listener is attached **only while `active()` is true**, so these keys keep their
+  normal behaviour everywhere else in the app.
+- `nativeKeyToCombo` mirrors `keyEventToCombo`'s modifier order (Cmd, Ctrl, Alt, Shift) —
+  the two are compared against each other for conflicts and persisted to the same store,
+  so a mismatch would make one physical chord compare as two different combos.
+- No-op outside Tauri (`isTauri()`); the event does not exist in browser mode.
+- Consumers: `KeyComboCapture` (Global Hotkey) and `KeyboardShortcutsTab` (per-action
+  recording), both routing the result through the same conflict check as the DOM path.
 
 ---
 
@@ -353,7 +393,7 @@ Creates long-press keyboard handlers for push-to-talk dictation and other hold-t
 
 **File:** `src/hooks/useWorktreeSwitchPrompt.ts`
 
-Prompts the user when switching to a branch that has a worktree in a different location, offering to open it or stay.
+Handles worktree lifecycle events. A newly created worktree can be opened or declined; when an agent is active, opening the worktree selects its own terminal without changing the agent terminal's branch or working directory. Removed worktrees are pruned from the sidebar.
 
 ---
 

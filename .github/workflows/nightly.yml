@@ -15,11 +15,12 @@ concurrency:
   group: nightly
   cancel-in-progress: true
 
-# See release.yml: sccache's idle timer measures time without new requests, so a
-# long single-crate compile outlives the server and kills the rustc talking to
-# it. Workflow level because sccache-action is what starts the server.
+# Keep the sccache server alive across a compile longer than its 600s idle timer —
+# see the note in release.yml. RUST_VERSION pins the compiler; bump it in lockstep
+# with ci.yml, release.yml and audit.yml — see the note in ci.yml and docs/guides/ci.md.
 env:
   SCCACHE_IDLE_TIMEOUT: "0"
+  RUST_VERSION: "1.98.0"
 
 jobs:
   cleanup:
@@ -136,8 +137,10 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Install Rust stable
+      - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10

@@ -1,5 +1,4 @@
 import { filePreviewRegistry } from "../plugins/filePreviewRegistry";
-import { diffTabsStore } from "../stores/diffTabs";
 import { editorTabsStore } from "../stores/editorTabs";
 import { mdTabsStore } from "../stores/mdTabs";
 import { type PaneTabType, paneLayoutStore } from "../stores/paneLayout";
@@ -74,22 +73,15 @@ export function openFileAction(
 		}
 	}
 
+	// Each store deactivates the other panes when it activates a tab
+	// (tabManager.activatePaneExclusively), so no hand-rolled setActive(null) here.
 	const target = classifyFile(filePath);
 	if (target === "markdown" && line === undefined) {
 		mdTabsStore.add(repoPath, filePath, fsRoot);
-		terminalsStore.setActive(null);
-		diffTabsStore.setActive(null);
-		editorTabsStore.setActive(null);
 	} else if (target === "preview" && line === undefined) {
 		mdTabsStore.addHtmlPreview(repoPath, filePath, fsRoot);
-		terminalsStore.setActive(null);
-		diffTabsStore.setActive(null);
-		editorTabsStore.setActive(null);
 	} else {
 		const tabId = editorTabsStore.add(repoPath, filePath, line, { fsRoot: fsRoot || repoPath });
-		terminalsStore.setActive(null);
-		diffTabsStore.setActive(null);
-		mdTabsStore.setActive(null);
 		onEditorTab?.(tabId);
 	}
 }

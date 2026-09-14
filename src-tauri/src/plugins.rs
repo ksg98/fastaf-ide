@@ -20,9 +20,44 @@ use tauri::{AppHandle, Emitter};
 // ---------------------------------------------------------------------------
 // Capability enforcement
 // ---------------------------------------------------------------------------
+//
+// WHAT THIS BOUNDARY IS, AND WHAT IT IS NOT.
+//
+// Capabilities gate what a plugin DECLARES — a plugin that never asked for
+// `exec:cli` cannot reach the exec commands under its own id, and a manifest is
+// validated against KNOWN_CAPABILITIES before anything is granted. That is the
+// whole of the guarantee.
+//
+// Capabilities do NOT gate what a plugin can IMPERSONATE. `plugin_id` arrives
+// from the caller and is the only key every check below consults, and plugins
+// are loaded by a bare dynamic `import()` into the SAME JavaScript realm as the
+// host (`src/plugins/pluginLoader.ts`). Any plugin can therefore import `invoke`
+// itself and pass a different plugin's id to inherit that plugin's exec,
+// credential and allowed-URL grants. Plugins are isolated from the HOST's
+// declared surface, not from EACH OTHER.
+//
+// This is stated plainly rather than papered over: a host-generated per-plugin
+// token would not fix it. Same-realm JavaScript can read the token out of the
+// module that holds it, proxy the function that uses it, or monkey-patch the
+// transport — so the token would add ceremony and a false sense of a boundary
+// without moving the actual trust line. FastAF's threat model is that the
+// user vets what they install (see AGENTS.md "Security Scope"); treat every
+// installed plugin as trusted with the union of all installed capabilities.
+//
+// DEFERRED (2026-07-28) — real per-plugin isolation. It requires running each
+// plugin off-realm (a Worker or a sandboxed iframe) and giving it a host-created
+// MessagePort as its ONLY channel to the backend, so the plugin's identity is
+// the port it was handed rather than a string it supplies. That is a rewrite of
+// the plugin loading and IPC surface, not an incremental patch, which is why a
+// token alone was rejected (Boss decision, 2026-07-28). Re-evaluate if plugins
+// ever become installable from an untrusted registry, which is the point where
+// mutually-untrusted plugins stop being hypothetical.
 
 /// Check that a plugin has a required capability, using the provided map.
 /// This is the testable core — does not depend on AppState.
+///
+/// Answers "did this plugin declare this capability", NOT "is this caller really
+/// this plugin" — see the module-level note above.
 /// Built-in plugins and their allowed capabilities.
 /// Hardcoded in Rust to maintain the security model — the frontend cannot
 /// self-register arbitrary capabilities for built-in plugins.
@@ -476,6 +511,53 @@ pub(crate) fn unregister_loaded_plugin_impl(state: &crate::AppState, plugin_id: 
 }
 
 // ---------------------------------------------------------------------------
+// Output watchers
+// ---------------------------------------------------------------------------
+
+/// Replace the OutputWatcher set of one frontend. The frontend pushes its full
+/// set whenever a watcher is added or removed, tagged with the client id it
+/// generated at load and a monotonic sequence number.
+///
+/// `seq` orders the mutations, not the replies: two syncs can be in flight at
+/// once and the older one must not install its set on top of the newer one. A
+/// stale sync answers `applied: false` and changes nothing.
+///
+/// The reply lists the watchers whose pattern the Rust `regex` crate cannot
+/// express (lookaround, backreferences, a negated class escape inside a class).
+/// Those are NOT an error: the frontend keeps matching them itself, and Rust
+/// keeps shipping every assembled line for as long as one is registered.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub fn set_plugin_output_watchers(
+    client_id: String,
+    seq: u64,
+    watchers: Vec<crate::output_watchers::WatcherSpec>,
+    state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
+) -> crate::output_watchers::SyncOutcome {
+    set_plugin_output_watchers_impl(&state, &client_id, seq, &watchers)
+}
+
+pub(crate) fn set_plugin_output_watchers_impl(
+    state: &crate::AppState,
+    client_id: &str,
+    seq: u64,
+    watchers: &[crate::output_watchers::WatcherSpec],
+) -> crate::output_watchers::SyncOutcome {
+    let outcome = state
+        .plugin_output_watchers
+        .write()
+        .sync(client_id, seq, watchers);
+    if !outcome.rejected.is_empty() {
+        tracing::info!(
+            source = "plugin",
+            "OutputWatcher patterns kept on the frontend (not expressible in the regex crate): {:?}",
+            outcome.rejected
+        );
+    }
+    outcome
+}
+
+// ---------------------------------------------------------------------------
 // Plugin README
 // ---------------------------------------------------------------------------
 
@@ -771,7 +853,19 @@ fn install_zip_inner(
 
     let target_dir = prepare_plugin_target(&manifest)?;
 
-    // Extract files
+    extract_zip_entries(&mut archive, &prefix, &target_dir.path)?;
+
+    finalize_plugin_install(target_dir, &manifest, app_handle)
+}
+
+/// Extract validated plugin entries into an already prepared target directory.
+/// This seam deliberately excludes Tauri state so archive safety and prefix
+/// handling can be characterized without installing or activating a plugin.
+fn extract_zip_entries(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    prefix: &str,
+    target_dir: &std::path::Path,
+) -> Result<(), String> {
     for i in 0..archive.len() {
         let mut entry = archive
             .by_index(i)
@@ -786,7 +880,7 @@ fn install_zip_inner(
 
         // Strip prefix (if manifest was inside a subdirectory)
         let relative = if !prefix.is_empty() {
-            match entry_str.strip_prefix(&prefix) {
+            match entry_str.strip_prefix(prefix) {
                 Some(r) if !r.is_empty() => r.to_string(),
                 _ => continue,
             }
@@ -799,7 +893,7 @@ fn install_zip_inner(
             return Err(format!("ZIP entry attempts path traversal: {relative}"));
         }
 
-        let target = target_dir.path.join(&relative);
+        let target = target_dir.join(&relative);
 
         if entry.is_dir() {
             std::fs::create_dir_all(&target)
@@ -815,8 +909,7 @@ fn install_zip_inner(
                 .map_err(|e| format!("Failed to write {relative}: {e}"))?;
         }
     }
-
-    finalize_plugin_install(target_dir, &manifest, app_handle)
+    Ok(())
 }
 
 /// Find the path to manifest.json inside a ZIP archive.
@@ -879,19 +972,7 @@ pub fn uninstall_plugin(
     app_handle: AppHandle,
     state: tauri::State<'_, std::sync::Arc<crate::AppState>>,
 ) -> Result<(), String> {
-    if id.is_empty() || is_path_escape(&id) {
-        return Err("Invalid plugin ID".into());
-    }
-
-    let dir = plugins_dir().join(&id);
-    if !dir.exists() {
-        dispose_plugin_runtime_state(&state, &id); // Sweep any lingering runtime state
-        return Ok(()); // Already gone
-    }
-
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to remove plugin directory: {e}"))?;
-
-    dispose_plugin_runtime_state(&state, &id);
+    uninstall_plugin_inner(&state, &id)?;
 
     let _ = app_handle.emit("plugin-changed", vec![id.clone()]);
     crate::app_logger::log_via_handle(
@@ -901,6 +982,29 @@ pub fn uninstall_plugin(
         &format!("Uninstalled plugin \"{id}\""),
     );
     Ok(())
+}
+
+/// Core uninstall, separated from the Tauri command wrapper for testability.
+///
+/// Runtime disposal happens FIRST and unconditionally. It used to run after the
+/// `?` on `remove_dir_all`, so a delete that failed (a file held open, a
+/// permissions problem) left the plugin's watchers and capability grant alive for
+/// a plugin the user had been told was gone — and every retry hit the same early
+/// return, so it never recovered. Disposal is idempotent and independent of the
+/// directory, so nothing is lost by doing it before the step that can fail.
+fn uninstall_plugin_inner(state: &crate::AppState, id: &str) -> Result<(), String> {
+    if id.is_empty() || is_path_escape(id) {
+        return Err("Invalid plugin ID".into());
+    }
+
+    dispose_plugin_runtime_state(state, id);
+
+    let dir = plugins_dir().join(id);
+    if !dir.exists() {
+        return Ok(()); // Already gone
+    }
+
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("Failed to remove plugin directory: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1185,181 @@ pub fn start_plugin_watcher(app_handle: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Output watcher registration (#599-6e94) --
+
+    use crate::output_watchers::WatcherSpec;
+
+    fn spec(id: &str, pattern: &str) -> WatcherSpec {
+        WatcherSpec {
+            id: id.to_string(),
+            pattern: pattern.to_string(),
+            flags: String::new(),
+        }
+    }
+
+    /// With every pattern compiled in Rust, nothing in the WebView has to scan
+    /// lines any more: only the matched ones cross the boundary.
+    #[test]
+    fn compiling_every_pattern_stops_shipping_every_line() {
+        let state = crate::state::tests_support::make_test_app_state();
+        assert!(
+            state.plugin_output_watchers.read().is_idle(),
+            "a fresh state has no watcher to match"
+        );
+
+        let outcome =
+            set_plugin_output_watchers_impl(&state, "c1", 1, &[spec("a", "done"), spec("b", "x+")]);
+
+        assert!(outcome.applied);
+        assert!(outcome.rejected.is_empty());
+        let watchers = state.plugin_output_watchers.read();
+        assert!(!watchers.needs_all_lines());
+        assert!(!watchers.is_idle());
+    }
+
+    /// One pattern the crate cannot express keeps every line flowing — that
+    /// watcher is still matched in the WebView and must not go blind.
+    #[test]
+    fn a_rejected_pattern_keeps_every_line_flowing() {
+        let state = crate::state::tests_support::make_test_app_state();
+
+        let outcome = set_plugin_output_watchers_impl(
+            &state,
+            "c1",
+            1,
+            &[spec("ok", "done"), spec("look", "a(?=b)")],
+        );
+
+        assert_eq!(outcome.rejected, vec!["look".to_string()]);
+        let watchers = state.plugin_output_watchers.read();
+        assert!(watchers.needs_all_lines());
+        // The compilable one is still matched in Rust.
+        assert_eq!(watchers.matching_ids("done"), vec!["c1/ok".to_string()]);
+    }
+
+    /// The frontend pushes the whole set every time, so a sync replaces rather
+    /// than accumulates — otherwise a disposed watcher would keep firing.
+    #[test]
+    fn a_later_sync_replaces_the_previous_set() {
+        let state = crate::state::tests_support::make_test_app_state();
+        set_plugin_output_watchers_impl(&state, "c1", 1, &[spec("old", "gone")]);
+
+        set_plugin_output_watchers_impl(&state, "c1", 2, &[spec("new", "kept")]);
+
+        let watchers = state.plugin_output_watchers.read();
+        assert!(watchers.matching_ids("gone").is_empty());
+        assert_eq!(watchers.matching_ids("kept"), vec!["c1/new".to_string()]);
+    }
+
+    /// A sync that lost the race must not install its older set: the frontend
+    /// would keep a watcher the backend no longer knows about, and nothing
+    /// would match it.
+    #[test]
+    fn a_stale_sync_changes_nothing() {
+        let state = crate::state::tests_support::make_test_app_state();
+        set_plugin_output_watchers_impl(&state, "c1", 2, &[spec("a", "kept"), spec("b", "also")]);
+
+        let outcome = set_plugin_output_watchers_impl(&state, "c1", 1, &[spec("a", "kept")]);
+
+        assert!(!outcome.applied);
+        assert_eq!(
+            state.plugin_output_watchers.read().matching_ids("also"),
+            vec!["c1/b".to_string()]
+        );
+    }
+
+    /// Unregistering the last watcher must also drop the set, or the reader
+    /// keeps paying for matching nobody asked for.
+    #[test]
+    fn an_empty_sync_clears_the_set() {
+        let state = crate::state::tests_support::make_test_app_state();
+        set_plugin_output_watchers_impl(&state, "c1", 1, &[spec("a", "done")]);
+
+        let outcome = set_plugin_output_watchers_impl(&state, "c1", 2, &[]);
+
+        assert!(outcome.applied);
+        assert!(outcome.rejected.is_empty());
+        assert!(state.plugin_output_watchers.read().is_idle());
+    }
+
+    /// Two frontends (desktop window and browser tab) keep independent sets:
+    /// one registering must not blind the other.
+    #[test]
+    fn a_second_client_does_not_replace_the_first() {
+        let state = crate::state::tests_support::make_test_app_state();
+        set_plugin_output_watchers_impl(&state, "desktop", 1, &[spec("w1", "alpha")]);
+
+        set_plugin_output_watchers_impl(&state, "browser", 1, &[spec("w1", "beta")]);
+
+        let watchers = state.plugin_output_watchers.read();
+        assert_eq!(
+            watchers.matching_ids("alpha"),
+            vec!["desktop/w1".to_string()]
+        );
+        assert_eq!(
+            watchers.matching_ids("beta"),
+            vec!["browser/w1".to_string()]
+        );
+    }
+
+    // -- Uninstall disposal (#485-1bd0) --
+
+    /// A failed directory removal used to skip `dispose_plugin_runtime_state`
+    /// entirely, leaving watchers and the capability grant alive for a plugin the
+    /// user was told was gone — and every retry hit the same early return.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_uninstall_still_disposes_the_runtime_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(home.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        state
+            .loaded_plugins
+            .insert("doomed".to_string(), vec!["fs:read".to_string()]);
+
+        let dir = plugins_dir().join("doomed");
+        std::fs::create_dir_all(dir.join("nested")).expect("create plugin dir");
+        // A read-only parent makes remove_dir_all fail without any exotic setup.
+        let parent = plugins_dir();
+        let original = std::fs::metadata(&parent).expect("stat").permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555))
+            .expect("make parent read-only");
+
+        let result = uninstall_plugin_inner(&state, "doomed");
+
+        // Restore before asserting so a failure cannot leave the tempdir undeletable.
+        std::fs::set_permissions(&parent, original).expect("restore permissions");
+
+        assert!(result.is_err(), "the removal was supposed to fail");
+        assert!(
+            !state.loaded_plugins.contains_key("doomed"),
+            "the capability grant must be revoked even when the delete fails"
+        );
+    }
+
+    #[test]
+    fn uninstalling_an_absent_plugin_still_sweeps_its_runtime_state() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(home.path().to_path_buf());
+        let state = crate::state::tests_support::make_test_app_state();
+        state
+            .loaded_plugins
+            .insert("ghost".to_string(), vec!["fs:read".to_string()]);
+
+        uninstall_plugin_inner(&state, "ghost").expect("absent plugin is not an error");
+
+        assert!(!state.loaded_plugins.contains_key("ghost"));
+    }
+
+    #[test]
+    fn uninstall_rejects_a_path_escaping_id_before_touching_anything() {
+        let state = crate::state::tests_support::make_test_app_state();
+        assert!(uninstall_plugin_inner(&state, "../etc").is_err());
+        assert!(uninstall_plugin_inner(&state, "").is_err());
+    }
 
     // -- Path safety --
 
@@ -1282,7 +1561,7 @@ mod tests {
     fn validate_rejects_empty_binary_name() {
         let mut m = valid_manifest("test");
         m.capabilities = vec!["exec:cli".into()];
-        m.binaries = vec!["".into()];
+        m.binaries = vec![String::new()];
         assert!(validate_manifest(&m, "test").is_err());
     }
 
@@ -1420,6 +1699,50 @@ mod tests {
         let result = find_manifest_in_zip(&archive);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn extract_zip_entries_strips_single_directory_prefix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let zip_path = create_test_zip(
+            dir.path(),
+            &[
+                ("my-plugin/manifest.json", &valid_manifest_json("my-plugin")),
+                ("my-plugin/main.js", "export default {}"),
+                ("my-plugin/assets/icon.txt", "icon"),
+                ("unrelated.txt", "ignored"),
+            ],
+        );
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+
+        extract_zip_entries(&mut archive, "my-plugin/", &target).unwrap();
+
+        assert!(target.join("manifest.json").is_file());
+        assert!(target.join("main.js").is_file());
+        assert_eq!(
+            std::fs::read_to_string(target.join("assets/icon.txt")).unwrap(),
+            "icon"
+        );
+        assert!(!target.join("unrelated.txt").exists());
+    }
+
+    #[test]
+    fn extract_zip_entries_rejects_parent_traversal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let zip_path = create_test_zip(dir.path(), &[("../escape.txt", "escape")]);
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let target = dir.path().join("out");
+        std::fs::create_dir(&target).unwrap();
+
+        let error = extract_zip_entries(&mut archive, "", &target)
+            .expect_err("parent traversal must be rejected");
+
+        assert!(error.contains("unsafe path") || error.contains("path traversal"));
+        assert!(!dir.path().join("escape.txt").exists());
     }
 
     // -- Capability enforcement --

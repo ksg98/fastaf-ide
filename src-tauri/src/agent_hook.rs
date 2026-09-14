@@ -41,6 +41,15 @@ pub(crate) fn hook_command(state: &str) -> String {
 /// Claude hooks (tool-level). Array order matters: the broad `PreToolUse` busy
 /// entry precedes the `AskUserQuestion|ExitPlanMode` awaiting entry so awaiting
 /// wins for those tools.
+///
+/// `Elicitation` covers MCP `elicitation/create` — an MCP server asking the user
+/// for input mid tool call. It is NOT a tool call, so no `PreToolUse` matcher can
+/// reach it, and its dialog matches none of the screen heuristics either: the
+/// options render horizontally (`Accept  Decline`) instead of numbered, and the
+/// footer is `Esc to cancel · ↑/↓ to navigate · …`, not `Enter to select`. Without
+/// this entry the tab stays "busy" while the agent is blocked on the user.
+/// `ElicitationResult` fires once the user answers and is the paired retraction —
+/// awaiting is sticky, so a set with no clear latches the badge forever.
 pub(crate) fn claude_hook_map() -> Vec<HookEntry> {
     vec![
         ("UserPromptSubmit", "", hook_command("busy")),
@@ -55,6 +64,8 @@ pub(crate) fn claude_hook_map() -> Vec<HookEntry> {
             "AskUserQuestion|ExitPlanMode",
             hook_command("busy"),
         ),
+        ("Elicitation", "", hook_command("awaiting")),
+        ("ElicitationResult", "", hook_command("busy")),
         ("Stop", "", hook_command("idle")),
         ("SessionEnd", "", hook_command("idle")),
     ]
@@ -164,6 +175,23 @@ mod tests {
                 .any(|(e, m, c)| *e == "PreToolUse" && m.is_empty() && c.contains("state=busy")),
             "broad PreToolUse must drive busy"
         );
+    }
+
+    /// MCP elicitation blocks the agent on the user but is not a tool call, so
+    /// the awaiting signal can only come from the dedicated `Elicitation` event —
+    /// and it must be retracted by `ElicitationResult`, or the badge latches.
+    #[test]
+    fn claude_map_pairs_elicitation_awaiting_with_a_retraction() {
+        let map = claude_hook_map();
+        let find = |event: &str| {
+            map.iter()
+                .find(|(e, m, _)| *e == event && m.is_empty())
+                .map(|(_, _, c)| c.clone())
+        };
+        let set = find("Elicitation").expect("MCP elicitation must set awaiting");
+        assert!(set.contains("state=awaiting"), "{set}");
+        let clear = find("ElicitationResult").expect("answered elicitation must clear awaiting");
+        assert!(clear.contains("state=busy"), "{clear}");
     }
 
     #[test]

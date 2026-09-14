@@ -60,14 +60,17 @@ UTF-8 String ──> EscapeAwareBuffer
 Safe String
     ├──> Ring Buffer (64KB, for MCP access)
     ├──> WebSocket broadcast (for browser clients)
-    └──> Tauri Event ("pty-output", {session_id, data})
+    ├──> Grid frame (alacritty_terminal) ──> Frontend: CanvasTerminal renders it
+    ├──> OutputParser detects special events
+    │    (rate limits, PR URLs, progress, prompts)
+    └──> output_watchers.rs: assemble lines, clean, match plugin patterns
               │
               ▼
-         Frontend: CanvasTerminal renders grid frame
+         Tauri Event ("pty-watcher-lines-{session_id}", {session_id, lines})
+         (browser: "watcher-lines" WS frame, "plugin-watcher-lines" SSE)
               │
               ▼
-         OutputParser detects special events
-         (rate limits, PR URLs, progress, prompts)
+         pluginRegistry.handleWatcherLines() ──> OutputWatcher.onMatch()
 ```
 
 Each PTY session has a dedicated reader thread (spawned in `pty.rs`) that reads from the PTY master fd in a loop.
@@ -146,7 +149,7 @@ useAppInit.initApp()
 
 | Event | Payload | Source |
 |-------|---------|--------|
-| `pty-output-{session_id}` | `{session_id, data}` | PTY reader thread |
+| `pty-watcher-lines-{session_id}` | `{session_id, lines}` | PTY reader thread (plugin OutputWatchers) |
 | `pty-exit-{session_id}` | `{session_id}` | PTY child exit |
 | `dictation-progress` | `{percent}` | Model download |
 | `menu-event` | `{id}` | Native menu click |

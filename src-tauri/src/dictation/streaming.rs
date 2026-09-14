@@ -37,14 +37,75 @@ const VAD_LAST_MS: u32 = 1000;
 const POLL_INTERVAL_MS: u64 = 50;
 /// Maximum buffer accumulation before forced flush (seconds).
 const MAX_BUFFER_S: f32 = 30.0;
+/// Hard cap on the audio retained for the final transcription (seconds).
+///
+/// Dictation is push-to-talk — `useDictationHotkey` starts on key press and
+/// stops on release — so a real utterance lasts seconds. `all_audio` keeps the
+/// whole recording for the final high-quality pass, which makes a stuck key both
+/// an unbounded allocation (16 kHz mono f32 = 64 KB/s) and an unbounded whisper
+/// pass. The cap keeps the most recent audio and sits far above anything a
+/// person dictates while holding a key.
+const MAX_RECORDING_S: f32 = 300.0;
+/// Hysteresis for the cap: trim only once this much audio is over the limit.
+///
+/// Trimming is a memmove of the whole retained buffer, so trimming on every 50 ms
+/// poll would cost more than the memory it saves.
+const TRIM_HYSTERESIS_S: f32 = 30.0;
 /// Convert milliseconds to sample count at 16kHz.
 fn ms_to_samples(ms: u32) -> usize {
     (SAMPLE_RATE as usize * ms as usize) / 1000
 }
 
+/// The `MAX_RECORDING_S` cap in samples.
+fn max_recording_samples() -> usize {
+    (MAX_RECORDING_S * SAMPLE_RATE as f32) as usize
+}
+
+/// Drop the oldest samples so at most `MAX_RECORDING_S` remain, and report how
+/// many were dropped.
+///
+/// `trim_threshold` is the length at which trimming becomes worth its memmove:
+/// the streaming loop passes the cap plus `TRIM_HYSTERESIS_S` because it calls
+/// this on every poll, while the one-shot pass at the end of a session passes the
+/// cap itself.
+fn trim_to_cap(audio: &mut Vec<f32>, trim_threshold: usize) -> usize {
+    if audio.len() <= trim_threshold {
+        return 0;
+    }
+    let excess = audio.len() - max_recording_samples();
+    audio.drain(..excess);
+    excess
+}
+
+/// Apply the recording cap to a finished recording, returning the samples dropped.
+///
+/// The streaming thread caps only what it drained itself. Audio that reached the
+/// capture buffer after that thread was signalled is appended by the caller, and
+/// with a slow final transcription window that tail is not small — without this
+/// pass the final buffer can exceed the cap the cap exists to enforce.
+pub fn cap_finished_recording(audio: &mut Vec<f32>) -> usize {
+    trim_to_cap(audio, max_recording_samples())
+}
+
+/// What a streaming session leaves behind for the final transcription pass.
+#[derive(Debug, Default)]
+pub struct StreamingAudio {
+    /// The retained recording, trimmed to at most `MAX_RECORDING_S`.
+    pub audio: Vec<f32>,
+    /// Samples the cap dropped off the front. Zero for any ordinary recording;
+    /// non-zero means the final transcription is missing that much speech, which
+    /// the caller must report instead of silently returning a partial answer.
+    pub dropped_samples: usize,
+    /// Set when the streaming thread panicked, so `audio` and `dropped_samples`
+    /// are not what the session captured — they are what survived the panic,
+    /// which is nothing. The caller must not present a transcription of the
+    /// leftovers as the recording.
+    pub interrupted: bool,
+}
+
 /// Manages a streaming transcription session on a background thread.
 pub struct StreamingSession {
-    handle: Option<std::thread::JoinHandle<Vec<f32>>>,
+    handle: Option<std::thread::JoinHandle<StreamingAudio>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -76,19 +137,23 @@ impl StreamingSession {
     }
 
     /// Signal the streaming thread to stop and wait for it to finish.
-    /// Returns any unconsumed audio samples for a final transcription.
-    pub fn stop(mut self) -> Vec<f32> {
+    /// Returns the retained audio for a final transcription, plus how much of it
+    /// the recording cap dropped.
+    pub fn stop(mut self) -> StreamingAudio {
         self.stop.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
             match handle.join() {
-                Ok(audio) => audio,
+                Ok(result) => result,
                 Err(e) => {
                     tracing::error!(source = "dictation", "Streaming thread panicked: {e:?}");
-                    Vec::new()
+                    StreamingAudio {
+                        interrupted: true,
+                        ..StreamingAudio::default()
+                    }
                 }
             }
         } else {
-            Vec::new()
+            StreamingAudio::default()
         }
     }
 
@@ -120,14 +185,15 @@ impl Drop for StreamingSession {
 /// The core streaming loop, runs on a dedicated thread.
 ///
 /// Returns ALL audio captured during the session (both processed and unprocessed)
-/// so the caller can do a single high-quality final transcription.
+/// so the caller can do a single high-quality final transcription, together with
+/// the number of samples the `MAX_RECORDING_S` cap dropped.
 fn streaming_loop(
     transcriber: Arc<dyn Transcriber>,
     audio_buffer: Arc<Mutex<VecDeque<f32>>>,
     tx: mpsc::Sender<String>,
     stop: Arc<AtomicBool>,
     language: Option<String>,
-) -> Vec<f32> {
+) -> StreamingAudio {
     let mut all_audio: Vec<f32> = Vec::new(); // complete recording for final pass
     let mut step_buf: Vec<f32> = Vec::new();
     let mut prev_tail: Vec<f32> = Vec::new(); // keep_ms overlap from previous window
@@ -137,6 +203,10 @@ fn streaming_loop(
 
     let keep_samples = ms_to_samples(KEEP_MS);
     let max_buffer_samples = (MAX_BUFFER_S * SAMPLE_RATE as f32) as usize;
+    let trim_threshold_samples =
+        max_recording_samples() + (TRIM_HYSTERESIS_S * SAMPLE_RATE as f32) as usize;
+    let mut trim_logged = false;
+    let mut dropped_samples = 0usize;
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -153,6 +223,21 @@ fn streaming_loop(
         if !swap_buf.is_empty() {
             all_audio.extend(swap_buf.iter());
             step_buf.extend(swap_buf.drain(..));
+
+            // Cap the retained recording, keeping the most recent audio. See
+            // MAX_RECORDING_S — the hysteresis makes this at most one memmove per
+            // TRIM_HYSTERESIS_S of speech rather than one per poll.
+            let dropped = trim_to_cap(&mut all_audio, trim_threshold_samples);
+            if dropped > 0 {
+                dropped_samples += dropped;
+                if !trim_logged {
+                    trim_logged = true;
+                    tracing::warn!(
+                        source = "dictation",
+                        "Recording passed {MAX_RECORDING_S}s — audio older than that is dropped from the final transcription"
+                    );
+                }
+            }
         }
 
         let current_step_samples = ms_to_samples(current_step_ms);
@@ -210,7 +295,11 @@ fn streaming_loop(
         std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
     }
 
-    all_audio
+    StreamingAudio {
+        audio: all_audio,
+        dropped_samples,
+        interrupted: false,
+    }
 }
 
 /// Transcribe a single window using the whisper transcriber.
@@ -285,6 +374,37 @@ mod tests {
                 skip_reason: Some("silence".to_string()),
             })
         }
+    }
+
+    /// Mock transcriber that panics, to exercise the streaming thread's unwind.
+    struct PanicTranscriber;
+
+    impl Transcriber for PanicTranscriber {
+        fn transcribe(
+            &self,
+            _audio: &[f32],
+            _language: Option<&str>,
+        ) -> Result<TranscribeResult, String> {
+            panic!("transcriber blew up mid-window");
+        }
+    }
+
+    /// Block until the streaming loop has taken everything out of the shared
+    /// buffer.
+    ///
+    /// A fixed sleep is a guess: on a loaded runner the loop may not be scheduled
+    /// within it, the test then stops a loop that never drained anything, and a
+    /// correct implementation fails. The loop swaps the buffer empty in one
+    /// iteration and finishes that iteration before re-reading `stop`, so an
+    /// observed-empty buffer means the samples are already accounted for.
+    fn wait_until_drained(buffer: &Arc<Mutex<VecDeque<f32>>>) {
+        for _ in 0..1000 {
+            if buffer.lock().is_empty() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("streaming loop never drained the shared buffer");
     }
 
     /// Generate a sine wave (speech-like signal) for testing.
@@ -369,7 +489,7 @@ mod tests {
         stop.store(true, Ordering::Release);
 
         let remaining = handle.join().expect("Loop should not panic");
-        assert!(remaining.is_empty(), "No unconsumed audio expected");
+        assert!(remaining.audio.is_empty(), "No unconsumed audio expected");
         assert!(
             rx.try_recv().is_err(),
             "No partials expected with empty buffer"
@@ -504,6 +624,148 @@ mod tests {
     }
 
     #[test]
+    fn the_retained_recording_is_capped() {
+        // A stuck push-to-talk key would otherwise grow all_audio without limit,
+        // and hand the whole thing to the final whisper pass.
+        let transcriber: Arc<dyn Transcriber> = Arc::new(EchoTranscriber::new());
+        let buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>();
+
+        let cap_samples = (MAX_RECORDING_S * SAMPLE_RATE as f32) as usize;
+        let total = cap_samples + ms_to_samples((TRIM_HYSTERESIS_S as u32 + 10) * 1000);
+        // A ramp, so the surviving slice identifies which end was kept.
+        {
+            let mut buf = buffer.lock();
+            buf.extend((0..total).map(|i| i as f32));
+        }
+
+        let buf_clone = buffer.clone();
+        let stop_clone = stop.clone();
+        let handle = std::thread::spawn(move || {
+            streaming_loop(transcriber, buf_clone, tx, stop_clone, None)
+        });
+
+        wait_until_drained(&buffer);
+        stop.store(true, Ordering::Release);
+        let result = handle.join().expect("Loop should not panic");
+        let all_audio = result.audio;
+
+        assert_eq!(
+            all_audio.len(),
+            cap_samples,
+            "retained recording must be trimmed back to the cap"
+        );
+        assert_eq!(
+            result.dropped_samples,
+            total - cap_samples,
+            "the caller must learn exactly how much speech the cap dropped"
+        );
+        // The newest audio is what the final transcription needs. Exact compares are
+        // deliberate: the ramp values are integers below 2^24, so the f32 casts are
+        // lossless, and these assertions exist to pin the exact trim boundary — a
+        // tolerance would let an off-by-one `excess` slip through.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(*all_audio.last().expect("non-empty"), (total - 1) as f32);
+            assert_eq!(all_audio[0], (total - cap_samples) as f32);
+        }
+    }
+
+    #[test]
+    fn a_recording_under_the_cap_is_kept_whole() {
+        let transcriber: Arc<dyn Transcriber> = Arc::new(EchoTranscriber::new());
+        let buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = mpsc::channel::<String>();
+
+        // Just over the hysteresis margin but far under the cap — the ordinary case.
+        let input = speech_samples(5_000);
+        let expected_len = input.len();
+        {
+            let mut buf = buffer.lock();
+            buf.extend(input);
+        }
+
+        let buf_clone = buffer.clone();
+        let stop_clone = stop.clone();
+        let handle = std::thread::spawn(move || {
+            streaming_loop(transcriber, buf_clone, tx, stop_clone, None)
+        });
+
+        wait_until_drained(&buffer);
+        stop.store(true, Ordering::Release);
+        let result = handle.join().expect("Loop should not panic");
+
+        assert_eq!(result.audio.len(), expected_len);
+        assert_eq!(
+            result.dropped_samples, 0,
+            "an ordinary recording reports no truncation"
+        );
+    }
+
+    /// The streaming thread caps only what it drained itself. The caller appends
+    /// whatever reached the capture buffer after the thread was signalled, and a
+    /// slow final whisper window makes that tail long — without a second pass the
+    /// buffer handed to the final transcription exceeds the cap that exists to
+    /// bound it, and nothing reports the overshoot either.
+    #[test]
+    fn the_assembled_recording_is_capped_after_the_thread_is_joined() {
+        let cap = max_recording_samples();
+        let mut assembled: Vec<f32> = (0..cap + ms_to_samples(20_000)).map(|i| i as f32).collect();
+        let total = assembled.len();
+
+        let dropped = cap_finished_recording(&mut assembled);
+
+        assert_eq!(
+            assembled.len(),
+            cap,
+            "the assembled buffer must obey the cap"
+        );
+        assert_eq!(dropped, total - cap, "and report what it dropped");
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(
+                assembled[0],
+                (total - cap) as f32,
+                "the newest audio is kept"
+            );
+        }
+    }
+
+    /// A panicked streaming thread takes the recording with it, and the samples
+    /// that reach the capture buffer afterwards are a fragment, not the answer.
+    /// The caller has to be told, or it transcribes that fragment and presents it
+    /// as the whole recording.
+    #[test]
+    fn a_panicked_streaming_thread_is_reported_as_interrupted() {
+        let transcriber: Arc<dyn Transcriber> = Arc::new(PanicTranscriber);
+        let buffer: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let (tx, _rx) = mpsc::channel::<String>();
+
+        // Enough speech to reach the first window, which is where it panics.
+        buffer.lock().extend(speech_samples(2000));
+
+        let session = StreamingSession::start(transcriber, buffer.clone(), tx, None);
+        wait_until_drained(&buffer);
+        let result = session.stop();
+
+        assert!(
+            result.interrupted,
+            "a panicked streaming thread must not look like an ordinary stop"
+        );
+        assert!(result.audio.is_empty());
+    }
+
+    #[test]
+    fn a_finished_recording_under_the_cap_is_left_alone() {
+        let mut assembled = speech_samples(5_000);
+        let expected = assembled.len();
+        assert_eq!(cap_finished_recording(&mut assembled), 0);
+        assert_eq!(assembled.len(), expected);
+    }
+
+    #[test]
     fn test_all_audio_no_duplication_on_pending_step_buf() {
         // Regression test: when the loop exits with unprocessed samples in
         // step_buf, all_audio must NOT contain those samples twice.
@@ -534,7 +796,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(120));
         stop.store(true, Ordering::Release);
 
-        let all_audio = handle.join().expect("Loop should not panic");
+        let all_audio = handle.join().expect("Loop should not panic").audio;
         assert_eq!(
             all_audio.len(),
             expected_len,

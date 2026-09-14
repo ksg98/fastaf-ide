@@ -25,15 +25,58 @@ describe("createRevisionCoalescer", () => {
 		const sched = manualScheduler();
 		const c = createRevisionCoalescer(bump, sched.schedule, sched.cancel);
 
-		c.bump("/repo");
-		c.bump("/repo");
-		c.bump("/repo");
+		c.bump("/repo", false);
+		c.bump("/repo", false);
+		c.bump("/repo", false);
 		// Nothing delivered until the frame fires.
 		expect(bump).not.toHaveBeenCalled();
 
 		sched.flush();
 		expect(bump).toHaveBeenCalledTimes(1);
-		expect(bump).toHaveBeenCalledWith("/repo");
+		expect(bump).toHaveBeenCalledWith("/repo", false);
+	});
+
+	// Collapsing must never downgrade the kind. A commit arrives as a burst of
+	// both kinds; delivering it as working-tree only would leave the history
+	// panels — the exact ones this narrowing moves off the general counter —
+	// stale on the one change that matters to them.
+	it("merges a same-frame burst up to git-state, never down", () => {
+		const bump = vi.fn();
+		const sched = manualScheduler();
+		const c = createRevisionCoalescer(bump, sched.schedule, sched.cancel);
+
+		c.bump("/repo", false);
+		c.bump("/repo", true);
+		c.bump("/repo", false);
+		sched.flush();
+
+		expect(bump).toHaveBeenCalledTimes(1);
+		expect(bump).toHaveBeenCalledWith("/repo", true);
+	});
+
+	it("keeps a working-tree-only burst at working-tree", () => {
+		const bump = vi.fn();
+		const sched = manualScheduler();
+		const c = createRevisionCoalescer(bump, sched.schedule, sched.cancel);
+
+		c.bump("/repo", false);
+		c.bump("/repo", false);
+		sched.flush();
+
+		expect(bump).toHaveBeenCalledWith("/repo", false);
+	});
+
+	it("tracks the kind per repo, not globally", () => {
+		const bump = vi.fn();
+		const sched = manualScheduler();
+		const c = createRevisionCoalescer(bump, sched.schedule, sched.cancel);
+
+		c.bump("/a", true);
+		c.bump("/b", false);
+		sched.flush();
+
+		expect(bump).toHaveBeenCalledWith("/a", true);
+		expect(bump).toHaveBeenCalledWith("/b", false);
 	});
 
 	it("delivers one bump per distinct repo in the same frame", () => {
@@ -41,9 +84,9 @@ describe("createRevisionCoalescer", () => {
 		const sched = manualScheduler();
 		const c = createRevisionCoalescer(bump, sched.schedule, sched.cancel);
 
-		c.bump("/a");
-		c.bump("/b");
-		c.bump("/a");
+		c.bump("/a", false);
+		c.bump("/b", false);
+		c.bump("/a", false);
 		sched.flush();
 
 		expect(bump).toHaveBeenCalledTimes(2);
@@ -55,9 +98,9 @@ describe("createRevisionCoalescer", () => {
 		const sched = manualScheduler();
 		const c = createRevisionCoalescer(bump, sched.schedule, sched.cancel);
 
-		c.bump("/repo");
+		c.bump("/repo", false);
 		sched.flush();
-		c.bump("/repo");
+		c.bump("/repo", false);
 		sched.flush();
 
 		expect(bump).toHaveBeenCalledTimes(2);
@@ -68,9 +111,9 @@ describe("createRevisionCoalescer", () => {
 		const schedule = vi.fn((_cb: () => void) => 1);
 		const c = createRevisionCoalescer(bump, schedule, vi.fn());
 
-		c.bump("/repo");
-		c.bump("/other");
-		c.bump("/repo");
+		c.bump("/repo", false);
+		c.bump("/other", false);
+		c.bump("/repo", false);
 
 		expect(schedule).toHaveBeenCalledTimes(1);
 	});
@@ -80,7 +123,7 @@ describe("createRevisionCoalescer", () => {
 		const sched = manualScheduler();
 		const c = createRevisionCoalescer(bump, sched.schedule, sched.cancel);
 
-		c.bump("/repo");
+		c.bump("/repo", false);
 		c.dispose();
 		expect(sched.cancel).toHaveBeenCalledWith(1);
 
@@ -98,14 +141,14 @@ describe("createRevisionCoalescer", () => {
 				delivered.push(repoPath);
 				if (!reentered) {
 					reentered = true;
-					c.bump("/during-flush"); // re-arm during flush
+					c.bump("/during-flush", false); // re-arm during flush
 				}
 			},
 			sched.schedule,
 			sched.cancel,
 		);
 
-		c.bump("/first");
+		c.bump("/first", false);
 		sched.flush();
 		expect(delivered).toEqual(["/first"]); // re-armed bump not yet delivered
 

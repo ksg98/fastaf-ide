@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::mdkb_client::MdkbClient;
+use crate::mdkb_client::{MdkbClient, MdkbPing};
 use crate::plugin_exec::resolve_binary;
 
 const DAEMON_SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,29 +52,49 @@ impl MdkbDaemon {
     }
 
     pub async fn ensure_running(&mut self) -> Result<&mut MdkbClient> {
-        if let Some(ref mut c) = self.client {
-            if c.ping().await.is_ok() {
+        let mut incompatible_daemon_found = false;
+
+        if let Some(mut client) = self.client.take()
+            && let Ok(ping) = client.ping_info().await
+        {
+            if self.is_compatible(&ping) {
+                self.client = Some(client);
                 return Ok(self.client.as_mut().unwrap());
             }
-            self.client = None;
+            incompatible_daemon_found = ping.pong;
         }
 
-        if let Ok(c) = MdkbClient::connect().await {
-            self.client = Some(c);
-            if self.client.as_mut().unwrap().ping().await.is_ok() {
+        if let Ok(mut client) = MdkbClient::connect().await
+            && let Ok(ping) = client.ping_info().await
+        {
+            if self.is_compatible(&ping) {
+                self.client = Some(client);
                 return Ok(self.client.as_mut().unwrap());
             }
-            self.client = None;
+            incompatible_daemon_found |= ping.pong;
         }
 
-        self.spawn_daemon().await?;
+        if incompatible_daemon_found {
+            self.restart_daemon().await?;
+        } else {
+            self.spawn_daemon()?;
+        }
 
-        let client = MdkbClient::connect().await?;
-        self.client = Some(client);
+        self.client = Some(self.wait_for_compatible_daemon().await?);
         Ok(self.client.as_mut().unwrap())
     }
 
-    async fn spawn_daemon(&self) -> Result<()> {
+    fn is_compatible(&self, ping: &MdkbPing) -> bool {
+        ping.pong
+            && self
+                .cached_version
+                .as_deref()
+                .is_none_or(|expected| ping.version.as_deref() == Some(expected))
+    }
+
+    /// Not `async`: `--detach` means we spawn and walk away, and
+    /// `tokio::process::Command::spawn` is itself synchronous.
+    fn spawn_daemon(&self) -> Result<()> {
         let bin = self
             .binary_path
             .as_ref()
@@ -86,13 +106,36 @@ impl MdkbDaemon {
             .stderr(std::process::Stdio::null())
             .spawn()?;
 
+        Ok(())
+    }
+
+    async fn restart_daemon(&self) -> Result<()> {
+        let bin = self
+            .binary_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("mdkb binary not found in trusted directories"))?;
+
+        let status = Command::new(bin)
+            .args(["daemon", "restart"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
+        if !status.success() {
+            bail!("mdkb daemon restart failed with status {status}");
+        }
+        Ok(())
+    }
+
+    async fn wait_for_compatible_daemon(&self) -> Result<MdkbClient> {
         let deadline = tokio::time::Instant::now() + DAEMON_SPAWN_TIMEOUT;
 
         while tokio::time::Instant::now() < deadline {
             if let Ok(mut c) = MdkbClient::connect().await
-                && c.ping().await.is_ok()
+                && let Ok(ping) = c.ping_info().await
+                && self.is_compatible(&ping)
             {
-                return Ok(());
+                return Ok(c);
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
@@ -168,7 +211,42 @@ mod tests {
             binary_path: None,
             cached_version: None,
         };
-        let err = daemon.spawn_daemon().await.unwrap_err();
+        let err = daemon.spawn_daemon().unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn installed_version_rejects_old_or_unidentified_daemon() {
+        let daemon = MdkbDaemon {
+            client: None,
+            binary_path: Some(PathBuf::from("/tmp/mdkb")),
+            cached_version: Some("3.7.11".to_string()),
+        };
+
+        assert!(daemon.is_compatible(&MdkbPing {
+            pong: true,
+            version: Some("3.7.11".to_string()),
+        }));
+        assert!(!daemon.is_compatible(&MdkbPing {
+            pong: true,
+            version: Some("3.7.10".to_string()),
+        }));
+        assert!(!daemon.is_compatible(&MdkbPing {
+            pong: true,
+            version: None,
+        }));
+    }
+
+    #[test]
+    fn daemon_without_local_binary_accepts_any_live_version() {
+        let daemon = MdkbDaemon {
+            client: None,
+            binary_path: None,
+            cached_version: None,
+        };
+        assert!(daemon.is_compatible(&MdkbPing {
+            pong: true,
+            version: None,
+        }));
     }
 }

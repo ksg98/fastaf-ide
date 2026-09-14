@@ -129,7 +129,13 @@ pub(crate) fn detect_transitions(
     }
     // Actionable transitions (only for OPEN PRs)
     else if new_state == "OPEN" {
-        if old.mergeable != "CONFLICTING" && new.mergeable == "CONFLICTING" {
+        // Same rule as the badge and the popover (#8537): a notification is an
+        // accusation too, and GitHub's last known `mergeable` is not evidence
+        // while it recomputes.
+        use crate::github::ConflictState;
+        if old.conflict_state != ConflictState::Conflicting
+            && new.conflict_state == ConflictState::Conflicting
+        {
             primary_type = Some("blocked");
             out.push(PrTransition::Blocked {
                 repo_path: rp.clone(),
@@ -729,16 +735,53 @@ pub(crate) async fn github_start_polling(
     Ok(())
 }
 
+/// Deliver a control command to the running GitHub poller.
+///
+/// The five control entry points used to swallow the outcome — `let _ = try_send`
+/// on the HTTP side, a `warn!` that still returned `Ok(())` on the IPC side — and
+/// reported success even when NO poller was running. A client that changed the
+/// issue filter or the visibility had no way to learn the change went nowhere.
+///
+/// Both transports go through this one function so their shapes cannot drift
+/// (see AGENTS.md "IPC / HTTP Parity").
+///
+/// The sender is cloned out of the lock before `try_send` so the poller mutex is
+/// never held across the send.
+pub(crate) fn send_poller_cmd(state: &AppState, cmd: PollerCmd) -> Result<(), String> {
+    let tx = state
+        .github_poller
+        .lock()
+        .as_ref()
+        .map(|poller| poller.cmd_tx.clone())
+        .ok_or_else(|| "GitHub poller is not running".to_string())?;
+    tx.try_send(cmd)
+        .map_err(|e| format!("GitHub poller command not delivered: {e}"))
+}
+
+/// Stop the poller and clear it from state.
+///
+/// Separate from [`send_poller_cmd`] because it takes ownership of the poller and
+/// uses the awaiting `send` — a Stop must not be dropped just because the command
+/// channel is momentarily full.
+pub(crate) async fn stop_poller(state: &AppState) -> Result<(), String> {
+    let poller = state
+        .github_poller
+        .lock()
+        .take()
+        .ok_or_else(|| "GitHub poller is not running".to_string())?;
+    poller
+        .cmd_tx
+        .send(PollerCmd::Stop)
+        .await
+        .map_err(|e| format!("GitHub poller stop not delivered: {e}"))
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub(crate) async fn github_stop_polling(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let poller = state.github_poller.lock().take();
-    if let Some(p) = poller {
-        let _ = p.cmd_tx.send(PollerCmd::Stop).await;
-    }
-    Ok(())
+    stop_poller(&state).await
 }
 
 #[cfg(feature = "desktop")]
@@ -747,12 +790,7 @@ pub(crate) async fn github_set_visibility(
     state: tauri::State<'_, Arc<AppState>>,
     visible: bool,
 ) -> Result<(), String> {
-    if let Some(poller) = state.github_poller.lock().as_ref()
-        && let Err(e) = poller.cmd_tx.try_send(PollerCmd::SetVisibility(visible))
-    {
-        tracing::warn!(source = "github", "Failed to send SetVisibility: {e}");
-    }
-    Ok(())
+    send_poller_cmd(&state, PollerCmd::SetVisibility(visible))
 }
 
 #[cfg(feature = "desktop")]
@@ -761,12 +799,7 @@ pub(crate) async fn github_poll_repo(
     state: tauri::State<'_, Arc<AppState>>,
     path: String,
 ) -> Result<(), String> {
-    if let Some(poller) = state.github_poller.lock().as_ref()
-        && let Err(e) = poller.cmd_tx.try_send(PollerCmd::PollRepo(path))
-    {
-        tracing::warn!(source = "github", "Failed to send PollRepo: {e}");
-    }
-    Ok(())
+    send_poller_cmd(&state, PollerCmd::PollRepo(path))
 }
 
 #[cfg(feature = "desktop")]
@@ -775,12 +808,7 @@ pub(crate) async fn github_update_paths(
     state: tauri::State<'_, Arc<AppState>>,
     paths: Vec<String>,
 ) -> Result<(), String> {
-    if let Some(poller) = state.github_poller.lock().as_ref()
-        && let Err(e) = poller.cmd_tx.try_send(PollerCmd::UpdatePaths(paths))
-    {
-        tracing::warn!(source = "github", "Failed to send UpdatePaths: {e}");
-    }
-    Ok(())
+    send_poller_cmd(&state, PollerCmd::UpdatePaths(paths))
 }
 
 #[cfg(feature = "desktop")]
@@ -789,12 +817,7 @@ pub(crate) async fn github_set_issue_filter(
     state: tauri::State<'_, Arc<AppState>>,
     filter: String,
 ) -> Result<(), String> {
-    if let Some(poller) = state.github_poller.lock().as_ref()
-        && let Err(e) = poller.cmd_tx.try_send(PollerCmd::SetIssueFilter(filter))
-    {
-        tracing::warn!(source = "github", "Failed to send SetIssueFilter: {e}");
-    }
-    Ok(())
+    send_poller_cmd(&state, PollerCmd::SetIssueFilter(filter))
 }
 
 #[cfg(feature = "desktop")]
@@ -843,6 +866,47 @@ mod tests {
     use super::*;
     use crate::github::CheckSummary;
 
+    /// The five control routes used to answer `{"ok": true}` no matter what,
+    /// including when no poller was running at all — so a client that changed the
+    /// issue filter or hid the window had no way to learn the command went
+    /// nowhere. Both transports now share this one function.
+    #[test]
+    fn a_command_for_a_stopped_poller_is_an_error() {
+        let state = crate::state::tests_support::make_test_app_state();
+        assert!(state.github_poller.lock().is_none(), "fixture: no poller");
+
+        let err = send_poller_cmd(&state, PollerCmd::SetVisibility(false))
+            .expect_err("no poller must not report success");
+        assert!(err.contains("not running"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_poller_that_is_not_running_is_an_error() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let err = stop_poller(&state)
+            .await
+            .expect_err("no poller must not report success");
+        assert!(err.contains("not running"), "unexpected error: {err}");
+    }
+
+    /// A running poller receives the command and the send is reported as
+    /// delivered — the filter must narrow the failure case, not break the
+    /// success case.
+    #[tokio::test]
+    async fn a_command_for_a_running_poller_is_delivered() {
+        let state = crate::state::tests_support::make_test_app_state();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        *state.github_poller.lock() = Some(GitHubPoller { cmd_tx });
+
+        send_poller_cmd(&state, PollerCmd::PollRepo("/repo".to_string())).expect("delivered");
+
+        match cmd_rx.recv().await {
+            Some(PollerCmd::PollRepo(path)) => assert_eq!(path, "/repo"),
+            Some(_) => panic!("a different command was delivered"),
+            None => panic!("nothing was delivered"),
+        }
+    }
+
     fn make_pr(
         state: &str,
         mergeable: &str,
@@ -850,6 +914,11 @@ mod tests {
         failed: u32,
         pending: u32,
     ) -> BranchPrStatus {
+        let merge_state_status = if mergeable == "CONFLICTING" {
+            "DIRTY"
+        } else {
+            "CLEAN"
+        };
         BranchPrStatus {
             branch: "feat/test".to_string(),
             number: 42,
@@ -867,7 +936,14 @@ mod tests {
             author: String::new(),
             commits: 1,
             mergeable: mergeable.to_string(),
-            merge_state_status: String::new(),
+            // Realistic pairing: GitHub reports DIRTY alongside a computed
+            // CONFLICTING. An empty status would mean "still recomputing", which
+            // is a different case entirely.
+            merge_state_status: merge_state_status.to_string(),
+            conflict_state: crate::github::classify_conflict_state(
+                Some(mergeable),
+                Some(merge_state_status),
+            ),
             review_decision: review.to_string(),
             viewer_did_approve: false,
             labels: vec![],

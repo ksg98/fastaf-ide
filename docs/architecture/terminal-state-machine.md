@@ -30,9 +30,9 @@ Rust-side per-session state:
 | `SilenceState.question_already_emitted` | `pty.rs` | Prevents re-emission of the same question |
 | `SilenceState.suppress_echo_until` | `pty.rs` | Deadline to ignore PTY echo of user-typed `?` lines |
 | `active_sub_tasks` | `AppState.session_states` | Sub-agent count per session |
-| `shell_states` | `AppState.shell_states` | `DashMap<String, AtomicU8>`: 0=null, 1=busy, 2=idle. Transitions use `compare_exchange` to prevent duplicate events when reader thread and silence timer race. |
+| `shell_states` | `AppState.shell_states` | `DashMap<String, AtomicU8>`: 0=null/unobserved, 1=busy, 2=idle. Null is omitted on the wire and produces agent lifecycle `starting`; transitions use `compare_exchange` to prevent duplicate events when reader thread and silence timer race. |
 | `last_output_ms` | `AppState.last_output_ms` | Epoch ms of last **real** output (not chrome-only). Stamped only when `!chrome_only`. |
-| `SessionState.background_work` | `AppState.session_states` | Meaningful live agent descendant; persistent integration-helper subtrees are excluded. Keeps task lifecycle working without changing terminal readiness. |
+| `SessionState.background_work` | `AppState.session_states` | Meaningful live agent descendant; persistent integration-helper subtrees are excluded, by name and by having started within 60s of the agent. Keeps task lifecycle working without changing terminal readiness. |
 
 The Activity Dashboard uses an effective state rather than raw `shellState`: rate
 limit/error/input take precedence; a ready composer is shown as `Idle` even when
@@ -192,8 +192,8 @@ terminalsStore.update(id, { shellState: state })
 handleShellStateChange(prev, next)  ← existing debounced busy logic
 ```
 
-The frontend does NOT derive shellState from raw PTY data. `handlePtyData` renders
-grid frames and updates `lastDataAt` — but never touches `shellState`.
+The frontend does NOT derive shellState from raw PTY data. `handlePtyData` updates
+`lastDataAt` and the tab activity flag — but never touches `shellState`.
 
 ### Transition table
 
@@ -387,7 +387,7 @@ Stored in **both** Rust (`AppState.active_sub_tasks`) and frontend (`terminalsSt
 
 Fires when an agent was busy for ≥5s then truly goes idle.
 
-**Two independent paths** can trigger completion:
+**Two signals share one per-busy-cycle completion latch:**
 
 ### Path 1: Session exit (Terminal.tsx)
 
@@ -395,8 +395,9 @@ Fires when an agent was busy for ≥5s then truly goes idle.
 Process exits → reader thread ends → exit callback fires
          │
          ├── terminal is active tab? → SKIP
+         ├── cycle already notified? → SKIP
          │
-         └── play("completion")
+         └── mark cycle notified → play("completion")
              (does NOT set unseen — user may switch soon)
 ```
 
@@ -414,6 +415,7 @@ onBusyToIdle(id, durationMs)
          ▼
     fireCompletion()
          │
+	     ├── cycle already notified? ───── SKIP (exit won the race)
          ├── terminal is active tab? ──── SKIP (user switched to it)
          ├── debouncedBusy still true? ── SKIP (went busy again)
          ├── terminal removed? ────────── SKIP
@@ -421,6 +423,7 @@ onBusyToIdle(id, durationMs)
          ├── awaitingInput set? ────────── SKIP (question/error active)
          │
          ▼
+    mark cycle notified
     play("completion")
     set unseen = true
     → tab turns purple (Unseen)
@@ -429,9 +432,10 @@ onBusyToIdle(id, durationMs)
 
 ### Sound deduplication
 
-Both paths can fire for the same session. Path 1 fires immediately on exit. Path 2 fires
-after cooldown + deferral. The notification manager handles dedup (cooldown between
-identical sounds).
+The first path to handle a busy cycle marks `completionNotified`. The other path
+then exits without calling the notification manager. A subsequent idle→busy
+transition resets the latch. This deduplicates an immediate process exit and a
+delayed BUSY→IDLE callback even when they are more than the audio cooldown apart.
 
 ### Timing under the new architecture
 
@@ -733,11 +737,11 @@ t=60      Process exits → reader thread ends
           → Rust emits ShellState { "idle" }
           → Frontend exit callback:
             sessionId = null, clearAwaitingInput
-            play("completion") [Path 1] ✓
+            mark cycle notified, play("completion") [Path 1] ✓
 
 t=62      Cooldown expires → onBusyToIdle(duration=60s)
-          → fireCompletion [Path 2] → play("completion"), unseen=true
-          │  Tab: purple (Unseen)
+          → fireCompletion [Path 2] sees cycle notified → SKIP
+          │  Tab remains Done
 
           User switches to tab → unseen cleared
           │  Tab: purple→green (Done)
@@ -816,9 +820,9 @@ t=5       API error while question is pending
 | `src-tauri/src/output_parser.rs` | `parse_question` (INK_FOOTER_RE), `parse_active_subtasks`, `ParsedEvent` enum |
 | `src-tauri/src/state.rs` | `AppState` (includes `shell_state`, `active_sub_tasks` maps) |
 | `src/stores/terminals.ts` | `shellState`, `awaitingInput`, `debouncedBusy`, `handleShellStateChange`, `onBusyToIdle` |
-| `src/components/Terminal/Terminal.tsx` | `handlePtyData` (grid frame render), `pty-parsed` event handler, notification effect |
+| `src/components/Terminal/Terminal.tsx` | `handlePtyData` (grid frame render), `pty-parsed` event handler, process-exit completion fallback |
 | `src/components/Terminal/awaitingInputSound.ts` | `getAwaitingInputSound` edge detection |
-| `src/App.tsx` | `onBusyToIdle` → completion notification with deferral + guards |
+| `src/hooks/useTerminalCompletionNotifications.ts` | `onBusyToIdle` → completion notification with deferral, guards, and per-cycle latch |
 | `src/stores/notifications.ts` | `play()`, `playQuestion()`, `playCompletion()` etc. |
 | `src/components/TabBar/TabBar.tsx` | Tab indicator class priority logic |
 | `src/components/TabBar/TabBar.module.css` | Indicator colors and animations |

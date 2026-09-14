@@ -1,5 +1,5 @@
 import { fireEvent, render } from "@solidjs/testing-library";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
 
@@ -31,6 +31,10 @@ describe("DetachedPlaceholder", () => {
 
 		const mod = await import("../../components/DetachedPlaceholder");
 		DetachedPlaceholder = mod.DetachedPlaceholder;
+	});
+
+	afterEach(() => {
+		uiStore._testCancelPendingSave();
 	});
 
 	it("renders panel name in message", () => {

@@ -10,4 +10,5 @@ export { RepoScriptsTab } from "./RepoScriptsTab";
 export type { RepoTabProps } from "./RepoWorktreeTab";
 export { RepoWorktreeTab } from "./RepoWorktreeTab";
 export { ServicesTab } from "./ServicesTab";
+export { SmartPromptsTab } from "./SmartPromptsTab";
 export { VoiceTab } from "./VoiceTab";

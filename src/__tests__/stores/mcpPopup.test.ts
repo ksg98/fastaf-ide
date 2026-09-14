@@ -181,10 +181,15 @@ describe("mcpPopupStore", () => {
 				await store.loadConfig();
 				await store.toggleServer("alpha");
 
-				// save_mcp_upstreams called with alpha.enabled = false
+				// The save carries the loaded base plus the desired delta result.
 				const saveCall = mockInvoke.mock.calls.find((c: unknown[]) => c[0] === "save_mcp_upstreams");
 				expect(saveCall).toBeDefined();
-				const savedConfig = (saveCall![1] as { config: { servers: { name: string; enabled: boolean }[] } }).config;
+				const request = saveCall![1] as {
+					base: { servers: { name: string; enabled: boolean }[] };
+					config: { servers: { name: string; enabled: boolean }[] };
+				};
+				const savedConfig = request.config;
+				expect(request.base.servers.find((s) => s.name === "alpha")?.enabled).toBe(true);
 				const alphaSaved = savedConfig.servers.find((s: { name: string }) => s.name === "alpha");
 				expect(alphaSaved?.enabled).toBe(false);
 

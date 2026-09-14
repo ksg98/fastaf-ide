@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Node.js** (LTS)
+- **Node.js 24+** (the repository version is pinned in [`.nvmrc`](https://github.com/sstraus/tuicommander/blob/main/.nvmrc))
 - **Rust** (stable toolchain via rustup)
 - **Tauri CLI** (`cargo install tauri-cli`)
 - **git** and **gh** (GitHub CLI) for git/GitHub features
@@ -23,7 +23,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-Starts Vite dev server + Tauri app with hot reload.
+Starts the Vite dev server and Tauri app. Frontend files use Vite HMR; Rust changes require restarting the development process.
 
 ### Browser Mode
 
@@ -34,6 +34,8 @@ pnpm dev
 ```
 
 Connects to the Rust HTTP server via WebSocket/REST.
+
+> **Note:** `pnpm dev` runs `scripts/dev-server.mjs`, not `vite` directly. The dev server is pinned to port 1421 (Tauri's `devUrl`), so the launcher checks the port first: if this checkout is already serving there it prints `reusing it` and exits 0 — the second Tauri app attaches to the running server. Starting a second Vite would wipe the shared `node_modules/.vite/deps` cache and kill hot reload for the session already running. If the port is held by another checkout or a stray process, the launcher fails with an explicit message instead of serving the wrong sources.
 
 ## Build
 
@@ -83,7 +85,7 @@ See [Architecture Overview](../architecture/overview.md) for full directory stru
 | `src/stores/terminals.ts` | Terminal state |
 | `src/stores/repositories.ts` | Repository state |
 | `SPEC.md` | Feature specification |
-| `IDEAS.md` | Feature concepts under evaluation |
+| `ideas/index.md` | Feature concepts under evaluation |
 
 ## Configuration
 
@@ -97,12 +99,36 @@ See [Configuration docs](../backend/config.md) for all config files.
 ## Makefile Targets
 
 ```bash
-make dev      # Tauri dev mode
-make build    # Production build
-make test     # Run tests
-make lint     # Run linter
-make clean    # Clean build artifacts
+make dev         # Tauri dev mode
+make build       # Production build
+make test        # Run tests
+make lint        # Run linter
+make docs        # Build this documentation + search index into docs/book
+make docs-serve  # …and serve it at http://127.0.0.1:8123
+make clean       # Clean build artifacts
 ```
+
+---
+
+## Documentation Site
+
+The book you are reading is [mdBook](https://rust-lang.github.io/mdBook/), built
+by `scripts/build-docs.sh` and deployed to GitHub Pages by
+`.github/workflows/website.yml`. The script is the single source of truth — CI
+runs the same one, so a local build matches the deployed site.
+
+```bash
+make docs-serve     # build + serve; open http://127.0.0.1:8123
+```
+
+Requires `mdbook` (`brew install mdbook` or `cargo install mdbook`) and `npx`.
+
+Search is [Pagefind](https://pagefind.app/), generated after the mdBook build,
+which is why `file://` previews have no search — the index is fetched over HTTP.
+mdBook's own elasticlunr search is disabled in `book.toml`.
+
+Adding a page means adding it to `SUMMARY.md`: mdBook only renders — and
+Pagefind only indexes — chapters listed there.
 
 ---
 

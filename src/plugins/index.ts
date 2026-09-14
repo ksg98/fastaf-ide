@@ -22,21 +22,23 @@ export async function initPlugins(): Promise<void> {
 	// Sync disabled list before checking built-in plugin state
 	await syncDisabledList();
 
-	for (const plugin of BUILTIN_PLUGINS) {
-		registerBuiltInPlugin(plugin);
-		const enabled = !isPluginDisabled(plugin.id);
-		pluginStore.registerPlugin(plugin.id, { builtIn: true, enabled });
-		if (enabled) {
-			await pluginRegistry.register(plugin);
-		}
-	}
+	await Promise.all(
+		BUILTIN_PLUGINS.map(async (plugin) => {
+			registerBuiltInPlugin(plugin);
+			const enabled = !isPluginDisabled(plugin.id);
+			pluginStore.registerPlugin(plugin.id, { builtIn: true, enabled });
+			if (enabled) {
+				await pluginRegistry.register(plugin);
+			}
+		}),
+	);
 
 	// Native Claude Usage feature — uses same disabled_plugin_ids toggle
 	if (!isPluginDisabled("claude-usage")) {
 		initClaudeUsage();
 	}
 
-	await loadUserPlugins();
+	await loadUserPlugins(false);
 }
 
 /**

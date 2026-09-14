@@ -5,6 +5,7 @@ import { rpc, type UpstreamMcpConfig, type UpstreamMcpServer, type UpstreamTrans
 import { handleOpenUrl } from "../../../../utils/openUrl";
 import { ConfirmDialog } from "../../../ConfirmDialog";
 import s from "../../Settings.module.css";
+import { SETTINGS_SECTION_UPSTREAM_MCP } from "../../sections";
 
 /** Pure helper: should the Authorize button be shown for this server+status? */
 export function shouldShowAuthorize(
@@ -54,11 +55,12 @@ export function authFromUpstreamForm(
 interface StartOAuthResponse {
 	authorization_url: string;
 	state: string;
+	cross_domain_as: boolean;
 }
 
 export async function startAuthorizeFlow(
 	name: string,
-	confirmAuthorization: (origin: string, name: string) => Promise<boolean>,
+	confirmAuthorization: (origin: string, name: string, crossDomain: boolean) => Promise<boolean>,
 ): Promise<void> {
 	let resp: StartOAuthResponse;
 	try {
@@ -72,17 +74,17 @@ export async function startAuthorizeFlow(
 	}
 
 	// Surface the AS origin before opening the browser so the user sees where
-	// they're being sent (AS mix-up defence, #1268-40e8). The backend already
-	// bails on cross-domain mismatches, but showing the hostname makes phishing
-	// attempts visible even when the mismatch check is bypassed by an explicit
-	// authorization_endpoint override.
+	// they're being sent (AS mix-up defence, #1268-40e8). The backend never
+	// blocks an off-domain authorization server — gateways and hosted IdPs make
+	// that routine — it flags it via `cross_domain_as` so this dialog can say so
+	// and let the user decide.
 	let asOrigin = resp.authorization_url;
 	try {
 		asOrigin = new URL(resp.authorization_url).origin;
 	} catch {
 		// keep full URL if parsing fails
 	}
-	const proceed = await confirmAuthorization(asOrigin, name);
+	const proceed = await confirmAuthorization(asOrigin, name, resp.cross_domain_as);
 	if (!proceed) {
 		try {
 			await rpc("cancel_mcp_upstream_oauth", { name });
@@ -119,7 +121,9 @@ function emptyForm() {
 		cwd: "",
 		credential: "",
 		timeout: 30,
-		authMethod: "bearer" as "bearer" | "oauth2",
+		// OAuth is the default: remote MCP servers overwhelmingly speak OAuth, and a
+		// pasted bearer token is the fallback for the few that only take an API key.
+		authMethod: "oauth2" as "bearer" | "oauth2",
 		oauthClientId: "",
 		oauthClientSecret: "",
 		oauthScopes: "",
@@ -136,13 +140,15 @@ export const UpstreamMcpPanel: Component = () => {
 	const [error, setError] = createSignal("");
 	const [editingId, setEditingId] = createSignal<string | null>(null);
 	const [editForm, setEditForm] = createSignal(emptyForm());
-	const confirmAuthorization = (origin: string, name: string) =>
+	const confirmAuthorization = (origin: string, name: string, crossDomain: boolean) =>
 		oauthDialog.confirm({
 			title: "Authorize MCP server",
-			message: `About to open ${origin} to authorize "${name}".\n\nContinue?`,
+			message: crossDomain
+				? `About to open ${origin} to authorize "${name}".\n\nThis authorization server is on a different domain than the MCP server. That is normal for gateways and hosted identity providers — but only continue if you recognise it.\n\nContinue?`
+				: `About to open ${origin} to authorize "${name}".\n\nContinue?`,
 			okLabel: "Continue",
 			cancelLabel: "Cancel",
-			kind: "info",
+			kind: crossDomain ? "warning" : "info",
 		});
 
 	const refreshStatus = async () => {
@@ -169,12 +175,13 @@ export const UpstreamMcpPanel: Component = () => {
 	async function saveUpstreams(servers: UpstreamMcpServer[]): Promise<boolean> {
 		setSaving(true);
 		setError("");
+		const base = { servers: [...upstreams()] };
 		try {
 			appLogger.info("mcp", "saveUpstreams: calling RPC", {
 				serverCount: servers.length,
 				names: servers.map((s) => s.name),
 			});
-			await rpc("save_mcp_upstreams", { config: { servers } });
+			await rpc("save_mcp_upstreams", { base, config: { servers } });
 			appLogger.info("mcp", "saveUpstreams: RPC succeeded");
 			setUpstreams(servers);
 			return true;
@@ -380,7 +387,10 @@ export const UpstreamMcpPanel: Component = () => {
 	}
 
 	return (
-		<div style={{ "margin-top": "24px", "border-top": "1px solid var(--border)", "padding-top": "16px" }}>
+		<div
+			id={SETTINGS_SECTION_UPSTREAM_MCP}
+			style={{ "margin-top": "24px", "border-top": "1px solid var(--border)", "padding-top": "16px" }}
+		>
 			<div class={s.group}>
 				<label style={{ display: "flex", "align-items": "center", gap: "8px", "justify-content": "space-between" }}>
 					<span>Upstream MCP Servers</span>
@@ -516,11 +526,16 @@ export const UpstreamMcpPanel: Component = () => {
 								style={{ width: "70px" }}
 								onInput={(e) => setForm((f) => ({ ...f, timeout: parseInt(e.currentTarget.value, 10) || 30 }))}
 							/>
-							<button class={s.copyBtn} onClick={addUpstream} disabled={saving()} style={{ "margin-left": "auto" }}>
+						</div>
+						{/* Same shape as the edit form below: primary + secondary on their own
+						    right-aligned row, so the pair is never squeezed by the timeout field
+						    and both buttons use the shared save/cancel styling. */}
+						<div style={{ display: "flex", gap: "8px", "justify-content": "flex-end" }}>
+							<button class={s.saveBtn} onClick={addUpstream} disabled={saving()}>
 								{saving() ? "Adding…" : "Add"}
 							</button>
 							<button
-								class={s.copyBtn}
+								class={s.testBtn}
 								onClick={() => {
 									setShowAdd(false);
 									setForm(emptyForm());

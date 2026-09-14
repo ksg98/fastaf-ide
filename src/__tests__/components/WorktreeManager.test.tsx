@@ -46,6 +46,7 @@ function mockPr(
 		author: "",
 		commits: 0,
 		mergeable: "UNKNOWN",
+		conflict_state: "clear" as const,
 		merge_state_status: "UNKNOWN",
 		review_decision: "",
 		viewer_did_approve: false,

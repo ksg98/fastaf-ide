@@ -87,11 +87,23 @@ impl ReasoningLevel {
     }
 }
 
-/// Opus 4.7+ gained adaptive extended thinking (genai 0.6.3).
-/// DEFERRED (2026-06-06) — extend match as new thinking-capable families ship.
+/// Models for which genai emits the modern reasoning payload (`output_config.effort`
+/// plus `thinking: {type: "adaptive"}`). This list mirrors genai 0.6.5's own Anthropic
+/// tables — `SUPPORT_EFFORT_MODELS` and `is_opus_4_7_or_higher` in `adapter_shared.rs`.
+///
+/// It is NOT the list of models that can think. Any model genai does not recognise
+/// falls through to the legacy `thinking: {type: "enabled", budget_tokens: N}` payload,
+/// which Opus 4.7+ and the Claude 5 family reject with a 400 — so a model missing here
+/// must stay off, not be added optimistically.
+///
+/// DEFERRED (2026-08-24) — the Claude 5 family (`claude-opus-5`, `claude-sonnet-5`,
+/// `claude-fable-5`) does support adaptive thinking, but genai 0.6.5 cannot express it:
+/// its `claude-opus-(\d+)-(\d+)` regex needs a minor-version suffix, so a bare
+/// `claude-opus-5` misses every table and lands on the legacy payload. Enable them once
+/// genai ships Claude 5 tables (0.7.x is still beta — do not bump for this).
 fn supports_extended_thinking(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    ["opus-4-7", "opus-4-8", "opus-4-9"]
+    ["opus-4-6", "sonnet-4-6", "opus-4-7", "opus-4-8"]
         .iter()
         .any(|t| m.contains(t))
 }
@@ -136,7 +148,6 @@ impl Default for ConversationConfig {
 // ── ConversationEvent ─────────────────────────────────────────
 
 /// Unified event stream for conversation sessions.
-/// DEFERRED (2026-05-07) — expand with richer event variants (progress, file-change) per terminal-watcher plan.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ConversationEvent {
@@ -268,7 +279,12 @@ fn build_base_system_prompt(session_id: &str) -> String {
 // ── Context assembly ──────────────────────────────────────────
 
 /// Assemble terminal context using VtLogBuffer.
-/// DEFERRED (2026-05-06) — will use OSC 133 blocks when available (story 1611-375b).
+///
+/// Deliberately NOT `TerminalGrid::extract_semantic_zones`, despite OSC 133 blocks
+/// now being available: zones cover only the active screen, and tagging requires
+/// shell integration no agent or fullscreen TUI emits. VtLogBuffer's 150 lines read
+/// scrollback and work on every session, so the block-based path would be strictly
+/// less context.
 fn assemble_context(state: &AppState, session_id: &str) -> String {
     // Re-use the existing TerminalContext builder from ai_chat.
     // We call assemble_terminal_context with 150 lines (same default as before).
@@ -1178,13 +1194,20 @@ mod tests {
     }
 
     #[test]
-    fn supports_extended_thinking_gates_on_opus_47_plus() {
+    fn supports_extended_thinking_tracks_genai_reasoning_tables() {
         assert!(supports_extended_thinking("claude-opus-4-7"));
         assert!(supports_extended_thinking("claude-opus-4-8"));
         assert!(supports_extended_thinking("CLAUDE-OPUS-4-8")); // case-insensitive
+        // 4.6 is in genai's SUPPORT_EFFORT_MODELS + SUPPORT_ADAPTIVE_THINK_MODELS.
+        assert!(supports_extended_thinking("claude-opus-4-6"));
+        assert!(supports_extended_thinking("claude-sonnet-4-6"));
         assert!(!supports_extended_thinking("claude-opus-4-1"));
-        assert!(!supports_extended_thinking("claude-sonnet-4-6"));
         assert!(!supports_extended_thinking("gpt-5"));
+        // Claude 5 thinks, but genai 0.6.5 would send it the legacy budget_tokens
+        // payload it rejects — stay off until genai knows the family.
+        assert!(!supports_extended_thinking("claude-opus-5"));
+        assert!(!supports_extended_thinking("claude-sonnet-5"));
+        assert!(!supports_extended_thinking("claude-fable-5"));
     }
 
     #[test]

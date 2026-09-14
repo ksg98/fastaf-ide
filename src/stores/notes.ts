@@ -23,8 +23,19 @@ export function generateId(): string {
 	return `note-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 }
 
+/**
+ * Set once `load_notes` has answered. Before that the store holds an empty array, and
+ * persisting it would atomically overwrite notes.json with `[]` — a permanent, silent loss
+ * (GH #107). Every mutation path funnels through saveNotes, so gating here covers them all.
+ */
+let hydrated = false;
+
 /** Persist notes to Rust backend (fire-and-forget) */
 function saveNotes(notes: Note[]): void {
+	if (!hydrated) {
+		appLogger.error("store", "Refusing to persist notes before a successful hydrate — notes.json left untouched");
+		return;
+	}
 	invoke("save_notes", { config: { notes } }).catch((err) => appLogger.error("store", "Failed to save notes", err));
 }
 
@@ -49,8 +60,11 @@ function createNotesStore() {
 					}));
 					setState("notes", migrated);
 				}
+				hydrated = true;
 			} catch (err) {
-				appLogger.debug("store", "Failed to hydrate notes", err);
+				// Backend could not read notes.json (unreadable or corrupt). Stay un-hydrated so
+				// the next mutation cannot overwrite the file we failed to read.
+				appLogger.error("store", "Failed to hydrate notes — notes will not be saved this session", err);
 			}
 		},
 

@@ -3,6 +3,9 @@
 //! Uses `addLocalMonitorForEventsMatchingMask:handler:` to observe `flagsChanged`
 //! events within the app process. Only fires when the window is focused.
 //! No accessibility permissions required.
+//!
+//! Keys that arrive as ordinary `keyDown` events but never reach the WebView
+//! (Ctrl+Tab, F13-F20) are handled by `crate::native_keys` instead.
 
 /// Install the Fn key local event monitor. Emits "fn-key-down" and "fn-key-up"
 /// Tauri events (scoped to the main window) when the Fn/Globe modifier flag toggles.

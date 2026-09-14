@@ -6,6 +6,7 @@ import { FONT_FAMILIES } from "../stores/settings";
 const ROOT = resolve(__dirname, "../..");
 const FONT_PATH = resolve(ROOT, "public/fonts/symbols-nerd-font-mono.woff2");
 const CSS_PATH = resolve(ROOT, "src/global.css");
+const CANVAS_PATH = resolve(ROOT, "src/components/Terminal/CanvasTerminal.tsx");
 
 const POWERLINE_CODEPOINTS = [
 	{ cp: 0xe0a0, name: "git branch" },
@@ -41,6 +42,19 @@ describe("Nerd Font Symbols", () => {
 			expect(symbolIdx, `${name}: missing symbol font`).toBeGreaterThanOrEqual(0);
 			expect(symbolIdx, `${name}: symbols must precede monospace`).toBeLessThan(monoIdx);
 		}
+	});
+
+	it("CanvasTerminal preloads the face with a real glyph, not an empty string", () => {
+		// document.fonts.load(font, text) only schedules the faces covering the
+		// characters in `text` — "" downloads nothing, and canvas 2D never pulls
+		// a webfont in by itself, so the powerline glyphs fall back to a system
+		// font. Guard the argument, not just the asset.
+		const src = readFileSync(CANVAS_PATH, "utf-8");
+		const call = src.match(/document\.fonts\.load\(`[^`]*Symbols Nerd Font Mono[^`]*`,\s*("(?:[^"\\]|\\.)*")\)/);
+		expect(call, "Symbols Nerd Font Mono preload call not found").not.toBeNull();
+		const text = JSON.parse(call?.[1] ?? '""');
+		expect(text.length, "preload text must contain at least one glyph").toBeGreaterThan(0);
+		expect(text.codePointAt(0), "preload glyph must be in the powerline range").toBeGreaterThanOrEqual(0xe0a0);
 	});
 
 	it("woff2 contains powerline codepoints (U+E0A0-E0B3)", () => {

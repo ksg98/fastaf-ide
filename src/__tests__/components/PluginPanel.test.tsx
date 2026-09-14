@@ -8,6 +8,7 @@ vi.mock("../../plugins/pluginRegistry", () => ({
 		handlePanelMessage: vi.fn(),
 		registerPanelSendChannel: vi.fn(),
 		unregisterPanelSendChannel: vi.fn(),
+		setPanelVisible: vi.fn(),
 	},
 }));
 
@@ -46,8 +47,12 @@ vi.mock("solid-js", async (importOriginal) => {
 	};
 });
 
-import { PluginPanel } from "../../components/PluginPanel/PluginPanel";
+import { createSignal } from "solid-js";
+import { injectThemeVars, PluginPanel } from "../../components/PluginPanel/PluginPanel";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
+import { mdTabsStore } from "../../stores/mdTabs";
+import { repositoriesStore } from "../../stores/repositories";
+import { applyAppTheme } from "../../themes";
 
 function makeTab(overrides: Partial<PluginPanelTab> = {}): PluginPanelTab {
 	return {
@@ -164,6 +169,154 @@ describe("PluginPanel", () => {
 		const { container } = render(() => <PluginPanel tab={tab} />);
 		const iframe = container.querySelector("iframe");
 		expect(iframe?.getAttribute("sandbox")).toBe("allow-scripts allow-same-origin");
+	});
+
+	describe("srcdoc writes (613-00e8 F100)", () => {
+		/**
+		 * Count assignments to the iframe's srcdoc. Reassigning it navigates the
+		 * iframe: a fresh document, a fresh JS global, and the scroll position,
+		 * focus and in-page state of the old one gone. It must happen only when the
+		 * HTML actually changed.
+		 */
+		function countSrcdocWrites(iframe: HTMLIFrameElement) {
+			const counter = { writes: 0 };
+			let value = iframe.getAttribute("srcdoc") ?? "";
+			Object.defineProperty(iframe, "srcdoc", {
+				configurable: true,
+				get: () => value,
+				set: (next: string) => {
+					counter.writes++;
+					value = next;
+				},
+			});
+			const realSetAttribute = iframe.setAttribute.bind(iframe);
+			iframe.setAttribute = (name: string, next: string) => {
+				if (name === "srcdoc") {
+					counter.writes++;
+					value = next;
+					return;
+				}
+				realSetAttribute(name, next);
+			};
+			return counter;
+		}
+
+		it("re-renders the iframe only when the plugin's HTML actually changed", () => {
+			mdTabsStore.clearAll();
+			const tabId = mdTabsStore.addPluginPanel("p1", "dash", "Dash", "<html><body>v1</body></html>");
+			const { container } = render(() => <PluginPanel tab={mdTabsStore.get(tabId) as PluginPanelTab} />);
+			const counter = countSrcdocWrites(container.querySelector("iframe") as HTMLIFrameElement);
+
+			mdTabsStore.updatePluginPanel(tabId, "<html><body>v1</body></html>");
+			expect(counter.writes).toBe(0);
+
+			mdTabsStore.updatePluginPanel(tabId, "<html><body>v2</body></html>");
+			expect(counter.writes).toBe(1);
+		});
+	});
+
+	describe("hidden panels (613-00e8 F102)", () => {
+		/**
+		 * Mount a panel and start spying on what reaches its iframe. The stub goes
+		 * in after mount on purpose — the mount-time handshake is not what this
+		 * block is about.
+		 */
+		function spyOnPanelTraffic(visible: () => boolean) {
+			const tab = makeTab();
+			const { container } = render(() => <PluginPanel tab={tab} visible={visible} />);
+			const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+			const postMessage = vi.fn();
+			Object.defineProperty(iframe, "contentWindow", {
+				configurable: true,
+				get: () => ({ postMessage }),
+			});
+			return postMessage;
+		}
+
+		const repoMessages = (postMessage: ReturnType<typeof vi.fn>) =>
+			postMessage.mock.calls.filter((call) => call[0]?.type === "tuic:repo-changed");
+
+		afterEach(() => {
+			repositoriesStore.setActive(null);
+			repositoriesStore._testCancelPendingSave();
+		});
+
+		it("does not push repo changes at a panel nobody can see", () => {
+			const postMessage = spyOnPanelTraffic(() => false);
+
+			repositoriesStore.setActive("/repo-x");
+
+			expect(repoMessages(postMessage)).toHaveLength(0);
+		});
+
+		it("hands the current repo over the moment the panel is shown", () => {
+			const [visible, setVisible] = createSignal(false);
+			const postMessage = spyOnPanelTraffic(visible);
+
+			repositoriesStore.setActive("/repo-x");
+			expect(repoMessages(postMessage)).toHaveLength(0);
+
+			setVisible(true);
+
+			// Exactly one — the panel must learn the current repo, not replay every
+			// repo it missed while hidden.
+			expect(repoMessages(postMessage)).toHaveLength(1);
+			expect(repoMessages(postMessage)[0][0]).toEqual({ type: "tuic:repo-changed", repoPath: "/repo-x" });
+		});
+
+		it("keeps pushing at a visible panel", () => {
+			const postMessage = spyOnPanelTraffic(() => true);
+
+			repositoriesStore.setActive("/repo-x");
+
+			expect(repoMessages(postMessage)).toHaveLength(1);
+		});
+	});
+
+	describe("theme extraction (613-00e8 F103)", () => {
+		const HTML = "<html><head></head><body></body></html>";
+		let sheetReads = 0;
+
+		beforeEach(() => {
+			// Invalidate whatever earlier tests left in the cache, so the first
+			// injection below is guaranteed to be the one that walks the sheets.
+			applyAppTheme("vscode-dark");
+			sheetReads = 0;
+			// StyleSheetList is live, so holding the object is enough to hand back.
+			const real = document.styleSheets;
+			Object.defineProperty(document, "styleSheets", {
+				configurable: true,
+				get() {
+					sheetReads++;
+					return real;
+				},
+			});
+		});
+
+		afterEach(() => {
+			delete (document as unknown as Record<string, unknown>).styleSheets;
+		});
+
+		it("walks the stylesheets once and reuses the result for every later injection", () => {
+			injectThemeVars(HTML, false);
+			const afterFirst = sheetReads;
+			expect(afterFirst).toBeGreaterThan(0);
+
+			injectThemeVars(HTML, false);
+			injectThemeVars(HTML, true);
+
+			expect(sheetReads).toBe(afterFirst);
+		});
+
+		it("re-reads the stylesheets once applyAppTheme has rewritten the root variables", () => {
+			injectThemeVars(HTML, false);
+			const afterFirst = sheetReads;
+
+			applyAppTheme("vscode-dark");
+			injectThemeVars(HTML, false);
+
+			expect(sheetReads).toBeGreaterThan(afterFirst);
+		});
 	});
 
 	describe("URL mode — SDK handshake", () => {

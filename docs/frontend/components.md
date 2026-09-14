@@ -62,7 +62,7 @@ App.tsx (central orchestrator)
 ├── TaskQueuePanel/           # Agent task queue
 ├── PromptOverlay/            # Agent prompt interception
 ├── PromptDrawer/             # Prompt library management
-├── CommandPalette/           # Cmd+P command palette
+├── CommandPalette/           # Cmd+P / browser-toolbar palette with transport-safe actions
 ├── ActivityDashboard/        # Activity center (bell dropdown)
 ├── BranchSwitcher/           # Quick branch switcher (held-key overlay)
 ├── BranchPopover/            # Branch selection popover
@@ -149,6 +149,17 @@ Terminal tab management.
 - Activity indicator (dot) for background terminals
 - Awaiting input indicator (question/error icons)
 - Context menu: Close, Close Others, Close to Right
+- Context menu, debug builds only (`isPerfDebug()`): **Capture Session** — arms the raw PTY
+  capture tap on that session so a state-detection bug can be recorded as it happens. See
+  `docs/frontend/utilities.md` → `ptyCapture.ts`.
+
+### PromptDrawer (`PromptDrawer/`)
+
+Creates, edits, and executes custom and built-in Smart Prompts. A normal click or
+keyboard Enter follows the prompt's `autoExecute` value. Double-click and
+**Insert & Run** explicitly submit once; **Insert** explicitly keeps the resolved
+text editable. The drawer delays a single pointer click until the double-click
+window closes so one gesture cannot trigger both delivery paths.
 
 ### SettingsPanel (`SettingsPanel/`)
 
@@ -279,6 +290,6 @@ Native SolidJS component (not a plugin) showing Claude API usage data. Displayed
 | Help | `Cmd+?` | Local state in App.tsx |
 | Prompt Library | `Cmd+Shift+K` | `promptLibraryStore.toggleDrawer()` |
 | Task Queue | — | Local state in App.tsx |
-| Command Palette | `Cmd+P` | `commandPaletteStore.toggle()` |
+| Command Palette | `Cmd+P`; browser toolbar button | `commandPaletteStore.toggle()`; browser mode filters to explicitly supported web/HTTP actions |
 | Activity Dashboard | — | `activityDashboardStore.toggle()` |
 | Worktree Manager | `Cmd+Shift+W` | `worktreeManagerStore.toggle()` |

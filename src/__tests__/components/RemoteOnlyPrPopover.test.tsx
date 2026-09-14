@@ -56,6 +56,7 @@ const mergeablePr: BranchPrStatus = {
 	review_decision: "APPROVED",
 	viewer_did_approve: false,
 	mergeable: "MERGEABLE",
+	conflict_state: "clear" as const,
 	merge_state_status: "CLEAN",
 	merge_commit_allowed: true,
 	squash_merge_allowed: true,

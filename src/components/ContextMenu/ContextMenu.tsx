@@ -308,10 +308,17 @@ export function createContextMenu() {
 	const close = () => {
 		setVisible(false);
 		cancelAnimationFrame(closeRaf);
-		if (previousFocus) {
-			closeRaf = requestAnimationFrame(() => previousFocus?.focus());
-			previousFocus = null;
-		}
+		if (!previousFocus) return;
+		// Snapshot: `previousFocus` is cleared synchronously below, so the frame
+		// callback must not read the mutable binding (it would always see null).
+		const restore = previousFocus;
+		previousFocus = null;
+		closeRaf = requestAnimationFrame(() => {
+			// Skip when something else already claimed focus — a menu item may have
+			// opened a dialog whose input focused itself before this frame ran.
+			const active = document.activeElement;
+			if (!active || active === document.body) restore.focus();
+		});
 	};
 
 	onCleanup(() => cancelAnimationFrame(closeRaf));

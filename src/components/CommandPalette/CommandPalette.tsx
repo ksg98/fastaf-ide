@@ -16,6 +16,90 @@ import s from "./CommandPalette.module.css";
 
 export interface CommandPaletteProps {
 	actions: ActionEntry[];
+	/** Browser clients expose only actions whose implementation is available over HTTP or in the web UI. */
+	browserMode?: boolean;
+}
+
+/**
+ * Browser action availability is opt-in. New desktop/native actions stay hidden
+ * until their HTTP or browser implementation has been verified explicitly.
+ */
+const BROWSER_ACTION_IDS = new Set([
+	"new-terminal",
+	"close-terminal",
+	"reopen-closed-tab",
+	"clear-terminal",
+	"refresh-terminal",
+	"find-in-terminal",
+	"run-command",
+	"edit-command",
+	"prev-tab",
+	"next-tab",
+	"focus-last-terminal",
+	"jump-waiting-terminal",
+	"zoom-in",
+	"zoom-out",
+	"zoom-reset",
+	"zoom-in-all",
+	"zoom-out-all",
+	"zoom-reset-all",
+	"toggle-markdown",
+	"toggle-settings",
+	"toggle-task-queue",
+	"toggle-notes",
+	"toggle-help",
+	"toggle-file-browser",
+	"toggle-outline",
+	"toggle-file-browser-content-search",
+	"toggle-diff-scroll",
+	"toggle-git-ops",
+	"toggle-branches-tab",
+	"toggle-global-workspace",
+	"split-vertical",
+	"split-horizontal",
+	"toggle-sidebar",
+	"activity-dashboard",
+	"worktree-manager",
+	"quick-branch-switch",
+	"toggle-error-log",
+	"toggle-ai-chat",
+	"clear-scrollback",
+	"scroll-to-top",
+	"scroll-to-bottom",
+	"scroll-page-up",
+	"scroll-page-down",
+	"zoom-pane",
+	"toggle-focus-mode",
+	"prompt-library",
+	"open-path",
+	"command-overview",
+	"ai-triage",
+	"toggle-tunnels",
+	"process-manager",
+	"open-generators",
+	"block-prev",
+	"block-next",
+	"block-fold-toggle",
+	"block-search-toggle",
+	"toggle-compose-panel",
+	"reset-panel-sizes",
+	"search-terminals",
+	"search-files",
+	"search-file-contents",
+]);
+
+const BROWSER_ACTION_PREFIXES = [
+	"switch-repo:",
+	"unpark-repo:",
+	"park-group:",
+	"unpark-group:",
+	"move-to-worktree:",
+	"smart:",
+	"plugin-action:",
+];
+
+export function isBrowserCommandPaletteAction(action: ActionEntry): boolean {
+	return BROWSER_ACTION_IDS.has(action.id) || BROWSER_ACTION_PREFIXES.some((prefix) => action.id.startsWith(prefix));
 }
 
 export const CommandPalette: Component<CommandPaletteProps> = (props) => {
@@ -26,6 +110,9 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	const isOpen = () => commandPaletteStore.state.isOpen;
 	const mode = () => commandPaletteStore.mode();
 	const searchQuery = () => commandPaletteStore.searchQuery();
+	const availableActions = createMemo(() =>
+		props.browserMode ? props.actions.filter(isBrowserCommandPaletteAction) : props.actions,
+	);
 
 	/**
 	 * Rebuild the BM25 index whenever the action list changes. The corpus is
@@ -33,7 +120,7 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	 * allocation-free per keystroke.
 	 */
 	const bm25Index = createMemo(() =>
-		buildIndex(props.actions.map((a) => ({ item: a, text: `${a.label} ${a.category}` }))),
+		buildIndex(availableActions().map((a) => ({ item: a, text: `${a.label} ${a.category}` }))),
 	);
 
 	/**
@@ -56,7 +143,7 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 		};
 
 		if (!query.trim()) {
-			return [...props.actions].sort(baseSort);
+			return [...availableActions()].sort(baseSort);
 		}
 
 		const ranked = bm25Index().score(query);
@@ -239,11 +326,19 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 	return (
 		<Show when={isOpen()}>
 			<div class={shared.overlayTop} onClick={() => commandPaletteStore.close()}>
-				<div class={s.palette} onClick={(e) => e.stopPropagation()}>
+				<div
+					id="command-palette"
+					class={s.palette}
+					role="dialog"
+					aria-modal="true"
+					aria-label="Command palette"
+					onClick={(e) => e.stopPropagation()}
+				>
 					<div class={s.search}>
 						<input
 							ref={inputRef}
 							type="text"
+							aria-label="Command palette search"
 							placeholder={placeholder()}
 							value={commandPaletteStore.state.query}
 							onInput={(e) => commandPaletteStore.setQuery(e.currentTarget.value)}
@@ -329,7 +424,16 @@ export const CommandPalette: Component<CommandPaletteProps> = (props) => {
 									!commandPaletteStore.state.contentError
 								}
 							>
-								<div class={s.empty}>No results</div>
+								{/* A cross-repo search can only cover repos whose index is built.
+								    Saying "No results" while N repos are still indexing is a lie —
+								    report the coverage instead. */}
+								<div class={s.empty}>
+									{commandPaletteStore.state.contentReposPending > 0
+										? `No results in ${commandPaletteStore.state.contentReposSearched} repo${
+												commandPaletteStore.state.contentReposSearched === 1 ? "" : "s"
+											} — ${commandPaletteStore.state.contentReposPending} still indexing, retry shortly`
+										: "No results"}
+								</div>
 							</Show>
 							<Show when={commandPaletteStore.state.contentError}>
 								<div class={s.empty}>Error: {commandPaletteStore.state.contentError}</div>

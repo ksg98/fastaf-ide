@@ -42,6 +42,11 @@ const CB_BASE_MS: f64 = 1_000.0;
 const CB_MAX_MS: f64 = 60_000.0;
 /// After this many total retries from CircuitOpen, mark the entry Failed.
 const CB_MAX_RETRIES: u32 = 10;
+/// Backoff armed once an upstream is exhausted (`Failed`). Recovery after
+/// sleep/wake still happens, but an upstream that has already burned
+/// `CB_MAX_RETRIES` must not be re-probed as often as a healthy one — which is
+/// what happened while `Failed` was the only status with no backoff at all.
+const CB_FAILED_MS: f64 = 600_000.0;
 
 /// Background health check interval.
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
@@ -123,6 +128,12 @@ impl CircuitBreaker {
         if s.failure_count >= CB_THRESHOLD {
             s.retry_count += 1;
             if s.retry_count > CB_MAX_RETRIES {
+                // Arm the Failed backoff on the way out. Returning without touching
+                // `open_until` left the last CircuitOpen window to expire and never
+                // be replaced, so the health checker probed a hopeless upstream on
+                // every tick forever.
+                s.open_until = Some(Instant::now() + Duration::from_millis(CB_FAILED_MS as u64));
+                s.failure_count = 0;
                 return true; // caller should transition to Failed
             }
             // Backoff based on retry_count (circuit re-opens), not cumulative failures.
@@ -698,6 +709,12 @@ impl UpstreamRegistry {
     ///
     /// Returns an error if `name` collides with an existing entry or if the
     /// config is self-referential (proxy pointing to itself).
+    ///
+    /// Stays `async` with nothing to await on purpose: it ends in `tokio::spawn`,
+    /// which panics outside a runtime. `async fn` makes "a runtime exists here" a
+    /// compile-time fact — the same invariant `disconnect_upstream` has to state
+    /// in prose because it is sync and does run from non-runtime contexts.
+    #[allow(clippy::unused_async_trait_impl)]
     pub(crate) async fn connect_upstream(
         &self,
         config: UpstreamMcpServer,
@@ -972,8 +989,12 @@ fn build_client(name: &str, config: &UpstreamMcpServer) -> Result<UpstreamClient
             ))))
         }
         UpstreamTransport::Stdio { .. } => {
-            let client = StdioMcpClient::from_upstream_config(name.to_string(), &config.transport)
-                .ok_or_else(|| format!("Failed to build stdio client for '{name}'"))?;
+            let client = StdioMcpClient::from_upstream_config(
+                name.to_string(),
+                &config.transport,
+                config.timeout_secs,
+            )
+            .ok_or_else(|| format!("Failed to build stdio client for '{name}'"))?;
             Ok(UpstreamClient::Stdio(Arc::new(std::sync::Mutex::new(
                 client,
             ))))
@@ -1213,6 +1234,22 @@ async fn initialize_entry_with_oauth(
     }
 }
 
+/// Decide whether this tick should probe an upstream.
+///
+/// Probe Ready upstreams, CircuitOpen with expired backoff, stuck Connecting,
+/// and Failed entries (allows recovery after sleep/wake or transient outages).
+fn should_probe(status: &UpstreamStatus, cb: &CircuitBreaker) -> bool {
+    match status {
+        UpstreamStatus::Ready => true,
+        UpstreamStatus::CircuitOpen => !cb.is_open(),
+        UpstreamStatus::Connecting => true,
+        UpstreamStatus::Failed => !cb.is_open(),
+        UpstreamStatus::Disabled => false,
+        UpstreamStatus::Authenticating => false,
+        UpstreamStatus::NeedsAuth => false,
+    }
+}
+
 /// Run health checks on Ready and recoverable CircuitOpen upstreams.
 async fn run_health_checks(registry: &UpstreamRegistry) {
     // Snapshot the bus once so each spawned task gets a clone without holding the lock.
@@ -1222,18 +1259,7 @@ async fn run_health_checks(registry: &UpstreamRegistry) {
 
     for entry_ref in registry.entries.iter() {
         let status = entry_ref.status.read().clone();
-        // Probe Ready upstreams, CircuitOpen with expired backoff, stuck Connecting,
-        // and Failed entries (allows recovery after sleep/wake or transient outages)
-        let should_probe = match status {
-            UpstreamStatus::Ready => true,
-            UpstreamStatus::CircuitOpen => !entry_ref.cb.is_open(),
-            UpstreamStatus::Connecting => true,
-            UpstreamStatus::Failed => true,
-            UpstreamStatus::Disabled => false,
-            UpstreamStatus::Authenticating => false,
-            UpstreamStatus::NeedsAuth => false,
-        };
-        if !should_probe {
+        if !should_probe(&status, &entry_ref.cb) {
             continue;
         }
         let entry = Arc::clone(entry_ref.value());
@@ -1657,6 +1683,73 @@ mod tests {
         // failure_count should be reset so the next half-open window
         // gets CB_THRESHOLD fresh attempts before re-opening
         assert_eq!(cb.state.lock().failure_count, 0);
+    }
+
+    /// Drive a breaker all the way to exhaustion (the `Failed` transition).
+    fn exhaust(cb: &CircuitBreaker) {
+        for cycle in 1..=(CB_MAX_RETRIES + 1) {
+            cb.state.lock().open_until = None;
+            for _ in 0..CB_THRESHOLD {
+                if cb.record_failure() {
+                    return;
+                }
+            }
+            assert!(cycle <= CB_MAX_RETRIES, "should have exhausted by now");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Health-check probe scheduling (F61)
+    // -----------------------------------------------------------------------
+
+    /// A permanently dead upstream used to be re-probed on every 60s tick while a
+    /// merely flaky one was throttled — the backoff applied to the recoverable
+    /// case and not to the hopeless one. Exhaustion must arm a backoff at least as
+    /// long as the worst CircuitOpen one, and the probe must honour it.
+    #[test]
+    fn a_failed_upstream_is_throttled_at_least_as_hard_as_a_circuit_open_one() {
+        let cb = CircuitBreaker::new();
+        exhaust(&cb);
+        assert!(
+            cb.is_open(),
+            "exhaustion must leave a backoff armed, not clear the field"
+        );
+        assert!(
+            !should_probe(&UpstreamStatus::Failed, &cb),
+            "a Failed upstream must respect its backoff"
+        );
+
+        let remaining = cb
+            .state
+            .lock()
+            .open_until
+            .map(|until| until.saturating_duration_since(Instant::now()))
+            .expect("open_until must be set");
+        assert!(
+            remaining.as_millis() as f64 >= CB_MAX_MS,
+            "Failed backoff {remaining:?} must be at least the CircuitOpen cap of {CB_MAX_MS}ms"
+        );
+    }
+
+    /// Recovery after sleep/wake or a transient outage still has to happen — the
+    /// backoff delays the probe, it does not cancel it.
+    #[test]
+    fn a_failed_upstream_is_probed_again_once_its_backoff_expires() {
+        let cb = CircuitBreaker::new();
+        exhaust(&cb);
+        cb.state.lock().open_until = Some(Instant::now() - Duration::from_secs(1));
+        assert!(should_probe(&UpstreamStatus::Failed, &cb));
+    }
+
+    #[test]
+    fn probe_skips_states_that_wait_on_the_user() {
+        let cb = CircuitBreaker::new();
+        assert!(should_probe(&UpstreamStatus::Ready, &cb));
+        assert!(should_probe(&UpstreamStatus::Connecting, &cb));
+        assert!(should_probe(&UpstreamStatus::CircuitOpen, &cb));
+        assert!(!should_probe(&UpstreamStatus::Disabled, &cb));
+        assert!(!should_probe(&UpstreamStatus::NeedsAuth, &cb));
+        assert!(!should_probe(&UpstreamStatus::Authenticating, &cb));
     }
 
     // -----------------------------------------------------------------------

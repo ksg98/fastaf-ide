@@ -1,7 +1,8 @@
-import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { ActivityItem as ActivityItemData } from "../../plugins/types";
 import { activityStore } from "../../stores/activityStore";
 import { ActivityItem } from "../components/ActivityItem";
+import { createVisibilityInterval } from "../utils/visibilityInterval";
 import styles from "./ActivityScreen.module.css";
 
 interface ActivityScreenProps {
@@ -57,8 +58,7 @@ export function ActivityScreen(props: ActivityScreenProps) {
 	// on every store mutation (which is constant with multiple sessions).
 	// New items/removals trigger an immediate snapshot via count change.
 	const [snapshot, setSnapshot] = createSignal(activeItems(), { equals: false });
-	const timer = setInterval(() => setSnapshot(activeItems()), 10_000);
-	onCleanup(() => clearInterval(timer));
+	createVisibilityInterval(() => setSnapshot(activeItems()), 10_000);
 
 	let prevCount = activeItems().length;
 	const groups = createMemo(() => {

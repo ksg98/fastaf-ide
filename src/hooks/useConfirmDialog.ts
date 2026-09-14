@@ -213,6 +213,33 @@ export function useConfirmDialog() {
 		});
 	}
 
+	/** Confirm a cleanup that would take the worktree's uncommitted work with it.
+	 *  The backend refuses archive/delete on a worktree it cannot confirm is clean;
+	 *  this is the ask that unblocks it. `commitsAhead` is 0 when the merge itself
+	 *  would also be a no-op — worth saying, because then nothing is gained either. */
+	async function confirmDirtyWorktreeCleanup(
+		branchName: string,
+		action: string,
+		commitsAhead: number,
+	): Promise<boolean> {
+		const verb = action === "delete" ? "Deleting" : "Archiving";
+		const fate =
+			action === "delete"
+				? "removes the worktree directory — the uncommitted changes are lost."
+				: "moves the worktree to __archived/ — the uncommitted changes move with it.";
+		const noop =
+			commitsAhead === 0
+				? `\n\n"${branchName}" also has no commits the target branch lacks, so the merge itself would do nothing.`
+				: "";
+		return await confirm({
+			title: "Uncommitted work in the worktree",
+			message: `The worktree for "${branchName}" has uncommitted changes. ${verb} it ${fate}${noop}\n\nContinue?`,
+			okLabel: action === "delete" ? "Delete anyway" : "Archive anyway",
+			cancelLabel: "Keep it",
+			kind: "warning",
+		});
+	}
+
 	return {
 		confirm,
 		confirmSaveChanges,
@@ -222,6 +249,7 @@ export function useConfirmDialog() {
 		confirmRemoveRepo,
 		confirmStashAndSwitch,
 		confirmOrphanCleanup,
+		confirmDirtyWorktreeCleanup,
 		reportGitError,
 		/** Reactive state for rendering the dialog — null when hidden */
 		dialogState,

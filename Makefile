@@ -21,8 +21,8 @@ export MACOSX_DEPLOYMENT_TARGET ?= 10.15
 # Distribution output
 DIST_DIR=dist-release
 
-.PHONY: all clean dev test build build-dmg check cov fmt sign verify-sign notarize release dist \
-       nightly github-release preview bump release-notes hooks \
+.PHONY: all clean dev test build build-dmg check cov crap fmt sign verify-sign notarize release dist \
+       nightly github-release preview bump release-notes hooks docs docs-serve \
        gh-debug-on gh-debug-off gh-debug-status gh-debug-logs gh-rate logs
 
 all: build sign
@@ -69,11 +69,13 @@ check:
 	@echo "Running checks..."
 	@rtk pnpm exec tsc --noEmit && echo "  tsc ✓"
 	@rtk pnpm exec biome check --max-diagnostics=100 src/ && echo "  biome ✓"
+	@rtk pnpm architecture:cycles && rtk pnpm architecture:cycles:test && echo "  architecture cycles ✓"
 	@bash -c 'caps=$$(sed -n "/const KNOWN_CAPABILITIES/,/];/p" src-tauri/src/plugins.rs | grep -oE "\"[a-z][a-z:_-]+\"" | tr -d "\""); miss=0; for c in $$caps; do for d in src-tauri/src/mcp_http/plugin_docs.rs docs/plugins.md; do grep -qF "$$c" "$$d" || { echo "  ✗ capability $$c missing from $$d"; miss=1; }; done; done; [ $$miss -eq 0 ]' && echo "  plugin-docs-sync ✓"
 	@cd src-tauri && rtk cargo fmt --check && echo "  rustfmt ✓"
 	@cd src-tauri && rtk cargo clippy --release -- -D warnings && echo "  clippy ✓"
-	@cd src-tauri && ulimit -n 10240 && rtk cargo nextest run && rtk cargo test --doc -q && echo "  rust tests ✓"
+	@cd src-tauri && ulimit -n 10240 && rtk cargo nextest run --workspace && rtk cargo test --doc -q && echo "  rust tests ✓"
 	@bash -o pipefail -c 'rtk pnpm exec vitest run --reporter=dot 2>&1 | tail -3' && echo "  vitest ✓"
+	@bash -o pipefail -c 'rtk pnpm test:plugins 2>&1 | tail -3' && echo "  plugin tests ✓"
 	@rtk pnpm audit --audit-level=high && echo "  pnpm audit ✓"
 	@cd src-tauri && rtk err cargo audit -q --ignore RUSTSEC-2026-0097 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 && echo "  cargo audit ✓"
 
@@ -85,7 +87,20 @@ check:
 cov:
 	@cd src-tauri && ulimit -n 10240 && rtk cargo llvm-cov nextest
 	@cd src-tauri && rtk cargo llvm-cov report --html
+	@cd src-tauri && rtk cargo llvm-cov report --lcov --output-path lcov.info
 	@echo "HTML report: src-tauri/target/llvm-cov/html/index.html"
+
+# CRAP metric (complexity² × uncovered³ + complexity) over the coverage data
+# from `make cov`. Thresholds and exclusions live in src-tauri/.cargo-crap.toml.
+#
+# Deliberately NOT `--workspace`: workspace mode walks every member root, and
+# src-tauri/ is itself a member whose tree *contains* crates/ and patches/ — so
+# each of those files is analyzed twice (417 reported "crappy" vs 312 real). One
+# root from src-tauri/ sees the same code once and lets the `patches/**` exclude
+# actually match.
+crap:
+	@cd src-tauri && test -f lcov.info || { echo "src-tauri/lcov.info missing — run 'make cov' first"; exit 1; }
+	@cd src-tauri && rtk cargo crap --lcov lcov.info --top 30
 
 # GitHub API debug logging — toggle at runtime, view logs
 gh-debug-on:
@@ -189,6 +204,8 @@ bump:
 	echo "  src-tauri/Cargo.toml [workspace.package] → $(V) (tuicommander, tuic-bridge, tuic-cli inherit)"; \
 	echo "  src-tauri/tauri.conf.json → $(V)"; \
 	echo "  package.json          → $(V)"; \
+	(cd src-tauri && (cargo metadata --offline --format-version 1 >/dev/null 2>&1 || cargo metadata --format-version 1 >/dev/null)); \
+	echo "  src-tauri/Cargo.lock  → $(V) (workspace members re-pinned)"; \
 	sed -i '' 's/^\*\*Version:\*\* .*/**Version:** $(V)/' SPEC.md; \
 	echo "  SPEC.md               → $(V)"; \
 	TODAY=$$(date +%Y-%m-%d); \
@@ -208,22 +225,24 @@ release-notes:
 # To bump first: make bump BUMP=patch (or minor|major), then make github-release.
 # NOTE: sed -i '' is macOS syntax — run this from macOS only.
 github-release:
-	@BRANCH=$$(git rev-parse --abbrev-ref HEAD); \
+	@set -e; \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD); \
 	if [ "$$BRANCH" != "main" ]; then echo "ERROR: must be on main (currently on $$BRANCH)" && exit 1; fi; \
 	if [ -n "$$(git status --porcelain)" ]; then echo "ERROR: working tree is dirty — commit or stash first" && exit 1; fi; \
 	CUR=$$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'); \
 	TAG="v$$CUR"; \
 	if git rev-parse "$$TAG" >/dev/null 2>&1; then echo "ERROR: tag $$TAG already exists" && exit 1; fi; \
 	echo "==> Releasing $$TAG"; \
-	git tag "$$TAG"; \
+	git tag -a -m "$$TAG" "$$TAG"; \
 	COMMIT=$$(git rev-parse HEAD); \
 	echo "--- Pushing..."; \
-	git push origin main --tags; \
+	git push origin main; \
+	git push origin "$$TAG" || { git tag -d "$$TAG"; echo "ERROR: tag push failed — local tag removed, fix and re-run"; exit 1; }; \
 	echo "--- Waiting for Release workflow on $$COMMIT..."; \
 	sleep 10; \
 	RUN_ID=""; \
 	for i in 1 2 3 4 5; do \
-		RUN_ID=$$(gh run list -w Release --limit 5 --json databaseId,headSha --jq ".[] | select(.headSha == \"$$COMMIT\") | .databaseId" | head -1); \
+		RUN_ID=$$(gh run list -w Release --limit 5 --json databaseId,headSha --jq ".[] | select(.headSha == \"$$COMMIT\") | .databaseId" 2>/dev/null | head -1) || true; \
 		if [ -n "$$RUN_ID" ]; then break; fi; \
 		echo "  run not found yet, retrying ($$i/5)..."; \
 		sleep 5; \
@@ -245,7 +264,17 @@ preview:
 	@echo "Launching TUIC-preview..."
 	open "src-tauri/target/debug/bundle/macos/TUIC-preview.app"
 
+# Build the documentation book + Pagefind search index into docs/book.
+# Same script CI runs, so a local preview matches the deployed site exactly.
+docs:
+	@./scripts/build-docs.sh
+
+# Preview the docs locally — the search needs to be served over HTTP, file:// won't do.
+docs-serve: docs
+	@echo "Docs at http://127.0.0.1:8123 (ctrl+c to stop)"
+	@cd docs/book && python3 -m http.server 8123
+
 # Clean build artifacts
 clean:
-	rm -rf $(DIST_DIR)
+	rm -rf $(DIST_DIR) docs/book
 	cd src-tauri && cargo clean

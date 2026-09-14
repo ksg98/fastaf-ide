@@ -12,6 +12,9 @@ export interface DeepLinkCallbacks {
 	confirm: (title: string, message: string) => Promise<boolean>;
 	/** Show an in-app error notification — replaces native browser alert() */
 	onInstallError: (message: string) => void;
+	/** Add a not-yet-known repo by path and make it active (same flow as the
+	 *  sidebar's "Add Repository"). Used by `tuic <dir>`. */
+	openRepoPath: (path: string) => Promise<void>;
 }
 
 /** Parse a tuic:// URL into a command, path segments, and parameters */
@@ -100,12 +103,17 @@ export async function handleDeepLink(urlString: string, callbacks: DeepLinkCallb
 				appLogger.warn("app", "Deep link open-repo: missing path parameter");
 				return;
 			}
-			// Security: only allow repos already in the repo list
-			if (!(path in repositoriesStore.state.repositories)) {
-				appLogger.warn("app", `Deep link open-repo: path not in repo list: ${path}`);
-				return;
+			// Known repo → activate, no questions asked (this is `tuic .` in a repo
+			// you already work in). Unknown repo → confirm first: a deep link can be
+			// opened by any local page, and adding a repo starts a watcher and an
+			// index over that directory.
+			if (path in repositoriesStore.state.repositories) {
+				repositoriesStore.setActive(path);
+				break;
 			}
-			repositoriesStore.setActive(path);
+			const proceed = await callbacks.confirm("Add repository?", `Add and open this folder in FastAF?\n\n${path}`);
+			if (!proceed) return;
+			await callbacks.openRepoPath(path);
 			break;
 		}
 

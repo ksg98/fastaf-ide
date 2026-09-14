@@ -35,13 +35,22 @@
   justify-content: flex-end;
   padding-right: 6px;
   gap: 2px;
+  overflow: hidden;
   -webkit-app-region: drag;
 }
 
+/* Flexible gap on either side of the app name. The name stays visually centred in
+   whatever space the buttons leave, but it is a real flex item — it can never be
+   painted on top of them. It used to be position:absolute at left:50%, which at a
+   narrow sidebar put the label straight over the right-aligned toggles. */
+.leftSpacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .appName {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  flex: 0 1 auto;
+  min-width: 0;
   pointer-events: none;
   user-select: none;
   opacity: 0.9;
@@ -490,12 +499,14 @@
   white-space: nowrap;
 }
 
+/* Wraps instead of truncating: a mirrored toast carries the whole message here,
+   and a message cut at one line is the thing the bell exists to prevent. Short
+   subtitles are unaffected — they already fit on one line. `anywhere` keeps a
+   long unbroken token (a path, a URL) inside the popover. */
 .activityItemSubtitle {
   font-size: var(--font-xs);
   color: var(--fg-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .activityItemDismiss {

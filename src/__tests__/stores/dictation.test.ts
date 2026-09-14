@@ -319,6 +319,7 @@ describe("dictationStore", () => {
 					text: "Hello world",
 					skip_reason: null,
 					duration_s: 2.5,
+					truncated_s: 0,
 				});
 
 			await testInScopeAsync(async () => {
@@ -330,6 +331,7 @@ describe("dictationStore", () => {
 					text: "Hello world",
 					skip_reason: null,
 					duration_s: 2.5,
+					truncated_s: 0,
 				});
 				expect(store.state.recording).toBe(false);
 				expect(store.state.processing).toBe(false);

@@ -120,5 +120,102 @@
       "Blocking MCP waits now honor their deadline (60s default, 300s max) instead of hitting a stray 10-second cutoff."
     ],
     "date": "2026-07-22"
+  },
+  "1.7.0": {
+    "highlights": [
+      "Spawned agents now return a durable task handle with a new `task` tool to poll status past the 5-minute wait ceiling, so long-running work survives a disconnect.",
+      "MCP `tools/call` works without a protocol session header — a plain curl against `POST /mcp` is now enough for actions that need no identity.",
+      "Agent tabs no longer flip falsely idle or falsely completed: Codex, Claude and Grok activity detection now tracks their current status rows, composers and background terminals.",
+      "Codex terminals no longer adopt another project's session, and heavy Codex streaming no longer stalls behind an unterminated synchronized update.",
+      "Grok can now call MCP tools proxied through FastAF, which it previously discarded silently.",
+      "Saving part of the configuration no longer silently disables remote access, and a failed save no longer rotates vault-backed credentials.",
+      "F13–F20 can now be bound to shortcuts and the Global Hotkey on macOS, and the `tuic` CLI's session and agent commands now show real ids, names and status.",
+      "Fixed stuck SSH tunnels, ghost worktree branches in the sidebar, stacked Markdown viewer/editor panes, and directory traversal on absolute-path file endpoints."
+    ],
+    "date": "2026-07-31"
+  },
+  "1.7.1": {
+    "highlights": [
+      "tuic run starts a command in a fresh session, and tuic ls now prints short IDs plus --json for scripting.",
+      "tuic capture -n tails recent output, tuic status names sessions waiting on you, and targets match name prefixes case-insensitively.",
+      "tuic . opens a directory as a repository again, activating known repos silently and confirming new ones once.",
+      "tuic send only treats whole-token key names as keys, so text like \"Enter the room\" types correctly; arrows, Home/End, PageUp/PageDown and C-<letter> are covered.",
+      "Fullscreen apps that print past the bottom of the window — gh run watch, long build monitors — now keep a scrollback you can actually scroll, isolated from your shell history.",
+      "Updating mdkb now reconnects to the new daemon instead of silently talking to the stale one.",
+      "Quiet dictation no longer types phantom subtitle credits like \"Grazie.\" in any of the eleven supported languages.",
+      "The whole Rust workspace is now tested in make check and CI, covering 267 previously skipped tests.",
+      "pi is now a fully tracked agent: correct classification, busy/idle detection, and resume via `pi --continue`.",
+      "Completion chimes can be muted for MCP-spawned sessions via Settings > Notifications > Orchestration.",
+      "Grok tabs now go idle after a finished turn instead of staying busy forever (new composer layout plus scrollbar false positive).",
+      "Scrolled-off agent output stays in the mobile log instead of being silently dropped from history.",
+      "Renaming a file to a different case now works on macOS and Windows.",
+      "Notes survive a failed config load: a corrupt file is moved aside instead of being overwritten with an empty list.",
+      "Worktrees survive a rebase, merge, cherry-pick, revert, or bisect, and removed worktrees now disappear from the sidebar.",
+      "Cmd+C copies text selected inside plugin dashboards and other panel iframes."
+    ],
+    "date": "2026-08-03"
+  },
+  "1.7.2": {
+    "highlights": [
+      "Agent wait and inbox now always return next_since, so a timeout no longer forces a full history reload",
+      "since is now optional on wait and inbox: omit it to resume from a server-side per-identity cursor, or pass 0 to replay",
+      "delivered_via_channel is gone from send responses; delivery_path names the actual route and is the single field to read",
+      "register now accepts replaces=<old_uuid> to hand a mailbox over to a new identity across MCP connections, with a warning when the old peer still owns a live terminal",
+      "The find shortcut re-focuses an already-open search bar in the terminal, code editor, diff, HTML preview and markdown",
+      "Orchestrator inbox wakes retry at most once per unread group instead of looping every five seconds forever",
+      "Creating a worktree opens it in its own terminal and leaves a running agent on its real branch and directory",
+      "Managed Codex peers now inherit TUIC_SESSION through the MCP entry, so their first agent send works without manual registration"
+    ],
+    "date": "2026-08-06"
+  },
+  "1.7.3": {
+    "highlights": [
+      "Queue follow-up commands with Shift+Ctrl+Enter — they run at the next idle window instead of interrupting the agent.",
+      "Toasts are now mirrored into a Messages section in the toolbar bell, so you can read them after they fade.",
+      "Agents can request a distinct Attention sound on MCP toasts, on both desktop and browser clients.",
+      "Cleaning up a merged worktree now confirms before discarding uncommitted work, and archiving really keeps the files.",
+      "A tab no longer stays badged \"question\" after you answer with a bare Enter or after a generic notification.",
+      "MCP bridge config is written only for agents you actually have installed, and unparsable configs are never overwritten.",
+      "agent detect now reports every agent TUIC can launch, and only the ones present on your machine.",
+      "Re-authorizing an HTTP MCP upstream takes effect on the next attempt, and Manage in Settings lands on the MCP block."
+    ],
+    "date": "2026-08-10"
+  },
+  "1.7.4": {
+    "highlights": [
+      "Queued Compose commands are now listed in delivery order, and you can delete a single one without clearing the rest.",
+      "The toolbar bell now shows the newest notification first instead of burying it under older history.",
+      "`tuic agent send` now reaches registered peers that have no terminal of their own, matching the MCP send tool.",
+      "A message that nothing will surface now reports \"Buffered for <peer> (inbox_only)\" instead of falsely claiming delivery.",
+      "`tuic agent type` splits text and Enter as separate writes, so raw-mode TUIs receive the input instead of leaving it as prefill.",
+      "Vague OSC 777 notifications no longer latch a permanent awaiting-input badge; only explicit permission prompts stay confident."
+    ],
+    "date": "2026-08-12"
+  },
+  "1.7.5": {
+    "highlights": [
+      "Confirmation prompts from agents now reach the desktop, every browser tab, and the phone with push, first answer wins.",
+      "Installing the MCP bridge preserves your Zed, VS Code, and opencode settings byte-for-byte, with backups and a remove-all button.",
+      "Browser and PWA clients gain working AI chat history, Command Palette, plugin watcher matches, and reliable event delivery.",
+      "Agent state is more accurate: idle root shells, awaiting-input, and stuck badges no longer misreport work.",
+      "Git, search, dictation, and Build Cleaner panels now show current state instead of results from before your last action.",
+      "Long AI answers and phone terminal views stay responsive as output grows, rendering only what changed.",
+      "Session history, repository edits, and terminal command blocks survive concurrent saves, restarts, and multi-window use.",
+      "Terminal links with trailing punctuation open correctly, and copying Claude output no longer pastes its quote gutter."
+    ],
+    "date": "2026-08-27"
+  },
+  "1.7.6": {
+    "highlights": [
+      "A tab parked in an unregistered repo now names the missing directory and offers a one-click Register to move it home.",
+      "Repository lists stay in sync across desktop, browser and phone, so one window's save no longer undoes another's.",
+      "Repository settings no longer stop saving because two windows computed different diff counts at the same moment.",
+      "Per-repository settings like base branch, setup script and worktree toggle now survive a restart.",
+      "A cd inside a terminal no longer moves an owned tab to another repo; only unowned parked tabs follow it.",
+      "Agent toasts show which repo they came from, and clicking one moves the sidebar, branch, pane and focus there.",
+      "An agent that quotes a menu on screen no longer marks its own tab as waiting for you.",
+      "Worktrees created by an agent now offer a Switch toast that waits in the bell instead of a blocking modal."
+    ],
+    "date": "2026-09-02"
   }
 }

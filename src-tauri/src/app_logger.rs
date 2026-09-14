@@ -396,7 +396,11 @@ fn cleanup_old_logs(log_dir: &std::path::Path) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("log") {
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("tuic.log."))
+        {
             continue;
         }
         let Ok(meta) = path.metadata() else { continue };
@@ -479,6 +483,42 @@ pub(crate) fn log_via_state(state: &Arc<AppState>, level: &str, source: &str, me
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_old_logs_removes_all_stale_rotated_files() {
+        let dir = tempfile::tempdir().expect("temp log dir");
+        let stale = std::time::SystemTime::now()
+            - std::time::Duration::from_secs((LOG_RETENTION_DAYS + 1) * 24 * 3600);
+
+        for index in 0..112 {
+            let path = dir.path().join(format!("tuic.log.2025-01-{index:03}"));
+            let file = std::fs::File::create(path).expect("create stale rotated log");
+            file.set_times(std::fs::FileTimes::new().set_modified(stale))
+                .expect("age stale rotated log");
+        }
+
+        let recent = dir.path().join("tuic.log.2026-08-18");
+        std::fs::File::create(&recent).expect("create recent rotated log");
+        let unrelated = dir.path().join("other.log.2025-01-01");
+        let unrelated_file = std::fs::File::create(&unrelated).expect("create unrelated log");
+        unrelated_file
+            .set_times(std::fs::FileTimes::new().set_modified(stale))
+            .expect("age unrelated log");
+
+        cleanup_old_logs(dir.path());
+
+        let remaining: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read cleaned log dir")
+            .map(|entry| entry.expect("read log entry").file_name())
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            2,
+            "all 112 stale TUIC logs must be removed"
+        );
+        assert!(recent.exists(), "recent rotated log must be retained");
+        assert!(unrelated.exists(), "unrelated files must be retained");
+    }
 
     #[test]
     fn push_assigns_monotonic_ids() {

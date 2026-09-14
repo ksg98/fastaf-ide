@@ -255,7 +255,9 @@ function createAppLogger() {
 		source: AppLogSource,
 		message: string,
 		data?: unknown,
-		audience: AppLogAudience = "user",
+		// `debug` is app-internal telemetry by definition, so it belongs in the
+		// diagnostic pool — a debug burst must never evict user-facing entries.
+		audience: AppLogAudience = level === "debug" ? "diagnostic" : "user",
 	): void {
 		const ring = ringFor(audience);
 
@@ -446,9 +448,6 @@ function createAppLogger() {
 			},
 			info(source: AppLogSource, message: string, data?: unknown): void {
 				push("info", source, message, data, "diagnostic");
-			},
-			debug(source: AppLogSource, message: string, data?: unknown): void {
-				push("debug", source, message, data, "diagnostic");
 			},
 		},
 

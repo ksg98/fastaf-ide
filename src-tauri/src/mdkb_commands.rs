@@ -40,14 +40,25 @@ pub struct MdkbStatus {
     pub version: Option<String>,
 }
 
+/// mdkb reports symbol ranges 0-based; every TUIC surface that consumes them
+/// (outline click, go-to-definition, references) addresses lines 1-based, the
+/// way CodeMirror's `doc.line(n)` does. Convert here, at the one boundary where
+/// the two conventions meet, so no caller has to remember which side it is on.
+///
+/// Note the asymmetry inside mdkb itself: `symbol_at_position` takes a *1-based*
+/// `line` input, so the request path needs no conversion — only the response.
+fn editor_line(mdkb_line: u32) -> u32 {
+    mdkb_line + 1
+}
+
 impl From<crate::mdkb_client::MdkbSymbol> for OutlineSymbol {
     fn from(s: crate::mdkb_client::MdkbSymbol) -> Self {
         Self {
             name: s.name,
             kind: s.kind,
             file_path: s.file_path,
-            line_start: s.line_start,
-            line_end: s.line_end,
+            line_start: editor_line(s.line_start),
+            line_end: s.line_end.map(editor_line),
             signature: s.signature,
             scope_context: s.scope_context,
         }
@@ -99,7 +110,7 @@ pub async fn mdkb_goto_definition(
     {
         Ok(Some(sym)) => Ok(Some(DefinitionLocation {
             file_path: sym.file_path,
-            line: sym.line_start,
+            line: editor_line(sym.line_start),
         })),
         Ok(None) => Ok(None),
         Err(e) => {
@@ -107,6 +118,19 @@ pub async fn mdkb_goto_definition(
             Ok(None)
         }
     }
+}
+
+/// A caller symbol is a jump target: the panel needs where it is and what it is
+/// called, nothing else.
+fn to_reference_locations(symbols: Vec<crate::mdkb_client::MdkbSymbol>) -> Vec<ReferenceLocation> {
+    symbols
+        .into_iter()
+        .map(|s| ReferenceLocation {
+            file_path: s.file_path,
+            line: editor_line(s.line_start),
+            name: s.name,
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -124,23 +148,7 @@ pub async fn mdkb_references(
         }
     };
     match client.code_graph(&repo_path, &symbol_name, "callers").await {
-        Ok(value) => {
-            let Some(arr) = value.as_array() else {
-                tracing::warn!("mdkb_references: expected array, got {}", value);
-                return Ok(vec![]);
-            };
-            let refs = arr
-                .iter()
-                .filter_map(|v| {
-                    Some(ReferenceLocation {
-                        file_path: v.get("file_path")?.as_str()?.to_string(),
-                        line: v.get("line_start")?.as_u64()? as u32,
-                        name: v.get("name")?.as_str()?.to_string(),
-                    })
-                })
-                .collect();
-            Ok(refs)
-        }
+        Ok(symbols) => Ok(to_reference_locations(symbols)),
         Err(e) => {
             tracing::warn!("mdkb_references failed: {e}");
             Ok(vec![])
@@ -296,9 +304,14 @@ pub async fn install_mdkb(state: State<'_, Arc<AppState>>) -> Result<String, Str
 
     tracing::info!(source = "mdkb", path = %install_path.display(), "mdkb installed");
 
-    // Re-initialize daemon so it picks up the new binary
+    // Re-initialize and connect now: version-aware startup will stop an older
+    // detached daemon before this installation is reported as complete.
     let mut daemon = state.mdkb_daemon.lock().await;
     *daemon = crate::mdkb_daemon::MdkbDaemon::new();
+    daemon
+        .ensure_running()
+        .await
+        .map_err(|e| format!("Installed mdkb but failed to start its daemon: {e}"))?;
 
     Ok(install_path.display().to_string())
 }
@@ -346,45 +359,60 @@ pub async fn uninstall_mdkb(state: State<'_, Arc<AppState>>) -> Result<(), Strin
 mod tests {
     use super::*;
 
-    #[test]
-    fn outline_symbol_from_mdkb_symbol() {
-        let mdkb = crate::mdkb_client::MdkbSymbol {
-            name: "foo".into(),
+    fn symbol(name: &str, file: &str, line_start: u32) -> crate::mdkb_client::MdkbSymbol {
+        crate::mdkb_client::MdkbSymbol {
+            name: name.into(),
             kind: "Function".into(),
-            file_path: "src/main.rs".into(),
-            line_start: 1,
-            line_end: Some(10),
-            signature: Some("fn foo()".into()),
+            file_path: file.into(),
+            line_start,
+            line_end: Some(line_start + 9),
+            signature: Some(format!("fn {name}()")),
             scope_context: None,
-        };
-        let outline: OutlineSymbol = mdkb.into();
-        assert_eq!(outline.name, "foo");
-        assert_eq!(outline.line_start, 1);
-        assert_eq!(outline.line_end, Some(10));
+        }
     }
 
     #[test]
-    fn reference_location_parse_from_json() {
-        let json = serde_json::json!([
-            {"file_path": "src/lib.rs", "line_start": 42, "name": "bar"},
-            {"file_path": "src/main.rs", "line_start": 7, "name": "baz"},
+    fn outline_symbol_from_mdkb_symbol() {
+        let outline: OutlineSymbol = symbol("foo", "src/main.rs", 0).into();
+        assert_eq!(outline.name, "foo");
+        assert_eq!(outline.signature.as_deref(), Some("fn foo()"));
+    }
+
+    #[test]
+    fn outline_symbol_shifts_mdkb_lines_into_editor_lines() {
+        // mdkb's first line is 0; the editor's first line is 1. Without the
+        // shift, every outline click and go-to-definition lands one line short
+        // — and a symbol on the very first line clamps to the same place as one
+        // on the second, so the error is invisible at the top of a file.
+        let outline: OutlineSymbol = symbol("first", "src/main.rs", 0).into();
+        assert_eq!(outline.line_start, 1, "mdkb line 0 is editor line 1");
+        assert_eq!(outline.line_end, Some(10));
+
+        let outline: OutlineSymbol = symbol("later", "src/main.rs", 41).into();
+        assert_eq!(outline.line_start, 42);
+    }
+
+    #[test]
+    fn editor_line_is_the_only_shift_applied() {
+        // Pinned so the conversion cannot quietly become a no-op or a double
+        // shift: the request side (`symbol_at_position`) already takes 1-based
+        // input, so only responses move.
+        assert_eq!(editor_line(0), 1);
+        assert_eq!(editor_line(41), 42);
+    }
+
+    #[test]
+    fn reference_locations_carry_the_caller_name_and_editor_line() {
+        let refs = to_reference_locations(vec![
+            symbol("bar", "src/lib.rs", 41),
+            symbol("baz", "src/main.rs", 6),
         ]);
-        let refs: Vec<ReferenceLocation> = json
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| {
-                Some(ReferenceLocation {
-                    file_path: v.get("file_path")?.as_str()?.to_string(),
-                    line: v.get("line_start")?.as_u64()? as u32,
-                    name: v.get("name")?.as_str()?.to_string(),
-                })
-            })
-            .collect();
+
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].file_path, "src/lib.rs");
         assert_eq!(refs[0].line, 42);
         assert_eq!(refs[1].name, "baz");
+        assert_eq!(refs[1].line, 7);
     }
 
     #[test]

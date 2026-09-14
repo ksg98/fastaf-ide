@@ -37,21 +37,28 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 	const isExpanded = () => props.expandedDirs.has(props.entry.path);
 	const children = () => props.childrenCache.get(props.entry.path) ?? [];
 
-	// Load children whenever this dir is expanded but its children aren't cached.
-	// This drives both the initial lazy-load and a reload after the cache is
-	// invalidated (manual refresh or a dir-changed watcher event) — so a
-	// create/rename/delete inside an expanded folder reflects immediately.
-	// `fetching` is a plain flag (not a signal) so it guards concurrency without
-	// re-triggering this effect.
+	/**
+	 * Load children whenever this node is expanded and the cache has no entry for
+	 * it — NOT only on the click that expanded it.
+	 *
+	 * Every invalidation depends on this. Dropping a cache key is how a mutation
+	 * (new file, delete, rename) and a `dir-changed` watcher event both ask the
+	 * subtree to reload; with the fetch living in the click handler instead, an
+	 * already-expanded folder had nothing to re-read it and either kept showing
+	 * stale rows or, once its key was deleted, rendered empty forever.
+	 */
 	let fetching = false;
 	createEffect(() => {
 		if (!props.entry.is_dir || !isExpanded()) return;
-		if (props.childrenCache.has(props.entry.path) || fetching) return;
+		if (props.childrenCache.has(props.entry.path)) return;
+		if (fetching) return;
 		fetching = true;
 		setLoading(true);
 		fb.listDirectory(props.fsRoot, props.entry.path)
 			.then((entries) => props.onChildrenLoaded(props.entry.path, entries))
-			.catch((err) => appLogger.error("app", "Failed to list directory", { path: props.entry.path, error: err }))
+			.catch((err) => {
+				appLogger.error("app", "Failed to list directory", { path: props.entry.path, error: err });
+			})
 			.finally(() => {
 				fetching = false;
 				setLoading(false);
@@ -60,7 +67,6 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 
 	const handleClick = () => {
 		if (props.entry.is_dir) {
-			// Toggle only — the effect above lazy-loads/reloads children as needed.
 			props.onToggleExpand(props.entry.path);
 		} else {
 			props.onFileOpen(props.repoPath, props.entry.path);
@@ -79,7 +85,7 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 					!props.entry.is_dir && props.entry.path === props.activePath && s.entryActive,
 					props.entry.is_ignored && s.entryIgnored,
 				)}
-				style={{ "padding-left": `${8 + props.depth * 16}px` }}
+				style={{ "padding-left": `calc(var(--row-pad-x) + ${props.depth} * var(--tree-indent))` }}
 				onClick={handleClick}
 				onContextMenu={(e) => props.onContextMenu(e, props.entry)}
 				onPointerDown={(e) => props.onPointerDragStart?.(absPath(), e)}
@@ -116,7 +122,10 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 				{/* Inline-create input for a new item inside this folder */}
 				<Show when={props.inlineCreateParent === props.entry.path}>{props.renderInlineCreate?.(props.depth + 1)}</Show>
 				<Show when={loading()}>
-					<div class={s.treeLoading} style={{ "padding-left": `${8 + (props.depth + 1) * 16}px` }}>
+					<div
+						class={s.treeLoading}
+						style={{ "padding-left": `calc(var(--row-pad-x) + ${props.depth + 1} * var(--tree-indent))` }}
+					>
 						Loading...
 					</div>
 				</Show>

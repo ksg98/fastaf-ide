@@ -13,6 +13,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { appLogger } from "./stores/appLogger";
 import { isTauri, rpc } from "./transport";
+import { randomId } from "./utils/randomId";
 
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -106,30 +107,124 @@ export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<
 let _sseSource: EventSource | null = null;
 /** Listeners registered before or after SSE connects */
 const _sseListeners = new Map<string, Set<(payload: unknown) => void>>();
+/** The `types` filter the server is applying to the live stream. */
+let _sseOpenedFor = "";
+/** The `types` the current connection's URL asked for — what an auto-reconnect resets the server to. */
+let _sseUrlTypes = "";
+/** A coalesced open is already queued. */
+let _sseOpenQueued = false;
+/** Types already wired on the *current* connection — attaching twice dispatches twice. */
+const _sseAttached = new Set<string>();
+/**
+ * Identifies this page's stream so its filter can be widened in place.
+ *
+ * Reconnecting to widen it loses every event published between the close and
+ * the new subscription: the server subscribes to the bus at connect time and
+ * replays nothing, so a `repo-changed` in that gap leaves a panel stale until
+ * something else happens to fire.
+ */
+const _sseStreamId = randomId("s");
 
-/** Get or create the shared SSE connection for browser mode */
-function ensureSse(): EventSource {
-	if (_sseSource && _sseSource.readyState !== EventSource.CLOSED) return _sseSource;
+/**
+ * Open (or reopen) the shared stream, filtered to the registered event types.
+ *
+ * The server fixes the filter at connect time, so a type registered later can
+ * only be delivered by reconnecting with a wider filter.
+ */
+function openSse(): void {
+	const types = [..._sseListeners.keys()].sort().join(",");
+	// An empty `types=` is not "send everything" — the server reads it as an empty
+	// allowlist and drops every event. Never open a stream that can receive nothing.
+	if (!types) return;
 
+	_sseSource?.close();
+	_sseAttached.clear();
+	_sseOpenedFor = types;
+	_sseUrlTypes = types;
 	const origin = typeof window !== "undefined" ? window.location.origin : "";
-	_sseSource = new EventSource(`${origin}/events`);
+	_sseSource = new EventSource(
+		`${origin}/events?types=${encodeURIComponent(types)}&stream_id=${encodeURIComponent(_sseStreamId)}`,
+	);
+
+	_sseSource.onopen = () => {
+		// An auto-reconnect replays the URL, so the server is back to the filter
+		// this connection was opened with. Anything widened since has to be
+		// re-applied, or those types stop arriving with no error anywhere.
+		if (_sseOpenedFor !== _sseUrlTypes) widenSse(_sseOpenedFor);
+	};
 
 	_sseSource.onerror = () => {
 		// EventSource auto-reconnects; just log
 		appLogger.debug("network", "SSE connection error — will auto-reconnect");
 	};
 
-	// Re-attach listeners for all registered event types
 	for (const eventType of _sseListeners.keys()) {
 		attachSseEventType(eventType);
 	}
+}
 
-	return _sseSource;
+/**
+ * Make sure the live stream covers every registered event type.
+ *
+ * Opens are coalesced onto a macrotask because startup registers a dozen types
+ * back to back; connecting per `listen()` call would trade the wide filter for a
+ * reconnect storm. Shrinking the filter is not worth a reconnect, so an unsubscribe
+ * leaves the stream as it is.
+ */
+function ensureSse(): void {
+	const live = _sseSource !== null && _sseSource.readyState !== EventSource.CLOSED;
+	const covered = new Set(_sseOpenedFor ? _sseOpenedFor.split(",") : []);
+	if (live && ![..._sseListeners.keys()].some((type) => !covered.has(type))) return;
+	if (_sseOpenQueued) return;
+
+	_sseOpenQueued = true;
+	setTimeout(() => {
+		_sseOpenQueued = false;
+		const types = [..._sseListeners.keys()].sort().join(",");
+		if (_sseSource !== null && _sseSource.readyState !== EventSource.CLOSED && types) {
+			// Widen the live stream instead of replacing it: the replacement
+			// subscribes only after the old one is gone, and nothing covers that gap.
+			widenSse(types);
+			return;
+		}
+		openSse();
+	}, 0);
+}
+
+/**
+ * Ask the server to apply `types` to this page's live stream.
+ *
+ * A 404 means the server is not tracking this stream (it ended, or it has more
+ * live streams than it tracks), so the only way to widen is the lossy one.
+ */
+function widenSse(types: string): void {
+	const origin = typeof window !== "undefined" ? window.location.origin : "";
+	fetch(`${origin}/events/types`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ stream_id: _sseStreamId, types: types.split(",") }),
+	})
+		.then((response) => {
+			if (!response.ok) {
+				appLogger.debug("network", `SSE filter update refused (${response.status}) — reconnecting instead`);
+				openSse();
+				return;
+			}
+			_sseOpenedFor = types;
+			// The stream was opened before these types existed, so nothing is
+			// listening for them yet on this connection.
+			for (const eventType of _sseListeners.keys()) attachSseEventType(eventType);
+		})
+		.catch((err) => {
+			appLogger.debug("network", `SSE filter update failed (${err}) — reconnecting instead`);
+			openSse();
+		});
 }
 
 /** Attach a native SSE addEventListener for a given event type */
 function attachSseEventType(eventType: string) {
-	if (!_sseSource) return;
+	if (!_sseSource || _sseAttached.has(eventType)) return;
+	_sseAttached.add(eventType);
 	_sseSource.addEventListener(eventType, ((sseEvent: MessageEvent) => {
 		const listeners = _sseListeners.get(eventType);
 		if (!listeners) return;
@@ -145,6 +240,20 @@ function attachSseEventType(eventType: string) {
 		}
 		for (const handler of listeners) handler(payload);
 	}) as EventListener);
+}
+
+/**
+ * Dispatch an event to browser-mode `listen()` subscribers without a round-trip.
+ *
+ * For a command whose desktop half answers over `AppHandle.emit` while its HTTP
+ * half answers in the response body, this republishes the body on the same event
+ * name so subscribers stay transport-agnostic. In Tauri mode the browser registry
+ * is empty (listen() goes to the Tauri bridge), so this is inert.
+ */
+export function emitLocalEvent(event: string, payload: unknown): void {
+	const listeners = _sseListeners.get(event);
+	if (!listeners) return;
+	for (const handler of listeners) handler(payload);
 }
 
 export function listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<() => void> {
@@ -171,16 +280,12 @@ export function listen<T>(event: string, handler: (event: { payload: T }) => voi
 	// Browser mode: SSE via shared EventSource
 	const wrappedHandler = (payload: unknown) => handler({ payload: payload as T });
 
-	if (!_sseListeners.has(event)) {
-		_sseListeners.set(event, new Set());
-		// If SSE is already connected, attach this new event type
-		if (_sseSource && _sseSource.readyState !== EventSource.CLOSED) {
-			attachSseEventType(event);
-		}
-	}
+	if (!_sseListeners.has(event)) _sseListeners.set(event, new Set());
 	_sseListeners.get(event)!.add(wrappedHandler);
 
-	// Ensure SSE connection exists
+	// Connect, or reconnect if this type is outside the live filter. `openSse`
+	// owns attaching — attaching here would not help, since the server never
+	// sends a type the stream did not ask for.
 	ensureSse();
 
 	return Promise.resolve(() => {

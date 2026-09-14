@@ -19,6 +19,7 @@ const OS_NOTIFICATION_TITLES: Record<NotificationSound, string> = {
 	completion: "Task completed",
 	warning: "Warning",
 	info: "Info",
+	attention: "Agent needs you",
 };
 
 let osNotificationPermission: NotificationPermission | null = null;
@@ -134,6 +135,22 @@ function createNotificationsStore() {
 		setAudioDevice(device: string | null): void {
 			setState("config", "audio_device", device);
 			notificationManager.updateConfig({ audio_device: device });
+			saveConfig(state.config);
+		},
+
+		/** Silence (or restore) the completion chime for MCP/HTTP-created sessions.
+		 *  Not forwarded to notificationManager: this is a per-terminal policy applied
+		 *  at the completion call site, not a property of the audio playback. */
+		setSilenceRemoteCompletions(silence: boolean): void {
+			setState("config", "silence_remote_completions", silence);
+			saveConfig(state.config);
+		},
+
+		/** Mirror toasts into the toolbar bell, or leave them transient.
+		 *  Not forwarded to notificationManager: this is about the visual list,
+		 *  not about audio. */
+		setToastsInBell(mirror: boolean): void {
+			setState("config", "toasts_in_bell", mirror);
 			saveConfig(state.config);
 		},
 

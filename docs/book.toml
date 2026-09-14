@@ -11,5 +11,13 @@ build-dir = "book"
 [output.html]
 site-url = "/docs/"
 default-theme = "light"
-git-repository-url = "https://github.com/sstraus/tuicommander" 
+git-repository-url = "https://github.com/sstraus/tuicommander"
 additional-css = ["theme/custom.css"]
+additional-js = ["theme/search.js"]
+
+# Built-in elasticlunr search is replaced by Pagefind (see theme/search.js and the
+# `pagefind` step in .github/workflows/website.yml). Rationale: the elasticlunr index
+# was a single 4.2 MB blob downloaded on first search; Pagefind ships a chunked index
+# and gives us an always-visible search box with live sub-results.
+[output.html.search]
+enable = false

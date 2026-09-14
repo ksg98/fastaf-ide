@@ -21,6 +21,7 @@ dist
 dist-ssr
 dist-release
 coverage
+lcov.info
 *.local
 
 # Editor directories and files
@@ -47,7 +48,9 @@ benchmarks
 CLAUDE.md
 .mdkb
 scripts/*
+!scripts/build-docs.sh
 !scripts/dev-install.sh
+!scripts/dev-server.mjs
 !scripts/generate-release-notes.sh
 !scripts/report-frontend-bundles.mjs
 !scripts/check-frontend-cycles.mjs
@@ -89,3 +92,11 @@ PR.md
 
 # Scratch worktree consolidation / temp working dir (local only)
 .tmp/
+.screenshots/
+
+# Python bytecode from the terminal-stress harness
+__pycache__/
+*.pyc
+.wiz/
+.codex/**
+.mdkb/**

@@ -5,10 +5,32 @@
 export type Platform = "macos" | "windows" | "linux" | "unknown";
 
 /**
+ * Memoised answer. The platform cannot change while the app runs, and the
+ * keystroke path asks on every key — so the UA string is parsed exactly once.
+ */
+let cachedPlatform: Platform | null = null;
+
+/**
+ * Drop the memoised platform. Only tests need this: they swap
+ * `navigator.platform` between cases, which the cache would otherwise hide.
+ */
+export function resetPlatformCache(): void {
+	cachedPlatform = null;
+}
+
+/**
  * Detect the current platform
  * Uses navigator.platform as it's synchronous and works in Tauri webview
  */
 export function detectPlatform(): Platform {
+	if (cachedPlatform !== null) {
+		return cachedPlatform;
+	}
+	cachedPlatform = computePlatform();
+	return cachedPlatform;
+}
+
+function computePlatform(): Platform {
 	const platform = navigator.platform.toLowerCase();
 
 	if (platform.includes("mac")) {

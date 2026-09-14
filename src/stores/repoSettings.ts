@@ -1,5 +1,6 @@
 import { createStore, reconcile } from "solid-js/store";
 import { invoke } from "../invoke";
+import { toCamelKeys, toSnakeKeys } from "../utils/caseKeys";
 import { appLogger } from "./appLogger";
 import type {
 	AutoDeleteOnPrClose,
@@ -28,6 +29,10 @@ export interface RepoSettings {
 	/** null = inherit from repoDefaultsStore */
 	archiveScript: string | null;
 	color: string;
+	/** Gather every worktree of this repo into one consolidated screen (#e767).
+	 *  Repo-specific, not inheritable — it describes how you want to look at THIS
+	 *  repo, and a global default would consolidate repos you never asked about. */
+	autoConsolidateWorktrees: boolean;
 	/** null = inherit global default (true on macOS). When false: left-Option sends composition chars instead of meta sequences */
 	terminalMetaHotkeys: boolean | null;
 	/** null = inherit from repoDefaultsStore */
@@ -50,6 +55,11 @@ export interface RepoSettings {
 	autoDeleteOnPrClose: AutoDeleteOnPrClose | null;
 	/** Allowlist of upstream MCP server names for this repo (null = all servers) */
 	mcpUpstreams: string[] | null;
+	// DEFERRED (2026-08-30) — `terminalMetaHotkeys` and the three `prHide*` fields
+	// below are override slots with no writer: no UI sets them, and `config.rs`
+	// has no matching field on `RepoSettingsEntry`, so a value set here would be
+	// dropped by the backend. Either wire them up or delete them; leaving them is
+	// what let the camelCase persistence bug hide.
 	/** null = inherit from settingsStore (global) */
 	prHideDrafts: boolean | null;
 	/** null = inherit from settingsStore (global) */
@@ -161,12 +171,60 @@ interface RepoSettingsState {
 
 const LEGACY_STORAGE_KEY = "tui-commander-repo-settings";
 
-/** Persist settings to Rust backend (fire-and-forget) */
+/**
+ * Persist settings to Rust backend (fire-and-forget).
+ *
+ * The keys are renamed on the way out. `RepoSettingsEntry` in `config.rs` is
+ * snake_case and carries `#[serde(default)]` on every field, so a camelCase key
+ * is not an error — serde drops it and the field reads as "the user set
+ * nothing". Sending the store shape verbatim therefore persisted only `path` and
+ * `color`, the two names that happen to spell the same in both conventions, and
+ * every per-repo override was lost on restart while looking correct until then.
+ */
 function saveSettings(settings: Record<string, RepoSettings>): void {
-	invoke("save_repo_settings", { config: { repos: settings } }).catch((err) =>
+	const repos: Record<string, unknown> = {};
+	for (const [path, entry] of Object.entries(settings)) repos[path] = toSnakeKeys(entry);
+	invoke("save_repo_settings", { config: { repos } }).catch((err) =>
 		appLogger.error("config", "Failed to save repo settings", err),
 	);
 }
+
+/** An entry with no overrides set — every field present, every override null. */
+function blankSettings(path: string, displayName: string): RepoSettings {
+	return {
+		path,
+		displayName,
+		color: "",
+		autoConsolidateWorktrees: false,
+		branchLabels: {},
+		...OVERRIDABLE_NULL_DEFAULTS,
+	};
+}
+
+/** Wire shape -> store shape, for what `load_repo_settings` returns. Layered over
+ *  a blank entry so a key the backend omits (`branch_labels` and `mcp_upstreams`
+ *  are skipped when empty) still arrives as its default rather than undefined. */
+function fromWire(repos: Record<string, Record<string, unknown>>): Record<string, RepoSettings> {
+	const out: Record<string, RepoSettings> = {};
+	for (const [path, entry] of Object.entries(repos)) {
+		out[path] = { ...blankSettings(path, ""), ...toCamelKeys(entry) } as RepoSettings;
+	}
+	return out;
+}
+
+/**
+ * Per-field resolution of the three-tier chain (per-repo > .tuic.json > global).
+ * One resolver per effective field, each reading only the signals its own field
+ * needs — so a caller that wants `terminalMetaHotkeys` does not subscribe to the
+ * ~50 signals the whole object touches. `getEffective` is built from this table,
+ * so the two entry points can never disagree.
+ */
+type EffectiveResolvers = {
+	[K in keyof EffectiveRepoSettings]: (
+		settings: RepoSettings,
+		local: () => RepoLocalConfig | null | undefined,
+	) => EffectiveRepoSettings[K];
+};
 
 /** Create repository settings store */
 function createRepoSettingsStore() {
@@ -176,6 +234,44 @@ function createRepoSettingsStore() {
 		activeRepoPath: null,
 	});
 
+	const resolvers: EffectiveResolvers = {
+		path: (s) => s.path,
+		displayName: (s) => s.displayName,
+		color: (s) => s.color,
+		baseBranch: (s, local) => s.baseBranch ?? local()?.base_branch ?? repoDefaultsStore.state.baseBranch,
+		copyIgnoredFiles: (s, local) =>
+			s.copyIgnoredFiles ?? local()?.copy_ignored_files ?? repoDefaultsStore.state.copyIgnoredFiles,
+		copyUntrackedFiles: (s, local) =>
+			s.copyUntrackedFiles ?? local()?.copy_untracked_files ?? repoDefaultsStore.state.copyUntrackedFiles,
+		// SECURITY: .tuic.json scripts are NOT merged here — a malicious repo could
+		// inject arbitrary shell commands via committed .tuic.json. Scripts must come
+		// from per-repo user settings or global defaults only. A future trust-on-first-use
+		// (TOFU) prompt will re-enable .tuic.json script inheritance.
+		setupScript: (s) => s.setupScript ?? repoDefaultsStore.state.setupScript,
+		runScript: (s) => s.runScript ?? repoDefaultsStore.state.runScript,
+		archiveScript: (s) => s.archiveScript ?? repoDefaultsStore.state.archiveScript,
+		terminalMetaHotkeys: (s) => s.terminalMetaHotkeys ?? true,
+		worktreeStorage: (s, local) =>
+			s.worktreeStorage ?? local()?.worktree_storage ?? repoDefaultsStore.state.worktreeStorage,
+		promptOnCreate: (s) => s.promptOnCreate ?? repoDefaultsStore.state.promptOnCreate,
+		deleteBranchOnRemove: (s, local) =>
+			s.deleteBranchOnRemove ?? local()?.delete_branch_on_remove ?? repoDefaultsStore.state.deleteBranchOnRemove,
+		autoArchiveMerged: (s, local) =>
+			s.autoArchiveMerged ?? local()?.auto_archive_merged ?? repoDefaultsStore.state.autoArchiveMerged,
+		orphanCleanup: (s, local) => s.orphanCleanup ?? local()?.orphan_cleanup ?? repoDefaultsStore.state.orphanCleanup,
+		prMergeStrategy: (s, local) =>
+			s.prMergeStrategy ?? local()?.pr_merge_strategy ?? repoDefaultsStore.state.prMergeStrategy,
+		afterMerge: (s, local) => s.afterMerge ?? local()?.after_merge ?? repoDefaultsStore.state.afterMerge,
+		autoFetchIntervalMinutes: (s) => s.autoFetchIntervalMinutes ?? repoDefaultsStore.state.autoFetchIntervalMinutes,
+		autoDeleteOnPrClose: (s, local) =>
+			s.autoDeleteOnPrClose ?? local()?.auto_delete_on_pr_close ?? repoDefaultsStore.state.autoDeleteOnPrClose,
+		mcpUpstreams: (s, local) => s.mcpUpstreams ?? local()?.mcp_upstreams ?? null,
+		prHideDrafts: (s) => s.prHideDrafts ?? settingsStore.state.prHideDrafts,
+		prHideConflicting: (s) => s.prHideConflicting ?? settingsStore.state.prHideConflicting,
+		prHideCiFailing: (s) => s.prHideCiFailing ?? settingsStore.state.prHideCiFailing,
+		branchLabels: (s) => s.branchLabels ?? {},
+	};
+
 	const actions = {
 		/** Load settings from Rust backend; migrate from localStorage on first run */
 		async hydrate(): Promise<void> {
@@ -184,17 +280,22 @@ function createRepoSettingsStore() {
 				const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
 				if (legacy) {
 					try {
-						const parsed = JSON.parse(legacy);
-						await invoke("save_repo_settings", { config: { repos: parsed } });
+						// localStorage held the store shape, so it needs the same rename as
+						// a normal save — otherwise the migration writes an entry the
+						// backend reads as empty and the settings are lost for good.
+						const parsed = JSON.parse(legacy) as Record<string, RepoSettings>;
+						const repos: Record<string, unknown> = {};
+						for (const [path, entry] of Object.entries(parsed)) repos[path] = toSnakeKeys(entry);
+						await invoke("save_repo_settings", { config: { repos } });
 					} catch {
 						/* ignore corrupt legacy data */
 					}
 					localStorage.removeItem(LEGACY_STORAGE_KEY);
 				}
 
-				const loaded = await invoke<{ repos?: Record<string, RepoSettings> }>("load_repo_settings");
+				const loaded = await invoke<{ repos?: Record<string, Record<string, unknown>> }>("load_repo_settings");
 				if (loaded?.repos) {
-					setState("settings", loaded.repos);
+					setState("settings", fromWire(loaded.repos));
 				}
 			} catch (err) {
 				appLogger.debug("config", "Failed to hydrate repo settings", err);
@@ -212,13 +313,7 @@ function createRepoSettingsStore() {
 				return state.settings[path];
 			}
 
-			const newSettings: RepoSettings = {
-				path,
-				displayName,
-				color: "",
-				branchLabels: {},
-				...OVERRIDABLE_NULL_DEFAULTS,
-			};
+			const newSettings = blankSettings(path, displayName);
 
 			setState("settings", path, newSettings);
 			saveSettings(state.settings);
@@ -242,40 +337,50 @@ function createRepoSettingsStore() {
 			const settings = state.settings[path];
 			if (!settings) return undefined;
 
-			const local = state.localConfigs[path];
-			const defaults = repoDefaultsStore.state;
+			const local = () => state.localConfigs[path];
+			// Spelled out rather than looped so this stays one object literal with no
+			// intermediate arrays. The resolution rules live only in `resolvers`, and
+			// the literal must satisfy EffectiveRepoSettings, so neither can drift.
 			return {
-				path: settings.path,
-				displayName: settings.displayName,
-				color: settings.color,
-				baseBranch: settings.baseBranch ?? local?.base_branch ?? defaults.baseBranch,
-				copyIgnoredFiles: settings.copyIgnoredFiles ?? local?.copy_ignored_files ?? defaults.copyIgnoredFiles,
-				copyUntrackedFiles: settings.copyUntrackedFiles ?? local?.copy_untracked_files ?? defaults.copyUntrackedFiles,
-				// SECURITY: .tuic.json scripts are NOT merged here — a malicious repo could
-				// inject arbitrary shell commands via committed .tuic.json. Scripts must come
-				// from per-repo user settings or global defaults only. A future trust-on-first-use
-				// (TOFU) prompt will re-enable .tuic.json script inheritance.
-				setupScript: settings.setupScript ?? defaults.setupScript,
-				runScript: settings.runScript ?? defaults.runScript,
-				archiveScript: settings.archiveScript ?? defaults.archiveScript,
-				terminalMetaHotkeys: settings.terminalMetaHotkeys ?? true,
-				worktreeStorage: settings.worktreeStorage ?? local?.worktree_storage ?? defaults.worktreeStorage,
-				promptOnCreate: settings.promptOnCreate ?? defaults.promptOnCreate,
-				deleteBranchOnRemove:
-					settings.deleteBranchOnRemove ?? local?.delete_branch_on_remove ?? defaults.deleteBranchOnRemove,
-				autoArchiveMerged: settings.autoArchiveMerged ?? local?.auto_archive_merged ?? defaults.autoArchiveMerged,
-				orphanCleanup: settings.orphanCleanup ?? local?.orphan_cleanup ?? defaults.orphanCleanup,
-				prMergeStrategy: settings.prMergeStrategy ?? local?.pr_merge_strategy ?? defaults.prMergeStrategy,
-				afterMerge: settings.afterMerge ?? local?.after_merge ?? defaults.afterMerge,
-				autoFetchIntervalMinutes: settings.autoFetchIntervalMinutes ?? defaults.autoFetchIntervalMinutes,
-				autoDeleteOnPrClose:
-					settings.autoDeleteOnPrClose ?? local?.auto_delete_on_pr_close ?? defaults.autoDeleteOnPrClose,
-				mcpUpstreams: settings.mcpUpstreams ?? local?.mcp_upstreams ?? null,
-				prHideDrafts: settings.prHideDrafts ?? settingsStore.state.prHideDrafts,
-				prHideConflicting: settings.prHideConflicting ?? settingsStore.state.prHideConflicting,
-				prHideCiFailing: settings.prHideCiFailing ?? settingsStore.state.prHideCiFailing,
-				branchLabels: settings.branchLabels ?? {},
+				path: resolvers.path(settings, local),
+				displayName: resolvers.displayName(settings, local),
+				color: resolvers.color(settings, local),
+				baseBranch: resolvers.baseBranch(settings, local),
+				copyIgnoredFiles: resolvers.copyIgnoredFiles(settings, local),
+				copyUntrackedFiles: resolvers.copyUntrackedFiles(settings, local),
+				setupScript: resolvers.setupScript(settings, local),
+				runScript: resolvers.runScript(settings, local),
+				archiveScript: resolvers.archiveScript(settings, local),
+				terminalMetaHotkeys: resolvers.terminalMetaHotkeys(settings, local),
+				worktreeStorage: resolvers.worktreeStorage(settings, local),
+				promptOnCreate: resolvers.promptOnCreate(settings, local),
+				deleteBranchOnRemove: resolvers.deleteBranchOnRemove(settings, local),
+				autoArchiveMerged: resolvers.autoArchiveMerged(settings, local),
+				orphanCleanup: resolvers.orphanCleanup(settings, local),
+				prMergeStrategy: resolvers.prMergeStrategy(settings, local),
+				afterMerge: resolvers.afterMerge(settings, local),
+				autoFetchIntervalMinutes: resolvers.autoFetchIntervalMinutes(settings, local),
+				autoDeleteOnPrClose: resolvers.autoDeleteOnPrClose(settings, local),
+				mcpUpstreams: resolvers.mcpUpstreams(settings, local),
+				prHideDrafts: resolvers.prHideDrafts(settings, local),
+				prHideConflicting: resolvers.prHideConflicting(settings, local),
+				prHideCiFailing: resolvers.prHideCiFailing(settings, local),
+				branchLabels: resolvers.branchLabels(settings, local),
 			};
+		},
+
+		/**
+		 * Resolve a single effective field. Prefer this over `getEffective` in a
+		 * reactive scope: it subscribes only to the signals that field's own
+		 * inheritance chain reads, instead of all ~50 across the four stores.
+		 */
+		getEffectiveField<K extends keyof EffectiveRepoSettings>(
+			path: string,
+			field: K,
+		): EffectiveRepoSettings[K] | undefined {
+			const settings = state.settings[path];
+			if (!settings) return undefined;
+			return resolvers[field](settings, () => state.localConfigs[path]);
 		},
 
 		/** Update settings for a repository */

@@ -27,13 +27,18 @@ import { isTauri } from "../transport";
 import { type AppInitDeps, initApp } from "./useAppInit";
 import { startAutoFetch } from "./useAutoFetch";
 
-type InitOptions = Omit<AppInitDeps, "stores" | "applyPlatformClass" | "onCloseRequested">;
+// `registerRepo` is omitted too: it is supplied below from `openRepoPath`, so the
+// caller passes one repo-registration function and both consumers (the deep link
+// and the parked-tab toast) share it.
+type InitOptions = Omit<AppInitDeps, "stores" | "applyPlatformClass" | "onCloseRequested" | "registerRepo">;
 
 export type AppBootstrapOptions = InitOptions & {
 	detectAgents: () => Promise<unknown>;
 	restoreDetachedPanels: () => void;
 	setWhatsNewVersion: (version: string) => void;
 	openSettings: (tab?: string) => void;
+	/** Add a repo by path — wired to the deep link `tuic://open-repo` (`tuic <dir>`). */
+	openRepoPath: (path: string) => Promise<void>;
 	confirm: (options: {
 		title: string;
 		message: string;
@@ -43,7 +48,7 @@ export type AppBootstrapOptions = InitOptions & {
 	}) => Promise<boolean>;
 };
 
-async function hydrateStores(detectAgents: () => Promise<unknown>): Promise<void> {
+async function hydrateStores(): Promise<void> {
 	const results = await Promise.allSettled([
 		repositoriesStore.hydrate(),
 		uiStore.hydrate(),
@@ -57,7 +62,6 @@ async function hydrateStores(detectAgents: () => Promise<unknown>): Promise<void
 		keybindingsStore.hydrate(),
 		agentConfigsStore.hydrate(),
 		providerRegistryStore.hydrate(),
-		detectAgents(),
 	]);
 	const failures = results.filter((result) => result.status === "rejected");
 	if (failures.length > 0) {
@@ -117,12 +121,21 @@ function offerCliInstall(confirm: AppBootstrapOptions["confirm"]): void {
 
 /** Initializes the main window and starts post-hydration native integrations. */
 export async function runAppBootstrap(options: AppBootstrapOptions): Promise<void> {
-	const { detectAgents, restoreDetachedPanels, setWhatsNewVersion, openSettings, confirm, ...initOptions } = options;
+	const {
+		detectAgents,
+		restoreDetachedPanels,
+		setWhatsNewVersion,
+		openSettings,
+		openRepoPath,
+		confirm,
+		...initOptions
+	} = options;
 
 	await initApp({
 		...initOptions,
+		registerRepo: openRepoPath,
 		stores: {
-			hydrate: () => hydrateStores(detectAgents),
+			hydrate: hydrateStores,
 			startPolling: githubStore.startPolling,
 			stopPolling: githubStore.stopPolling,
 			startAutoFetch,
@@ -145,6 +158,8 @@ export async function runAppBootstrap(options: AppBootstrapOptions): Promise<voi
 		document.getElementById("splash")?.remove();
 	});
 
+	detectAgents().catch((error) => appLogger.debug("app", "Agent detection failed", error));
+
 	restoreDetachedPanels();
 	checkForUpdates();
 	checkWhatsNew(setWhatsNewVersion);
@@ -153,6 +168,7 @@ export async function runAppBootstrap(options: AppBootstrapOptions): Promise<voi
 		openSettings,
 		confirm: (title, message) => confirm({ title, message, kind: "warning" }),
 		onInstallError: (message) => appLogger.error("plugin", message),
+		openRepoPath,
 	});
 }
 

@@ -545,7 +545,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["status"], "needs_approval");
         assert_eq!(parsed["reason"], "force push");
-        assert!(parsed["action"].as_str().unwrap().len() > 0);
+        assert!(!parsed["action"].as_str().unwrap().is_empty());
     }
 
     #[test]

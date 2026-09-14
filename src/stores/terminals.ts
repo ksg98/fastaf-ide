@@ -5,6 +5,7 @@ import { rpc } from "../transport";
 import type { TerminalMatch } from "../types";
 import { isPerfDebug } from "../utils/perfDebug";
 import { appLogger } from "./appLogger";
+import { activatePaneExclusively, registerPaneDeactivator } from "./tabManager";
 
 /** Type of input being awaited */
 export type AwaitingInputType = "question" | "error" | null;
@@ -47,6 +48,20 @@ export interface TerminalData {
 	name: string;
 	nameIsCustom: boolean; // When true, OSC/status-line title changes are ignored
 	cwd: string | null;
+	/**
+	 * The registered repo that owns this terminal, resolved from `cwd`.
+	 *
+	 * The sidebar renders a terminal by its membership in
+	 * `repos[X].branches[Y].terminals[]`, which made that array the ONLY record of
+	 * a terminal's repo — so a wrong placement was unrecoverable and a dangling id
+	 * could never be reconciled. This field is the record; the arrays are a display
+	 * index derived from it.
+	 *
+	 * `null` means no registered repo owns the cwd. Such a terminal is parked in
+	 * the active repo so it stays visible, and `reconcileTerminalOwnership` moves it
+	 * home as soon as a repo claims the path.
+	 */
+	repoPath: string | null;
 	awaitingInput: AwaitingInputType;
 	awaitingInputConfident: boolean; // High-confidence detection — don't clear on idle→busy
 	activity: boolean;
@@ -57,6 +72,8 @@ export interface TerminalData {
 	shellStateRevision: number;
 	agentState: AgentLifecycleState;
 	backgroundWork: boolean;
+	queuedCommands: number; // Compose-panel commands waiting for the agent's next idle window
+	completionNotified: boolean; // Current busy cycle already produced its completion notification
 	agentType: AgentType | null; // Detected foreground agent process (e.g. "claude")
 	agentLaunchCommand: string | null; // Run-config command used to launch (e.g. "c"), for accurate resume
 	pendingResumeCommand: string | null; // Set at restore time, consumed on first shell idle
@@ -65,11 +82,12 @@ export interface TerminalData {
 	lastDataAt: number | null; // Timestamp of last PTY output
 	idleSince: number | null; // Timestamp when shellState transitioned to idle
 	lastPrompt: string | null; // Last relevant user prompt (>= 10 words), set by Rust
+	ptyDescription: string | null; // Orchestrator-supplied description of assigned PTY work
 	agentIntent: string | null; // LLM-declared intent via intent: token
 	currentTask: string | null; // Current agent task from status-line parsing (e.g. "Reading files")
 	activeSubTasks: number; // Count of running sub-agents/background tasks from ›› status line
 	isRemote: boolean; // Created via HTTP/MCP (not locally by the UI)
-	agentSessionId: string | null; // Agent session ID for session-specific resume (claude, gemini, codex)
+	agentSessionId: string | null; // Discovered agent session ID for exact resume (claude, gemini, codex, grok)
 	tuicSession: string | null; // Stable tab UUID — injected as TUIC_SESSION env var, persists across restarts
 	suggestedActions: string[] | null; // Follow-up suggestions from suggest: token
 	suggestDismissed: boolean; // true after user dismissed/selected/typed — resets on shell-state:idle
@@ -93,6 +111,8 @@ type TerminalCreateData = Omit<
 	| "shellStateRevision"
 	| "agentState"
 	| "backgroundWork"
+	| "queuedCommands"
+	| "completionNotified"
 	| "nameIsCustom"
 	| "agentType"
 	| "agentLaunchCommand"
@@ -102,6 +122,7 @@ type TerminalCreateData = Omit<
 	| "lastDataAt"
 	| "idleSince"
 	| "lastPrompt"
+	| "ptyDescription"
 	| "agentIntent"
 	| "currentTask"
 	| "activeSubTasks"
@@ -118,13 +139,16 @@ type TerminalCreateData = Omit<
 	| "userPromptLines"
 	| "alias"
 	| "standby"
+	| "repoPath"
 > & {
+	repoPath?: string | null;
 	tuicSession?: string | null;
 	isRemote?: boolean;
 	nameIsCustom?: boolean;
 	agentType?: AgentType | null;
 	agentSessionId?: string | null;
 	agentLaunchCommand?: string | null;
+	ptyDescription?: string | null;
 };
 
 /** Terminal component ref interface */
@@ -181,14 +205,6 @@ interface TerminalsStoreState {
 /** Debounce hold time: how long isBusy() stays true after shellState goes idle */
 const BUSY_HOLD_MS = 2000;
 
-/** Once a confident question was last (re)detected this long ago while the
- *  terminal is still busy (producing output), treat the prompt as answered and
- *  clear the awaiting badge. Ink menus repaint and re-emit the question, which
- *  refreshes this timer; a statically-waiting prompt leaves the terminal idle,
- *  so it is never cleared. Backstops the user-input clear (Terminal.tsx) for
- *  inputs that don't go through a real keystroke (channel/MCP prompts). */
-const SUSTAINED_BUSY_CLEAR_MS = 2500;
-
 /** Create the terminals store */
 function createTerminalsStore() {
 	const [state, setState] = createStore<TerminalsStoreState>({
@@ -210,15 +226,6 @@ function createTerminalsStore() {
 	const busySinceMap = new Map<string, number>();
 	const busyDurationMap = new Map<string, number>();
 	const cooldownTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	// Per-terminal timer clearing a stale confident question — see SUSTAINED_BUSY_CLEAR_MS.
-	const staleQuestionTimers = new Map<string, ReturnType<typeof setTimeout>>();
-	function cancelStaleQuestionTimer(id: string): void {
-		const t = staleQuestionTimers.get(id);
-		if (t != null) {
-			clearTimeout(t);
-			staleQuestionTimers.delete(id);
-		}
-	}
 	const busyToIdleCallbacks: Array<(id: string, durationMs: number) => void> = [];
 	const idleToBusyCallbacks: Array<(id: string) => void> = [];
 	const onRemoveCallbacks: Array<(id: string) => void> = [];
@@ -303,8 +310,9 @@ function createTerminalsStore() {
 			// like an Ink "Enter to select" menu stays awaiting even while the TUI repaints
 			// (cursor blink, animation, scrollbar) — those repaints oscillate idle→busy and
 			// would otherwise wrongly clear a genuine interactive prompt. Confident questions
-			// instead clear on real user-input (Terminal.tsx), process exit (below), or
-			// sustained busy with no re-detection (setAwaitingInput / SUSTAINED_BUSY_CLEAR_MS).
+			// instead clear on real user-input (Terminal.tsx) or process exit (below) —
+			// the same policy the backend applies in state.rs (`question_confident` is
+			// sticky across busy status-line ticks, cleared by the user-input arm).
 			if (prev === "idle" && state.terminals[id]?.awaitingInput && !state.terminals[id]?.awaitingInputConfident) {
 				setState("terminals", id, "awaitingInput", null);
 				setState("terminals", id, "awaitingInputConfident", false);
@@ -380,7 +388,6 @@ function createTerminalsStore() {
 		);
 		busySinceMap.delete(id);
 		busyDurationMap.delete(id);
-		cancelStaleQuestionTimer(id);
 	}
 
 	const actions = {
@@ -397,6 +404,8 @@ function createTerminalsStore() {
 				shellStateRevision: 0,
 				agentState: null,
 				backgroundWork: false,
+				queuedCommands: 0,
+				completionNotified: false,
 				nameIsCustom: false,
 				agentType: null,
 				agentLaunchCommand: null,
@@ -406,6 +415,7 @@ function createTerminalsStore() {
 				lastDataAt: null,
 				idleSince: null,
 				lastPrompt: null,
+				ptyDescription: null,
 				agentIntent: null,
 				currentTask: null,
 				activeSubTasks: 0,
@@ -422,6 +432,7 @@ function createTerminalsStore() {
 				userPromptLines: [],
 				alias: null,
 				standby: false,
+				repoPath: null,
 				...data,
 			});
 			if (data.sessionId) sessionToTerminal.set(data.sessionId, id);
@@ -439,6 +450,8 @@ function createTerminalsStore() {
 				shellStateRevision: 0,
 				agentState: null,
 				backgroundWork: false,
+				queuedCommands: 0,
+				completionNotified: false,
 				nameIsCustom: false,
 				agentType: null,
 				agentLaunchCommand: null,
@@ -448,6 +461,7 @@ function createTerminalsStore() {
 				lastDataAt: null,
 				idleSince: null,
 				lastPrompt: null,
+				ptyDescription: null,
 				agentIntent: null,
 				currentTask: null,
 				activeSubTasks: 0,
@@ -464,6 +478,7 @@ function createTerminalsStore() {
 				userPromptLines: [],
 				alias: null,
 				standby: false,
+				repoPath: null,
 				...data,
 			});
 			if (data.sessionId) sessionToTerminal.set(data.sessionId, id);
@@ -514,6 +529,10 @@ function createTerminalsStore() {
 			const prevId = state.activeId;
 			batch(() => {
 				if (id) {
+					// The terminal pane is now the only one showing — see
+					// activatePaneExclusively. Without this, opening a terminal on top of
+					// an active editor/diff/markdown tab left both panes rendered.
+					activatePaneExclusively("terminals");
 					setState("terminals", id, "activity", false);
 					setState("terminals", id, "unseen", false);
 					setState("lastActiveId", id);
@@ -575,15 +594,23 @@ function createTerminalsStore() {
 						// after it can no longer appear in the next session-list snapshot.
 						setState("terminals", id, "agentState", null);
 						setState("terminals", id, "backgroundWork", false);
+						// The backend drops the queue with the session; a lingering count
+						// would offer to clear commands that no longer exist.
+						setState("terminals", id, "queuedCommands", 0);
 					}
 				}
 				setState("terminals", id, data);
 			});
-			// Sync display name to backend so PWA session list can show it
+			// Sync display name and its origin so reconnect can distinguish a
+			// user-protected rename from a transient OSC/intent title.
 			if ("name" in data) {
 				const sessionId = state.terminals[id]?.sessionId;
 				if (sessionId) {
-					rpc("set_session_name", { sessionId, name: data.name ?? null }).catch(() => {});
+					rpc("set_session_name", {
+						sessionId,
+						name: data.name ?? null,
+						isCustom: state.terminals[id]?.nameIsCustom ?? false,
+					}).catch(() => {});
 				}
 			}
 		},
@@ -597,10 +624,23 @@ function createTerminalsStore() {
 			setState("terminals", id, "sessionId", sessionId);
 		},
 
+		/** Record the repo that owns this terminal (null = no registered repo does).
+		 *  Set from the resolver at assignment time; never from the focused repo. */
+		setRepoPath(id: string, repoPath: string | null): void {
+			if (!has(id)) return;
+			setState("terminals", id, "repoPath", repoPath);
+		},
+
 		/** Update last relevant user prompt */
 		setLastPrompt(id: string, prompt: string | null): void {
 			if (!has(id)) return;
 			setState("terminals", id, "lastPrompt", prompt);
+		},
+
+		/** Update the orchestrator-supplied PTY task description. */
+		setPtyDescription(id: string, description: string | null): void {
+			if (!has(id)) return;
+			setState("terminals", id, "ptyDescription", description);
 		},
 
 		/** Set suggested follow-up actions (timer-free — overlay handles visibility timeout) */
@@ -715,39 +755,25 @@ function createTerminalsStore() {
 			setState("terminals", id, "fontSize", fontSize);
 		},
 
-		/** Set terminal awaiting input state */
+		/** Set terminal awaiting input state.
+		 *
+		 *  A confident question is sticky: it is NOT expired by a timer. An Ink
+		 *  dialog repaints (spinner, cursor) while it waits for an answer, so
+		 *  "the terminal is still producing output" does not mean "the prompt was
+		 *  answered". The answer itself is the signal — `user-input` (Terminal.tsx),
+		 *  which also covers channel/MCP writes because they reach the PTY through
+		 *  the same path — plus process exit and explicit clearAwaitingInput. */
 		setAwaitingInput(id: string, type: AwaitingInputType, confident = false): void {
 			if (!has(id)) return;
 			batch(() => {
 				setState("terminals", id, "awaitingInput", type);
 				setState("terminals", id, "awaitingInputConfident", confident);
 			});
-			// Arm/refresh the sustained-busy clear for confident questions. Each fresh
-			// detection (e.g. an Ink menu repaint) refreshes the timer; if detections
-			// stop while the terminal keeps producing output, the prompt was answered
-			// and the badge would otherwise stay stuck — so clear it.
-			cancelStaleQuestionTimer(id);
-			if (type === "question" && confident) {
-				staleQuestionTimers.set(
-					id,
-					setTimeout(() => {
-						staleQuestionTimers.delete(id);
-						if (state.terminals[id]?.awaitingInputConfident && state.terminals[id]?.shellState === "busy") {
-							batch(() => {
-								setState("terminals", id, "awaitingInput", null);
-								setState("terminals", id, "awaitingInputConfident", false);
-							});
-							appLogger.debug("terminal", `[Awaiting] ${id} confident question cleared — sustained busy, no re-detect`);
-						}
-					}, SUSTAINED_BUSY_CLEAR_MS),
-				);
-			}
 		},
 
 		/** Clear terminal awaiting input state */
 		clearAwaitingInput(id: string): void {
 			if (!has(id)) return;
-			cancelStaleQuestionTimer(id);
 			batch(() => {
 				setState("terminals", id, "awaitingInput", null);
 				setState("terminals", id, "awaitingInputConfident", false);
@@ -811,6 +837,13 @@ function createTerminalsStore() {
 		/** Get all terminal IDs */
 		getIds(): string[] {
 			return Object.keys(state.terminals);
+		},
+
+		/** The terminal tab driving a backend PTY session, or undefined once it
+		 *  is closed. Backend events carry session ids, tabs are keyed by their
+		 *  own id, so every "the backend means this tab" lookup goes through here. */
+		findBySessionId(sessionId: string): string | undefined {
+			return Object.keys(state.terminals).find((id) => state.terminals[id]?.sessionId === sessionId);
 		},
 
 		/** Get terminal count */
@@ -954,8 +987,6 @@ function createTerminalsStore() {
 		_testCancelPendingTimers(): void {
 			for (const timer of cooldownTimers.values()) clearTimeout(timer);
 			cooldownTimers.clear();
-			for (const timer of staleQuestionTimers.values()) clearTimeout(timer);
-			staleQuestionTimers.clear();
 			if (lastDataAtFlushTimer) {
 				clearInterval(lastDataAtFlushTimer);
 				lastDataAtFlushTimer = null;
@@ -965,3 +996,9 @@ function createTerminalsStore() {
 }
 
 export const terminalsStore = createTerminalsStore();
+
+// Terminals own a pane but don't go through createTabManager, so register the
+// deactivator by hand — otherwise opening a diff/markdown/editor tab would leave
+// the terminal pane active underneath it. Uses setActive(null), not a raw state
+// write, so the visibility RPC for the terminal we're leaving still fires.
+registerPaneDeactivator("terminals", () => terminalsStore.setActive(null));

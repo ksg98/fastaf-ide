@@ -13,7 +13,7 @@ import { IFRAME_SCROLLBAR_STYLE, IFRAME_SEARCH_BRIDGE_SCRIPT } from "../../utils
 import { isAbsolutePath, joinPath } from "../../utils/pathUtils";
 import { buildSearchPattern, type SearchOptions } from "../shared/DomSearchEngine";
 import e from "../shared/editor-header.module.css";
-import { SearchBar } from "../shared/SearchBar";
+import { createSearchVisibility, SearchBar } from "../shared/SearchBar";
 import s from "./HtmlPreviewTab.module.css";
 
 export interface HtmlPreviewTabProps {
@@ -54,7 +54,12 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 	const [loading, setLoading] = createSignal(false);
 	const [error, setError] = createSignal<string | null>(null);
 	const [reloadKey, setReloadKey] = createSignal(0);
-	const [searchVisible, setSearchVisible] = createSignal(false);
+	const {
+		visible: searchVisible,
+		focusToken: searchFocusToken,
+		open: openSearchBar,
+		close: closeSearchBar,
+	} = createSearchVisibility();
 	const [matchIndex, setMatchIndex] = createSignal(-1);
 	const [matchCount, setMatchCount] = createSignal(0);
 	const repo = useRepository();
@@ -99,7 +104,7 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 				reloadIframe();
 				break;
 			case "tuic:search-open":
-				setSearchVisible(true);
+				openSearchBar();
 				break;
 			case "tuic:search-result":
 				setMatchCount(typeof data.count === "number" ? data.count : 0);
@@ -129,7 +134,7 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 	// reload-request, so the parent must trigger it).
 	createEffect(() => {
 		mdTabsStore.setHandle(props.tab.id, {
-			openSearch: () => setSearchVisible(true),
+			openSearch: () => openSearchBar(),
 			reload: reloadIframe,
 		});
 		onCleanup(() => mdTabsStore.clearHandle(props.tab.id));
@@ -147,7 +152,7 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 	const handleSearchPrev = () => postToIframe({ type: "tuic:search-prev" });
 	const handleSearchClose = () => {
 		postToIframe({ type: "tuic:search-close" });
-		setSearchVisible(false);
+		closeSearchBar();
 		setMatchCount(0);
 		setMatchIndex(-1);
 		lastSearch = null;
@@ -257,6 +262,7 @@ export const HtmlPreviewTab: Component<HtmlPreviewTabProps> = (props) => {
 			<Show when={kind() === "html"}>
 				<SearchBar
 					visible={searchVisible()}
+					focusToken={searchFocusToken()}
 					onSearch={handleSearch}
 					onNext={handleSearchNext}
 					onPrev={handleSearchPrev}

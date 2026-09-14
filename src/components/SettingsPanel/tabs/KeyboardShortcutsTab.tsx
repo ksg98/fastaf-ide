@@ -1,4 +1,5 @@
 import { type Component, createMemo, createSignal, For, Show } from "solid-js";
+import { useNativeKeyCombo } from "../../../hooks/useNativeKeyCombo";
 import { t } from "../../../i18n";
 import { type ActionName, normalizeCombo } from "../../../keybindingDefaults";
 import { getModifierSymbol, isMacOS } from "../../../platform";
@@ -427,6 +428,35 @@ export const KeyboardShortcutsTab: Component = () => {
 		setConflict(null);
 	}
 
+	/**
+	 * Apply a recorded combo to the action being edited.
+	 *
+	 * Shared by the DOM keydown path and the native path (`useNativeKeyCombo`), so that
+	 * F13-F20 — which macOS never delivers to the WebView — go through the exact same
+	 * conflict check and persistence as every other key.
+	 */
+	async function applyCapturedCombo(combo: string) {
+		const action = editingAction();
+		if (!action) return;
+
+		const normalized = normalizeCombo(combo);
+		const existingAction = keybindingsStore.getActionForCombo(normalized);
+		if (existingAction && canonicalActionId(existingAction) !== canonicalActionId(action)) {
+			setConflict({ action: existingAction, combo });
+			return;
+		}
+
+		await keybindingsStore.setOverride(action, combo);
+		cancelEditing();
+	}
+
+	useNativeKeyCombo(
+		() => editingAction() !== null,
+		(combo) => {
+			void applyCapturedCombo(combo);
+		},
+	);
+
 	async function handleKeyDown(e: KeyboardEvent) {
 		const action = editingAction();
 		if (!action) return;
@@ -443,16 +473,7 @@ export const KeyboardShortcutsTab: Component = () => {
 		const combo = keyEventToCombo(e);
 		if (!combo) return; // modifier-only
 
-		// Check for conflicts
-		const normalized = normalizeCombo(combo);
-		const existingAction = keybindingsStore.getActionForCombo(normalized);
-		if (existingAction && canonicalActionId(existingAction) !== canonicalActionId(action)) {
-			setConflict({ action: existingAction, combo });
-			return;
-		}
-
-		await keybindingsStore.setOverride(action, combo);
-		cancelEditing();
+		await applyCapturedCombo(combo);
 	}
 
 	/**

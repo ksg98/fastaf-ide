@@ -1,7 +1,15 @@
 import { createMemo, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
-import { subscribePty } from "../../transport";
-import { groupLineBlocks, type LogLine, lineMatchesQuery, normalizeLogLine, spanStyle } from "../utils/logLine";
+import { type PtySubscription, subscribePty } from "../../transport";
+import {
+	groupLineBlocks,
+	type LogLine,
+	lineMatchesNeedle,
+	normalizeLogLine,
+	sameLine,
+	spanStyle,
+} from "../utils/logLine";
+import { createVisibilityGate } from "../utils/pageVisibility";
 import styles from "./OutputView.module.css";
 
 const MAX_LINES = 500;
@@ -28,7 +36,7 @@ export function OutputView(props: OutputViewProps) {
 	const [subscribeError, setSubscribeError] = createSignal<string | null>(null);
 	const [loadingOlder, setLoadingOlder] = createSignal(false);
 	let containerEl: HTMLDivElement | undefined;
-	let unsubscribe: (() => void) | null = null;
+	let unsubscribe: PtySubscription | null = null;
 	// When the user scrolls up manually, stop auto-scrolling until they
 	// return near the bottom.
 	let userScrolledUp = false;
@@ -43,12 +51,17 @@ export function OutputView(props: OutputViewProps) {
 				appLogger.warn("terminal", "fetchInitialOutput non-ok response, will rely on WS", { status: resp.status });
 				return 0;
 			}
-			const json = (await resp.json()) as { lines: unknown[]; total_lines: number; screen?: string[] };
+			const json = (await resp.json()) as {
+				lines: unknown[];
+				total_lines: number;
+				offset?: number;
+				screen?: string[];
+			};
 			if (json.lines && json.lines.length > 0) {
 				setLogLines(json.lines.map(normalizeLogLine));
 			}
 			if (json.screen && json.screen.length > 0) {
-				setScreenRows((json.screen as unknown[]).map(normalizeLogLine));
+				reconcileScreenRows(json.screen as unknown[]);
 			}
 			// Sync initial input_line from HTTP response
 			if (props.onInputLine) {
@@ -56,7 +69,11 @@ export function OutputView(props: OutputViewProps) {
 				props.onInputLine(typeof il === "string" ? il : null);
 			}
 			const total = json.total_lines ?? 0;
-			oldestLoadedOffset = Math.max(0, total - (json.lines?.length ?? 0));
+			// The backend reports where the returned window actually starts. Deriving it
+			// from lines.length would drift: chrome lines (agent prompt box, footer)
+			// occupy offsets without being returned, so the subtraction lands inside the
+			// window we already hold and replays those lines on scroll-up.
+			oldestLoadedOffset = json.offset ?? Math.max(0, total - (json.lines?.length ?? 0));
 			scrollToBottom(true);
 			return total;
 		} catch (err) {
@@ -102,6 +119,23 @@ export function OutputView(props: OutputViewProps) {
 		}
 	}
 
+	/**
+	 * The backend re-sends the whole screen on every frame, but almost every row
+	 * renders exactly as it did before. Each row arrives freshly deserialized, so
+	 * identity has to be re-established by value: keeping the previous frame's
+	 * LogLine for an unchanged row keeps the block wrapper `<For>` is keyed on,
+	 * and with it the row's DOM nodes.
+	 */
+	function reconcileScreenRows(rows: unknown[]) {
+		setScreenRows((prev) =>
+			rows.map((raw, i) => {
+				const line = normalizeLogLine(raw);
+				const before = prev[i];
+				return before && sameLine(before, line) ? before : line;
+			}),
+		);
+	}
+
 	// Touch inertia guard: while the user is actively touching, don't auto-scroll
 	let touchActive = false;
 	const handleTouchStart = () => {
@@ -132,6 +166,14 @@ export function OutputView(props: OutputViewProps) {
 		}
 	}
 
+	// A backgrounded PWA renders nothing, so every frame a busy agent pushes is
+	// pure battery and radio cost. Registered in the component body, not in the
+	// async mount, so the listener has an owner to be released by.
+	createVisibilityGate(
+		() => unsubscribe?.pause(),
+		() => unsubscribe?.resume(),
+	);
+
 	onMount(async () => {
 		containerEl?.addEventListener("scroll", handleScroll, { passive: true });
 		containerEl?.addEventListener("touchstart", handleTouchStart, { passive: true });
@@ -145,7 +187,7 @@ export function OutputView(props: OutputViewProps) {
 					() => {}, // unused — onLogLines handles log delivery
 					() => {
 						setLogLines((prev) => [...prev, { spans: [{ text: "--- session exited ---" }] }]);
-						setScreenRows([]);
+						reconcileScreenRows([]);
 					},
 					{
 						format: "log",
@@ -158,13 +200,18 @@ export function OutputView(props: OutputViewProps) {
 							scrollToBottom();
 						},
 						onScreenRows(rows) {
-							setScreenRows(rows.map(normalizeLogLine));
+							reconcileScreenRows(rows);
 							scrollToBottom();
 						},
 						onStateChange: props.onStateChange,
 						onInputLine: props.onInputLine,
 					},
 				)) ?? null;
+			// The subscription is installed after an awaited fetch. A page hidden
+			// during that window produced no visibilitychange to catch, so without
+			// this the stream would run until the next one — which for a tab
+			// restored in the background may never come.
+			if (document.visibilityState === "hidden") unsubscribe?.pause();
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			appLogger.error("terminal", "Failed to subscribe to PTY output", { error: msg });
@@ -184,7 +231,8 @@ export function OutputView(props: OutputViewProps) {
 	const displayedLines = createMemo(() => {
 		const q = props.searchQuery;
 		if (!q) return allLines();
-		return allLines().filter((line) => lineMatchesQuery(line, q));
+		const needle = q.toLowerCase();
+		return allLines().filter((line) => lineMatchesNeedle(line, needle));
 	});
 
 	const lineBlocks = createMemo(() => groupLineBlocks(displayedLines()));

@@ -10,14 +10,13 @@ import { notificationsStore } from "../stores/notifications";
 import { pluginStore } from "../stores/pluginStore";
 import { prNotificationsStore } from "../stores/prNotifications";
 import { repoSettingsStore } from "../stores/repoSettings";
-import { repositoriesStore } from "../stores/repositories";
+import { locateFile, repositoriesStore } from "../stores/repositories";
 import { sidebarPluginStore } from "../stores/sidebarPluginStore";
 import { statusBarTicker } from "../stores/statusBarTicker";
 import { terminalsStore } from "../stores/terminals";
-import { LineBuffer } from "../utils/lineBuffer";
+import { randomId } from "../utils/randomId";
 import { sanitizeSvgIcon } from "../utils/sanitizeSvg";
 import { getShellFamily, sendCommand } from "../utils/sendCommand";
-import { stripAnsi } from "../utils/stripAnsi";
 import { dashboardRegistry } from "./dashboardRegistry";
 import { fileIconRegistry } from "./fileIconRegistry";
 import { filePreviewRegistry } from "./filePreviewRegistry";
@@ -72,12 +71,120 @@ function createPluginRegistry() {
 	const panelMessageHandlers = new Map<string, (data: unknown) => void>();
 	// Panel message bridge: tabId → send function (set by PluginPanel component)
 	const panelSendChannels = new Map<string, (data: unknown) => void>();
+	// Panel visibility: tabId → is its tab the one on screen (set by PluginPanel).
+	// A plugin that rebuilds its board on a filesystem event has no other way to
+	// tell that it is rendering into a tab behind display:none.
+	const panelVisibility = new Map<string, boolean>();
+	// Panel visibility: tabId → onVisibilityChange callback from plugin
+	const panelVisibilityHandlers = new Map<string, (visible: boolean) => void>();
+	// Panel lifetime: tabId → onClose callback from plugin. A hidden panel comes
+	// back; a closed one never does, and a plugin that cannot tell them apart
+	// keeps a dead handle and whatever the panel owned — a watch, a timer.
+	const panelCloseHandlers = new Map<string, () => void>();
 
-	// Global watcher list — all watchers from all plugins, tagged with pluginId
-	const outputWatchers: Array<{ pluginId: string; watcher: OutputWatcher }> = [];
+	// A panel dies whenever its tab leaves the store — through the plugin's own
+	// close(), the × on the tab, a middle-click or the context menu. Subscribing
+	// to the store covers all of them at once, so no close path can forget.
+	mdTabsStore.onPluginPanelClosed((tabId) => {
+		// Deleted before it runs: the callback may reach back into the registry,
+		// and a second close of the same tab must be a no-op.
+		const onClose = panelCloseHandlers.get(tabId);
+		panelMessageHandlers.delete(tabId);
+		panelSendChannels.delete(tabId);
+		panelVisibility.delete(tabId);
+		panelVisibilityHandlers.delete(tabId);
+		panelCloseHandlers.delete(tabId);
+		onClose?.();
+	});
 
-	// Per-session LineBuffers for processRawOutput
-	const lineBuffers = new Map<string, LineBuffer>();
+	// Global watcher list — all watchers from all plugins, tagged with pluginId.
+	// `id` is the handle Rust reports matches under; `inRust` says whether the
+	// backend compiled this watcher's pattern (see syncOutputWatchers).
+	const outputWatchers: Array<{ id: string; pluginId: string; watcher: OutputWatcher; inRust: boolean }> = [];
+	let nextWatcherId = 0;
+	// Identifies this frontend to the backend. A desktop window and a browser tab
+	// hold independent watcher sets, and watcher ids are per-frontend counters —
+	// without this they would collide and one client would fire the other's.
+	const clientId = randomId("c");
+	// Orders the *mutations*, not the replies: two syncs can be in flight and the
+	// backend must ignore the older one. The same counter guards the replies here.
+	let watcherSyncSeq = 0;
+
+	/**
+	 * Push the watcher set to Rust, which assembles PTY lines on the reader
+	 * thread and only wakes the WebView for a line that hit. Patterns the `regex`
+	 * crate cannot express (lookaround, backreferences) come back as rejected;
+	 * Rust then keeps shipping every line and those watchers are matched here.
+	 */
+	function syncOutputWatchers(): void {
+		const specs = outputWatchers.map(({ id, watcher }) => ({
+			id,
+			pattern: watcher.pattern.source,
+			flags: watcher.pattern.flags,
+		}));
+		const seq = ++watcherSyncSeq;
+		invoke<{ applied: boolean; rejected: string[] }>("set_plugin_output_watchers", {
+			clientId,
+			seq,
+			watchers: specs,
+		})
+			.then((outcome) => {
+				if (seq !== watcherSyncSeq) return;
+				// `applied: false` means the backend refused this sync as stale, so
+				// its rejected list describes a set nobody holds. Only a genuine
+				// reply may decide who matches what — guessing wrong costs a
+				// watcher that never fires again.
+				if (!outcome?.applied || !Array.isArray(outcome.rejected)) {
+					for (const entry of outputWatchers) entry.inRust = false;
+					return;
+				}
+				const rejectedIds = new Set(outcome.rejected);
+				for (const entry of outputWatchers) {
+					entry.inRust = !rejectedIds.has(entry.id);
+				}
+				for (const id of rejectedIds) {
+					const entry = outputWatchers.find((w) => w.id === id);
+					if (entry) {
+						appLogger.debug(
+							"plugin",
+							`Watcher of "${entry.pluginId}" stays on the frontend: /${entry.watcher.pattern.source}/ is not expressible in the Rust regex crate`,
+						);
+					}
+				}
+			})
+			.catch((err) => {
+				if (seq !== watcherSyncSeq) return;
+				for (const entry of outputWatchers) entry.inRust = false;
+				appLogger.warn("plugin", `set_plugin_output_watchers failed: ${err}`);
+			});
+		scheduleWatcherHeartbeat();
+	}
+
+	/**
+	 * Resend the set on a timer while any watcher exists.
+	 *
+	 * Rust is the only source of lines now, so a client it does not know about is
+	 * blind — and two paths lead there with no local symptom: the sync failed
+	 * (backend restarting, transport hiccup), or the client bound evicted this
+	 * set to make room for a newer one, which reloading a browser tab does
+	 * without any disconnect reaching the backend. Neither raises an event to
+	 * recover from, so recovery is periodic. It doubles as the liveness signal
+	 * eviction picks by, which is why it runs even when the set is unchanged.
+	 */
+	const WATCHER_HEARTBEAT_MS = 30_000;
+	let watcherHeartbeat: ReturnType<typeof setInterval> | undefined;
+
+	function scheduleWatcherHeartbeat(): void {
+		const wanted = outputWatchers.length > 0;
+		if (wanted && watcherHeartbeat === undefined) {
+			watcherHeartbeat = setInterval(syncOutputWatchers, WATCHER_HEARTBEAT_MS);
+		} else if (!wanted && watcherHeartbeat !== undefined) {
+			// No watcher left: the backend holds a parked empty set and there is
+			// nothing to keep alive.
+			clearInterval(watcherHeartbeat);
+			watcherHeartbeat = undefined;
+		}
+	}
 
 	// Structured event handlers: type → list of { pluginId, handler }
 	const structuredHandlers = new Map<
@@ -184,12 +291,18 @@ function createPluginRegistry() {
 			},
 
 			registerOutputWatcher(watcher: OutputWatcher): Disposable {
-				const entry = { pluginId, watcher };
+				// Optimistically ours until Rust confirms it compiled the pattern:
+				// matching here is redundant work, never a missed line.
+				const entry = { id: `w${nextWatcherId++}`, pluginId, watcher, inRust: false };
 				outputWatchers.push(entry);
+				syncOutputWatchers();
 				return track({
 					dispose() {
 						const idx = outputWatchers.indexOf(entry);
-						if (idx >= 0) outputWatchers.splice(idx, 1);
+						if (idx >= 0) {
+							outputWatchers.splice(idx, 1);
+							syncOutputWatchers();
+						}
 					},
 				});
 			},
@@ -464,7 +577,11 @@ function createPluginRegistry() {
 
 			openMarkdownFile(absolutePath: string): void {
 				requireCapability(pluginId, capabilities, "ui:markdown");
-				mdTabsStore.add("", absolutePath);
+				// The file names its own repo. Passing "" left the tab unowned, so it
+				// showed up in every repo; passing the active repo would have been worse
+				// still — it would have claimed a file belonging to a different one.
+				const { repoPath, fsRoot, filePath } = locateFile(absolutePath);
+				mdTabsStore.add(repoPath, filePath, fsRoot || undefined);
 			},
 
 			async playNotificationSound(sound?: NotificationSound): Promise<void> {
@@ -486,6 +603,12 @@ function createPluginRegistry() {
 			async readFile(absolutePath: string): Promise<string> {
 				requireCapability(pluginId, capabilities, "fs:read");
 				return invoke<string>("plugin_read_file", { path: absolutePath, pluginId });
+			},
+
+			async readFiles(absolutePaths: string[]): Promise<(string | null)[]> {
+				requireCapability(pluginId, capabilities, "fs:read");
+				if (absolutePaths.length === 0) return [];
+				return invoke<(string | null)[]>("plugin_read_files", { paths: absolutePaths, pluginId });
 			},
 
 			async readFileBase64(absolutePath: string): Promise<string> {
@@ -532,6 +655,11 @@ function createPluginRegistry() {
 				await invoke("delete_build_artifact", { path, repoPaths, pluginId });
 			},
 
+			async trimBuildArtifact(path: string, repoPaths: string[]): Promise<number> {
+				requireCapability(pluginId, capabilities, "fs:delete");
+				return await invoke<number>("trim_build_artifact", { path, repoPaths, pluginId });
+			},
+
 			async watchPath(
 				path: string,
 				callback: (events: FsChangeEvent[]) => void,
@@ -544,7 +672,10 @@ function createPluginRegistry() {
 					recursive: options?.recursive ?? false,
 					debounceMs: options?.debounceMs ?? 300,
 				});
-				const eventName = `plugin-fs-change-${pluginId}`;
+				// Keyed on the watch, not the plugin: a plugin with K watches used to
+				// get every change delivered to all K callbacks, and each one had no
+				// way to tell whose path it was.
+				const eventName = `plugin-fs-change-${watchId}`;
 				const unlisten = await listen<FsChangeEvent[]>(eventName, (event) => {
 					try {
 						callback(event.payload);
@@ -589,19 +720,33 @@ function createPluginRegistry() {
 
 			openPanel(options: OpenPanelOptions): PanelHandle {
 				requireCapability(pluginId, capabilities, "ui:panel");
-				const tabId = mdTabsStore.addPluginPanel(pluginId, options.title, options.html);
+				const tabId = mdTabsStore.addPluginPanel(pluginId, options.id, options.title, options.html);
 				// Register message handler for this panel
 				if (options.onMessage) {
 					panelMessageHandlers.set(tabId, options.onMessage);
 				}
+				if (options.onVisibilityChange) {
+					panelVisibilityHandlers.set(
+						tabId,
+						guardPluginCallback(pluginId, "panel onVisibilityChange", options.onVisibilityChange),
+					);
+				}
+				if (options.onClose) {
+					panelCloseHandlers.set(tabId, guardPluginCallback(pluginId, "panel onClose", options.onClose));
+				}
+				// addPluginPanel activates the tab, so the panel starts on screen. The
+				// component confirms it a tick later; seeding avoids a window where
+				// isVisible() lies to the plugin that just opened the panel.
+				panelVisibility.set(tabId, true);
 				return {
 					tabId,
 					update(html: string) {
-						mdTabsStore.updatePluginPanel(tabId, html);
+						return mdTabsStore.updatePluginPanel(tabId, html);
+					},
+					isVisible() {
+						return panelVisibility.get(tabId) ?? false;
 					},
 					close() {
-						panelMessageHandlers.delete(tabId);
-						panelSendChannels.delete(tabId);
 						mdTabsStore.remove(tabId);
 					},
 					send(data: unknown) {
@@ -802,53 +947,71 @@ function createPluginRegistry() {
 	// Dispatch
 	// -------------------------------------------------------------------------
 
-	/**
-	 * Dispatch a clean (ANSI-stripped) PTY line to all registered OutputWatchers.
-	 * Regex matching runs synchronously (cheap), but onMatch callbacks are
-	 * deferred via queueMicrotask so slow handlers don't block terminal.write().
-	 */
-	function dispatchLine(cleanLine: string, sessionId: string): void {
-		for (const { pluginId, watcher } of outputWatchers) {
-			if (isPluginPaused(pluginId)) continue;
-			if (!pluginMatchesSession(pluginId, sessionId)) continue;
-			const { pattern, onMatch } = watcher;
-			// Reset global regex state before each test to avoid position carry-over
-			if (pattern.global) pattern.lastIndex = 0;
-			const match = pattern.exec(cleanLine);
-			if (match) {
-				queueMicrotask(() => {
-					try {
-						onMatch(match, sessionId);
-					} catch (err) {
-						const msg = err instanceof Error ? err.message : String(err);
-						appLogger.error("plugin", `Plugin "${pluginId}" output watcher threw: ${msg}`, err);
-						pluginStore.getLogger(pluginId).error(`OutputWatcher threw: ${msg}`, err);
-					}
-				});
+	/** Run one watcher against a line and defer its callback. */
+	function fireWatcher(
+		entry: { pluginId: string; watcher: OutputWatcher },
+		cleanLine: string,
+		sessionId: string,
+	): void {
+		const { pluginId, watcher } = entry;
+		if (isPluginPaused(pluginId)) return;
+		if (!pluginMatchesSession(pluginId, sessionId)) return;
+		const { pattern, onMatch } = watcher;
+		// Reset global regex state before each test to avoid position carry-over
+		if (pattern.global) pattern.lastIndex = 0;
+		const match = pattern.exec(cleanLine);
+		if (!match) return;
+		queueMicrotask(() => {
+			try {
+				onMatch(match, sessionId);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				appLogger.error("plugin", `Plugin "${pluginId}" output watcher threw: ${msg}`, err);
+				pluginStore.getLogger(pluginId).error(`OutputWatcher threw: ${msg}`, err);
 			}
+		});
+	}
+
+	/**
+	 * Run a clean PTY line through the watchers Rust is NOT matching. Regex
+	 * matching is synchronous (cheap); onMatch callbacks are deferred via
+	 * queueMicrotask so a slow handler cannot stall the event loop.
+	 *
+	 * `alreadyFired` holds the ids Rust matched on this same line — a watcher
+	 * whose sync reply has not landed yet is still `inRust: false` here, and
+	 * without the skip it would fire twice for one line.
+	 */
+	function dispatchLine(cleanLine: string, sessionId: string, alreadyFired?: ReadonlySet<string>): void {
+		for (const entry of outputWatchers) {
+			if (entry.inRust) continue; // already matched on the reader thread
+			if (alreadyFired?.has(entry.id)) continue;
+			fireWatcher(entry, cleanLine, sessionId);
 		}
 	}
 
 	/**
-	 * Accept a raw PTY data chunk, reassemble complete lines, strip ANSI, and
-	 * dispatch each clean line to all registered OutputWatchers.
+	 * Lines assembled by the Rust reader. Each carries the cleaned text Rust
+	 * matched on, so re-running the real `RegExp` here reproduces the same
+	 * decision and yields the `RegExpExecArray` the plugin API promises, plus
+	 * the qualified ids Rust already flagged.
 	 *
-	 * Called inside handlePtyData() BEFORE terminal.write() so that plugins
-	 * observe every byte in the same order xterm does.
+	 * Rust sends every line only while some pattern could not be compiled;
+	 * otherwise it sends the matches alone.
 	 */
-	function processRawOutput(data: string, sessionId: string): void {
-		if (outputWatchers.length === 0) return; // fast path: no watchers
-		let buf = lineBuffers.get(sessionId);
-		if (!buf) {
-			buf = new LineBuffer();
-			lineBuffers.set(sessionId, buf);
-		}
-		const lines = buf.push(data);
-		for (const line of lines) {
-			// Strip ANSI escapes, then backticks — Claude Code renders tokens as
-			// markdown inline code (`path`), leaving literal backticks in clean text.
-			const clean = stripAnsi(line).split("`").join("");
-			dispatchLine(clean, sessionId);
+	function handleWatcherLines(sessionId: string, lines: ReadonlyArray<{ text: string; matched_ids: string[] }>): void {
+		const prefix = `${clientId}/`;
+		for (const { text, matched_ids } of lines) {
+			const fired = new Set<string>();
+			for (const qualified of matched_ids ?? []) {
+				// Another frontend's watchers travel on the same event.
+				if (!qualified.startsWith(prefix)) continue;
+				const id = qualified.slice(prefix.length);
+				const entry = outputWatchers.find((w) => w.id === id);
+				if (!entry) continue;
+				fired.add(id);
+				fireWatcher(entry, text, sessionId);
+			}
+			dispatchLine(text, sessionId, fired);
 		}
 	}
 
@@ -874,9 +1037,8 @@ function createPluginRegistry() {
 		}
 	}
 
-	/** Clean up the LineBuffer for a closed PTY session and notify plugins. */
+	/** Notify plugins that a PTY session is gone. */
 	function removeSession(sessionId: string): void {
-		lineBuffers.delete(sessionId);
 		dispatchStructuredEvent("session-closed", {}, sessionId);
 	}
 
@@ -930,10 +1092,12 @@ function createPluginRegistry() {
 		for (const id of [...plugins.keys()]) {
 			unregister(id);
 		}
-		lineBuffers.clear();
 		stateChangeListeners.length = 0;
 		panelMessageHandlers.clear();
 		panelSendChannels.clear();
+		panelVisibility.clear();
+		panelVisibilityHandlers.clear();
+		panelCloseHandlers.clear();
 	}
 
 	// -------------------------------------------------------------------------
@@ -964,6 +1128,20 @@ function createPluginRegistry() {
 	}
 
 	/**
+	 * Record whether a panel is the tab on screen (called by PluginPanel).
+	 *
+	 * Only a real change reaches the plugin: the component re-reports on every
+	 * effect run, and a plugin that rebuilds its board on this callback must not
+	 * be woken by a repeat of what it already knows. A tab already closed is
+	 * ignored — its entry is gone and must not come back.
+	 */
+	function setPanelVisible(tabId: string, visible: boolean): void {
+		if (!panelVisibility.has(tabId) || panelVisibility.get(tabId) === visible) return;
+		panelVisibility.set(tabId, visible);
+		panelVisibilityHandlers.get(tabId)?.(visible);
+	}
+
+	/**
 	 * Invoke a plugin command by its namespaced action name.
 	 * Returns true if a handler was found and called.
 	 * Used by the global keybinding dispatcher in App.tsx.
@@ -987,8 +1165,8 @@ function createPluginRegistry() {
 	return {
 		register,
 		unregister,
-		processRawOutput,
 		dispatchLine,
+		handleWatcherLines,
 		dispatchStructuredEvent,
 		notifyStateChange,
 		removeSession,
@@ -997,6 +1175,7 @@ function createPluginRegistry() {
 		handlePanelMessage,
 		registerPanelSendChannel,
 		unregisterPanelSendChannel,
+		setPanelVisible,
 		invokePluginCommand,
 	};
 }

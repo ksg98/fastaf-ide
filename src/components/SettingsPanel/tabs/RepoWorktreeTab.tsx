@@ -191,6 +191,19 @@ export const RepoWorktreeTab: Component<RepoTabProps> = (props) => {
 				<div class={s.toggle}>
 					<input
 						type="checkbox"
+						checked={props.settings.autoConsolidateWorktrees}
+						onChange={(e) => props.onUpdate("autoConsolidateWorktrees", e.currentTarget.checked)}
+					/>
+					<span>
+						{t("repoWorktree.toggle.autoConsolidate", "Show all worktrees of this repo in one consolidated screen")}
+					</span>
+				</div>
+			</div>
+
+			<div class={s.group}>
+				<div class={s.toggle}>
+					<input
+						type="checkbox"
 						checked={effectiveBool(props.settings.promptOnCreate, props.defaults.promptOnCreate)}
 						onChange={(e) => props.onUpdate("promptOnCreate", e.currentTarget.checked)}
 					/>

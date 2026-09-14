@@ -71,10 +71,19 @@ function createStatusBarTicker() {
 		return messages().filter((m) => m.ttlMs === 0 || now - m.createdAt < m.ttlMs);
 	}
 
-	/** Remove expired messages */
+	/** Remove expired messages.
+	 *
+	 *  This runs once a second for as long as any message exists, and most ticks
+	 *  expire nothing. `filter` allocates regardless, and the signal compares by
+	 *  reference, so returning its result unconditionally republished the list
+	 *  60 times a minute and woke every subscriber for no change. Hand back the
+	 *  identical array when nothing was dropped and the tick stays silent. */
 	function scavenge(): void {
 		const now = Date.now();
-		setMessages((prev) => prev.filter((m) => m.ttlMs === 0 || now - m.createdAt < m.ttlMs));
+		setMessages((prev) => {
+			const kept = prev.filter((m) => m.ttlMs === 0 || now - m.createdAt < m.ttlMs);
+			return kept.length === prev.length ? prev : kept;
+		});
 		if (messages().length === 0) stopTimers();
 	}
 

@@ -14,7 +14,10 @@ VS Code ──────┘   (TUIC server)  ├──▶ Filesystem MCP (stdi
                                   └──▶ Custom MCP     (HTTP/stdio)
 ```
 
-The entry point for all MCP traffic is `POST /mcp` (Streamable HTTP transport, spec 2025-03-26). When a `tools/call` request arrives with a name containing `__`, the transport layer routes it to the upstream registry instead of the native tool handler.
+The entry point for all MCP traffic is `POST /mcp` (legacy Streamable HTTP
+transport, revision 2025-11-25). When a `tools/call` request arrives with a name
+containing `__`, the transport layer routes it to the upstream registry instead
+of the native tool handler.
 
 ## Module Layout
 
@@ -113,7 +116,7 @@ A background task (`spawn_health_checker`) runs every 60 seconds and probes all 
 
 ## HTTP Client (`http_client.rs`)
 
-Implements the MCP Streamable HTTP transport (spec 2025-03-26):
+Implements the legacy MCP Streamable HTTP transport (revision 2025-11-25):
 
 1. **`initialize()`** — Reads Bearer token from OS keyring (if any), sends `initialize` request, caches `mcp-session-id` header, sends `notifications/initialized` (fire-and-forget), fetches `tools/list`.
 2. **`call_tool(name, args)`** — Sends `tools/call` with the cached session ID and auth token.
@@ -121,7 +124,9 @@ Implements the MCP Streamable HTTP transport (spec 2025-03-26):
 4. **`health_check()`** — Pings via `tools/list`. Used by the background health checker.
 5. **`shutdown()`** — Sends `DELETE /mcp` with the session ID to cleanly terminate the upstream session.
 
-The User-Agent header is set to `tuicommander-mcp-proxy/{version}`.
+The User-Agent header is set to `tuicommander-mcp-proxy/{version}`. Every POST
+also carries `MCP-Protocol-Version: 2025-11-25`; the stdio client offers the
+same revision during initialization.
 
 ### OAuth Refresh Failure → Re-Authorization
 
@@ -142,6 +147,48 @@ Spawns a local process and communicates via newline-delimited JSON-RPC on stdin/
 2. **`call_tool(name, args)`** — Sends `tools/call` JSON-RPC via stdin, reads response from stdout.
 3. **`is_alive()`** — Non-blocking `try_wait()` check on the child process.
 4. **`shutdown()`** — Closes stdin (signals EOF), waits up to 2s for voluntary exit, then kills.
+
+### Reading stdout
+
+A dedicated thread pumps the child's stdout into a **bounded** queue so `read_line`
+can wait with a deadline — a blocking read straight off the pipe is uninterruptible,
+and the caller is a blocking-pool thread holding this client's mutex. Nothing drains
+that queue between calls, so the bound is what keeps an upstream that chatters while
+idle from growing TUIC's memory. Three limits, because a line count alone bounds
+nothing: 256 lines, 8 MiB queued in total, and 16 MiB for any single line (a longer
+one is discarded whole rather than published as a truncated line nobody sent).
+
+The queue is **lossy — it drops the oldest line, it never blocks the reader.**
+Blocking the reader parks the child on its stdout write, and a child that is not
+reading its stdin can then park TUIC on the write side: neither side moves again.
+What gets dropped is what a call discards anyway — messages that arrived while
+nothing was waiting for them. A reply lost to a genuine flood surfaces as the
+timeout the call already has, and the timeout log carries the drop count.
+
+### Writing stdin
+
+A second thread owns the child's stdin, for the same reason the reader has one:
+`write_all` on a pipe is uninterruptible. A request larger than the pipe buffer
+parks there until the child reads it, and a child that stopped reading never
+does — so the write parks a blocking-pool thread holding this client's mutex,
+and that upstream's call and health-check paths are wedged for the life of the
+process.
+
+`write_line` hands the line to that thread and waits on the **same deadline as
+the reply**, so an unresponsive child costs one `timeout_secs`, not forever.
+A write that runs out of time tears the client down: the bytes may still be
+half-inside the pipe, and a child holding a partial JSON-RPC frame cannot be
+spoken to again.
+
+One request waits on **one deadline for the whole exchange** (`timeout_secs`),
+armed **before** the write rather than after it, and covering write and reads
+alike. It is not a per-message count. Server notifications and log messages arriving in
+between are skipped, however many there are: a chatty upstream must not lose a
+reply it answered correctly. Being out of time outranks having a line ready to
+parse, or an upstream that refills the queue faster than TUIC drains it would keep
+a call alive forever. On timeout the client is torn down, because a request we gave
+up on may still be answered later and that stale reply must not be handed to the
+next call as its own.
 
 ### Environment Sanitization
 

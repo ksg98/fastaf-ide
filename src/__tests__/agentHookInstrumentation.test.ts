@@ -10,7 +10,7 @@ describe("agent hook instrumentation toggle", () => {
 		for (const a of on) {
 			expect(HOOK_SUPPORT[a]).toBe(true);
 		}
-		const off: AgentType[] = ["aider", "cursor", "amp", "goose", "droid", "git", "api"];
+		const off: AgentType[] = ["aider", "cursor", "amp", "goose", "droid", "pi", "git", "api"];
 		for (const a of off) {
 			expect(HOOK_SUPPORT[a]).toBe(false);
 		}

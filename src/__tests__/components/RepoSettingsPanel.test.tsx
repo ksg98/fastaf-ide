@@ -92,6 +92,7 @@ describe("SettingsPanel — repo context", () => {
 		const mockSettings: RepoSettings = {
 			path: "/repo",
 			displayName: "my-repo",
+			autoConsolidateWorktrees: false,
 			baseBranch: "automatic",
 			copyIgnoredFiles: false,
 			copyUntrackedFiles: false,

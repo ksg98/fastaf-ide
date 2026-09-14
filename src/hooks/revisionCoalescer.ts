@@ -8,8 +8,13 @@
 // frame), so panels still re-fetch fresh data exactly once.
 
 export interface RevisionCoalescer {
-	/** Queue a revision bump for `repoPath`, delivered once on the next frame. */
-	bump(repoPath: string): void;
+	/**
+	 * Queue a revision bump for `repoPath`, delivered once on the next frame.
+	 * `isGitState` merges upward across a burst: one git-state event in the
+	 * frame makes the whole collapsed bump git-state, because that kind is a
+	 * superset of what a working-tree one signals.
+	 */
+	bump(repoPath: string, isGitState: boolean): void;
 	/** Cancel any pending flush (teardown). */
 	dispose(): void;
 }
@@ -27,25 +32,25 @@ const defaultCancel: FrameCanceller = (handle) => cancelAnimationFrame(handle);
  * scheduled frame. `schedule`/`cancel` are injectable for deterministic tests.
  */
 export function createRevisionCoalescer(
-	bump: (repoPath: string) => void,
+	bump: (repoPath: string, isGitState: boolean) => void,
 	schedule: FrameScheduler = defaultSchedule,
 	cancel: FrameCanceller = defaultCancel,
 ): RevisionCoalescer {
-	const pending = new Set<string>();
+	const pending = new Map<string, boolean>();
 	let handle: number | null = null;
 
 	const flush = () => {
 		handle = null;
 		// Snapshot before delivering: a bump fired during flush re-arms a new frame
-		// rather than mutating the set we're iterating.
-		const paths = [...pending];
+		// rather than mutating the map we're iterating.
+		const batch = [...pending];
 		pending.clear();
-		for (const path of paths) bump(path);
+		for (const [path, isGitState] of batch) bump(path, isGitState);
 	};
 
 	return {
-		bump(repoPath: string): void {
-			pending.add(repoPath);
+		bump(repoPath: string, isGitState: boolean): void {
+			pending.set(repoPath, (pending.get(repoPath) ?? false) || isGitState);
 			if (handle === null) handle = schedule(flush);
 		},
 		dispose(): void {

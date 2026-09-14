@@ -33,7 +33,7 @@ const SESSION_MAX_AGE: Duration = Duration::from_secs(300);
 /// - `cwd`: the terminal's working directory (used to compute project-scoped paths)
 /// - `claimed_ids`: session IDs already assigned to other terminals — excluded from results
 /// - `agent_pid`: PID of the running agent process. When provided, env vars that affect
-///   session storage paths (`CLAUDE_CONFIG_DIR`, `GEMINI_CLI_HOME`, `CODEX_HOME`) are read
+///   session storage paths (`CLAUDE_CONFIG_DIR`, `GEMINI_CLI_HOME`, `CODEX_HOME`, `HOME`) are read
 ///   directly from the process's initial environment — the ground-truth source.
 /// - `env_overrides`: fallback env overrides from the TUIC run config. Only used for keys
 ///   NOT found in the process env (i.e. process env takes precedence).
@@ -57,7 +57,11 @@ pub(crate) fn discover_agent_session(
             &claimed_ids,
             env.get("GEMINI_CLI_HOME").map(|s| s.as_str()),
         ),
-        "codex" => discover_codex_session(&claimed_ids, env.get("CODEX_HOME").map(|s| s.as_str())),
+        "codex" => discover_codex_session(
+            &cwd,
+            &claimed_ids,
+            env.get("CODEX_HOME").map(|s| s.as_str()),
+        ),
         // Goose stores sessions in SQLite — no filesystem discovery.
         // Shell wrapper injects --name $TUIC_SESSION for deterministic binding.
         "goose" => None,
@@ -292,7 +296,22 @@ pub(crate) fn codex_sessions_dir(codex_home: Option<&str>) -> Option<PathBuf> {
 
 /// Codex CLI stores sessions under `~/.codex/sessions/YYYY/MM/DD/`.
 /// Files are named `rollout-<timestamp>-<UUID>.jsonl`.
-fn discover_codex_session(claimed_ids: &[String], codex_home: Option<&str>) -> Option<String> {
+///
+/// Unlike Claude and Grok, Codex does not partition its sessions by project — every
+/// project's rollouts land in the same date tree. So the walk is filtered twice, and
+/// both filters are load-bearing:
+///
+/// - **age**: `SESSION_MAX_AGE`, per file, matching the Claude/Gemini/Grok siblings.
+///   The date-dir prune alone bounds the walk to 24-48h, which is not a recency check:
+///   a terminal opened now could bind to a session abandoned this morning.
+/// - **cwd**: the rollout's own recorded working directory must match this session's.
+///   Without it a fresh terminal in project A took the globally-newest unclaimed
+///   session and resumed project B's history.
+fn discover_codex_session(
+    cwd: &str,
+    claimed_ids: &[String],
+    codex_home: Option<&str>,
+) -> Option<String> {
     let sessions_root = codex_sessions_dir(codex_home)?;
 
     if !sessions_root.exists() {
@@ -303,9 +322,11 @@ fn discover_codex_session(claimed_ids: &[String], codex_home: Option<&str>) -> O
     // SESSION_MAX_AGE can only live there. This prunes the entire historical tree
     // by date before walking, so cost stays bounded regardless of how much
     // lifetime history has accumulated.
+    let now = SystemTime::now();
+    let wanted_cwd = normalize_cwd(cwd);
     let mut candidates: Vec<(SystemTime, String)> = Vec::new();
     for day_dir in codex_recent_day_dirs(&sessions_root, chrono::Local::now()) {
-        collect_codex_files(&day_dir, &mut candidates);
+        collect_codex_files(&day_dir, now, &wanted_cwd, &mut candidates);
     }
 
     // Sort newest first
@@ -315,6 +336,74 @@ fn discover_codex_session(claimed_ids: &[String], codex_home: Option<&str>) -> O
         .into_iter()
         .find(|(_, id)| !claimed_ids.contains(id))
         .map(|(_, id)| id)
+}
+
+/// Canonical form for comparing two working directories.
+///
+/// Falls back to the lexical path when the directory cannot be canonicalized (it may
+/// have been deleted since the session started) so a missing directory degrades to an
+/// exact string match rather than matching everything.
+fn normalize_cwd(cwd: &str) -> PathBuf {
+    let path = PathBuf::from(cwd);
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
+/// Read the working directory Codex recorded in a rollout file.
+///
+/// The first JSONL record is `{"type":"session_meta","payload":{...,"cwd":"…"}}` —
+/// verified against Codex 0.122 and 0.142, which agree on the field's location.
+/// Only that first line is read: the payload embeds the full base instructions, so a
+/// rollout is easily megabytes, and only the head is needed.
+fn read_codex_rollout_cwd(path: &Path) -> Option<PathBuf> {
+    use std::io::{BufRead, BufReader, Read};
+
+    let file = std::fs::File::open(path).ok()?;
+    // Cap the read: a corrupt file with no newline must not pull an unbounded amount
+    // of it into memory on a path that runs every agent turn.
+    let mut head = String::new();
+    BufReader::new(file.take(256 * 1024))
+        .read_line(&mut head)
+        .ok()?;
+
+    let meta: serde_json::Value = serde_json::from_str(head.trim_end()).ok()?;
+    let cwd = meta.get("payload")?.get("cwd")?.as_str()?;
+    Some(normalize_cwd(cwd))
+}
+
+fn collect_codex_files(
+    dir: &PathBuf,
+    now: SystemTime,
+    wanted_cwd: &Path,
+    out: &mut Vec<(SystemTime, String)>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_codex_files(&path, now, wanted_cwd, out);
+        } else if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string())
+            && let Some(uuid) = extract_codex_uuid(&name)
+            && let Ok(meta) = entry.metadata()
+            && let Ok(mtime) = meta.modified()
+        {
+            // Age first: it is a stat we already have, and it rejects almost
+            // everything before any file is opened.
+            if now.duration_since(mtime).unwrap_or_default() > SESSION_MAX_AGE {
+                continue;
+            }
+            // A rollout whose cwd cannot be read is REJECTED, not accepted. If Codex
+            // ever moves the field, resume-after-restart quietly stops working —
+            // annoying but obvious. Accepting instead would silently reinstate
+            // cross-project binding, which resumes the wrong history.
+            if read_codex_rollout_cwd(&path).as_deref() != Some(wanted_cwd) {
+                continue;
+            }
+            out.push((mtime, uuid));
+        }
+    }
 }
 
 /// Resolve the `<root>/YYYY/MM/DD` session dirs that can hold a session younger
@@ -338,25 +427,6 @@ fn codex_recent_day_dirs(root: &Path, now: chrono::DateTime<chrono::Local>) -> V
         })
         .filter(|p| p.is_dir())
         .collect()
-}
-
-fn collect_codex_files(dir: &PathBuf, out: &mut Vec<(SystemTime, String)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_codex_files(&path, out);
-        } else if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string())
-            && let Some(uuid) = extract_codex_uuid(&name)
-            && let Ok(meta) = entry.metadata()
-            && let Ok(mtime) = meta.modified()
-        {
-            out.push((mtime, uuid));
-        }
-    }
 }
 
 /// Extract the UUID from a Codex session filename: `rollout-<ts>-<UUID>.jsonl`
@@ -656,12 +726,25 @@ where
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
     fn make_file(dir: &std::path::Path, name: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, b"{}").unwrap();
+        path
+    }
+
+    /// Write a Codex rollout whose first line is the real `session_meta` shape,
+    /// which is where discovery reads the recorded working directory from.
+    fn make_codex_rollout(dir: &std::path::Path, name: &str, cwd: &str) -> PathBuf {
+        let path = dir.join(name);
+        let head = serde_json::json!({
+            "timestamp": "2026-07-01T08:31:54.793Z",
+            "type": "session_meta",
+            "payload": { "id": "ignored", "cwd": cwd, "originator": "codex-tui" },
+        });
+        fs::write(&path, format!("{head}\n{{\"type\":\"event_msg\"}}\n")).unwrap();
         path
     }
 
@@ -1070,23 +1153,176 @@ mod tests {
         fs::create_dir_all(&today_dir).unwrap();
         fs::create_dir_all(&old_dir).unwrap();
 
+        let project = root.path().join("project-a");
+        fs::create_dir_all(&project).unwrap();
+        let cwd = project.to_str().unwrap();
+
         let fresh = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
         let stale = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-        make_file(
+        make_codex_rollout(
             &today_dir,
             &format!("rollout-2026-07-07T10-00-00-{fresh}.jsonl"),
+            cwd,
         );
         // Create the stale file LAST so its mtime is newest — if the old subtree
         // weren't pruned it would win the newest-first sort, so returning `fresh`
         // proves the date prune worked.
         std::thread::sleep(Duration::from_millis(10));
-        make_file(
+        make_codex_rollout(
             &old_dir,
             &format!("rollout-2020-01-01T10-00-00-{stale}.jsonl"),
+            cwd,
         );
 
-        let result = discover_codex_session(&[], Some(root.path().to_str().unwrap()));
+        let result = discover_codex_session(cwd, &[], Some(root.path().to_str().unwrap()));
         assert_eq!(result, Some(fresh.to_string()));
+    }
+
+    /// The date-dir prune bounds the walk to 24-48h, which is NOT a recency check:
+    /// a session abandoned this morning still sits in today's dir. Claude, Gemini and
+    /// Grok all reject candidates older than SESSION_MAX_AGE per file; Codex did not.
+    #[test]
+    fn test_discover_codex_session_rejects_a_stale_session_in_todays_dir() {
+        use chrono::Datelike;
+        let root = TempDir::new().unwrap();
+        let sessions = root.path().join("sessions");
+        let today = chrono::Local::now().date_naive();
+        let today_dir = codex_day_dir(&sessions, today.year(), today.month(), today.day());
+        fs::create_dir_all(&today_dir).unwrap();
+
+        let project = root.path().join("project-a");
+        fs::create_dir_all(&project).unwrap();
+        let cwd = project.to_str().unwrap();
+
+        let stale = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let path = make_codex_rollout(
+            &today_dir,
+            &format!("rollout-2026-07-07T10-00-00-{stale}.jsonl"),
+            cwd,
+        );
+        // Same day, but well past the 5-minute bound.
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        assert_eq!(
+            discover_codex_session(cwd, &[], Some(root.path().to_str().unwrap())),
+            None,
+            "a session older than SESSION_MAX_AGE must not be resumed"
+        );
+    }
+
+    /// Codex does not partition sessions by project, so without cwd scoping a fresh
+    /// terminal in project A bound to the globally-newest unclaimed session and
+    /// resumed project B's history.
+    #[test]
+    fn test_discover_codex_session_ignores_another_projects_session() {
+        use chrono::Datelike;
+        let root = TempDir::new().unwrap();
+        let sessions = root.path().join("sessions");
+        let today = chrono::Local::now().date_naive();
+        let today_dir = codex_day_dir(&sessions, today.year(), today.month(), today.day());
+        fs::create_dir_all(&today_dir).unwrap();
+
+        let project_a = root.path().join("project-a");
+        let project_b = root.path().join("project-b");
+        fs::create_dir_all(&project_a).unwrap();
+        fs::create_dir_all(&project_b).unwrap();
+
+        let mine = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let theirs = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+        make_codex_rollout(
+            &today_dir,
+            &format!("rollout-2026-07-07T10-00-00-{mine}.jsonl"),
+            project_a.to_str().unwrap(),
+        );
+        // Newest, so it wins the sort — only the cwd filter can keep it out.
+        std::thread::sleep(Duration::from_millis(10));
+        make_codex_rollout(
+            &today_dir,
+            &format!("rollout-2026-07-07T10-00-01-{theirs}.jsonl"),
+            project_b.to_str().unwrap(),
+        );
+
+        let home = Some(root.path().to_str().unwrap());
+        assert_eq!(
+            discover_codex_session(project_a.to_str().unwrap(), &[], home),
+            Some(mine.to_string()),
+            "the other project's newer session must not be selected"
+        );
+        assert_eq!(
+            discover_codex_session(project_b.to_str().unwrap(), &[], home),
+            Some(theirs.to_string()),
+            "and project B still finds its own"
+        );
+    }
+
+    /// A rollout whose cwd cannot be read is rejected. Accepting it would silently
+    /// reinstate cross-project binding the moment Codex changed its file format.
+    #[test]
+    fn test_discover_codex_session_rejects_a_rollout_with_no_readable_cwd() {
+        use chrono::Datelike;
+        let root = TempDir::new().unwrap();
+        let sessions = root.path().join("sessions");
+        let today = chrono::Local::now().date_naive();
+        let today_dir = codex_day_dir(&sessions, today.year(), today.month(), today.day());
+        fs::create_dir_all(&today_dir).unwrap();
+
+        let project = root.path().join("project-a");
+        fs::create_dir_all(&project).unwrap();
+
+        let id = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        // `{}` — a well-formed JSON line with no payload, i.e. a format we don't know.
+        make_file(
+            &today_dir,
+            &format!("rollout-2026-07-07T10-00-00-{id}.jsonl"),
+        );
+
+        assert_eq!(
+            discover_codex_session(
+                project.to_str().unwrap(),
+                &[],
+                Some(root.path().to_str().unwrap())
+            ),
+            None
+        );
+    }
+
+    /// The recorded cwd and the session cwd may spell the same directory differently
+    /// (symlinked /tmp on macOS, a trailing slash). Compare canonical paths.
+    #[test]
+    fn test_discover_codex_session_matches_an_equivalent_cwd_spelling() {
+        use chrono::Datelike;
+        let root = TempDir::new().unwrap();
+        let sessions = root.path().join("sessions");
+        let today = chrono::Local::now().date_naive();
+        let today_dir = codex_day_dir(&sessions, today.year(), today.month(), today.day());
+        fs::create_dir_all(&today_dir).unwrap();
+
+        let project = root.path().join("project-a");
+        fs::create_dir_all(&project).unwrap();
+
+        let id = "12345678-1234-1234-1234-123456789abc";
+        make_codex_rollout(
+            &today_dir,
+            &format!("rollout-2026-07-07T10-00-00-{id}.jsonl"),
+            project.to_str().unwrap(),
+        );
+
+        // Same directory reached through a `.` component.
+        let indirect = project.join(".");
+        assert_eq!(
+            discover_codex_session(
+                indirect.to_str().unwrap(),
+                &[],
+                Some(root.path().to_str().unwrap())
+            ),
+            Some(id.to_string())
+        );
     }
 
     // ── extract_codex_uuid ──

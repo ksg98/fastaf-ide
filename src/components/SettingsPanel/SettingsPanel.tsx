@@ -1,4 +1,4 @@
-import { type Component, createEffect, createSignal, Show } from "solid-js";
+import { type Component, createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { shortenHomePath } from "../../platform";
@@ -26,6 +26,7 @@ import {
 	RepoScriptsTab,
 	RepoWorktreeTab,
 	ServicesTab,
+	SmartPromptsTab,
 	VoiceTab,
 } from "./tabs";
 import { ProvidersTab } from "./tabs/ProvidersTab";
@@ -37,6 +38,8 @@ export interface SettingsPanelProps {
 	visible: boolean;
 	onClose: () => void;
 	initialTab?: string;
+	/** DOM id of a block to scroll to once the panel is open — see sections.ts */
+	initialSection?: string;
 	context?: SettingsContext;
 }
 
@@ -47,8 +50,9 @@ const BASE_GLOBAL_TABS: SettingsShellTab[] = [
 	{ key: "dictation", label: t("settings.dictation", "Dictation") },
 	{ key: "voice", label: t("settings.voice", "Voice") },
 	{ key: "github", label: "Git & GitHub" },
-	{ key: "services", label: t("settings.services", "Services") },
+	{ key: "services", label: t("settings.services", "Services & MCP") },
 	{ key: "plugins", label: t("settings.plugins", "Plugins") },
+	{ key: "smart-prompts", label: t("settings.smartPrompts", "Smart Prompts") },
 	{ key: "providers", label: "Providers" },
 	{ key: "agents", label: t("settings.agents", "Agents") },
 ];
@@ -101,6 +105,19 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
 		if (props.visible) {
 			setActiveTab(props.initialTab ?? defaultTab(ctx()));
 		}
+	});
+
+	// A deep link (the MCP popup's "Manage in Settings") opens a long tab where
+	// the block it promised sits below the fold. Scroll to it, after the frame
+	// that inserts the tab content into the document.
+	createEffect(() => {
+		if (!props.visible) return;
+		const section = props.initialSection;
+		if (!section) return;
+		const frame = requestAnimationFrame(() => {
+			document.getElementById(section)?.scrollIntoView({ block: "start", behavior: "smooth" });
+		});
+		onCleanup(() => cancelAnimationFrame(frame));
 	});
 
 	// Auto-reset to general when the current tab vanishes (e.g. AI Chat flag
@@ -234,6 +251,9 @@ export const SettingsPanel: Component<SettingsPanelProps> = (props) => {
 			</Show>
 			<Show when={activeTab() === "plugins"}>
 				<PluginsTab onClose={props.onClose} />
+			</Show>
+			<Show when={activeTab() === "smart-prompts"}>
+				<SmartPromptsTab />
 			</Show>
 			<Show when={activeTab() === "providers"}>
 				<ProvidersTab />

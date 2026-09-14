@@ -2,7 +2,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildAgentSeed, useGitOperations } from "../../hooks/useGitOperations";
 import * as platform from "../../platform";
+import { diffTabsStore } from "../../stores/diffTabs";
+import { editorTabsStore } from "../../stores/editorTabs";
+import { getForRepo as getFocusForRepo, recordTerminalRepo } from "../../stores/focusRegistry";
 import { githubStore } from "../../stores/github";
+import { mdTabsStore } from "../../stores/mdTabs";
 import { paneLayoutStore, resetGroupCounter } from "../../stores/paneLayout";
 import { repoSettingsStore } from "../../stores/repoSettings";
 import { repositoriesStore } from "../../stores/repositories";
@@ -21,6 +25,9 @@ function resetStores() {
 	for (const s of repoSettingsStore.getAll()) {
 		repoSettingsStore.remove(s.path);
 	}
+	editorTabsStore.clearAll();
+	diffTabsStore.clearAll();
+	mdTabsStore.clearAll();
 }
 
 describe("buildAgentSeed", () => {
@@ -107,6 +114,7 @@ describe("useGitOperations", () => {
 		confirmRemoveWorktree: vi.fn().mockResolvedValue(true),
 		confirmRemoveLockedWorktree: vi.fn().mockResolvedValue(true),
 		confirmStashAndSwitch: vi.fn().mockResolvedValue(true),
+		confirmDirtyWorktreeCleanup: vi.fn().mockResolvedValue(true),
 		reportGitError: vi.fn().mockResolvedValue(false),
 	};
 
@@ -128,6 +136,14 @@ describe("useGitOperations", () => {
 		mockDialogs.confirmRemoveLockedWorktree.mockResolvedValue(true);
 		mockDialogs.confirmStashAndSwitch.mockResolvedValue(true);
 		mockDialogs.reportGitError.mockResolvedValue(false);
+		// The post-merge cleanup dialog asks two dirtiness questions before it opens.
+		// Both fail SAFE (an unanswered question reads as dirty), so a bare
+		// `resolves undefined` mock would make every ask-mode test look dirty.
+		mockInvoke.mockImplementation((cmd: string) => {
+			if (cmd === "run_git_command") return Promise.resolve({ stdout: "", stderr: "" });
+			if (cmd === "check_worktree_dirty") return Promise.resolve(false);
+			return Promise.resolve(undefined);
+		});
 		mockRepo.switchBranch.mockResolvedValue({
 			success: true,
 			stashed: false,
@@ -908,6 +924,116 @@ describe("useGitOperations", () => {
 			expect(mockSetStatusInfo).toHaveBeenCalledWith(expect.stringContaining("archived"));
 		});
 
+		// Archiving or deleting a worktree ends in `git worktree remove --force`, which
+		// destroys uncommitted work. The backend refuses whenever it cannot confirm the
+		// worktree is clean — with or without commits to merge — and asks first.
+		describe("dirty-worktree guard", () => {
+			function seedBranch() {
+				repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+				repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo", isMain: true });
+				repositoriesStore.setBranch("/repo", "feature/x", { worktreePath: "/repo/.wt/x" });
+			}
+
+			it("keeps the branch and does not force when the user declines", async () => {
+				seedBranch();
+				mockDialogs.confirmDirtyWorktreeCleanup.mockResolvedValueOnce(false);
+				mockRepo.mergeAndArchiveWorktree.mockResolvedValueOnce({
+					merged: false,
+					action: "needs_confirmation",
+					archive_path: null,
+					commits_ahead: 0,
+					worktree_dirty: true,
+				});
+
+				await gitOps.handleMergeAndArchive("/repo", "feature/x", "main", "archive");
+
+				expect(mockDialogs.confirmDirtyWorktreeCleanup).toHaveBeenCalledWith("feature/x", "archive", 0);
+				expect(mockRepo.mergeAndArchiveWorktree).toHaveBeenCalledTimes(1);
+				expect(repositoriesStore.get("/repo")?.branches["feature/x"]).toBeDefined();
+			});
+
+			// The old guard only fired on an empty branch, so a worktree full of
+			// uncommitted work was force-removed without a word the moment the branch
+			// carried a single commit. `commits_ahead` must not enter the decision.
+			it("asks even when the branch has commits to merge", async () => {
+				seedBranch();
+				mockDialogs.confirmDirtyWorktreeCleanup.mockResolvedValueOnce(false);
+				mockRepo.mergeAndArchiveWorktree.mockResolvedValueOnce({
+					merged: false,
+					action: "needs_confirmation",
+					archive_path: null,
+					commits_ahead: 7,
+					worktree_dirty: true,
+				});
+
+				await gitOps.handleMergeAndArchive("/repo", "feature/x", "main", "delete");
+
+				expect(mockDialogs.confirmDirtyWorktreeCleanup).toHaveBeenCalledWith("feature/x", "delete", 7);
+				expect(repositoriesStore.get("/repo")?.branches["feature/x"]).toBeDefined();
+			});
+
+			it("retries with force once the user confirms", async () => {
+				seedBranch();
+				mockDialogs.confirmDirtyWorktreeCleanup.mockResolvedValueOnce(true);
+				mockRepo.mergeAndArchiveWorktree
+					.mockResolvedValueOnce({
+						merged: false,
+						action: "needs_confirmation",
+						archive_path: null,
+						commits_ahead: 0,
+						worktree_dirty: true,
+					})
+					.mockResolvedValueOnce({
+						merged: true,
+						action: "archived",
+						archive_path: "/archived/feature-x",
+						commits_ahead: 0,
+						worktree_dirty: true,
+					});
+
+				await gitOps.handleMergeAndArchive("/repo", "feature/x", "main", "archive");
+
+				expect(mockRepo.mergeAndArchiveWorktree).toHaveBeenLastCalledWith(
+					"/repo",
+					"feature/x",
+					"main",
+					"archive",
+					true,
+				);
+				expect(repositoriesStore.get("/repo")?.branches["feature/x"]).toBeUndefined();
+			});
+
+			it("reports what the merge actually carried across", async () => {
+				seedBranch();
+				mockRepo.mergeAndArchiveWorktree.mockResolvedValueOnce({
+					merged: true,
+					action: "archived",
+					archive_path: "/archived/feature-x",
+					commits_ahead: 7,
+					worktree_dirty: false,
+				});
+
+				await gitOps.handleMergeAndArchive("/repo", "feature/x", "main", "archive");
+
+				expect(mockSetStatusInfo).toHaveBeenCalledWith(expect.stringContaining("7 commits"));
+			});
+
+			it("says so when the merge was a no-op", async () => {
+				seedBranch();
+				mockRepo.mergeAndArchiveWorktree.mockResolvedValueOnce({
+					merged: true,
+					action: "archived",
+					archive_path: "/archived/feature-x",
+					commits_ahead: 0,
+					worktree_dirty: false,
+				});
+
+				await gitOps.handleMergeAndArchive("/repo", "feature/x", "main", "archive");
+
+				expect(mockSetStatusInfo).toHaveBeenCalledWith(expect.stringContaining("nothing to merge"));
+			});
+		});
+
 		it("sets mergePendingCtx when action is pending (ask mode)", async () => {
 			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
 			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo", isMain: true });
@@ -924,6 +1050,7 @@ describe("useGitOperations", () => {
 				branchName: "feature/x",
 				baseBranch: "main",
 				hasDirtyFiles: false,
+				worktreeDirty: false,
 			});
 		});
 
@@ -974,6 +1101,7 @@ describe("useGitOperations", () => {
 			author: "user",
 			commits: 2,
 			mergeable: "MERGEABLE",
+			conflict_state: "clear" as const,
 			merge_state_status: "CLEAN",
 			review_decision: "APPROVED",
 			viewer_did_approve: false,
@@ -1031,6 +1159,7 @@ describe("useGitOperations", () => {
 				branchName: "feature/x",
 				baseBranch: "main",
 				hasDirtyFiles: false,
+				worktreeDirty: false,
 			});
 			expect(repositoriesStore.get("/repo")?.branches["feature/x"]).toBeDefined();
 		});
@@ -1077,10 +1206,12 @@ describe("useGitOperations", () => {
 		});
 
 		function mockConflictAssist(result: {
-			status: "clean" | "conflicts";
+			status: "clean" | "clean_unverified" | "conflicts";
 			worktree_path: string;
 			branch: string;
 			base: string;
+			base_source: "fetched_remote" | "existing_tracking" | "local_fallback";
+			base_warning: string | null;
 			conflicted_files: string[];
 			prompt: string;
 		}) {
@@ -1096,6 +1227,8 @@ describe("useGitOperations", () => {
 				worktree_path: "/repo/.worktrees/feature",
 				branch: "feature",
 				base: "main",
+				base_source: "fetched_remote",
+				base_warning: null,
 				conflicted_files: [],
 				prompt: "",
 			});
@@ -1107,6 +1240,25 @@ describe("useGitOperations", () => {
 			expect(repositoriesStore.get("/repo")?.branches["feature"]).toBeUndefined();
 		});
 
+		it("warns when a conflict-free rebase used a base that could not be refreshed", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			mockConflictAssist({
+				status: "clean_unverified",
+				worktree_path: "/repo/.worktrees/feature",
+				branch: "feature",
+				base: "main",
+				base_source: "existing_tracking",
+				base_warning: "Could not refresh origin/main; using the existing remote-tracking ref.",
+				conflicted_files: [],
+				prompt: "",
+			});
+
+			await gitOps.handleConflictAssist("/repo", 43);
+
+			expect(mockSetStatusInfo).toHaveBeenCalledWith(expect.stringContaining("Could not refresh origin/main"));
+			expect(repositoriesStore.get("/repo")?.branches["feature"]).toBeUndefined();
+		});
+
 		it("registers the existing worktree and seeds an agent with the resolution prompt on conflicts", async () => {
 			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
 			mockConflictAssist({
@@ -1114,6 +1266,8 @@ describe("useGitOperations", () => {
 				worktree_path: "/repo/.worktrees/feature",
 				branch: "feature",
 				base: "main",
+				base_source: "fetched_remote",
+				base_warning: null,
 				conflicted_files: ["a.ts"],
 				prompt: "Resolve the conflicts in a.ts",
 			});
@@ -1177,6 +1331,38 @@ describe("useGitOperations", () => {
 			const branch = repositoriesStore.get("/repo")?.branches["main"];
 			expect(branch?.additions).toBe(5);
 			expect(branch?.deletions).toBe(3);
+		});
+
+		it("refreshes the active repo first and caps repo fan-out", async () => {
+			const pending: Array<{ path: string; resolve: (value: unknown) => void }> = [];
+			for (let index = 0; index < 7; index++) {
+				const path = `/repo-${index}`;
+				repositoriesStore.add({ path, displayName: `Repo ${index}` });
+				repositoriesStore.setBranch(path, "main", { worktreePath: path });
+			}
+			repositoriesStore.setActive("/repo-6");
+			mockRepo.getRepoStructure.mockImplementation(
+				(path: string) => new Promise((resolve) => pending.push({ path, resolve })),
+			);
+			mockRepo.getRepoDiffStats.mockResolvedValue({ diff_stats: {}, last_commit_ts: {} });
+
+			const refresh = gitOps.refreshAllBranchStats();
+			await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+
+			expect(pending[0].path).toBe("/repo-6");
+			expect(pending.length).toBeLessThanOrEqual(4);
+
+			let released = 0;
+			while (released < 7) {
+				while (released < pending.length) {
+					const item = pending[released++];
+					item.resolve({ worktree_paths: { main: item.path }, merged_branches: [] });
+				}
+				if (released < 7) {
+					await vi.waitFor(() => expect(pending.length).toBeGreaterThan(released));
+				}
+			}
+			await refresh;
 		});
 
 		it("git init: carries shell-branch terminals into the new git branch instead of orphaning them", async () => {
@@ -1250,6 +1436,66 @@ describe("useGitOperations", () => {
 
 			expect(repositoriesStore.get("/repo")?.branches["stale"]).toBeUndefined();
 			expect(repositoriesStore.get("/repo")?.branches["main"]).toBeDefined();
+		});
+
+		it("coalesces refresh storms without starving stale-worktree pruning", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+			repositoriesStore.setBranch("/repo", "ghost-a", { worktreePath: "/repo/wt-a" });
+			repositoriesStore.setBranch("/repo", "ghost-b", { worktreePath: "/repo/wt-b" });
+
+			const structureResolvers: Array<(value: unknown) => void> = [];
+			mockRepo.getRepoStructure.mockImplementation(() => new Promise((resolve) => structureResolvers.push(resolve)));
+			mockRepo.getRepoDiffStats.mockResolvedValue({
+				diff_stats: { "/repo": { additions: 0, deletions: 0 } },
+				last_commit_ts: {},
+			});
+
+			const first = gitOps.refreshAllBranchStats("/repo");
+			await vi.waitFor(() => expect(structureResolvers).toHaveLength(1));
+			const queued = Array.from({ length: 100 }, () => gitOps.refreshAllBranchStats("/repo"));
+			expect(mockRepo.getRepoStructure).toHaveBeenCalledTimes(1);
+
+			structureResolvers[0]({ worktree_paths: { main: "/repo" }, merged_branches: [] });
+			await vi.waitFor(() => expect(structureResolvers).toHaveLength(2));
+			structureResolvers[1]({ worktree_paths: { main: "/repo" }, merged_branches: [] });
+			await Promise.all([first, ...queued]);
+
+			expect(mockRepo.getRepoStructure).toHaveBeenCalledTimes(2);
+			expect(Object.keys(repositoriesStore.get("/repo")?.branches ?? {})).toEqual(["main"]);
+		});
+
+		it("runs the queued refresh after the active refresh fails", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+			let rejectFirst!: (reason: Error) => void;
+			mockRepo.getRepoStructure
+				.mockReturnValueOnce(new Promise((_, reject) => (rejectFirst = reject)))
+				.mockResolvedValueOnce({ worktree_paths: { main: "/repo" }, merged_branches: [] });
+			mockRepo.getRepoDiffStats.mockResolvedValue({
+				diff_stats: { "/repo": { additions: 0, deletions: 0 } },
+				last_commit_ts: {},
+			});
+
+			const first = gitOps.refreshAllBranchStats("/repo");
+			await vi.waitFor(() => expect(mockRepo.getRepoStructure).toHaveBeenCalledTimes(1));
+			const queued = gitOps.refreshAllBranchStats("/repo");
+			rejectFirst(new Error("transient structure failure"));
+			await Promise.all([first, queued]);
+
+			expect(mockRepo.getRepoStructure).toHaveBeenCalledTimes(2);
+			expect(mockRepo.getRepoDiffStats).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not refresh a parked repository even when explicitly scoped", async () => {
+			repositoriesStore.add({ path: "/parked", displayName: "Parked" });
+			repositoriesStore.setBranch("/parked", "main", { worktreePath: "/parked" });
+			repositoriesStore.setPark("/parked", true);
+
+			await gitOps.refreshAllBranchStats("/parked");
+
+			expect(mockRepo.getRepoStructure).not.toHaveBeenCalled();
+			expect(mockRepo.getRepoDiffStats).not.toHaveBeenCalled();
 		});
 
 		it("discovers externally created worktrees", async () => {
@@ -2892,6 +3138,55 @@ describe("useGitOperations", () => {
 			await vi.advanceTimersByTimeAsync(300);
 		});
 
+		it("keeps an owned tab in its own repo when the cwd moves to another repo", async () => {
+			repositoriesStore.add({ path: "/other", displayName: "Other" });
+			repositoriesStore.setBranch("/other", "main", { worktreePath: "/other" });
+			const id = addTerminal({ sessionId: "s9", cwd: "/repo" });
+			repositoriesStore.addTerminalToBranch("/repo", "main", id);
+			terminalsStore.setRepoPath(id, "/repo");
+			terminalsStore.setActive(id);
+			repositoriesStore.setActive("/repo");
+
+			gitOps.handleTerminalCwdChange(id, "/other/src");
+			await vi.advanceTimersByTimeAsync(300);
+
+			expect(repositoriesStore.get("/repo")?.branches["main"]?.terminals).toContain(id);
+			expect(repositoriesStore.get("/other")?.branches["main"]?.terminals).not.toContain(id);
+			expect(terminalsStore.get(id)?.repoPath).toBe("/repo");
+			// The sidebar must not follow a cd either — that is what read as the app
+			// switching repo on its own.
+			expect(repositoriesStore.state.activeRepoPath).toBe("/repo");
+		});
+
+		it("still follows a worktree switch inside the owning repo", async () => {
+			const id = addTerminal({ sessionId: "s10", cwd: "/repo" });
+			repositoriesStore.addTerminalToBranch("/repo", "main", id);
+			terminalsStore.setRepoPath(id, "/repo");
+			terminalsStore.setActive(id);
+
+			gitOps.handleTerminalCwdChange(id, "/repo/.worktrees/feature-x");
+			await vi.advanceTimersByTimeAsync(300);
+
+			expect(repositoriesStore.get("/repo")?.branches["feature-x"]?.terminals).toContain(id);
+			expect(repositoriesStore.get("/repo")?.branches["main"]?.terminals).not.toContain(id);
+		});
+
+		it("still settles a parked tab that cds into a registered repo", async () => {
+			repositoriesStore.add({ path: "/other", displayName: "Other" });
+			repositoriesStore.setBranch("/other", "main", { worktreePath: "/other" });
+			const id = addTerminal({ sessionId: "s11", cwd: "/tmp" });
+			// Parked in whatever repo was active, with no owner recorded.
+			repositoriesStore.addTerminalToBranch("/repo", "main", id);
+			terminalsStore.setRepoPath(id, null);
+			terminalsStore.setActive(id);
+
+			gitOps.handleTerminalCwdChange(id, "/other");
+			await vi.advanceTimersByTimeAsync(300);
+
+			expect(repositoriesStore.get("/other")?.branches["main"]?.terminals).toContain(id);
+			expect(terminalsStore.get(id)?.repoPath).toBe("/other");
+		});
+
 		it("cancelCwdTracking cancels pending debounce timer", async () => {
 			const id = addTerminal({ sessionId: "s8", cwd: "/repo" });
 			repositoriesStore.addTerminalToBranch("/repo", "main", id);
@@ -2922,6 +3217,42 @@ describe("useGitOperations", () => {
 
 			// Repo settings should be cleaned up
 			expect(repoSettingsStore.get("/repo")).toBeUndefined();
+		});
+
+		// Terminals were already closed here; the file-backed tabs of the same repo
+		// were not, and they point at a tree the user just said they are done with.
+		// They survive as tabs nothing can reach: getVisibleIds filters on a branch
+		// key that no longer resolves, so they are invisible AND immortal — every
+		// removal leaks another set. closeTerminal is the only function that closes
+		// a tab completely (store entry, pane slot, next selection), so route them
+		// through it rather than re-deriving that cleanup here.
+		it("closes the repo's editor, diff and markdown tabs too", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+			repositoriesStore.add({ path: "/other", displayName: "Other" });
+
+			const edit = editorTabsStore.add("/repo", "src/main.ts");
+			const diff = diffTabsStore.add("/repo", "src/main.ts", "M");
+			const md = mdTabsStore.add("/repo", "README.md");
+			const keep = editorTabsStore.add("/other", "src/keep.ts");
+
+			await gitOps.handleRemoveRepo("/repo");
+
+			expect(mockCloseTerminal).toHaveBeenCalledWith(edit);
+			expect(mockCloseTerminal).toHaveBeenCalledWith(diff);
+			expect(mockCloseTerminal).toHaveBeenCalledWith(md);
+			expect(mockCloseTerminal).not.toHaveBeenCalledWith(keep);
+		});
+
+		it("forgets the removed repo's remembered focus target", async () => {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+			recordTerminalRepo("term-1", "/repo");
+			expect(getFocusForRepo("/repo")).not.toBeNull();
+
+			await gitOps.handleRemoveRepo("/repo");
+
+			expect(getFocusForRepo("/repo")).toBeNull();
 		});
 	});
 });

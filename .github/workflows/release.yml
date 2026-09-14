@@ -12,8 +12,13 @@ on:
 # with "connection forcibly closed" (os error 10054). 0 keeps the server alive for
 # the whole job. It sits at workflow level because sccache-action starts the
 # server, so a step-level value would never reach it.
+#
+# RUST_VERSION pins the compiler so a new stable cannot change what ships. Bump it
+# in lockstep with ci.yml, nightly.yml and audit.yml — see the note in ci.yml and
+# docs/guides/ci.md.
 env:
   SCCACHE_IDLE_TIMEOUT: "0"
+  RUST_VERSION: "1.98.0"
 
 jobs:
   build:
@@ -78,8 +83,10 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Install Rust stable
+      - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -258,9 +265,10 @@ jobs:
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
-      - name: Install Rust stable
+      - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
       - name: Setup sccache

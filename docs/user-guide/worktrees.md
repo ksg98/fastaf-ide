@@ -73,13 +73,19 @@ Right-click a worktree branch → **Merge & Archive** to:
 
 1. Merge the branch into the main branch
 2. Handle the worktree based on the "After merge" setting:
-   - **Archive**: Moves the worktree directory to `__archived/` (accessible but removed from sidebar)
-   - **Delete**: Removes the worktree and branch entirely
+   - **Archive**: Moves the worktree directory to `__archived/` — the whole directory, uncommitted changes included (accessible but removed from sidebar)
+   - **Delete**: Removes the worktree and branch entirely. Anything not committed is gone
    - **Ask**: Merge succeeds, then you choose what to do
 
 The merge uses `--no-edit` for a clean fast-forward or merge commit. If conflicts are detected, FastAF attempts `git merge --abort` and leaves the worktree intact. If that abort fails, the error message tells you the repository may still be conflicted and includes the manual abort command.
 
-When using **Ask** mode, the cleanup dialog detects uncommitted changes and auto-stashes them during the branch switch. An "Unstash after switch" checkbox lets you restore changes on the target branch.
+### Uncommitted work in the worktree
+
+Both **Archive** and **Delete** remove the worktree, so FastAF asks first whenever the worktree is not known to be clean — whether or not the branch carries commits, and whether the cleanup was started by hand or by **Auto-archive merged**. The confirmation names what happens to the work: archived files travel to `__archived/`, deleted files do not come back. If the check itself cannot run, that counts as "not clean" and the cleanup still stops.
+
+The automatic sweep never asks — it keeps a dirty worktree and reports it in the status line (`kept N with uncommitted work`).
+
+When using **Ask** mode, the cleanup dialog detects uncommitted changes and auto-stashes them during the branch switch. An "Unstash after switch" checkbox lets you restore changes on the target branch. That stash covers the **base repository**; the warning under the worktree step is about the branch's own directory, which is a different place.
 
 ### Archive Script
 
@@ -146,7 +152,9 @@ Use the **Select All** checkbox in the toolbar to toggle all non-main worktrees.
 
 ## MCP Worktree Creation (AI Agents)
 
-AI agents connected via MCP can create worktrees using the `worktree action=create` tool.
+AI agents connected via MCP can create worktrees using `repo action=worktree_create`.
+
+When FastAF receives a worktree creation event while the active terminal is running an agent, the confirmation offers **Open Worktree**. Accepting selects an existing terminal in the new worktree or creates one when needed. The running agent stays in its original terminal, branch, and working directory; FastAF does not relabel or interrupt it.
 
 ### Claude Code — Agent Bridge
 

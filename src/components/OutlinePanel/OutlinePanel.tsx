@@ -7,7 +7,7 @@ import { openFileAction } from "../../utils/filePreview";
 import p from "../shared/panel.module.css";
 import s from "./OutlinePanel.module.css";
 
-interface OutlineSymbol {
+export interface OutlineSymbol {
 	name: string;
 	kind: string;
 	filePath: string;
@@ -46,10 +46,11 @@ function kindClass(kind: string): string {
 	return s[key] ?? s.kindDefault;
 }
 
-function nestLevel(sym: OutlineSymbol): number {
-	if (!sym.scopeContext) return 0;
-	const parts = sym.scopeContext.split("::").length;
-	return Math.min(parts, 2);
+// mdkb sends scopeContext as a Rust Debug rendering — "Module",
+// "ClassMember { class_name: None }" — never a "::"-joined path. It carries no
+// depth, only whether the symbol sits inside a type, so that is all we indent.
+export function nestLevel(sym: OutlineSymbol): number {
+	return sym.scopeContext?.startsWith("ClassMember") ? 1 : 0;
 }
 
 export const OutlinePanel: Component<OutlinePanelProps> = (props) => {

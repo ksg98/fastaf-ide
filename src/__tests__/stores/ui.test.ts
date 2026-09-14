@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testInScope, testInScopeAsync } from "../helpers/store";
 
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
@@ -11,6 +11,7 @@ describe("uiStore", () => {
 	let store: typeof import("../../stores/ui").uiStore;
 
 	beforeEach(async () => {
+		vi.useFakeTimers();
 		vi.resetModules();
 		mockInvoke.mockReset().mockResolvedValue(undefined);
 		localStorage.clear();
@@ -20,6 +21,43 @@ describe("uiStore", () => {
 		}));
 
 		store = (await import("../../stores/ui")).uiStore;
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** Let the debounced saveUIPrefs fire. */
+	function flushPersist(): void {
+		vi.advanceTimersByTime(600);
+	}
+
+	describe("flushSave", () => {
+		// The debounce timer dies with the WebView, so a preference toggled
+		// inside its window is lost unless the exit path writes it out.
+		it("writes a pending save immediately", () => {
+			testInScope(() => {
+				store.toggleSidebar();
+				expect(mockInvoke).not.toHaveBeenCalledWith("save_ui_prefs", expect.anything());
+
+				store.flushSave();
+				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
+					config: expect.objectContaining({ sidebar_visible: false }),
+				});
+
+				// The timer it replaced must not fire a second write.
+				mockInvoke.mockClear();
+				flushPersist();
+				expect(mockInvoke).not.toHaveBeenCalledWith("save_ui_prefs", expect.anything());
+			});
+		});
+
+		it("does nothing when no save is pending", () => {
+			testInScope(() => {
+				store.flushSave();
+				expect(mockInvoke).not.toHaveBeenCalledWith("save_ui_prefs", expect.anything());
+			});
+		});
 	});
 
 	describe("sidebar", () => {
@@ -41,6 +79,7 @@ describe("uiStore", () => {
 		it("persists sidebar state via invoke", () => {
 			testInScope(() => {
 				store.toggleSidebar();
+				flushPersist();
 				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
 					config: expect.objectContaining({ sidebar_visible: false }),
 				});
@@ -75,6 +114,7 @@ describe("uiStore", () => {
 			testInScope(() => {
 				mockInvoke.mockClear();
 				store.toggleFocusMode();
+				flushPersist();
 				const calls = mockInvoke.mock.calls.filter((c) => c[0] === "save_ui_prefs");
 				expect(calls).toHaveLength(0);
 			});
@@ -107,6 +147,7 @@ describe("uiStore", () => {
 			testInScope(() => {
 				mockInvoke.mockClear();
 				store.setFileBrowserExternalRoot("/tmp/foo");
+				flushPersist();
 				const persistCalls = mockInvoke.mock.calls.filter((c) => c[0] === "save_ui_prefs");
 				expect(persistCalls).toHaveLength(0);
 			});
@@ -233,6 +274,7 @@ describe("uiStore", () => {
 		it("persists sidebar width via invoke", () => {
 			testInScope(() => {
 				store.setSidebarWidth(350);
+				flushPersist();
 				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
 					config: expect.objectContaining({ sidebar_width: 350 }),
 				});
@@ -241,6 +283,30 @@ describe("uiStore", () => {
 	});
 
 	describe("markdown panel", () => {
+		it("opening it logs nothing — no leftover debug instrumentation", async () => {
+			const { appLogger } = await import("../../stores/appLogger");
+			const warn = vi.spyOn(appLogger, "warn");
+
+			testInScope(() => {
+				store.setMarkdownPanelVisible(true);
+			});
+
+			expect(warn).not.toHaveBeenCalled();
+		});
+
+		it("hydrating with the panel open logs nothing", async () => {
+			const { appLogger } = await import("../../stores/appLogger");
+			const warn = vi.spyOn(appLogger, "warn");
+			mockInvoke.mockResolvedValueOnce({ markdown_panel_visible: true });
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.state.markdownPanelVisible).toBe(true);
+			});
+
+			expect(warn).not.toHaveBeenCalled();
+		});
+
 		it("toggleMarkdownPanel toggles", () => {
 			testInScope(() => {
 				store.toggleMarkdownPanel();
@@ -299,29 +365,7 @@ describe("uiStore", () => {
 	describe("panel widths", () => {
 		it("defaults to expected widths", () => {
 			testInScope(() => {
-				expect(store.state.markdownPanelWidth).toBe(400);
-				expect(store.state.notesPanelWidth).toBe(350);
 				expect(store.state.settingsNavWidth).toBe(180);
-			});
-		});
-
-		it("setMarkdownPanelWidth updates and persists", () => {
-			testInScope(() => {
-				store.setMarkdownPanelWidth(450);
-				expect(store.state.markdownPanelWidth).toBe(450);
-				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
-					config: expect.objectContaining({ markdown_panel_width: 450 }),
-				});
-			});
-		});
-
-		it("setNotesPanelWidth updates and persists", () => {
-			testInScope(() => {
-				store.setNotesPanelWidth(300);
-				expect(store.state.notesPanelWidth).toBe(300);
-				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
-					config: expect.objectContaining({ notes_panel_width: 300 }),
-				});
 			});
 		});
 
@@ -339,6 +383,7 @@ describe("uiStore", () => {
 				store.setSettingsNavWidth(220);
 				mockInvoke.mockClear();
 				store.persistUIPrefs();
+				flushPersist();
 				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
 					config: expect.objectContaining({ settings_nav_width: 220 }),
 				});
@@ -349,15 +394,11 @@ describe("uiStore", () => {
 			mockInvoke.mockResolvedValueOnce({
 				sidebar_visible: true,
 				sidebar_width: 300,
-				markdown_panel_width: 450,
-				notes_panel_width: 320,
 				settings_nav_width: 200,
 			});
 
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				expect(store.state.markdownPanelWidth).toBe(450);
-				expect(store.state.notesPanelWidth).toBe(320);
 				expect(store.state.settingsNavWidth).toBe(200);
 			});
 		});
@@ -367,21 +408,18 @@ describe("uiStore", () => {
 
 			await testInScopeAsync(async () => {
 				await store.hydrate();
-				expect(store.state.markdownPanelWidth).toBe(400);
-				expect(store.state.notesPanelWidth).toBe(350);
 				expect(store.state.settingsNavWidth).toBe(180);
 			});
 		});
 
-		it("save_ui_prefs includes all panel widths", () => {
+		it("save_ui_prefs includes the tracked panel widths", () => {
 			testInScope(() => {
 				store.setSidebarWidth(300);
+				flushPersist();
 				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
 					config: expect.objectContaining({
 						sidebar_visible: true,
 						sidebar_width: 300,
-						markdown_panel_width: 400,
-						notes_panel_width: 350,
 						settings_nav_width: 180,
 					}),
 				});
@@ -429,35 +467,6 @@ describe("uiStore", () => {
 				store.toggleGitPanel();
 				expect(store.state.gitPanelVisible).toBe(true);
 				expect(store.state.aiChatPanelVisible).toBe(false);
-			});
-		});
-
-		it("aiChatPanelWidth defaults to 500", () => {
-			testInScope(() => {
-				expect(store.state.aiChatPanelWidth).toBe(500);
-			});
-		});
-
-		it("setAiChatPanelWidth updates and persists", () => {
-			testInScope(() => {
-				store.setAiChatPanelWidth(600);
-				expect(store.state.aiChatPanelWidth).toBe(600);
-				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
-					config: expect.objectContaining({ ai_chat_panel_width: 600 }),
-				});
-			});
-		});
-
-		it("hydrate loads AI Chat panel width from backend", async () => {
-			mockInvoke.mockResolvedValueOnce({
-				sidebar_visible: true,
-				sidebar_width: 300,
-				ai_chat_panel_width: 550,
-			});
-
-			await testInScopeAsync(async () => {
-				await store.hydrate();
-				expect(store.state.aiChatPanelWidth).toBe(550);
 			});
 		});
 	});
@@ -511,6 +520,7 @@ describe("uiStore", () => {
 			testInScope(() => {
 				mockInvoke.mockClear();
 				store.setDetached("activity", "panel-activity");
+				flushPersist();
 				const persistCalls = mockInvoke.mock.calls.filter((c) => c[0] === "save_ui_prefs");
 				expect(persistCalls).toHaveLength(1);
 				expect(persistCalls[0][1].config.detached_panels).toEqual({ activity: "panel-activity" });
@@ -522,9 +532,103 @@ describe("uiStore", () => {
 				store.setDetached("activity", "panel-activity");
 				mockInvoke.mockClear();
 				store.clearDetached("activity");
+				flushPersist();
 				const persistCalls = mockInvoke.mock.calls.filter((c) => c[0] === "save_ui_prefs");
 				expect(persistCalls).toHaveLength(1);
 				expect(persistCalls[0][1].config.detached_panels).toEqual({});
+			});
+		});
+	});
+
+	describe("githubSectionCollapsed", () => {
+		it("reports undefined for a section nobody has toggled", () => {
+			testInScope(() => {
+				expect(store.getGithubSectionCollapsed("issues")).toBeUndefined();
+			});
+		});
+
+		it("stores the collapsed flag per section id", () => {
+			testInScope(() => {
+				store.setGithubSectionCollapsed("issues", true);
+				store.setGithubSectionCollapsed("prs", false);
+				expect(store.getGithubSectionCollapsed("issues")).toBe(true);
+				expect(store.getGithubSectionCollapsed("prs")).toBe(false);
+			});
+		});
+
+		it("persists to the backend so the state survives a restart", () => {
+			testInScope(() => {
+				store.setGithubSectionCollapsed("issues", true);
+				flushPersist();
+				expect(mockInvoke).toHaveBeenCalledWith("save_ui_prefs", {
+					config: expect.objectContaining({ github_section_collapsed: { issues: true } }),
+				});
+			});
+		});
+
+		it("hydrates the map from the backend", async () => {
+			mockInvoke.mockResolvedValueOnce({ github_section_collapsed: { issues: true, "my-prs": false } });
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.getGithubSectionCollapsed("issues")).toBe(true);
+				expect(store.getGithubSectionCollapsed("my-prs")).toBe(false);
+				expect(store.getGithubSectionCollapsed("prs")).toBeUndefined();
+			});
+		});
+	});
+
+	describe("dead right-panel width state", () => {
+		// PanelResizeHandle sets panel.style.width inline and never tells the
+		// store, so these four fields had no writer and no reader — they were
+		// serialized on every persist for nothing.
+		it("does not serialize the unread right-panel widths", () => {
+			testInScope(() => {
+				mockInvoke.mockClear();
+				store.toggleSidebar();
+				flushPersist();
+
+				const config = mockInvoke.mock.calls.filter((c) => c[0] === "save_ui_prefs")[0][1].config;
+				expect(config).not.toHaveProperty("markdown_panel_width");
+				expect(config).not.toHaveProperty("notes_panel_width");
+				expect(config).not.toHaveProperty("git_panel_width");
+				expect(config).not.toHaveProperty("ai_chat_panel_width");
+				// The widths that do have readers stay.
+				expect(config).toHaveProperty("sidebar_width");
+				expect(config).toHaveProperty("settings_nav_width");
+			});
+		});
+
+		it("exposes no setters for them", () => {
+			const store_ = store as unknown as Record<string, unknown>;
+			expect(store_.setMarkdownPanelWidth).toBeUndefined();
+			expect(store_.setNotesPanelWidth).toBeUndefined();
+			expect(store_.setGitPanelWidth).toBeUndefined();
+			expect(store_.setAiChatPanelWidth).toBeUndefined();
+		});
+	});
+
+	describe("persistence debounce", () => {
+		it("coalesces a burst of mutations into a single save_ui_prefs", () => {
+			testInScope(() => {
+				mockInvoke.mockClear();
+
+				store.toggleSidebar();
+				store.toggleGitPanel();
+				store.toggleNotesPanel();
+
+				expect(mockInvoke.mock.calls.filter((c) => c[0] === "save_ui_prefs")).toHaveLength(0);
+
+				flushPersist();
+
+				const calls = mockInvoke.mock.calls.filter((c) => c[0] === "save_ui_prefs");
+				expect(calls).toHaveLength(1);
+				// The single write carries the final state, not the first mutation's.
+				expect(calls[0][1].config).toMatchObject({
+					sidebar_visible: false,
+					notes_panel_visible: true,
+					git_panel_visible: false,
+				});
 			});
 		});
 	});

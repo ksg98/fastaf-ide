@@ -17,12 +17,13 @@ describe("startAuthorizeFlow", () => {
 		mockInvoke.mockResolvedValueOnce({
 			authorization_url: "https://auth.example.com/oauth?state=nonce",
 			state: "nonce",
+			cross_domain_as: false,
 		});
 		const confirmAuthorization = vi.fn().mockResolvedValue(true);
 
 		await startAuthorizeFlow("example", confirmAuthorization);
 
-		expect(confirmAuthorization).toHaveBeenCalledWith("https://auth.example.com", "example");
+		expect(confirmAuthorization).toHaveBeenCalledWith("https://auth.example.com", "example", false);
 		expect(openUrl).toHaveBeenCalledWith("https://auth.example.com/oauth?state=nonce");
 	});
 
@@ -31,6 +32,7 @@ describe("startAuthorizeFlow", () => {
 			.mockResolvedValueOnce({
 				authorization_url: "https://auth.example.com/oauth?state=nonce",
 				state: "nonce",
+				cross_domain_as: false,
 			})
 			.mockResolvedValueOnce(undefined);
 
@@ -38,6 +40,20 @@ describe("startAuthorizeFlow", () => {
 
 		expect(mockInvoke).toHaveBeenLastCalledWith("cancel_mcp_upstream_oauth", { name: "example" });
 		expect(openUrl).not.toHaveBeenCalled();
+	});
+
+	it("forwards the cross-domain flag so the dialog can warn instead of blocking", async () => {
+		mockInvoke.mockResolvedValueOnce({
+			authorization_url: "https://auth.example-idp.com/authorize?state=nonce",
+			state: "nonce",
+			cross_domain_as: true,
+		});
+		const confirmAuthorization = vi.fn().mockResolvedValue(true);
+
+		await startAuthorizeFlow("gateway", confirmAuthorization);
+
+		expect(confirmAuthorization).toHaveBeenCalledWith("https://auth.example-idp.com", "gateway", true);
+		expect(openUrl).toHaveBeenCalledWith("https://auth.example-idp.com/authorize?state=nonce");
 	});
 });
 

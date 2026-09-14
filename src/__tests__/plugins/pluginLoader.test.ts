@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import type { PluginManifest } from "../../plugins/pluginLoader";
-import { loadUserPlugins, pluginModuleBaseUrl, validateManifest, validateModule } from "../../plugins/pluginLoader";
+import {
+	loadPluginsConcurrently,
+	loadUserPlugins,
+	pluginModuleBaseUrl,
+	validateManifest,
+	validateModule,
+} from "../../plugins/pluginLoader";
 
 // Mock invoke
 vi.mock("../../invoke", () => ({
@@ -170,6 +176,23 @@ describe("loadUserPlugins", () => {
 	it("registers listen handler for plugin-changed events", async () => {
 		await loadUserPlugins();
 		expect(listen).toHaveBeenCalledWith("plugin-changed", expect.any(Function));
+	});
+
+	it("can reuse an already-synced disabled list", async () => {
+		await loadUserPlugins(false);
+
+		expect(invoke).not.toHaveBeenCalledWith("load_config");
+	});
+
+	it("loads valid user plugins concurrently", async () => {
+		const manifests = [validManifest({ id: "plugin-a" }), validManifest({ id: "plugin-b" })];
+		const releases: Array<() => void> = [];
+		const loader = vi.fn(() => new Promise<void>((resolve) => releases.push(resolve)));
+
+		const loading = loadPluginsConcurrently(manifests, loader);
+		await vi.waitFor(() => expect(loader).toHaveBeenCalledTimes(2));
+		for (const release of releases) release();
+		await loading;
 	});
 
 	it("skips plugins that fail manifest validation", async () => {

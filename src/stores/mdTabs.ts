@@ -1,5 +1,5 @@
-import { pathBasename, pathStartsWith } from "../utils/pathUtils";
-import { currentBranchKey, repositoriesStore } from "./repositories";
+import { pathBasename } from "../utils/pathUtils";
+import { branchKeyFor, resolveRepoPathFor } from "./repositories";
 import { type BaseTab, createTabManager } from "./tabManager";
 
 // Zoom bounds mirror the terminal zoom (useTerminalLifecycle) for consistency.
@@ -38,6 +38,13 @@ export interface PluginPanelTab extends BaseTab {
 	title: string;
 	/** The plugin that owns this panel */
 	pluginId: string;
+	/**
+	 * The panel's identity within its plugin — `OpenPanelOptions.id`. Two
+	 * openPanel calls with the same key are the same panel, whatever the title
+	 * says; a dashboard that names itself after the active repo must not spawn a
+	 * second tab. Absent on MCP `ui action=tab` panels, which key on pluginId.
+	 */
+	panelKey?: string;
 	/** HTML content rendered inside the sandboxed iframe */
 	html: string;
 	/** Optional URL to load instead of inline HTML (mutually exclusive with html) */
@@ -104,22 +111,45 @@ export type MdTabData =
 	| CommandOverviewTab;
 
 /**
- * Resolve a caller-supplied path (repo root or PTY cwd) to a registered repo
- * path. Exact match first, then longest-prefix match so that nested cwds
- * (e.g. `/repo/src/foo`) still map back to the repo root (`/repo`).
- * Returns null when no registered repo owns the path.
+ * Resolve a caller-supplied path (repo root or PTY cwd) to a registered repo path.
+ *
+ * Kept as a named forwarder because callers here only ever want the repo, not the
+ * worktree branch. The matching itself lives in `utils/repoOwnership` — this used
+ * to be its own longest-prefix loop that ignored worktrees, so a session inside a
+ * linked worktree resolved to the wrong repo or to nothing at all.
+ *
+ * A function, not a `const` alias: an alias reads the repositories module the
+ * instant this one is imported, so any test that stubs that module — even a test
+ * that never touches a markdown tab — fails to load. Forwarding at call time
+ * means only the callers that actually resolve a path need it.
  */
-export function resolveRepoForCwd(cwd: string | null | undefined): string | null {
-	if (!cwd) return null;
-	const repos = Object.keys(repositoriesStore.state.repositories);
-	if (repos.includes(cwd)) return cwd;
-	let best: string | null = null;
-	for (const repo of repos) {
-		if (pathStartsWith(cwd, repo) && (best === null || repo.length > best.length)) {
-			best = repo;
-		}
-	}
-	return best;
+export function resolveRepoForCwd(path: string | null | undefined): string | null {
+	return resolveRepoPathFor(path);
+}
+
+/**
+ * Find an open file tab for the same file IN THE SAME REPO.
+ *
+ * `repoPath` is part of the identity on purpose. The old key was `fsRoot +
+ * filePath`, and `fsRoot` collapses to `""` for every plugin-opened tab, so two
+ * repos that both contain `README.md` (or a relative `plans/foo.md`) collided into
+ * a single tab. Whichever repo asked second got handed the FIRST repo's tab, with
+ * the first repo's content still in it.
+ */
+function findFileTab(
+	tabs: Record<string, MdTabData>,
+	repoPath: string,
+	filePath: string,
+	fsRoot?: string,
+): FileTab | undefined {
+	const effectiveRoot = fsRoot || repoPath;
+	return Object.values(tabs).find(
+		(tab): tab is FileTab =>
+			tab.type === "file" &&
+			tab.repoPath === repoPath &&
+			(tab as FileTab).fsRoot === effectiveRoot &&
+			tab.filePath === filePath,
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,14 +159,48 @@ export function resolveRepoForCwd(cwd: string | null | undefined): string | null
 /** Imperative handles exposed by tab components (e.g. MarkdownTabHandle) */
 const handles = new Map<string, unknown>();
 
+/**
+ * Notified whenever a plugin-panel tab leaves the store.
+ *
+ * The × button, middle-click, the tab context menu and closeTerminal all call
+ * `remove` straight on the store — none of them can reach the plugin's
+ * PanelHandle. Without this the owning plugin's message handler outlives its
+ * panel, holding the plugin module alive for a tab that no longer exists.
+ */
+const pluginPanelClosedListeners = new Set<(tabId: string) => void>();
+
 function createMdTabsStore() {
 	const base = createTabManager<MdTabData>("markdown");
 
+	/** Announce a plugin-panel closure to every subscriber. */
+	function announceIfPluginPanel(tabId: string): void {
+		if (base.get(tabId)?.type !== "plugin-panel") return;
+		for (const listener of pluginPanelClosedListeners) listener(tabId);
+	}
+
 	return {
 		state: base.state,
-		remove: base.remove,
+
+		/** Remove a tab. Plugin panels announce their own death on the way out. */
+		remove(id: string): void {
+			announceIfPluginPanel(id);
+			base.remove(id);
+		},
+
 		setActive: base.setActive,
-		clearAll: base.clearAll,
+
+		clearAll(): void {
+			for (const id of base.getIds()) announceIfPluginPanel(id);
+			base.clearAll();
+		},
+
+		/** Subscribe to plugin-panel closures. Returns the unsubscribe function. */
+		onPluginPanelClosed(listener: (tabId: string) => void): () => void {
+			pluginPanelClosedListeners.add(listener);
+			return () => {
+				pluginPanelClosedListeners.delete(listener);
+			};
+		},
 		get: base.get,
 		getIds: base.getIds,
 		getVisibleIds: base.getVisibleIds,
@@ -148,18 +212,12 @@ function createMdTabsStore() {
 		/** Add a file-based markdown tab (or return existing if same file already open).
 		 *  `fsRoot` overrides the filesystem root for I/O (e.g. worktree path). */
 		add(repoPath: string, filePath: string, fsRoot?: string): string {
-			const effectiveRoot = fsRoot || repoPath;
-			const existing = Object.values(base.state.tabs).find(
-				(tab) => tab.type === "file" && (tab as FileTab).fsRoot === effectiveRoot && tab.filePath === filePath,
-			) as FileTab | undefined;
+			const existing = findFileTab(base.state.tabs, repoPath, filePath, fsRoot);
 			if (existing) {
-				const key = currentBranchKey();
-				if (existing.repoPath !== repoPath || existing.branchKey !== key) {
-					base._setState("tabs", existing.id, "repoPath" as keyof MdTabData, repoPath as MdTabData[keyof MdTabData]);
-					base._setState("tabs", existing.id, "branchKey" as keyof MdTabData, key as MdTabData[keyof MdTabData]);
-				}
+				// Deliberately does NOT re-stamp repoPath/branchKey. It used to, which
+				// meant reopening a file MOVED its tab into whichever repo had focus —
+				// the tab, and the content in it, migrated away from its own repo.
 				base.setActive(existing.id);
-
 				return existing.id;
 			}
 
@@ -171,8 +229,8 @@ function createMdTabsStore() {
 				repoPath,
 				filePath,
 				fileName,
-				branchKey: currentBranchKey(),
-				fsRoot: effectiveRoot,
+				branchKey: branchKeyFor(repoPath),
+				fsRoot: fsRoot || repoPath,
 			};
 			const tabId = base._addTab(tab);
 
@@ -182,11 +240,7 @@ function createMdTabsStore() {
 		/** Add a file-based markdown tab in the background (does not change activeId).
 		 *  Returns tab ID, or null if a tab for the same file is already open. */
 		addFileBackground(repoPath: string, filePath: string, fsRoot?: string): string | null {
-			const effectiveRoot = fsRoot || repoPath;
-			const existing = Object.values(base.state.tabs).find(
-				(tab) => tab.type === "file" && (tab as FileTab).fsRoot === effectiveRoot && tab.filePath === filePath,
-			) as FileTab | undefined;
-			if (existing) return null;
+			if (findFileTab(base.state.tabs, repoPath, filePath, fsRoot)) return null;
 
 			const id = base._nextId("md");
 			const fileName = pathBasename(filePath) || filePath;
@@ -196,8 +250,8 @@ function createMdTabsStore() {
 				repoPath,
 				filePath,
 				fileName,
-				branchKey: currentBranchKey(),
-				fsRoot: effectiveRoot,
+				branchKey: branchKeyFor(repoPath),
+				fsRoot: fsRoot || repoPath,
 				pinned: true,
 			};
 			base._addTabBackground(tab);
@@ -239,23 +293,43 @@ function createMdTabsStore() {
 		},
 
 		/**
-		 * Add a plugin panel tab (or return existing if same pluginId+title already open).
+		 * Add a plugin panel tab, or reuse the one this plugin already opened under
+		 * the same `panelKey`. Reuse refreshes html and title and activates the tab
+		 * — the plugin asked for that panel, so the user must end up looking at it.
 		 * Returns the tab ID.
 		 */
-		addPluginPanel(pluginId: string, title: string, html: string): string {
+		addPluginPanel(pluginId: string, panelKey: string, title: string, html: string): string {
 			const existing = Object.values(base.state.tabs).find(
-				(tab) => tab.type === "plugin-panel" && (tab as PluginPanelTab).pluginId === pluginId && tab.title === title,
+				(tab) =>
+					tab.type === "plugin-panel" &&
+					(tab as PluginPanelTab).pluginId === pluginId &&
+					(tab as PluginPanelTab).panelKey === panelKey,
 			) as PluginPanelTab | undefined;
 			if (existing) {
 				// Refresh html so plugin updates (e.g. after hot-reload or
 				// re-open) replace stale content instead of silently keeping
 				// the previous render.
 				base._setState("tabs", existing.id, "html" as keyof MdTabData, html as MdTabData[keyof MdTabData]);
+				base._setState("tabs", existing.id, "title" as keyof MdTabData, title as MdTabData[keyof MdTabData]);
+				base.setActive(existing.id);
 				return existing.id;
 			}
 
 			const id = base._nextId("md");
-			const tabId = base._addTab({ type: "plugin-panel", id, title, pluginId, html, pinned: true } as PluginPanelTab);
+			// pinned: an SDK dashboard is global, not a per-repo view — it carries no
+			// repoPath, so evictNonPinnedPluginPanelsForOtherRepos would leave it
+			// alone either way. The flag is the honest label for a tab the user opened
+			// deliberately and expects to find again, and it is what protects the
+			// panel the day one of these does become repo-scoped.
+			const tabId = base._addTab({
+				type: "plugin-panel",
+				id,
+				title,
+				pluginId,
+				panelKey,
+				html,
+				pinned: true,
+			} as PluginPanelTab);
 
 			return tabId;
 		},
@@ -312,12 +386,18 @@ function createMdTabsStore() {
 			if (existing) base.remove(existing.id);
 		},
 
-		/** Update the HTML content of an existing plugin panel tab */
-		updatePluginPanel(tabId: string, html: string): void {
+		/**
+		 * Update the HTML content of an existing plugin panel tab.
+		 *
+		 * Returns false when the tab is gone — the user can close a panel from the
+		 * tab bar at any time, and a plugin that keeps pushing renders into nothing
+		 * has no other way to notice it should re-open.
+		 */
+		updatePluginPanel(tabId: string, html: string): boolean {
 			const tab = base.get(tabId);
-			if (tab && tab.type === "plugin-panel") {
-				base._setState("tabs", tabId, "html" as keyof MdTabData, html as MdTabData[keyof MdTabData]);
-			}
+			if (tab?.type !== "plugin-panel") return false;
+			base._setState("tabs", tabId, "html" as keyof MdTabData, html as MdTabData[keyof MdTabData]);
+			return true;
 		},
 
 		/** Add the Claude Usage Dashboard tab (singleton — reuses existing if open) */
@@ -407,16 +487,18 @@ function createMdTabsStore() {
 		/** Add an HTML preview tab (or return existing if same file already open) */
 		addHtmlPreview(repoPath: string, filePath: string, fsRoot?: string): string {
 			const effectiveRoot = fsRoot || repoPath;
+			// Same identity rule as findFileTab: the repo is part of what makes this
+			// preview "the same preview". Without it a preview opened from one repo is
+			// handed back to another, which is how a preview full of one project's
+			// output turned up in a project that had nothing to do with it.
 			const existing = Object.values(base.state.tabs).find(
 				(tab) =>
-					tab.type === "html-preview" && (tab as HtmlPreviewTab).fsRoot === effectiveRoot && tab.filePath === filePath,
+					tab.type === "html-preview" &&
+					tab.repoPath === repoPath &&
+					(tab as HtmlPreviewTab).fsRoot === effectiveRoot &&
+					tab.filePath === filePath,
 			) as HtmlPreviewTab | undefined;
 			if (existing) {
-				const key = currentBranchKey();
-				if (existing.repoPath !== repoPath || existing.branchKey !== key) {
-					base._setState("tabs", existing.id, "repoPath" as keyof MdTabData, repoPath as MdTabData[keyof MdTabData]);
-					base._setState("tabs", existing.id, "branchKey" as keyof MdTabData, key as MdTabData[keyof MdTabData]);
-				}
 				base.setActive(existing.id);
 				return existing.id;
 			}
@@ -430,7 +512,7 @@ function createMdTabsStore() {
 				repoPath,
 				filePath,
 				fileName,
-				branchKey: currentBranchKey(),
+				branchKey: branchKeyFor(repoPath),
 				fsRoot: effectiveRoot,
 			};
 			return base._addTab(tab);

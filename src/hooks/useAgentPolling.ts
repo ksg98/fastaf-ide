@@ -15,7 +15,14 @@ const NATIVE_LIFECYCLE_TIMEOUT_MS = 5_000;
 
 type SessionLifecycleResponse = {
 	session_id: string;
-	state?: { shell_state?: string; agent_state?: string; background_work?: boolean } | null;
+	state?: {
+		shell_state?: string;
+		agent_state?: string;
+		awaiting_input?: boolean;
+		question_confident?: boolean;
+		background_work?: boolean;
+		queued_commands?: number;
+	} | null;
 };
 
 let nextLifecycleRequest = 0;
@@ -105,6 +112,8 @@ async function syncAgentLifecycleStatesOnce(): Promise<void> {
 		const termId = terminalsStore.getTerminalForSession(session.session_id);
 		if (!termId) continue;
 		const shellState = toShellState(session.state?.shell_state);
+		const wasAwaiting = terminalsStore.get(termId)?.awaitingInput === "question";
+		const isAwaiting = session.state?.awaiting_input === true;
 		const requested = requestedSessions.get(termId);
 		const snapshotIsFresh =
 			requested?.sessionId === session.session_id &&
@@ -112,9 +121,21 @@ async function syncAgentLifecycleStatesOnce(): Promise<void> {
 		if (!snapshotIsFresh) continue;
 		terminalsStore.update(termId, {
 			agentState: toAgentLifecycleState(session.state?.agent_state),
+			awaitingInput: session.state?.awaiting_input === true ? "question" : null,
+			awaitingInputConfident: session.state?.question_confident === true,
 			backgroundWork: session.state?.background_work === true,
+			// Omitted by the backend when zero (serde skips it), so absence is an
+			// empty queue — not "unknown".
+			queuedCommands: session.state?.queued_commands ?? 0,
 			...(shellState !== undefined ? { shellState } : {}),
 		});
+		if (wasAwaiting !== isAwaiting) {
+			pluginRegistry.dispatchStructuredEvent(
+				"awaiting",
+				{ awaiting: isAwaiting, confident: session.state?.question_confident === true },
+				session.session_id,
+			);
+		}
 	}
 }
 
@@ -222,7 +243,7 @@ export async function detectAgentForTerminal(termId: string, source: DetectionSo
 			}
 
 			// Read the agent's leaf PID so the backend can extract env vars
-			// (CLAUDE_CONFIG_DIR, GEMINI_CLI_HOME, CODEX_HOME) directly from
+			// (CLAUDE_CONFIG_DIR, GEMINI_CLI_HOME, CODEX_HOME, HOME) directly from
 			// the process's initial environment — the ground-truth source.
 			let agentPid: number | null = null;
 			if (current.sessionId) {

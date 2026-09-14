@@ -14,8 +14,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGINS_SRC="$REPO_ROOT/plugins"
 
-# Determine plugin install directories per platform. Debug and release builds use
-# different bundle ids; install into both so `make dev` sees symlinks too.
+# Determine plugin install directories per platform. Debug and release builds
+# share the same config dir (see config_dir() in config.rs — no debug/release
+# branch); install into it, plus the legacy name for older installs.
 PLUGINS_DIRS=()
 case "$(uname)" in
   Darwin)

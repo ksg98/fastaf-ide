@@ -7,7 +7,36 @@ export interface TerminalTransport {
 	resubscribe(): Promise<void>;
 	unsubscribe(): void;
 	invoke(cmd: string, args: Record<string, unknown>): Promise<unknown>;
+	/**
+	 * Report the total number of frames received, opening the backend's delivery
+	 * gate once the count catches up with what it sent.
+	 *
+	 * Only the Tauri channel is gated this way; the WS transport recovers from a
+	 * dropped frame by sequence number and has no ack command at all, so the call
+	 * is a no-op there rather than a per-frame rejected invoke.
+	 */
+	ackFrame(received: number): void;
 	onEvent(type: string, handler: (payload: unknown) => void): Promise<void>;
+}
+
+/**
+ * Normalize a binary IPC payload to an ArrayBuffer, or null when it is not
+ * binary at all.
+ *
+ * Rust hands grid frames and styled-row chunks over as raw bytes, which reach JS
+ * as an ArrayBuffer on the custom-protocol IPC and as a plain `number[]` on the
+ * postMessage path Tauri falls back to when that protocol is blocked. Both are
+ * legitimate; anything else (an error object, null, a string) is not, and must
+ * not be fed to `new Uint8Array()` — that quietly produces an empty buffer, so a
+ * broken response would decode as an empty frame instead of being dropped.
+ */
+export function toBinaryPayload(data: unknown): ArrayBuffer | null {
+	if (data instanceof ArrayBuffer) return data;
+	if (ArrayBuffer.isView(data)) {
+		return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+	}
+	if (Array.isArray(data)) return new Uint8Array(data).buffer;
+	return null;
 }
 
 export function createTransport(sessionId: string, baseUrl?: string): TerminalTransport {
@@ -20,6 +49,17 @@ export class TauriTransport implements TerminalTransport {
 	private invokeRef: ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null = null;
 	private unlisteners: (() => void)[] = [];
 	private onFrameHandler: ((data: ArrayBuffer) => void) | null = null;
+	/**
+	 * Epoch of the live subscription, as returned by `subscribe_terminal_grid`,
+	 * or null while there is none.
+	 *
+	 * A terminal that remounts subscribes before the outgoing instance tears
+	 * down, so the backend receives the old instance's calls against the new
+	 * gate. The epoch is what makes those calls harmless: an ack for a previous
+	 * subscription is dropped instead of crediting frames nobody received, and a
+	 * stale unsubscribe is dropped instead of deleting the live channel.
+	 */
+	private epoch: number | null = null;
 
 	constructor(sessionId: string) {
 		this.sessionId = sessionId;
@@ -47,21 +87,29 @@ export class TauriTransport implements TerminalTransport {
 		const sessionId = this.sessionId;
 		const channel = new Channel();
 		channel.onmessage = (data: ArrayBuffer | number[]) => {
+			const frame = toBinaryPayload(data);
+			if (!frame) {
+				appLogger.error("terminal", "grid channel delivered a non-binary payload", { sessionId });
+				return;
+			}
 			try {
-				onFrame(data instanceof ArrayBuffer ? data : new Uint8Array(data).buffer);
+				onFrame(frame);
 			} catch (e) {
 				appLogger.error("terminal", "onFrame threw in channel callback", { sessionId, error: e });
 			}
 		};
-		await invoke("subscribe_terminal_grid", {
+		this.epoch = (await invoke("subscribe_terminal_grid", {
 			sessionId: this.sessionId,
 			channel,
-		});
+		})) as number;
 		invoke("terminal_request_frame", { sessionId: this.sessionId }).catch(() => {});
 	}
 
 	unsubscribe(): void {
-		this.invokeRef?.("unsubscribe_terminal_grid", { sessionId: this.sessionId }).catch(() => {});
+		if (this.epoch !== null) {
+			this.invokeRef?.("unsubscribe_terminal_grid", { sessionId: this.sessionId, epoch: this.epoch }).catch(() => {});
+			this.epoch = null;
+		}
 		for (const unlisten of this.unlisteners) {
 			// Tauri's unlisten is async under the hood and REJECTS if its internal
 			// registry entry is already gone (webview/session teardown race — common
@@ -78,6 +126,15 @@ export class TauriTransport implements TerminalTransport {
 			this.invokeRef = invoke;
 		}
 		return this.invokeRef(cmd, args);
+	}
+
+	ackFrame(received: number): void {
+		// No epoch means no live subscription: there is no gate to open, and epoch 0
+		// would match none, so the backend would ignore every later ack anyway.
+		if (this.epoch === null) return;
+		this.invokeRef?.("ack_terminal_frame", { sessionId: this.sessionId, epoch: this.epoch, received }).catch((e) => {
+			appLogger.debug("terminal", "ack_terminal_frame failed", { sessionId: this.sessionId, error: e });
+		});
 	}
 
 	async onEvent(type: string, handler: (payload: unknown) => void): Promise<void> {
@@ -134,9 +191,16 @@ export class WsTransport implements TerminalTransport {
 			const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
 			url = `${proto}//${window.location.host}/sessions/${encodeURIComponent(this.sessionId)}/stream?format=grid`;
 		}
-		this.ws = new WebSocket(url);
-		this.ws.binaryType = "arraybuffer";
-		this.ws.onmessage = (e) => {
+		// Every handler below is guarded on `this.ws === ws`. A socket the transport
+		// has moved on from still fires its callbacks: its onclose reads as an
+		// unexpected drop and reconnects a socket nobody tracks, and its onmessage
+		// feeds deltas from an older stream into the same row map — an old delta
+		// landing after a newer full frame paints stale rows with no error.
+		const ws = new WebSocket(url);
+		this.ws = ws;
+		ws.binaryType = "arraybuffer";
+		ws.onmessage = (e) => {
+			if (this.ws !== ws) return;
 			if (e.data instanceof ArrayBuffer) {
 				this.onFrameHandler?.(e.data);
 			} else {
@@ -155,8 +219,8 @@ export class WsTransport implements TerminalTransport {
 				}
 			}
 		};
-		this.ws.onclose = () => {
-			if (this.closed) return;
+		ws.onclose = () => {
+			if (this.closed || this.ws !== ws) return;
 			if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
 				appLogger.warn("terminal", `Terminal stream disconnected after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`, {
 					sessionId: this.sessionId,
@@ -177,7 +241,6 @@ export class WsTransport implements TerminalTransport {
 					});
 			}, delay);
 		};
-		const ws = this.ws;
 		await new Promise<void>((resolve, reject) => {
 			ws.onopen = () => resolve();
 			ws.onerror = () => reject(new Error("WebSocket connection failed"));
@@ -197,6 +260,12 @@ export class WsTransport implements TerminalTransport {
 
 	async invoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
 		return rpc(cmd, args);
+	}
+
+	ackFrame(_received: number): void {
+		// No-op by design. `ack_terminal_frame` is desktop-only; this socket's
+		// backend detects a dropped frame from the sequence number it stamps on
+		// each one and resends the full grid, so there is nothing to acknowledge.
 	}
 
 	onEvent(type: string, handler: (payload: unknown) => void): Promise<void> {

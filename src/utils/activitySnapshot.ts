@@ -45,6 +45,30 @@ export function isActivityWorking(state: EffectiveActivityState): boolean {
 	return state === "rate_limited" || state === "awaiting_input" || state === "working";
 }
 
+/** Every label `terminalStatusLabel` can produce, lowercased. */
+const STATUS_LABELS = new Set(["rate limited", "error", "waiting for input", "working", "completed", "idle"]);
+
+/**
+ * The task worth showing next to a status badge — `null` when there is none.
+ *
+ * A `current_task` is whatever the agent painted on its status line. When that
+ * is a bare spinner verb it repeats the badge sitting right next to it: a row
+ * reading "Working / Working" costs a line and says nothing. Claude's verbs are
+ * dropped wholesale because it cycles decorative ones ("Undulating",
+ * "Crunching") that restate the badge without matching its wording.
+ *
+ * Matching is exact against the labels this module itself produces, so a real
+ * task ("Waiting for background terminal") is never mistaken for a verb.
+ */
+export function displayTask(
+	currentTask: string | null | undefined,
+	agentType: string | null | undefined,
+): string | null {
+	if (!currentTask) return null;
+	if (agentType === "claude") return null;
+	return STATUS_LABELS.has(currentTask.trim().toLowerCase()) ? null : currentTask;
+}
+
 /** Extract project name (last path segment) from cwd */
 export function projectName(cwd: string | null): string | null {
 	if (!cwd) return null;
@@ -139,7 +163,7 @@ export function buildActivitySnapshot(): ActivitySnapshot {
 			sessionId: t?.sessionId ?? null,
 			agentType: t?.agentType ?? null,
 			agentIntent: t?.agentIntent ?? null,
-			currentTask: t?.agentType === "claude" ? null : (t?.currentTask ?? null),
+			currentTask: displayTask(t?.currentTask, t?.agentType),
 			lastPrompt: t?.lastPrompt ?? null,
 			activeSubTasks: t?.activeSubTasks ?? 0,
 			cwd: t?.cwd ?? null,

@@ -42,6 +42,14 @@ Maps GitHub merge state and review decision to display labels with CSS classes. 
 
 ## Terminal Utilities
 
+### sendCommand.ts
+
+`sendCommand(writeFn, text, agentType, shellFamily, submit?)` is the single
+frontend path for terminal command insertion and submission. It applies
+platform-aware line clearing, bracketed paste for multi-line text, and the
+agent-specific delay before Enter. Passing `submit=false` keeps the text
+editable and does not write Enter.
+
 ### terminalFilter.ts
 
 ```typescript
@@ -57,6 +65,22 @@ findOrphanTerminals(terminalIds: string[], branchTerminalMap: Record<string, str
 ```
 
 Finds terminals that exist in the store but aren't associated with any branch. Used for cleanup.
+
+### ptyCapture.ts
+
+`ptyCaptureStore` drives the raw PTY capture tap from the UI: `isRecording(sessionId)`,
+`bytes(sessionId)`, `refresh()`, and `toggle(sessionId)`. It backs the **Capture Session**
+item in the tab context menu, which appears only while `isPerfDebug()` is on.
+
+The tap has to be armed *before* a reproduction — the per-session output ring holds only the
+last 8 KB, so a state-detection bug reported after the fact has already lost its evidence.
+That is why the control sits one click from the misbehaving tab instead of in a curl the
+reporter has to look up.
+
+The tap is one global switch that `POST /diagnostics/capture` and other windows can also
+flip, so `refresh()` runs on every context-menu open rather than trusting the last value this
+window wrote. Starting always opens a fresh file, so the byte count reported when stopping
+belongs to that recording alone.
 
 ## Path Utilities (`pathUtils.ts`)
 

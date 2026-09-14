@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The shortcuts that matter when twelve agents are working — FastAF Blog</title>
+  <meta name="description" content="A keyboard shortcut list is usually a feature dump. These are the handful that change how you work when the terminal is where you supervise, not where you type." />
+
+  <meta property="og:title" content="The shortcuts that matter when twelve agents are working — FastAF" />
+  <meta property="og:description" content="The scarce resource stopped being keystrokes. It became knowing where to look next." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/sstraus/tuicommander/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>August 9, 2026</time>
+      <h1>The shortcuts that matter when twelve agents are working</h1>
+      <p class="blog-post-summary">A shortcut list is usually a feature dump — every binding, alphabetically, equally important. This is the other thing: the handful that changed how we work once the terminal stopped being where you type and became where you supervise. Mac keys below; <code>Cmd</code> is <code>Ctrl</code> on Windows and Linux.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>The premise: your attention is the bottleneck</h2>
+      <p>When you drive one terminal, shortcuts save keystrokes. That's a real but small win, and it's the win every shortcut guide is written about.</p>
+      <p>When you have a dozen agents running across four repositories, keystrokes are not what you're short of. Most of them are working and need nothing from you. One of them is blocked on a question, and until you find it, it is doing nothing at all. The expensive operation is <em>locating the thing that needs you</em> — and then getting back to whatever you were doing before.</p>
+      <p>Almost every shortcut below is a navigation shortcut. That's not an accident.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Cmd+U — the one to learn first</h2>
+      <p><strong><code>Cmd+U</code> jumps to the next terminal awaiting input.</strong> It cycles, and it crosses repositories: press it again and you're at the next one, regardless of which project it belongs to.</p>
+      <p>The awaiting badge tells you <em>that</em> something is waiting. <code>Cmd+U</code> is the part that takes you there without you having to know where "there" is. In practice the loop becomes: press it, answer, press it again, until it has nowhere left to send you. That last state — <code>Cmd+U</code> doing nothing — is the actual signal that you're free.</p>
+      <p>Its counterpart is <strong><code>Cmd+Ctrl+Backspace</code>: return to the last terminal.</strong> It's a toggle and it also crosses repositories, which is what makes the round trip cheap. You get pulled away to answer a prompt three repos over, and one chord puts you back where you were reading.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Cmd+I — say the next thing without interrupting this one</h2>
+      <p><strong><code>Cmd+I</code> opens the compose panel.</strong> <code>Ctrl+Enter</code> sends immediately. <code>Shift+Ctrl+Enter</code> queues instead: the command is handed to the backend and delivered at the next idle window, after the current turn finishes.</p>
+      <p>That distinction is the whole point. Typing into an agent that's mid-thought steers it — you've injected a new instruction into the middle of its reasoning. Queueing says "next, do this" without touching what's happening now. <code>Esc</code> closes the panel.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Reading long output: blocks, not scrollback</h2>
+      <p>An agent's turn produces a lot of text, and the classic answer — scroll up and squint — scales badly. FastAF groups output into command blocks, and the block shortcuts are how you move through them:</p>
+      <ul>
+        <li><code>Cmd+Shift+↑</code> / <code>Cmd+Shift+↓</code> — jump to the previous / next block</li>
+        <li><code>Cmd+Shift+.</code> — fold a block away once you've read it</li>
+        <li><code>Cmd+Shift+B</code> — search <em>inside</em> the current block instead of the whole scrollback</li>
+        <li><code>Cmd+F</code> — the ordinary find, across the terminal or the diff tab</li>
+      </ul>
+      <p>Block-scoped search is the underrated one. "Where did that error appear" has a very different answer when the haystack is one command's output rather than an hour of session history.</p>
+      <p>For plain movement: <code>Cmd+Home</code> and <code>Cmd+End</code> go to the top and the bottom, <code>Shift+PageUp</code> and <code>Shift+PageDown</code> move a page at a time.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Two different ways to make it bigger</h2>
+      <p>These get confused, and they do genuinely different things.</p>
+      <p><strong><code>Cmd+Shift+Enter</code> maximizes the active pane</strong> within its split, and restores it on a second press. You use it when you're in a split layout and one side has become the interesting one for a minute.</p>
+      <p><strong><code>Cmd+Alt+Enter</code> is focus mode</strong>: it hides the sidebar, the tab bar and every side panel, keeping the toolbar and the status bar. You use it when you're done supervising and want to actually read something.</p>
+      <p>Related and much simpler: <code>Cmd+[</code> toggles the sidebar on its own, and <code>Cmd+\</code> / <code>Cmd+Alt+\</code> split the terminal side-by-side or stacked.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Branches, without the picker dance</h2>
+      <p><strong><code>Cmd+B</code> is a fuzzy branch switcher</strong> — type a few characters, hit Enter.</p>
+      <p>But the faster one is muscle memory: <strong>hold <code>Cmd+Ctrl</code></strong> (<code>Ctrl+Alt</code> on Windows and Linux) and every branch in the sidebar shows a numbered badge. Press the number and you're there. <code>Cmd+Ctrl+1</code> through <code>Cmd+Ctrl+9</code> work directly if you already know the position — which, after a day on the same project, you do.</p>
+      <p>The rest of git is on <code>Cmd+Shift+D</code> for the Git Panel, <code>Cmd+G</code> for its Branches tab, and <code>Cmd+Shift+W</code> for the Worktree Manager.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Three small ones you'll want and won't guess</h2>
+      <p><strong><code>Cmd+Shift+L</code> refreshes the terminal.</strong> When a full-screen TUI has drawn garbage — half a box, a stale glyph, a redraw that lost a race — this repaints it. It's the shortcut people ask for after they've already restarted the session unnecessarily once.</p>
+      <p><strong><code>Cmd+Shift+T</code> reopens the tab you just closed.</strong> Same contract as a browser, and it matters more here, because a closed tab was somebody's working context.</p>
+      <p><strong><code>Cmd+Shift+I</code> opens the MCP servers popup.</strong> Toggle an upstream server on or off for the current repository without going near a settings page. <code>Cmd+L</code> clears the terminal, and <code>Cmd+,</code> opens settings when you do want the settings page.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Cmd+P, with a caveat</h2>
+      <p><strong><code>Cmd+P</code> is the command palette</strong> — commands, files and content search in one box. It's the shortcut we reach for most when we don't know the shortcut.</p>
+      <p>The caveat: the palette is desktop-only. Open FastAF in a browser or as a PWA — from an iPad, over Tailscale — and it isn't there. We'd rather say that plainly than have you press it on the couch and wonder what broke.</p>
+      <p>Also worth knowing: <code>Cmd+Shift+A</code> opens the Activity Dashboard, <code>Cmd+Shift+K</code> the prompt library, <code>Cmd+E</code> the file browser, and <code>Cmd+J</code> the task queue.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Make them yours</h2>
+      <p>Every binding above is a default, and defaults are guesses about your hands.</p>
+      <p>Press <code>Cmd+?</code> and open Keyboard Shortcuts. Click the pencil beside any action to enter recording mode, then press the combination you want; if it's already taken, you get told before you commit to it. Overrides are highlighted with a reset icon so you can revert one at a time, and there's a reset-everything button at the bottom.</p>
+      <p>If you'd rather work in a file, the same overrides live in <code>keybindings.json</code> in your config directory. Only list what you're changing — everything absent keeps its default, and <code>"key": ""</code> unbinds an action entirely:</p>
+      <pre><code>[
+  { "action": "toggle-git-ops", "key": "Cmd+Shift+Y" },
+  { "action": "jump-waiting-terminal", "key": "Cmd+Shift+U" }
+]</code></pre>
+      <p>One macOS detail we're quietly pleased with: <code>F13</code>–<code>F20</code> are recordable. macOS never forwards those keys to a WebView, so we capture them natively and feed them into the recorder. If you have a keyboard with a row of otherwise useless function keys, they can drive the app.</p>
+      <p>There's also a global hotkey — an OS-level chord that shows or hides FastAF from inside any other application. It ships with no default on purpose; pick one at the top of the same tab.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The short version</h2>
+      <p>If you learn three, learn <code>Cmd+U</code> to find the agent that needs you, <code>Cmd+Ctrl+Backspace</code> to get back, and <code>Cmd+I</code> to queue the next instruction without derailing the current one.</p>
+      <p>They're all the same shortcut, really. They answer "where do I look next" — which, once the machines are doing the typing, is the only question left that's yours.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/sstraus/tuicommander/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

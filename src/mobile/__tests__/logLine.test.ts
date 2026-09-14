@@ -4,6 +4,8 @@ import {
 	hasBoxDrawing,
 	type LogColor,
 	type LogLine,
+	lineMatchesNeedle,
+	lineText,
 	logColorToCss,
 	normalizeLogLine,
 	spanStyle,
@@ -268,5 +270,89 @@ describe("groupLineBlocks", () => {
 		expect(blocks[0]).toEqual({ type: "table", lines: [lines[0], lines[1]] });
 		expect(blocks[1]).toEqual({ type: "text", line: lines[2] });
 		expect(blocks[2]).toEqual({ type: "table", lines: [lines[3]] });
+	});
+});
+
+// --- Per-line derivation cache (F130 / F137) ---
+//
+// The mobile view re-derives blocks and filter text for the whole screen on
+// every frame. Before the cache, `groupLineBlocks` handed Solid's
+// reference-keyed `<For>` a brand-new wrapper for every line on every call, so
+// no line ever matched its previous identity and the whole rendered DOM was
+// rebuilt per frame. These tests pin the identity contract that makes reuse
+// possible, and the "reads" counters prove the text is derived once per line
+// rather than once per call.
+
+describe("line derivation cache", () => {
+	/** A LogLine whose span text counts how often it is read. */
+	function countingLine(text: string): { line: LogLine; reads: () => number } {
+		let reads = 0;
+		const line = {
+			spans: [
+				{
+					get text() {
+						reads++;
+						return text;
+					},
+				},
+			],
+		} as unknown as LogLine;
+		return { line, reads: () => reads };
+	}
+
+	it("returns the same block object for an unchanged line", () => {
+		const line: LogLine = { spans: [{ text: "hello" }] };
+		const first = groupLineBlocks([line]);
+		const second = groupLineBlocks([line]);
+		expect(second[0]).toBe(first[0]);
+	});
+
+	it("gives each line its own block", () => {
+		const a: LogLine = { spans: [{ text: "a" }] };
+		const b: LogLine = { spans: [{ text: "b" }] };
+		const blocks = groupLineBlocks([a, b]);
+		expect(blocks[0]).not.toBe(blocks[1]);
+	});
+
+	it("keeps a table block stable while its rows are unchanged", () => {
+		const top: LogLine = { spans: [{ text: "┌─┐" }] };
+		const bottom: LogLine = { spans: [{ text: "└─┘" }] };
+		const first = groupLineBlocks([top, bottom]);
+		const second = groupLineBlocks([top, bottom]);
+		expect(first[0].type).toBe("table");
+		expect(second[0]).toBe(first[0]);
+	});
+
+	it("rebuilds a table block when the group gains a row", () => {
+		const top: LogLine = { spans: [{ text: "┌─┐" }] };
+		const bottom: LogLine = { spans: [{ text: "└─┘" }] };
+		const middle: LogLine = { spans: [{ text: "├─┤" }] };
+		const first = groupLineBlocks([top, bottom]);
+		const second = groupLineBlocks([top, middle, bottom]);
+		expect(second[0]).not.toBe(first[0]);
+		expect(second[0]).toEqual({ type: "table", lines: [top, middle, bottom] });
+	});
+
+	it("reads a line's text once however often it is filtered", () => {
+		const { line, reads } = countingLine("Hello World");
+		expect(lineMatchesNeedle(line, "hello")).toBe(true);
+		expect(lineMatchesNeedle(line, "world")).toBe(true);
+		expect(lineMatchesNeedle(line, "nope")).toBe(false);
+		expect(reads()).toBe(1);
+	});
+
+	it("scans a line for box drawing once however often it is grouped", () => {
+		const { line, reads } = countingLine("plain text");
+		groupLineBlocks([line]);
+		groupLineBlocks([line]);
+		groupLineBlocks([line]);
+		expect(reads()).toBe(1);
+	});
+
+	it("re-derives a line that normalizeLogLine rewrote in place", () => {
+		const line: LogLine = { spans: [{ text: "● ready" }] };
+		expect(lineText(line)).toBe("● ready");
+		normalizeLogLine(line);
+		expect(lineText(line)).toBe("●︎ ready");
 	});
 });

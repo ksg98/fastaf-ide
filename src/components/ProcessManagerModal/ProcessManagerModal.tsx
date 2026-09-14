@@ -108,6 +108,9 @@ export const ProcessManagerModal: Component<ProcessManagerModalProps> = (props) 
 					<div class={d.headerText}>
 						<h4>Process Manager</h4>
 					</div>
+					<button class={s.close} onClick={props.onClose} title="Close" aria-label="Close">
+						&times;
+					</button>
 				</div>
 				<div class={s.scrollBody}>
 					<Show when={processes().length > 0} fallback={<div class={s.empty}>Loading...</div>}>

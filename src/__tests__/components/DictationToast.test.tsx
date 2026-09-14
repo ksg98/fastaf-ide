@@ -37,7 +37,7 @@ describe("DictationToast", () => {
 			expect(container.querySelector(".toast")).not.toBeNull();
 			expect(container.querySelector('[role="meter"]')?.getAttribute("aria-valuenow")).toBe("0");
 
-			mockInvoke.mockResolvedValueOnce({ text: "", skip_reason: "no speech detected", duration_s: 0 });
+			mockInvoke.mockResolvedValueOnce({ text: "", skip_reason: "no speech detected", duration_s: 0, truncated_s: 0 });
 			await dictationStore.stopRecording();
 		});
 	});
@@ -52,7 +52,7 @@ describe("DictationToast", () => {
 			expect(dictationStore.state.recording).toBe(true);
 
 			// Stop recording
-			mockInvoke.mockResolvedValueOnce({ text: "hello", skip_reason: null, duration_s: 1.0 });
+			mockInvoke.mockResolvedValueOnce({ text: "hello", skip_reason: null, duration_s: 1.0, truncated_s: 0 });
 			await dictationStore.stopRecording();
 
 			expect(dictationStore.state.recording).toBe(false);

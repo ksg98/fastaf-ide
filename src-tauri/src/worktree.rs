@@ -701,10 +701,14 @@ pub(crate) async fn create_worktree(
                 let emit_repo_changed = || {
                     state_arc.invalidate_repo_caches(&config_bg.base_repo);
                     // Dual-emit: bus (SSE/PWA/remote) + Tauri window (desktop).
+                    // A new worktree is `.git/worktrees` admin plus a ref, so it is
+                    // git-state: the branch list and every panel reading committed
+                    // history has to re-read.
                     let _ = state_arc
                         .event_bus
                         .send(crate::state::AppEvent::RepoChanged {
                             repo_path: config_bg.base_repo.clone(),
+                            kind: crate::repo_watcher::RepoChangeKind::GitState,
                         });
                     // Clone the handle out of the lock so we don't hold the read
                     // guard across the (potentially blocking) emit call.
@@ -715,6 +719,7 @@ pub(crate) async fn create_worktree(
                             "repo-changed",
                             crate::repo_watcher::RepoChangedPayload {
                                 repo_path: config_bg.base_repo.clone(),
+                                kind: crate::repo_watcher::RepoChangeKind::GitState,
                             },
                         );
                     }
@@ -965,7 +970,7 @@ pub(crate) async fn remove_worktree(
             if outcome.branch_delete_warning.is_none() {
                 crate::config::remove_branch_label(&repo_path, &branch_name);
             }
-            state.invalidate_repo_caches(&repo_path);
+            state.notify_worktree_removed(&repo_path, &branch_name);
             Ok(outcome)
         }
         Err(e) => {
@@ -981,24 +986,13 @@ pub(crate) async fn remove_worktree(
 /// If no worktree exists (bare local ref), returns `false` — there's nothing to be dirty.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn check_worktree_dirty(repo_path: String, branch_name: String) -> Result<bool, String> {
-    let base_repo = PathBuf::from(&repo_path);
-
-    let wt_list = git_cmd(&base_repo)
-        .args(["worktree", "list", "--porcelain"])
-        .run()
-        .map_err(|e| format!("Failed to list worktrees: {e}"))?
-        .stdout;
-
-    let wt_path = match find_worktree_path_for_branch(&wt_list, &branch_name) {
-        Some(p) => p,
-        None => return Ok(false), // No worktree = not dirty
-    };
-
-    let status_out = git_cmd(&wt_path)
-        .args(["status", "--porcelain"])
-        .run()
-        .map_err(|e| format!("Failed to check worktree status: {e}"))?;
-    Ok(!status_out.stdout.trim().is_empty())
+    match worktree_dirtiness(Path::new(&repo_path), &branch_name) {
+        WorktreeDirtiness::Clean => Ok(false),
+        WorktreeDirtiness::Dirty => Ok(true),
+        // An unanswered question is an error here, never a "no". Callers that
+        // gate a destructive action on this must see the failure.
+        WorktreeDirtiness::Unknown(reason) => Err(reason),
+    }
 }
 
 /// Delete a local branch.
@@ -1080,8 +1074,14 @@ pub(crate) fn delete_local_branch(
     branch_name: String,
     keep_worktree: Option<bool>,
 ) -> Result<(), String> {
-    delete_local_branch_impl(&repo_path, &branch_name, keep_worktree.unwrap_or(false))?;
-    state.invalidate_repo_caches(&repo_path);
+    let keep_worktree = keep_worktree.unwrap_or(false);
+    delete_local_branch_impl(&repo_path, &branch_name, keep_worktree)?;
+    if keep_worktree {
+        state.invalidate_repo_caches(&repo_path);
+    } else {
+        // The branch's worktree went with it — the sidebar row must go too.
+        state.notify_worktree_removed(&repo_path, &branch_name);
+    }
     Ok(())
 }
 
@@ -1104,6 +1104,120 @@ pub(crate) fn get_worktree_paths_cached(
     .clone()
 }
 
+/// One block of `git worktree list --porcelain` output.
+struct WorktreeEntry {
+    path: String,
+    /// Branch from the `branch refs/heads/...` line — absent while HEAD is detached.
+    branch: Option<String>,
+    detached: bool,
+}
+
+fn parse_worktree_entries(porcelain: &str) -> Vec<WorktreeEntry> {
+    let mut entries = Vec::new();
+
+    for block in porcelain.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+
+        let mut path: Option<String> = None;
+        let mut branch: Option<String> = None;
+        let mut detached = false;
+
+        for line in block.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(p.to_string());
+            } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(b.to_string());
+            } else if line == "detached" {
+                detached = true;
+            }
+        }
+
+        if let Some(path) = path {
+            entries.push(WorktreeEntry {
+                path,
+                branch,
+                detached,
+            });
+        }
+    }
+
+    entries
+}
+
+/// Marker files git writes into a worktree's admin dir while a multi-step operation is in
+/// flight. Rebase and bisect detach HEAD, so `git worktree list --porcelain` emits no branch
+/// line and the worktree reads as dead to anything keyed on that line (GH #112).
+const IN_PROGRESS_MARKERS: [&str; 6] = [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+];
+
+/// Admin dir of a linked worktree: its `.git` is a *file* holding
+/// `gitdir: <repo>/.git/worktrees/<name>`. Returns `None` for the main worktree (where `.git`
+/// is a directory) and for paths that no longer exist.
+fn worktree_admin_dir(worktree_path: &str) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(Path::new(worktree_path).join(".git")).ok()?;
+    let gitdir = content.trim().strip_prefix("gitdir:")?.trim();
+    Some(PathBuf::from(gitdir))
+}
+
+/// True when the worktree is in the middle of a rebase / merge / cherry-pick / revert / bisect.
+fn has_operation_in_progress(worktree_path: &str) -> bool {
+    let Some(admin) = worktree_admin_dir(worktree_path) else {
+        return false;
+    };
+    IN_PROGRESS_MARKERS
+        .iter()
+        .any(|marker| admin.join(marker).exists())
+}
+
+/// Branch a detached worktree was on before the in-flight operation started. Git records it in
+/// `head-name` for both rebase backends; merge/cherry-pick/revert never detach, so they have no
+/// equivalent (and need none). Bisect records only a raw name in `BISECT_START`, which we do not
+/// trust as a branch — such a worktree stays alive as an in-progress op, just without a row.
+pub(crate) fn operation_head_branch(worktree_path: &str) -> Option<String> {
+    let admin = worktree_admin_dir(worktree_path)?;
+    for backend in ["rebase-merge", "rebase-apply"] {
+        let head_name = std::fs::read_to_string(admin.join(backend).join("head-name")).ok();
+        if let Some(branch) = head_name
+            .as_deref()
+            .and_then(|s| s.trim().strip_prefix("refs/heads/"))
+        {
+            return Some(branch.to_string());
+        }
+    }
+    None
+}
+
+/// Map branch name -> worktree directory. A worktree detached by an in-progress rebase keeps its
+/// row: its pre-rebase branch is recovered from git's own state files, so the sidebar entry
+/// survives and its terminals are not closed mid-conflict-resolution.
+fn map_worktree_branch_paths(porcelain: &str) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    for entry in parse_worktree_entries(porcelain) {
+        let branch = match entry.branch {
+            Some(branch) => Some(branch),
+            None => operation_head_branch(&entry.path),
+        };
+        // Skip entries whose directory no longer exists (double safety after prune)
+        if let Some(branch) = branch
+            && Path::new(&entry.path).exists()
+        {
+            result.insert(branch, entry.path);
+        }
+    }
+
+    result
+}
+
 /// Get worktree paths for a repo: maps branch name -> worktree directory
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn get_worktree_paths(repo_path: String) -> Result<HashMap<String, String>, String> {
@@ -1114,78 +1228,37 @@ pub(crate) fn get_worktree_paths(repo_path: String) -> Result<HashMap<String, St
         .run()
         .map_err(|e| format!("git worktree list failed: {e}"))?;
 
-    let mut result = HashMap::new();
-    let mut current_path: Option<String> = None;
-
-    for line in out.stdout.lines() {
-        if line.starts_with("worktree ") {
-            current_path = Some(line.trim_start_matches("worktree ").to_string());
-        } else if line.starts_with("branch refs/heads/") {
-            let branch = line.trim_start_matches("branch refs/heads/").to_string();
-            if let Some(ref path) = current_path {
-                // Skip entries whose directory no longer exists (double safety after prune)
-                if Path::new(path).exists() {
-                    result.insert(branch, path.clone());
-                }
-            }
-        }
-    }
-
-    Ok(result)
+    Ok(map_worktree_branch_paths(&out.stdout))
 }
 
 /// Parse `git worktree list --porcelain` output and return paths of linked worktrees that are in
 /// detached HEAD state (i.e. their branch has been deleted). The main worktree (first entry) is
-/// always skipped — it can't be removed without removing the repo itself.
+/// always skipped — it can't be removed without removing the repo itself. A worktree detached by
+/// an in-progress operation is not an orphan: its branch is coming back when the rebase ends.
 fn parse_orphan_worktrees(porcelain: &str) -> Vec<String> {
-    let mut orphans = Vec::new();
-    let mut is_first = true;
-
-    for block in porcelain.split("\n\n") {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
-
-        let mut path: Option<String> = None;
-        let mut has_branch = false;
-        let mut is_detached = false;
-
-        for line in block.lines() {
-            if line.starts_with("worktree ") {
-                path = Some(line.trim_start_matches("worktree ").to_string());
-            } else if line.starts_with("branch refs/heads/") {
-                has_branch = true;
-            } else if line == "detached" {
-                is_detached = true;
-            }
-        }
-
-        if is_first {
-            is_first = false;
-            continue;
-        }
-
-        if is_detached && !has_branch {
-            orphans.extend(path);
-        }
-    }
-
-    orphans
+    parse_worktree_entries(porcelain)
+        .into_iter()
+        .skip(1)
+        .filter(|e| e.detached && e.branch.is_none() && !has_operation_in_progress(&e.path))
+        .map(|e| e.path)
+        .collect()
 }
 
 /// Detect orphan worktrees: linked worktrees present on the filesystem but in detached HEAD
 /// state (i.e. their branch has been deleted). Returns a list of worktree directory paths.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn detect_orphan_worktrees(repo_path: String) -> Result<Vec<String>, String> {
-    let base_repo = PathBuf::from(&repo_path);
+pub(crate) async fn detect_orphan_worktrees(repo_path: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let base_repo = PathBuf::from(&repo_path);
+        let out = git_cmd(&base_repo)
+            .args(["worktree", "list", "--porcelain"])
+            .run()
+            .map_err(|e| format!("git worktree list failed: {e}"))?;
 
-    let out = git_cmd(&base_repo)
-        .args(["worktree", "list", "--porcelain"])
-        .run()
-        .map_err(|e| format!("git worktree list failed: {e}"))?;
-
-    Ok(parse_orphan_worktrees(&out.stdout))
+        Ok(parse_orphan_worktrees(&out.stdout))
+    })
+    .await
+    .map_err(|e| format!("orphan worktree detection task failed: {e}"))?
 }
 
 /// Remove an orphan worktree by its filesystem path (detached HEAD — no branch to look up).
@@ -1624,16 +1697,199 @@ pub(crate) fn checkout_remote_branch(
 pub(crate) struct MergeArchiveResult {
     /// Whether the merge succeeded
     pub(crate) merged: bool,
-    /// What happened to the worktree (archived / deleted / pending user choice)
+    /// What happened to the worktree (archived / deleted / pending user choice /
+    /// needs_confirmation — nothing was touched, the caller must confirm)
     pub(crate) action: String,
     /// Path to archived directory (if archived)
     pub(crate) archive_path: Option<String>,
+    /// Commits the branch had that the target did not, measured BEFORE the merge.
+    /// 0 means the merge was a no-op ("Already up to date") — the worktree is about
+    /// to disappear from the sidebar without contributing anything.
+    pub(crate) commits_ahead: usize,
+    /// Whether the worktree had uncommitted changes at pre-flight time.
+    pub(crate) worktree_dirty: bool,
+}
+
+/// Whether a branch's worktree holds uncommitted work.
+///
+/// Tri-state on purpose. "We could not tell" is not the same answer as "clean",
+/// and when the answer gates an irreversible delete it must not collapse into it.
+pub(crate) enum WorktreeDirtiness {
+    /// The worktree exists and `git status` reported nothing, or the branch has
+    /// no worktree at all — either way there is no uncommitted work to lose.
+    Clean,
+    /// `git status` reported uncommitted work.
+    Dirty,
+    /// A git command failed, so the question is unanswered. Carries the reason.
+    Unknown(String),
+}
+
+impl WorktreeDirtiness {
+    /// True only when git actually reported uncommitted work.
+    pub(crate) fn is_dirty(&self) -> bool {
+        matches!(self, WorktreeDirtiness::Dirty)
+    }
+
+    /// True unless the worktree is known to be clean. An irreversible cleanup
+    /// needs a positive answer, and silence is not one.
+    fn blocks_cleanup(&self) -> bool {
+        !matches!(self, WorktreeDirtiness::Clean)
+    }
+}
+
+/// Ask git whether `branch_name`'s worktree has uncommitted work.
+///
+/// The three outcomes are kept apart deliberately: a branch with no worktree has
+/// nothing to lose (Clean), while a git command that failed tells us nothing
+/// (Unknown). Folding the second into the first is what let a dirty worktree be
+/// force-removed on a transient git error.
+pub(crate) fn worktree_dirtiness(base_repo: &Path, branch_name: &str) -> WorktreeDirtiness {
+    let list = match git_cmd(base_repo)
+        .args(["worktree", "list", "--porcelain"])
+        .run()
+    {
+        Ok(out) => out.stdout,
+        Err(e) => return WorktreeDirtiness::Unknown(format!("Failed to list worktrees: {e}")),
+    };
+
+    let Some(wt_path) = find_worktree_path_for_branch(&list, branch_name) else {
+        return WorktreeDirtiness::Clean; // No worktree = nothing to lose
+    };
+
+    match git_cmd(&wt_path).args(["status", "--porcelain"]).run() {
+        Ok(out) if out.stdout.trim().is_empty() => WorktreeDirtiness::Clean,
+        Ok(_) => WorktreeDirtiness::Dirty,
+        Err(e) => WorktreeDirtiness::Unknown(format!("Failed to check worktree status: {e}")),
+    }
+}
+
+/// The single gate every destructive worktree cleanup passes through.
+///
+/// Both entry points — `merge_and_archive_worktree_impl` and
+/// `finalize_merged_worktree_impl` — call this, so the two cleanup paths cannot
+/// drift apart. `force` is the user's confirmation, arriving from the frontend
+/// after the dialog explained what is about to be destroyed.
+fn cleanup_needs_confirmation(action: &str, force: bool, dirt: &WorktreeDirtiness) -> bool {
+    let cleans_up = action == "archive" || action == "delete";
+    if !cleans_up || force {
+        return false;
+    }
+    if let WorktreeDirtiness::Unknown(reason) = dirt {
+        tracing::warn!(
+            source = "worktree",
+            "Cleanup blocked: could not confirm the worktree is clean ({reason})"
+        );
+    }
+    dirt.blocks_cleanup()
+}
+
+/// What the pre-flight learned about a worktree branch before we merge it.
+pub(crate) struct MergePreflight {
+    pub(crate) commits_ahead: usize,
+    pub(crate) worktree_dirty: WorktreeDirtiness,
+}
+
+/// Count commits on `branch` that `target` does not have, and check whether the
+/// branch's worktree has uncommitted changes.
+///
+/// This is what tells a real merge apart from an "Already up to date" no-op. Both
+/// succeed as far as `git merge` is concerned, but only one of them justifies
+/// making the worktree row disappear.
+///
+/// A failing rev-list is not fatal — the merge was asked for and deserves to run,
+/// so the count falls back to 0. The dirty check is different: it gates a delete,
+/// so its failure is reported as Unknown rather than swallowed. See
+/// `cleanup_needs_confirmation`.
+pub(crate) fn merge_preflight(
+    repo_path: &str,
+    branch_name: &str,
+    target_branch: &str,
+) -> MergePreflight {
+    let base_repo = Path::new(repo_path);
+    let commits_ahead = git_cmd(base_repo)
+        .args([
+            "rev-list",
+            "--count",
+            &format!("{target_branch}..{branch_name}"),
+        ])
+        .run()
+        .ok()
+        .and_then(|out| out.stdout.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+
+    MergePreflight {
+        commits_ahead,
+        worktree_dirty: worktree_dirtiness(base_repo, branch_name),
+    }
 }
 
 /// Complete a pending merge by archiving or deleting the worktree.
 ///
-/// Called after `merge_and_archive_worktree` returns `action: "pending"` (ask mode).
-/// The merge has already succeeded; this only handles the worktree cleanup.
+/// Called after `merge_and_archive_worktree` returns `action: "pending"` (ask mode),
+/// and by the auto-archive-merged sweep, which has no user in the loop at all. The
+/// merge has already succeeded; this only handles the worktree cleanup.
+///
+/// `force` is the user's confirmation that a dirty worktree may be destroyed.
+/// Without it, a worktree that is not known to be clean is left untouched and the
+/// caller gets `needs_confirmation` — the same contract
+/// `merge_and_archive_worktree_impl` uses, through the same gate.
+///
+/// Blocking — callers wrap in `spawn_blocking` when on an async runtime.
+pub(crate) fn finalize_merged_worktree_impl(
+    state: &Arc<AppState>,
+    repo_path: String,
+    branch_name: String,
+    action: String,
+    force: bool,
+) -> Result<MergeArchiveResult, String> {
+    let script = resolve_archive_script(&repo_path);
+    let base_repo = std::path::PathBuf::from(&repo_path);
+
+    let dirt = worktree_dirtiness(&base_repo, &branch_name);
+    if cleanup_needs_confirmation(&action, force, &dirt) {
+        return Ok(MergeArchiveResult {
+            merged: true, // The merge itself already happened; only cleanup stopped.
+            action: "needs_confirmation".to_string(),
+            archive_path: None,
+            commits_ahead: 0,
+            worktree_dirty: dirt.is_dirty(),
+        });
+    }
+
+    match action.as_str() {
+        "archive" => {
+            let archive_path = archive_worktree(&base_repo, &branch_name, script.as_deref())?;
+            // Archiving moves the worktree out of the repo — as far as the sidebar
+            // is concerned the row is gone, same as a delete.
+            state.notify_worktree_removed(&repo_path, &branch_name);
+            Ok(MergeArchiveResult {
+                merged: true,
+                action: "archived".to_string(),
+                archive_path: Some(archive_path),
+                // The merge already happened in the "pending" call that preceded
+                // this one; its pre-flight numbers were reported there.
+                commits_ahead: 0,
+                worktree_dirty: dirt.is_dirty(),
+            })
+        }
+        "delete" => {
+            remove_worktree_by_branch(&repo_path, &branch_name, true, script.as_deref(), false)?;
+            state.notify_worktree_removed(&repo_path, &branch_name);
+            Ok(MergeArchiveResult {
+                merged: true,
+                action: "deleted".to_string(),
+                archive_path: None,
+                commits_ahead: 0,
+                worktree_dirty: dirt.is_dirty(),
+            })
+        }
+        _ => Err(format!(
+            "Unknown action '{action}': expected 'archive' or 'delete'"
+        )),
+    }
+}
+
+/// Finalize a pending merge by archiving/deleting the worktree (Tauri command).
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub(crate) fn finalize_merged_worktree(
@@ -1641,32 +1897,15 @@ pub(crate) fn finalize_merged_worktree(
     repo_path: String,
     branch_name: String,
     action: String,
+    force: Option<bool>,
 ) -> Result<MergeArchiveResult, String> {
-    let script = resolve_archive_script(&repo_path);
-    let base_repo = std::path::PathBuf::from(&repo_path);
-    match action.as_str() {
-        "archive" => {
-            let archive_path = archive_worktree(&base_repo, &branch_name, script.as_deref())?;
-            state.invalidate_repo_caches(&repo_path);
-            Ok(MergeArchiveResult {
-                merged: true,
-                action: "archived".to_string(),
-                archive_path: Some(archive_path),
-            })
-        }
-        "delete" => {
-            remove_worktree_by_branch(&repo_path, &branch_name, true, script.as_deref(), false)?;
-            state.invalidate_repo_caches(&repo_path);
-            Ok(MergeArchiveResult {
-                merged: true,
-                action: "deleted".to_string(),
-                archive_path: None,
-            })
-        }
-        _ => Err(format!(
-            "Unknown action '{action}': expected 'archive' or 'delete'"
-        )),
-    }
+    finalize_merged_worktree_impl(
+        state.inner(),
+        repo_path,
+        branch_name,
+        action,
+        force.unwrap_or(false),
+    )
 }
 
 /// Merge a worktree branch into a target branch, then archive or delete the worktree.
@@ -1683,9 +1922,26 @@ pub(crate) fn merge_and_archive_worktree_impl(
     branch_name: String,
     target_branch: String,
     after_merge: String,
+    force: bool,
 ) -> Result<MergeArchiveResult, String> {
     let script = resolve_archive_script(&repo_path);
     let base_repo = PathBuf::from(&repo_path);
+
+    // 0. Pre-flight: would the cleanup take uncommitted work with it? Both
+    //    "archive" and "delete" end in `git worktree remove --force`, so any
+    //    worktree not known to be clean must be confirmed first — whether or not
+    //    the branch carries commits. `commits_ahead` is reported alongside so the
+    //    dialog can also say that an empty branch's merge would be a no-op.
+    let preflight = merge_preflight(&repo_path, &branch_name, &target_branch);
+    if cleanup_needs_confirmation(&after_merge, force, &preflight.worktree_dirty) {
+        return Ok(MergeArchiveResult {
+            merged: false,
+            action: "needs_confirmation".to_string(),
+            archive_path: None,
+            commits_ahead: preflight.commits_ahead,
+            worktree_dirty: preflight.worktree_dirty.is_dirty(),
+        });
+    }
 
     // 1. Ensure we're on the target branch in the base repo
     git_cmd(&base_repo)
@@ -1707,23 +1963,34 @@ pub(crate) fn merge_and_archive_worktree_impl(
     }
 
     // 3. Handle the worktree based on after_merge setting
+    let MergePreflight {
+        commits_ahead,
+        worktree_dirty,
+    } = preflight;
+    let worktree_dirty = worktree_dirty.is_dirty();
     match after_merge.as_str() {
         "archive" => {
             let archive_path = archive_worktree(&base_repo, &branch_name, script.as_deref())?;
-            state.invalidate_repo_caches(&repo_path);
+            // Archiving moves the worktree out of the repo — as far as the sidebar
+            // is concerned the row is gone, same as a delete.
+            state.notify_worktree_removed(&repo_path, &branch_name);
             Ok(MergeArchiveResult {
                 merged: true,
                 action: "archived".to_string(),
                 archive_path: Some(archive_path),
+                commits_ahead,
+                worktree_dirty,
             })
         }
         "delete" => {
             remove_worktree_by_branch(&repo_path, &branch_name, true, script.as_deref(), false)?;
-            state.invalidate_repo_caches(&repo_path);
+            state.notify_worktree_removed(&repo_path, &branch_name);
             Ok(MergeArchiveResult {
                 merged: true,
                 action: "deleted".to_string(),
                 archive_path: None,
+                commits_ahead,
+                worktree_dirty,
             })
         }
         _ => {
@@ -1733,12 +2000,17 @@ pub(crate) fn merge_and_archive_worktree_impl(
                 merged: true,
                 action: "pending".to_string(),
                 archive_path: None,
+                commits_ahead,
+                worktree_dirty,
             })
         }
     }
 }
 
 /// Merge a worktree branch into a target branch, then archive/delete (Tauri command).
+///
+/// `force` skips the pre-flight guard that refuses to clean up a branch carrying no
+/// commits while its worktree is dirty. The frontend sets it after the user confirms.
 #[cfg(feature = "desktop")]
 #[tauri::command]
 pub(crate) fn merge_and_archive_worktree(
@@ -1747,6 +2019,7 @@ pub(crate) fn merge_and_archive_worktree(
     branch_name: String,
     target_branch: String,
     after_merge: String,
+    force: Option<bool>,
 ) -> Result<MergeArchiveResult, String> {
     merge_and_archive_worktree_impl(
         state.inner(),
@@ -1754,6 +2027,7 @@ pub(crate) fn merge_and_archive_worktree(
         branch_name,
         target_branch,
         after_merge,
+        force.unwrap_or(false),
     )
 }
 
@@ -1812,19 +2086,10 @@ pub(crate) fn archive_worktree(
     std::fs::create_dir_all(&archive_dir)
         .map_err(|e| format!("Failed to create archive directory: {e}"))?;
 
-    // Remove git worktree link first (so git doesn't track it)
-    let wt_path_str = wt_path.to_string_lossy().to_string();
-    if let Err(e) = git_cmd(base_repo)
-        .args(["worktree", "remove", "--force", &wt_path_str])
-        .run()
-    {
-        tracing::warn!(
-            source = "worktree",
-            "Archive: failed to remove worktree link: {e}"
-        );
-    }
-
-    // Move the directory if it still exists (worktree remove may have deleted it)
+    // Move the directory out FIRST. `git worktree remove --force` DELETES
+    // uncommitted work, so removing before the rename made "archive" exactly as
+    // destructive as "delete" for a dirty worktree — the rename then found
+    // nothing left to move and silently did nothing.
     if wt_path.exists() {
         // Archive is the non-destructive alternative to delete — never clobber a
         // prior archive for the same branch name; land on the next free suffix.
@@ -1833,8 +2098,19 @@ pub(crate) fn archive_worktree(
             .map_err(|e| format!("Failed to move worktree to archive: {e}"))?;
     }
 
-    // Prune stale worktree entries
-    let _ = git_cmd(base_repo).args(["worktree", "prune"]).run();
+    // The directory is out of the repo now; drop git's administrative entry for
+    // it. Unlock first — `prune` skips locked worktrees and would leave a ghost
+    // row in the sidebar.
+    let wt_path_str = wt_path.to_string_lossy().to_string();
+    let _ = git_cmd(base_repo)
+        .args(["worktree", "unlock", &wt_path_str])
+        .run();
+    if let Err(e) = git_cmd(base_repo).args(["worktree", "prune"]).run() {
+        tracing::warn!(
+            source = "worktree",
+            "Archive: failed to prune the worktree entry: {e}"
+        );
+    }
 
     Ok(archive_dest.to_string_lossy().to_string())
 }
@@ -2619,6 +2895,340 @@ mod tests {
         assert_eq!(unique.len(), refs.len(), "Duplicate refs found: {names:?}");
     }
 
+    // --- merge pre-flight ---
+    //
+    // The whole point: `git merge` succeeds identically for a branch carrying 7
+    // commits and for one carrying none ("Already up to date"), and in both cases
+    // the worktree row then disappears from the sidebar. Only the pre-flight can
+    // tell the user which of the two just happened.
+
+    /// Build a worktree on `branch` and return its path. Optionally commit a file
+    /// so the branch is genuinely ahead of the base branch.
+    fn worktree_with(repo: &Path, branch: &str, commit: bool) -> PathBuf {
+        let repo_path = repo.to_string_lossy().to_string();
+        let config = WorktreeConfig {
+            task_name: branch.to_string(),
+            base_repo: repo_path,
+            branch: Some(branch.to_string()),
+            create_branch: true,
+        };
+        let wt = create_worktree_internal(&repo.join("worktrees"), &config, None)
+            .expect("create worktree");
+        if commit {
+            fs::write(wt.path.join("work.txt"), "real work").expect("write");
+            git_cmd(&wt.path).args(["add", "."]).run().expect("add");
+            git_cmd(&wt.path)
+                .args(["commit", "-m", "feat: real work"])
+                .run()
+                .expect("commit");
+        }
+        wt.path
+    }
+
+    /// The base branch of `setup_test_repo` — git's default name varies by version.
+    fn base_branch_of(repo: &Path) -> String {
+        git_cmd(repo)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .run()
+            .expect("rev-parse HEAD")
+            .stdout
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn merge_preflight_counts_commits_the_target_is_missing() {
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        worktree_with(repo.path(), "feat-ahead", true);
+
+        let pf = merge_preflight(&repo.path().to_string_lossy(), "feat-ahead", &base);
+        assert_eq!(pf.commits_ahead, 1, "one commit the base branch lacks");
+        assert!(
+            matches!(pf.worktree_dirty, WorktreeDirtiness::Clean),
+            "everything was committed"
+        );
+    }
+
+    #[test]
+    fn merge_preflight_reports_zero_for_a_branch_with_nothing_to_merge() {
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        worktree_with(repo.path(), "feat-empty", false);
+
+        let pf = merge_preflight(&repo.path().to_string_lossy(), "feat-empty", &base);
+        assert_eq!(
+            pf.commits_ahead, 0,
+            "branch was cut from base and never committed — merging it is a no-op"
+        );
+    }
+
+    #[test]
+    fn merge_preflight_sees_uncommitted_work_in_the_worktree() {
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        let wt = worktree_with(repo.path(), "feat-dirty", false);
+        fs::write(wt.join("scratch.txt"), "not committed yet").expect("write");
+
+        let pf = merge_preflight(&repo.path().to_string_lossy(), "feat-dirty", &base);
+        assert_eq!(pf.commits_ahead, 0);
+        assert!(
+            matches!(pf.worktree_dirty, WorktreeDirtiness::Dirty),
+            "an untracked file still counts as work that archiving would sweep away"
+        );
+    }
+
+    #[test]
+    fn merge_preflight_is_clean_for_an_already_merged_branch() {
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        worktree_with(repo.path(), "feat-merged", true);
+        git_cmd(repo.path())
+            .args(["merge", "feat-merged", "--no-edit"])
+            .run()
+            .expect("merge");
+
+        let pf = merge_preflight(&repo.path().to_string_lossy(), "feat-merged", &base);
+        assert_eq!(
+            pf.commits_ahead, 0,
+            "already merged — the target has everything"
+        );
+    }
+
+    #[test]
+    fn merge_preflight_falls_back_to_unknown_for_a_branch_that_does_not_exist() {
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        // rev-list fails on an unknown ref; the pre-flight must not panic or block
+        // the merge — it is a guard rail, not a gate.
+        let pf = merge_preflight(&repo.path().to_string_lossy(), "no-such-branch", &base);
+        assert_eq!(pf.commits_ahead, 0);
+        assert!(
+            matches!(pf.worktree_dirty, WorktreeDirtiness::Clean),
+            "no worktree at all means there is no uncommitted work to lose"
+        );
+    }
+
+    // --- the destructive-cleanup gate ---
+    //
+    // Both "archive" and "delete" end in `git worktree remove --force`, which
+    // deletes uncommitted work without a word. Every path to that call must pass
+    // `cleanup_needs_confirmation` first. These tests exercise the two entry
+    // points end to end on a real repo, because the bug they cover was not in
+    // the gate — it was in a caller that never reached it.
+
+    /// An isolated config dir, so `resolve_archive_script` reads an empty config
+    /// instead of the developer's real one and cannot run a live archive script.
+    fn isolated_config() -> (TempDir, impl Drop) {
+        let dir = TempDir::new().expect("config dir");
+        let guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        (dir, guard)
+    }
+
+    /// A worktree on `branch` with an uncommitted file in it, plus the commit
+    /// count the branch is ahead of base. Returns the worktree path.
+    fn dirty_worktree_with(repo: &Path, branch: &str, commit: bool) -> PathBuf {
+        let wt = worktree_with(repo, branch, commit);
+        fs::write(wt.join("scratch.txt"), "hours of uncommitted work").expect("write scratch");
+        wt
+    }
+
+    #[test]
+    fn merge_and_archive_asks_before_destroying_a_dirty_worktree_with_commits() {
+        let (_cfg, _guard) = isolated_config();
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        let wt = dirty_worktree_with(repo.path(), "feat-dirty-ahead", true);
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let res = merge_and_archive_worktree_impl(
+            &state,
+            repo.path().to_string_lossy().to_string(),
+            "feat-dirty-ahead".to_string(),
+            base,
+            "archive".to_string(),
+            false,
+        )
+        .expect("pre-flight returns a result, not an error");
+
+        assert_eq!(res.action, "needs_confirmation");
+        assert!(!res.merged, "nothing ran — not even the merge");
+        assert_eq!(res.commits_ahead, 1, "the dialog says what would be merged");
+        assert!(res.worktree_dirty);
+        assert!(
+            wt.join("scratch.txt").exists(),
+            "the uncommitted file is still there"
+        );
+    }
+
+    #[test]
+    fn merge_and_archive_proceeds_once_the_user_confirms() {
+        let (_cfg, _guard) = isolated_config();
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        let wt = dirty_worktree_with(repo.path(), "feat-confirmed", true);
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let res = merge_and_archive_worktree_impl(
+            &state,
+            repo.path().to_string_lossy().to_string(),
+            "feat-confirmed".to_string(),
+            base,
+            "archive".to_string(),
+            true,
+        )
+        .expect("archive");
+
+        assert_eq!(res.action, "archived");
+        assert!(res.merged);
+        assert!(!wt.exists(), "the worktree left its old place");
+        // Archiving is the non-destructive choice, so the work must survive the
+        // move. Removing the worktree before the rename used to delete it.
+        let archived = PathBuf::from(res.archive_path.expect("archive path"));
+        assert!(
+            archived.join("scratch.txt").exists(),
+            "uncommitted work moved to the archive instead of being deleted"
+        );
+    }
+
+    #[test]
+    fn merge_and_archive_does_not_ask_about_a_clean_worktree() {
+        let (_cfg, _guard) = isolated_config();
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        worktree_with(repo.path(), "feat-clean", true);
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let res = merge_and_archive_worktree_impl(
+            &state,
+            repo.path().to_string_lossy().to_string(),
+            "feat-clean".to_string(),
+            base,
+            "archive".to_string(),
+            false,
+        )
+        .expect("archive");
+
+        assert_eq!(res.action, "archived", "nothing to lose, nothing to ask");
+        assert!(!res.worktree_dirty);
+    }
+
+    #[test]
+    fn merge_and_archive_in_ask_mode_never_blocks() {
+        let (_cfg, _guard) = isolated_config();
+        let repo = setup_test_repo();
+        let base = base_branch_of(repo.path());
+        let wt = dirty_worktree_with(repo.path(), "feat-ask", true);
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let res = merge_and_archive_worktree_impl(
+            &state,
+            repo.path().to_string_lossy().to_string(),
+            "feat-ask".to_string(),
+            base,
+            "ask".to_string(),
+            false,
+        )
+        .expect("merge");
+
+        // "ask" destroys nothing — it merges and hands the cleanup decision to the
+        // dialog, which asks for itself. Blocking here would deadlock the flow.
+        assert_eq!(res.action, "pending");
+        assert!(res.merged);
+        assert!(res.worktree_dirty, "the dialog needs to know");
+        assert!(wt.join("scratch.txt").exists());
+    }
+
+    #[test]
+    fn finalize_refuses_to_destroy_a_dirty_worktree() {
+        let (_cfg, _guard) = isolated_config();
+        let repo = setup_test_repo();
+        let wt = dirty_worktree_with(repo.path(), "feat-finalize-dirty", true);
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        // This is the path the auto-archive sweep takes, with nobody watching.
+        let res = finalize_merged_worktree_impl(
+            &state,
+            repo.path().to_string_lossy().to_string(),
+            "feat-finalize-dirty".to_string(),
+            "delete".to_string(),
+            false,
+        )
+        .expect("guard returns a result");
+
+        assert_eq!(res.action, "needs_confirmation");
+        assert!(res.worktree_dirty);
+        assert!(wt.join("scratch.txt").exists(), "still on disk, untouched");
+    }
+
+    #[test]
+    fn finalize_deletes_once_the_user_confirms() {
+        let (_cfg, _guard) = isolated_config();
+        let repo = setup_test_repo();
+        let wt = dirty_worktree_with(repo.path(), "feat-finalize-forced", true);
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let res = finalize_merged_worktree_impl(
+            &state,
+            repo.path().to_string_lossy().to_string(),
+            "feat-finalize-forced".to_string(),
+            "delete".to_string(),
+            true,
+        )
+        .expect("delete");
+
+        assert_eq!(res.action, "deleted");
+        assert!(!wt.exists(), "the user asked for it");
+    }
+
+    #[test]
+    fn finalize_leaves_a_clean_worktree_to_the_sweep() {
+        let (_cfg, _guard) = isolated_config();
+        let repo = setup_test_repo();
+        worktree_with(repo.path(), "feat-finalize-clean", true);
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let res = finalize_merged_worktree_impl(
+            &state,
+            repo.path().to_string_lossy().to_string(),
+            "feat-finalize-clean".to_string(),
+            "archive".to_string(),
+            false,
+        )
+        .expect("archive");
+
+        assert_eq!(res.action, "archived", "no confirmation needed");
+    }
+
+    #[test]
+    fn an_unanswered_dirty_check_blocks_the_cleanup() {
+        // Failing open here is what let a transient git error wipe a worktree.
+        let unknown = WorktreeDirtiness::Unknown("git exploded".to_string());
+        assert!(cleanup_needs_confirmation("archive", false, &unknown));
+        assert!(cleanup_needs_confirmation("delete", false, &unknown));
+        assert!(
+            !unknown.is_dirty(),
+            "reported as not-known-dirty: the field must not claim more than git said"
+        );
+    }
+
+    #[test]
+    fn the_gate_only_guards_the_destructive_actions() {
+        let dirty = WorktreeDirtiness::Dirty;
+        assert!(cleanup_needs_confirmation("archive", false, &dirty));
+        assert!(cleanup_needs_confirmation("delete", false, &dirty));
+        // "ask" and anything else remove nothing, so there is nothing to confirm.
+        assert!(!cleanup_needs_confirmation("ask", false, &dirty));
+        assert!(!cleanup_needs_confirmation("keep", false, &dirty));
+        // force is the confirmation itself.
+        assert!(!cleanup_needs_confirmation("delete", true, &dirty));
+        assert!(!cleanup_needs_confirmation(
+            "archive",
+            false,
+            &WorktreeDirtiness::Clean
+        ));
+    }
+
     #[test]
     fn archive_worktree_moves_directory() {
         let repo = setup_test_repo();
@@ -2812,6 +3422,114 @@ branch refs/heads/feat
 ";
         let orphans = super::parse_orphan_worktrees(porcelain);
         assert!(orphans.is_empty());
+    }
+
+    #[tokio::test]
+    async fn detect_orphan_worktrees_runs_as_async_command() {
+        let repo = TempDir::new().expect("temp repo");
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(repo.path())
+            .status()
+            .expect("run git init");
+        assert!(status.success());
+
+        let orphans = super::detect_orphan_worktrees(repo.path().display().to_string())
+            .await
+            .expect("detect orphan worktrees");
+
+        assert!(orphans.is_empty());
+    }
+
+    /// Build a linked-worktree fixture: `<root>/wt` with a `.git` file pointing at
+    /// `<root>/admin`, plus whichever in-progress marker files the test needs.
+    fn linked_worktree_fixture(root: &Path, markers: &[(&str, &str)]) -> String {
+        let wt = root.join("wt");
+        let admin = root.join("admin");
+        std::fs::create_dir_all(&wt).expect("worktree dir");
+        std::fs::create_dir_all(&admin).expect("admin dir");
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display()))
+            .expect("gitdir file");
+        for (rel, contents) in markers {
+            let target = admin.join(rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).expect("marker parent");
+            }
+            std::fs::write(target, contents).expect("marker file");
+        }
+        wt.to_string_lossy().into_owned()
+    }
+
+    fn detached_porcelain(wt_path: &str) -> String {
+        format!(
+            "worktree /repo/main\nHEAD abc123\nbranch refs/heads/main\n\nworktree {wt_path}\nHEAD deadbeef\ndetached\n\n"
+        )
+    }
+
+    #[test]
+    fn worktree_mid_rebase_is_not_orphan_and_keeps_its_branch() {
+        let dir = TempDir::new().expect("temp dir");
+        let wt = linked_worktree_fixture(
+            dir.path(),
+            &[("rebase-merge/head-name", "refs/heads/feat-auth\n")],
+        );
+        let porcelain = detached_porcelain(&wt);
+
+        assert!(super::parse_orphan_worktrees(&porcelain).is_empty());
+        assert_eq!(
+            super::map_worktree_branch_paths(&porcelain).get("feat-auth"),
+            Some(&wt)
+        );
+    }
+
+    #[test]
+    fn worktree_mid_rebase_apply_is_not_orphan_and_keeps_its_branch() {
+        let dir = TempDir::new().expect("temp dir");
+        let wt = linked_worktree_fixture(
+            dir.path(),
+            &[("rebase-apply/head-name", "refs/heads/feat-am\n")],
+        );
+        let porcelain = detached_porcelain(&wt);
+
+        assert!(super::parse_orphan_worktrees(&porcelain).is_empty());
+        assert_eq!(
+            super::map_worktree_branch_paths(&porcelain).get("feat-am"),
+            Some(&wt)
+        );
+    }
+
+    #[test]
+    fn interrupted_merge_and_cherry_pick_are_not_orphans() {
+        // Merge and cherry-pick never detach HEAD, but a worktree that is BOTH detached and
+        // mid-operation (e.g. a cherry-pick started from a detached HEAD) must not be archived.
+        for marker in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "BISECT_LOG",
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            let wt = linked_worktree_fixture(dir.path(), &[(marker, "deadbeef\n")]);
+            assert!(
+                super::parse_orphan_worktrees(&detached_porcelain(&wt)).is_empty(),
+                "{marker} should suppress the orphan verdict"
+            );
+        }
+    }
+
+    #[test]
+    fn genuinely_orphaned_worktree_is_still_reported() {
+        let dir = TempDir::new().expect("temp dir");
+        // Same fixture, no in-progress marker: the branch really is gone.
+        let wt = linked_worktree_fixture(dir.path(), &[]);
+        let porcelain = detached_porcelain(&wt);
+
+        assert_eq!(super::parse_orphan_worktrees(&porcelain), vec![wt.clone()]);
+        assert!(
+            !super::map_worktree_branch_paths(&porcelain)
+                .values()
+                .any(|p| *p == wt)
+        );
     }
 
     #[test]
@@ -3257,6 +3975,41 @@ branch refs/heads/feat
             result.is_ok(),
             "slashed local branch should be a no-op, not a failed fetch: {:?}",
             result
+        );
+    }
+
+    /// End-to-end companion to `test_fetch_local_branch_with_slash_is_noop`:
+    /// the user-facing "Create Branch from <slashed local branch>" flow reaches
+    /// `fetch_if_remote` through `create_worktree_internal`'s start-point, so the
+    /// no-op must hold at the caller too — not just in the helper.
+    #[test]
+    fn test_create_worktree_from_slashed_local_start_point_succeeds() {
+        let repo = setup_test_repo();
+        let worktrees_dir = repo.path().join("worktrees");
+
+        git_cmd(repo.path())
+            .args(["branch", "POC-0001/merge-radar"])
+            .run()
+            .expect("Failed to create slashed local branch");
+
+        let config = WorktreeConfig {
+            task_name: "from-slashed-base".to_string(),
+            base_repo: repo.path().to_string_lossy().to_string(),
+            branch: Some("POC-0002/derived".to_string()),
+            create_branch: true,
+        };
+
+        let result =
+            create_worktree_internal(&worktrees_dir, &config, Some("POC-0001/merge-radar"));
+        assert!(
+            result.is_ok(),
+            "slashed local start-point must not be fetched as a remote: {:?}",
+            result
+        );
+        assert_eq!(
+            result.unwrap().branch,
+            Some("POC-0002/derived".to_string()),
+            "new branch should be created from the slashed local base"
         );
     }
 

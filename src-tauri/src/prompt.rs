@@ -629,7 +629,7 @@ mod tests {
     async fn resolve_context_variables_non_git_path() {
         let vars = resolve_context_variables("/tmp".to_string()).await.unwrap();
         // Should return empty or near-empty map, no panic
-        assert!(vars.get("branch").is_none() || !vars.get("branch").unwrap().is_empty());
+        assert!(vars.get("branch").is_none_or(|branch| !branch.is_empty()));
     }
 
     // --- process_content_shell_safe tests ---

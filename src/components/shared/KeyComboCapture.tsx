@@ -1,4 +1,5 @@
 import { type Component, createSignal, onCleanup, Show } from "solid-js";
+import { useNativeKeyCombo } from "../../hooks/useNativeKeyCombo";
 import { listen } from "../../invoke";
 import { normalizeCombo } from "../../keybindingDefaults";
 import { keybindingsStore } from "../../stores/keybindings";
@@ -28,6 +29,14 @@ export interface KeyComboCaptureProps {
  */
 export const KeyComboCapture: Component<KeyComboCaptureProps> = (props) => {
 	const [capturing, setCapturing] = createSignal(false);
+
+	// F13-F20 never reach the WebView on macOS, exactly like Fn below. Rust catches them
+	// with an NSEvent monitor and re-emits them; without this they look unbindable even
+	// though `validateGlobalHotkeyCombo` and `global-hotkey` both accept F13-F24.
+	useNativeKeyCombo(capturing, (combo) => {
+		props.onChange(combo);
+		stopCapture();
+	});
 
 	const conflictingAction = () => {
 		if (!props.value) return null;

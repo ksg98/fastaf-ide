@@ -19,3 +19,8 @@ overrides:
   # esbuild < 0.28.1 (build/test-only, via vite + vitest) — GHSA-gv7w-rqvm-qjhr.
   # vite 8 is already latest and still resolves 0.27.7; pin to the patched line.
   esbuild: ">=0.28.1"
+  # nanoid < 3.3.18 (build/test-only, via vite > postcss) — GHSA-2v37-7h3g-55p8:
+  # a custom generator loops forever when size is 0. Stay on the 3.x line: the
+  # only consumer is postcss, which imports the CJS `nanoid/non-secure`, and
+  # a bare ">=" resolves to the ESM-only 6.x.
+  nanoid: "^3.3.18"

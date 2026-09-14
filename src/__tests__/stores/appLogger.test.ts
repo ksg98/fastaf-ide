@@ -284,6 +284,22 @@ describe("appLogger", () => {
 		});
 	});
 
+	it("debug() lands in the diagnostic pool, so a debug burst cannot evict user entries", () => {
+		testInScope(() => {
+			appLogger.error("git", "user-critical");
+
+			// 1100 exceeds the 1000-entry user pool cap. If debug() wrote into the
+			// user pool the error above (oldest) would be evicted.
+			for (let i = 0; i < 1100; i++) {
+				appLogger.debug("app", `dbg-${i}`);
+			}
+
+			const entries = appLogger.getEntries();
+			expect(entries.find((e) => e.message === "dbg-1099")?.audience).toBe("diagnostic");
+			expect(entries.some((e) => e.message === "user-critical")).toBe(true);
+		});
+	});
+
 	it("diagnostic errors do NOT bump the user-facing unseen-error badge", () => {
 		testInScope(() => {
 			appLogger.diag.error("app", "internal telemetry error");

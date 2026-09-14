@@ -316,7 +316,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 					stash,
 				});
 			}
-			repositoriesStore.bumpRevision(props.repoPath);
+			repositoriesStore.bumpGitRevision(props.repoPath);
 			appLogger.info("git", `Switched to branch: ${branch.name}`);
 		} catch (err) {
 			const errStr = typeof err === "string" ? err : String(err);
@@ -385,7 +385,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			// Only close the form once the branch actually exists — on failure the
 			// form stays open so the user can correct the name and retry.
 			setCreating(false);
-			repositoriesStore.bumpRevision(props.repoPath);
+			repositoriesStore.bumpGitRevision(props.repoPath);
 			appLogger.info("git", `Created branch: ${name}`);
 		} catch (err) {
 			appLogger.error("git", `Failed to create branch ${name}`, err);
@@ -420,7 +420,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		if (!props.repoPath) return false;
 		try {
 			await invoke("delete_branch", { path: props.repoPath, name, force });
-			repositoriesStore.bumpRevision(props.repoPath);
+			repositoriesStore.bumpGitRevision(props.repoPath);
 			return true;
 		} catch (err) {
 			appLogger.error("git", `Failed to delete branch ${name}`, err);
@@ -494,7 +494,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		if (!newName || newName === oldName) return;
 		try {
 			await invoke("rename_branch", { path: props.repoPath, oldName, newName });
-			repositoriesStore.bumpRevision(props.repoPath);
+			repositoriesStore.bumpGitRevision(props.repoPath);
 			appLogger.info("git", `Renamed branch ${oldName} to ${newName}`);
 		} catch (err) {
 			appLogger.error("git", `Failed to rename branch ${oldName}`, err);
@@ -534,7 +534,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			toastsStore.add("Merge failed", `Could not run merge for "${branch.name}"`, "error", true);
 			return;
 		}
-		repositoriesStore.bumpRevision(props.repoPath);
+		repositoriesStore.bumpGitRevision(props.repoPath);
 
 		// run_git_command never throws on git failure — inspect success explicitly.
 		if (!res.success) {
@@ -619,7 +619,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			toastsStore.add(failTitle, failMessage, "error", true);
 			return;
 		}
-		repositoriesStore.bumpRevision(props.repoPath);
+		repositoriesStore.bumpGitRevision(props.repoPath);
 		if (!res.success) {
 			const detail = (res.stderr || res.stdout).trim();
 			appLogger.error("git", `${failTitle}: ${detail}`);
@@ -722,7 +722,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 				strategy: "rebase",
 			});
 			appLogger.info("git", result);
-			repositoriesStore.bumpRevision(props.repoPath);
+			repositoriesStore.bumpGitRevision(props.repoPath);
 		} catch (err) {
 			appLogger.error("git", `Update from base failed for ${branch.name}`, err);
 		}

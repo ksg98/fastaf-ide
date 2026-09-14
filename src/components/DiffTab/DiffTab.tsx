@@ -15,7 +15,7 @@ import { ConfirmDialog } from "../ConfirmDialog";
 import type { SearchOptions } from "../shared/DomSearchEngine";
 import { DomSearchEngine } from "../shared/DomSearchEngine";
 import { DomSearchOverview } from "../shared/DomSearchOverview";
-import { SearchBar } from "../shared/SearchBar";
+import { createSearchVisibility, SearchBar } from "../shared/SearchBar";
 import { DiffViewer } from "../ui/DiffViewer";
 import { BranchDiffScrollView } from "./BranchDiffScrollView";
 import s from "./DiffTab.module.css";
@@ -48,7 +48,12 @@ export const DiffTab: Component<DiffTabProps> = (props) => {
 	const repo = useRepository();
 
 	// Search state
-	const [searchVisible, setSearchVisible] = createSignal(false);
+	const {
+		visible: searchVisible,
+		focusToken: searchFocusToken,
+		open: openSearchBar,
+		close: closeSearchBar,
+	} = createSearchVisibility();
 	const [matchIndex, setMatchIndex] = createSignal(-1);
 	const [matchCount, setMatchCount] = createSignal(0);
 	/** Match-center fractions for the scrollbar overview ticks. */
@@ -124,7 +129,7 @@ export const DiffTab: Component<DiffTabProps> = (props) => {
 
 	// Expose openSearch for Cmd+F
 	createEffect(() => {
-		diffTabsStore.setHandle(props.tabId, { openSearch: () => setSearchVisible(true) });
+		diffTabsStore.setHandle(props.tabId, { openSearch: () => openSearchBar() });
 		onCleanup(() => diffTabsStore.clearHandle(props.tabId));
 	});
 
@@ -213,7 +218,7 @@ export const DiffTab: Component<DiffTabProps> = (props) => {
 
 	const handleSearchClose = () => {
 		engine?.clear();
-		setSearchVisible(false);
+		closeSearchBar();
 		setMatchCount(0);
 		setMatchIndex(-1);
 		setOverviewFractions([]);
@@ -540,6 +545,7 @@ export const DiffTab: Component<DiffTabProps> = (props) => {
 			</div>
 			<SearchBar
 				visible={searchVisible()}
+				focusToken={searchFocusToken()}
 				onSearch={handleSearch}
 				onNext={handleSearchNext}
 				onPrev={handleSearchPrev}

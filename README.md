@@ -83,13 +83,13 @@ Launch Claude Code on five branches at once — or mix agents. Each session runs
 
 ### Agent observability — not just terminals
 
-FastAF auto-detects **10 AI coding agents** (Claude Code, Codex CLI, Aider, Gemini CLI, Amp, Cursor Agent, OpenCode, Droid, Goose, Grok) and understands what they're doing:
+FastAF auto-detects **11 AI coding agents** (Claude Code, Codex CLI, Aider, Gemini CLI, Amp, Cursor Agent, OpenCode, Droid, Goose, Grok, pi) and understands what they're doing:
 
 - **Rate limit detection** — Provider-specific patterns with countdown timers per session.
 - **Question detection** — Y/N prompts, numbered options, inquirer-style menus. Tab indicator, notification sound, keyboard overlay.
 - **Usage tracking** — Claude Code weekly/session limits with color-coded thresholds. Full Claude Usage Dashboard with rate limit bars, 7-day chart, 52-week heatmap, per-project breakdown.
 - **Activity dashboard** — Every session at a glance: agent type, status (working / waiting / rate-limited / idle), last activity.
-- **Session-aware resume** — Auto-discovers agent session IDs from disk (Claude Code, Gemini CLI, Codex CLI). Resume exactly where you left off.
+- **Session-aware resume** — Auto-discovers agent session IDs from disk (Claude Code, Gemini CLI, Codex CLI, Grok). Resume exactly where you left off.
 
 No other tool knows that your agent is stuck.
 
@@ -129,7 +129,7 @@ A conversational AI companion that sees your terminal as you see it. Ask about e
 
 Aggregate all your MCP servers into a single endpoint. Claude Code, Cursor, VS Code — each agent connects once and gets access to every upstream tool.
 
-- Auto-configures Claude Code, Cursor, Windsurf, VS Code, Zed, Amp, Gemini
+- Auto-configures Claude Code, Cursor, Windsurf, VS Code, Zed, Amp, Gemini, Codex, Grok, OpenCode, Droid, Goose, and pi
 - Circuit breakers, health checks, hot-reload per upstream
 - Credential management via OS keyring, OAuth 2.1 support
 - Tool filtering: whitelist or blacklist per upstream server
@@ -325,8 +325,10 @@ Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI,
 | [AI Agents](docs/user-guide/ai-agents.md) | Agent detection, rate limits, question detection |
 | [Plugin API](docs/plugins.md) | Build plugins for FastAF |
 | [HTTP API](docs/api/http-api.md) | REST/WebSocket/SSE endpoints |
-| [Architecture](docs/ARCHITECTURE.md) | System design and component overview |
+| [Architecture](docs/architecture/overview.md) | System design and component overview |
 | [Development Setup](docs/guides/development-setup.md) | Build from source |
+| [Modes](docs/user-guide/modes.md) | Desktop, browser, mobile, and remote daemon |
+| [Troubleshooting](docs/user-guide/troubleshooting.md) | Common setup and runtime problems |
 
 ---
 
@@ -334,7 +336,7 @@ Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI,
 
 ## Acknowledgements
 
-FastAF is based on [TUICommander](https://github.com/sstraus/tuicommander) by sstraus — all credit for the core architecture to that project.
+FastAF is based on [FastAF](https://github.com/sstraus/tuicommander) by sstraus — all credit for the core architecture to that project.
 
 ## License
 

@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { invoke, listen } from "./invoke";
 import { appLogger } from "./stores/appLogger";
 import { FONT_FAMILIES, type FontType, settingsStore } from "./stores/settings";
@@ -306,6 +307,17 @@ const ANSI_KEYS: readonly (keyof TerminalTheme)[] = [
 	"brightWhite",
 ];
 
+const [themeGeneration, bumpThemeGeneration] = createSignal(0);
+
+/**
+ * Counter of how many times the root CSS custom properties have been rewritten.
+ *
+ * Anything that caches a value derived from those properties must key on this
+ * and NOT on the theme name: hot-reloading the themes directory re-applies the
+ * same key with different values, which a name-keyed cache would never notice.
+ */
+export { themeGeneration };
+
 /** Apply an app theme by setting CSS custom properties on the document root */
 export function applyAppTheme(key: string): void {
 	const appTheme = themes.get(key);
@@ -357,4 +369,5 @@ export function applyAppTheme(key: string): void {
 			appLogger.warn("app", "Failed to sync ANSI colors to backend", { error: e });
 		});
 	}
+	bumpThemeGeneration((g) => g + 1);
 }

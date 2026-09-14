@@ -19,11 +19,45 @@ pub fn read_process_env_var(pid: u32, name: &str) -> Option<String> {
         .find_map(|entry| entry.strip_prefix(&prefix).map(str::to_owned))
 }
 
+/// Read `argv[0]` of a process by PID.
+///
+/// Needed to identify a CLI that runs inside a script interpreter: the executable
+/// path names the interpreter (`node`), while argv[0] names the tool the user
+/// actually launched (`pi`). Returns `None` on any platform read failure, and on
+/// Windows, where the process-snapshot API exposes no argv.
+#[cfg(target_os = "macos")]
+pub fn read_process_argv0(pid: u32) -> Option<String> {
+    let buf = read_procargs2_raw(pid).ok()?;
+    let int_size = std::mem::size_of::<libc::c_int>();
+    if buf.len() < int_size {
+        return None;
+    }
+    // Layout: [i32 argc] [exec_path\0 ...padding...] [argv[0]\0 ...]
+    let data = skip_leading_nulls(skip_cstring(&buf[int_size..]));
+    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&data[..end]).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+pub fn read_process_argv0(pid: u32) -> Option<String> {
+    let buf = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
 // ─── macOS ──────────────────────────────────────────────────────────────────
 
+/// Fetch the raw `KERN_PROCARGS2` blob for a PID: `[i32 argc] [exec_path\0 …padding…]
+/// [argv…] [env…]`. Shared by the argv[0] and environment readers.
 #[cfg(target_os = "macos")]
-fn read_environ_raw(pid: u32) -> Result<Vec<String>, std::io::Error> {
-    use std::io::{Error, ErrorKind};
+fn read_procargs2_raw(pid: u32) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::Error;
 
     let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
 
@@ -62,6 +96,14 @@ fn read_environ_raw(pid: u32) -> Result<Vec<String>, std::io::Error> {
         return Err(Error::last_os_error());
     }
     buf.truncate(buf_size);
+    Ok(buf)
+}
+
+#[cfg(target_os = "macos")]
+fn read_environ_raw(pid: u32) -> Result<Vec<String>, std::io::Error> {
+    use std::io::{Error, ErrorKind};
+
+    let buf = read_procargs2_raw(pid)?;
 
     // Step 3: parse the KERN_PROCARGS2 layout
     //   [i32 argc] [exec_path\0 ...padding...] [argv[0]\0 ... argv[n-1]\0] [env[0]\0 ...]
@@ -300,6 +342,19 @@ mod tests {
         // PID 0 or a very high PID should fail gracefully
         let val = read_process_env_var(99999999, "PATH");
         assert!(val.is_none());
+    }
+
+    #[test]
+    fn read_own_argv0() {
+        // Our own argv[0] is always readable and never empty — the property the
+        // interpreter fallback in pty.rs depends on.
+        let argv0 = read_process_argv0(std::process::id());
+        assert!(argv0.is_some_and(|s| !s.is_empty()));
+    }
+
+    #[test]
+    fn read_argv0_of_dead_process() {
+        assert!(read_process_argv0(99999999).is_none());
     }
 
     #[cfg(target_os = "macos")]

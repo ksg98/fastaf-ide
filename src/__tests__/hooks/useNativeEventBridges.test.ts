@@ -1,22 +1,22 @@
 import { createRoot } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockListen, mockOpenFileAction, mockRepositoriesStore } = vi.hoisted(() => ({
+const { mockListen, mockInvoke, mockOpenFileAction } = vi.hoisted(() => ({
 	mockListen: vi.fn(),
+	mockInvoke: vi.fn().mockResolvedValue(undefined),
 	mockOpenFileAction: vi.fn(),
-	mockRepositoriesStore: { state: { activeRepoPath: "/repo" as string | null } },
 }));
 
-vi.mock("../../invoke", () => ({ listen: mockListen }));
+vi.mock("../../invoke", () => ({ invoke: mockInvoke, listen: mockListen }));
 vi.mock("../../transport", () => ({ isTauri: () => true, rpc: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../../utils/filePreview", () => ({ openFileAction: mockOpenFileAction }));
-vi.mock("../../stores/repositories", () => ({ repositoriesStore: mockRepositoriesStore }));
 vi.mock("../../stores/appLogger", () => ({
 	appLogger: { debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() },
 }));
 
 import { useFileOpenBridge } from "../../hooks/useFileOpenBridge";
 import { useTerminalReattachBridge } from "../../hooks/useTerminalReattachBridge";
+import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
 
 type EventHandler = (event: { payload: unknown }) => void;
@@ -32,7 +32,8 @@ describe("native event bridges", () => {
 		handlers = new Map();
 		unlisteners.length = 0;
 		mockOpenFileAction.mockReset();
-		mockRepositoriesStore.state.activeRepoPath = "/repo";
+		repositoriesStore._testSetHydrated(true);
+		for (const path of repositoriesStore.getPaths()) repositoriesStore.remove(path);
 		mockListen.mockReset().mockImplementation((event: string, handler: EventHandler) => {
 			handlers.set(event, handler);
 			const unlisten = vi.fn();
@@ -44,14 +45,17 @@ describe("native event bridges", () => {
 	afterEach(() => {
 		dispose?.();
 		dispose = undefined;
+		repositoriesStore._testCancelPendingSave();
 		vi.clearAllTimers();
 		vi.useRealTimers();
 	});
 
-	it("opens associated files relative to the active worktree when possible", async () => {
+	it("relativizes against the worktree of the branch that owns the file", async () => {
+		repositoriesStore.add({ path: "/repo", displayName: "repo" });
+		repositoriesStore.setBranch("/repo", "feature", { worktreePath: "/repo-worktree" });
 		createRoot((rootDispose) => {
 			dispose = rootDispose;
-			useFileOpenBridge({ getActiveWorktreePath: () => "/repo-worktree" });
+			useFileOpenBridge();
 		});
 		await Promise.resolve();
 
@@ -63,16 +67,35 @@ describe("native event bridges", () => {
 		expect(mockOpenFileAction).toHaveBeenNthCalledWith(2, "/outside/readme.md", "", undefined);
 	});
 
-	it("uses the repository root when no worktree is active", async () => {
+	it("uses the repository root when the file is owned at the root", async () => {
+		repositoriesStore.add({ path: "/repo", displayName: "repo" });
+		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
 		createRoot((rootDispose) => {
 			dispose = rootDispose;
-			useFileOpenBridge({ getActiveWorktreePath: () => "" });
+			useFileOpenBridge();
 		});
 		await Promise.resolve();
 
 		handlers.get("file-open")?.({ payload: ["/repo/docs/guide.md"] });
 
 		expect(mockOpenFileAction).toHaveBeenCalledWith("docs/guide.md", "/repo", "/repo");
+	});
+
+	it("scopes to the repo that owns the file, not the repo in focus", async () => {
+		// The user is on /repo; the double-clicked file lives in /other. It used to
+		// open as an absolute, unscoped tab visible under every repo.
+		repositoriesStore.add({ path: "/repo", displayName: "repo" });
+		repositoriesStore.add({ path: "/other", displayName: "other" });
+		repositoriesStore.setActive("/repo");
+		createRoot((rootDispose) => {
+			dispose = rootDispose;
+			useFileOpenBridge();
+		});
+		await Promise.resolve();
+
+		handlers.get("file-open")?.({ payload: ["/other/docs/guide.md"] });
+
+		expect(mockOpenFileAction).toHaveBeenCalledWith("docs/guide.md", "/other", "/other");
 	});
 
 	it("reattaches detached terminals and refreshes their renderer", async () => {
@@ -130,7 +153,7 @@ describe("native event bridges", () => {
 	it("cleans up both listeners", async () => {
 		createRoot((rootDispose) => {
 			dispose = rootDispose;
-			useFileOpenBridge({ getActiveWorktreePath: () => "" });
+			useFileOpenBridge();
 			useTerminalReattachBridge({ reattach: vi.fn(), setStatusInfo: vi.fn() });
 		});
 		await Promise.resolve();

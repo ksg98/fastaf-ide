@@ -57,7 +57,7 @@ function rowWithTrailingBg(bgSpaces: number): DecodedRow {
 		bg[c] = 0x141414; // explicit dark bg (48;2;20;20;20)
 		attrs[c] = ATTR_DEFAULT_FG; // default fg, EXPLICIT bg (ATTR_DEFAULT_BG cleared)
 	}
-	return { index: 0, count, codepoints, fg, bg, attrs };
+	return { index: 0, count, wrapped: false, codepoints, fg, bg, attrs };
 }
 
 describe("gridRenderer paintRow — background of trailing cells (story 036)", () => {
@@ -87,7 +87,7 @@ describe("gridRenderer paintRow — background of trailing cells (story 036)", (
 		codepoints[2] = 0x43;
 		for (let c = 0; c < count; c++) attrs[c] = ATTR_DEFAULT_FG | ATTR_DEFAULT_BG;
 		for (let c = 3; c < count; c++) codepoints[c] = 0x20;
-		r.paintRow({ index: 0, count, codepoints, fg, bg, attrs }, 0, METRICS);
+		r.paintRow({ index: 0, count, wrapped: false, codepoints, fg, bg, attrs }, 0, METRICS);
 
 		// No background fill should happen anywhere — every cell is default bg.
 		expect(fillRect).not.toHaveBeenCalled();
@@ -113,7 +113,7 @@ describe("gridRenderer paintRow — background of trailing cells (story 036)", (
 			fg[c] = 0xff0000; // explicit fg — becomes the visible bg under inverse
 			attrs[c] = ATTR_DEFAULT_BG | ATTR_INVERSE; // default-bg flag SET, inverse active
 		}
-		r.paintRow({ index: 0, count, codepoints, fg, bg, attrs }, 0, METRICS);
+		r.paintRow({ index: 0, count, wrapped: false, codepoints, fg, bg, attrs }, 0, METRICS);
 
 		const filledXs = fillRect.mock.calls.map((c) => c[0] as number);
 		for (let c = 3; c < count; c++) {

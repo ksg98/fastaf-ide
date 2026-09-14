@@ -41,10 +41,15 @@ export async function executeCleanup(config: CleanupConfig): Promise<void> {
 			switch (step.id) {
 				case "worktree": {
 					if (!config.worktreeAction) break; // no-op if action not set
+					// `force` because this dialog IS the confirmation: it shows the
+					// uncommitted-work warning under this very step (worktreeDirty)
+					// before the user checks it and presses Execute. Without it the
+					// backend guard would bounce the step back as an opaque failure.
 					await invoke("finalize_merged_worktree", {
 						repoPath,
 						branchName,
 						action: config.worktreeAction,
+						force: true,
 					});
 					break;
 				}
@@ -127,5 +132,5 @@ export async function executeCleanup(config: CleanupConfig): Promise<void> {
 	if (didDeleteLocal) {
 		repositoriesStore.removeBranch(repoPath, branchName);
 	}
-	repositoriesStore.bumpRevision(repoPath);
+	repositoriesStore.bumpGitRevision(repoPath);
 }

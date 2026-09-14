@@ -31,6 +31,21 @@ pub(super) async fn plugin_fs_read(
     json_result(crate::plugin_fs::plugin_read_file_impl(&state, q.path, plugin_id).await)
 }
 
+/// Batch read. The paths travel in the body because a query string cannot carry
+/// a directory's worth of them.
+#[derive(Deserialize)]
+pub(super) struct FsReadBatchBody {
+    pub paths: Vec<String>,
+}
+
+pub(super) async fn plugin_fs_read_batch(
+    State(state): State<Arc<AppState>>,
+    AxumPath(plugin_id): AxumPath<String>,
+    Json(body): Json<FsReadBatchBody>,
+) -> Response {
+    json_result(crate::plugin_fs::plugin_read_files_impl(&state, body.paths, plugin_id).await)
+}
+
 pub(super) async fn plugin_fs_read_base64(
     State(state): State<Arc<AppState>>,
     AxumPath(plugin_id): AxumPath<String>,
@@ -151,6 +166,18 @@ pub(super) async fn plugin_delete_build_artifact(
     )
 }
 
+/// Same body as delete — the difference is how much of the dir is removed.
+pub(super) async fn plugin_trim_build_artifact(
+    State(state): State<Arc<AppState>>,
+    AxumPath(plugin_id): AxumPath<String>,
+    Json(body): Json<DeleteArtifactBody>,
+) -> Response {
+    json_result(
+        crate::plugin_fs::trim_build_artifact_impl(&state, body.path, body.repo_paths, plugin_id)
+            .await,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // CLI execution
 // ---------------------------------------------------------------------------
@@ -226,12 +253,15 @@ pub(super) async fn plugin_pty_output(
     AxumPath(plugin_id): AxumPath<String>,
     Query(q): Query<PtyOutputQuery>,
 ) -> Response {
-    json_result(crate::plugin_pty::plugin_read_session_output_impl(
-        &state,
-        q.session_id,
-        q.max_lines,
-        plugin_id,
-    ))
+    json_result(
+        crate::plugin_pty::plugin_read_session_output_impl(
+            &state,
+            q.session_id,
+            q.max_lines,
+            plugin_id,
+        )
+        .await,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +291,30 @@ pub(super) async fn plugin_unregister(
 ) -> Response {
     crate::plugins::unregister_loaded_plugin_impl(&state, &plugin_id);
     json_result(Ok::<_, String>(()))
+}
+
+#[derive(Deserialize)]
+pub(super) struct OutputWatchersBody {
+    /// Identifies the frontend that owns this set — a desktop window and a
+    /// browser tab keep independent watchers.
+    pub client_id: String,
+    /// Monotonic per-client counter that orders the mutations, so a sync that
+    /// lost the race cannot install its older set.
+    pub seq: u64,
+    pub watchers: Vec<crate::output_watchers::WatcherSpec>,
+}
+
+pub(super) async fn plugin_set_output_watchers(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<OutputWatchersBody>,
+) -> Response {
+    let outcome = crate::plugins::set_plugin_output_watchers_impl(
+        &state,
+        &body.client_id,
+        body.seq,
+        &body.watchers,
+    );
+    json_result(Ok::<crate::output_watchers::SyncOutcome, String>(outcome))
 }
 
 // ---------------------------------------------------------------------------

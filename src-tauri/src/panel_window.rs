@@ -20,10 +20,6 @@ fn load_geometry() -> PanelGeometryMap {
     crate::config::load_json_config(PANEL_GEOMETRY_FILE)
 }
 
-fn save_geometry(map: &PanelGeometryMap) {
-    let _ = crate::config::save_json_config(PANEL_GEOMETRY_FILE, map);
-}
-
 fn validate_panel_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
@@ -115,17 +111,18 @@ fn save_window_geometry(panel_id: &str, window: &tauri::WebviewWindow) {
     if size.width < 100 || size.height < 100 {
         return;
     }
-    let mut map = load_geometry();
-    map.insert(
-        panel_id.to_string(),
-        PanelGeometry {
-            x: pos.x,
-            y: pos.y,
-            width: size.width,
-            height: size.height,
+    let geometry = PanelGeometry {
+        x: pos.x,
+        y: pos.y,
+        width: size.width,
+        height: size.height,
+    };
+    let _ = crate::config::ConfigFile::<PanelGeometryMap>::new(PANEL_GEOMETRY_FILE).update(
+        move |map| {
+            map.insert(panel_id.to_string(), geometry.clone());
+            true
         },
     );
-    save_geometry(&map);
 }
 
 #[tauri::command]

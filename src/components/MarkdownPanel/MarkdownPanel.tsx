@@ -143,42 +143,39 @@ export const MarkdownPanel: Component<MarkdownPanelProps> = (props) => {
 		setContentPaths(new Set<string>());
 
 		let cancelled = false;
-		let unlistenBatch: (() => void) | null = null;
-		let unlistenError: (() => void) | null = null;
+		let unlistenSearch: (() => void) | null = null;
 
 		const timer = setTimeout(async () => {
 			if (cancelled) return;
 			try {
-				const batchPromise = fb.onContentSearchBatch((batch) => {
-					if (cancelled) return;
-					setContentPaths((prev) => {
-						const next = new Set(prev);
-						for (const m of batch.matches) next.add(m.path);
-						return next;
-					});
-					if (batch.is_final) setContentSearching(false);
-				});
-				const errorPromise = fb.onContentSearchError((err) => {
-					if (cancelled) return;
-					appLogger.error("app", "Markdown content search error", err);
-					setContentSearching(false);
-				});
-
-				const [batchUn, errorUn] = await Promise.all([batchPromise, errorPromise]);
-				unlistenBatch = batchUn;
-				unlistenError = errorUn;
-
-				if (cancelled) {
-					unlistenBatch();
-					unlistenError();
-					return;
-				}
-
 				// DEFERRED (2026-06-03) — search_content uses a single global cancel
 				// token, so a simultaneous FileBrowser content search cancels this one
 				// (and vice versa). Harmless in practice (one panel active at a time);
-				// revisit only if both panels are commonly searched at once.
-				await fb.searchContent(fsRoot, q);
+				// revisit only if both panels are commonly searched at once. The
+				// correlation id below keeps the *results* apart either way, and a
+				// cancelled search still emits its own final batch, so the spinner
+				// below stops even when the other panel wins the token.
+				const unlisten = await fb.searchContent(fsRoot, q, {
+					onBatch: (batch) => {
+						if (cancelled) return;
+						setContentPaths((prev) => {
+							const next = new Set(prev);
+							for (const m of batch.matches) next.add(m.path);
+							return next;
+						});
+						if (batch.is_final) setContentSearching(false);
+					},
+					onError: (err) => {
+						if (cancelled) return;
+						appLogger.error("app", "Markdown content search error", err);
+						setContentSearching(false);
+					},
+				});
+				if (cancelled) {
+					unlisten();
+					return;
+				}
+				unlistenSearch = unlisten;
 			} catch (err) {
 				if (!cancelled) {
 					appLogger.error("app", "Markdown content search failed", err);
@@ -190,8 +187,7 @@ export const MarkdownPanel: Component<MarkdownPanelProps> = (props) => {
 		onCleanup(() => {
 			cancelled = true;
 			clearTimeout(timer);
-			unlistenBatch?.();
-			unlistenError?.();
+			unlistenSearch?.();
 		});
 	});
 

@@ -204,13 +204,15 @@ export const LogTab: Component<LogTabProps> = (props) => {
 	}
 	onCleanup(() => expandedRO?.disconnect());
 
-	// Re-fetch when repo changes or revision bumps
+	// Re-fetch when the repo changes or its git state moves. The GIT revision,
+	// not the general one: `get_commit_log` and `get_commit_graph` read only
+	// committed history, so a plain file save cannot change their answer.
 	createEffect(
 		on(
 			() => {
 				const repoPath = props.repoPath;
-				// Track revision to re-fetch on repo changes (value consumed for reactivity)
-				const rev = repoPath ? repositoriesStore.getRevision(repoPath) : 0;
+				// Value consumed for reactivity
+				const rev = repoPath ? repositoriesStore.getGitRevision(repoPath) : 0;
 				return `${repoPath ?? ""}:${rev}`;
 			},
 			() => {

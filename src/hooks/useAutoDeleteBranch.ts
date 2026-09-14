@@ -94,7 +94,7 @@ export function useAutoDeleteBranch(deps: AutoDeleteDeps): void {
 		// Perform deletion
 		try {
 			await invoke("delete_local_branch", { repoPath, branchName: branch });
-			repositoriesStore.bumpRevision(repoPath);
+			repositoriesStore.bumpGitRevision(repoPath);
 			appLogger.info("git", `Auto-deleted branch '${branch}' (PR #${prNumber} ${type})`);
 		} catch (err) {
 			appLogger.warn("git", `Failed to delete branch '${branch}': ${err}`);

@@ -1,7 +1,9 @@
 import { Show } from "solid-js";
-import { AGENT_DISPLAY, AGENT_TYPES, type AgentType } from "../../agents";
+import { AGENT_DISPLAY, type AgentType } from "../../agents";
 import { AgentIcon } from "../../components/ui/AgentIcon";
+import { displayTask } from "../../utils/activitySnapshot";
 import type { SessionInfo } from "../useSessions";
+import { isKnownAgentType } from "../utils/sessionKind";
 import { useDebouncedStatus } from "../utils/useDebouncedStatus";
 import styles from "./SessionCard.module.css";
 import { StatusBadge } from "./StatusBadge";
@@ -26,16 +28,35 @@ function projectName(cwd: string | null): string {
 	return parts[parts.length - 1] || "unknown";
 }
 
-function isAgentType(value: string): value is AgentType {
-	return (AGENT_TYPES as readonly string[]).includes(value);
+/** A plain shell. Marks the card so a PTY is not read as an unidentified agent. */
+function TerminalIcon() {
+	return (
+		<svg
+			width="22"
+			height="22"
+			viewBox="0 0 24 24"
+			fill="none"
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			aria-hidden="true"
+			data-testid="pty-icon"
+		>
+			<rect x="2" y="4" width="20" height="16" rx="2" />
+			<path d="M7 9l3 3-3 3" />
+			<path d="M13 15h4" />
+		</svg>
+	);
 }
 
 export function SessionCard(props: SessionCardProps) {
 	const status = useDebouncedStatus(() => props.session);
 	const agentType = () => props.session.state?.agent_type;
+	const task = () => displayTask(props.session.state?.current_task, agentType());
 	const agentColor = () => {
 		const t = agentType();
-		if (t && isAgentType(t)) return AGENT_DISPLAY[t].color;
+		if (isKnownAgentType(t)) return AGENT_DISPLAY[t].color;
 		return "var(--fg-muted)";
 	};
 
@@ -46,8 +67,8 @@ export function SessionCard(props: SessionCardProps) {
 			onClick={() => props.onSelect(props.session.session_id)}
 		>
 			<div class={styles.iconCol} style={{ color: agentColor() }}>
-				<Show when={agentType() && isAgentType(agentType()!)} fallback={<span class={styles.termIcon}>{">"}_</span>}>
-					<AgentIcon agent={agentType()! as AgentType} size={22} />
+				<Show when={isKnownAgentType(agentType())} fallback={<TerminalIcon />}>
+					<AgentIcon agent={agentType() as AgentType} size={22} />
 				</Show>
 			</div>
 
@@ -92,22 +113,27 @@ export function SessionCard(props: SessionCardProps) {
 					</div>
 				</Show>
 
-				{/* Current task sub-row */}
-				<Show when={props.session.state?.current_task}>
+				{/* Current task sub-row. `displayTask` drops a bare spinner verb —
+				    "Working" next to an Activity badge is a line that says nothing. */}
+				<Show when={task()}>
 					<div class={styles.subRow} data-testid="task-row">
 						<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 							<circle cx="12" cy="12" r="3" />
 							<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
 						</svg>
-						<span class={styles.subRowText}>{props.session.state!.current_task}</span>
-						<Show when={props.session.state?.progress != null}>
-							<div class={styles.progressBar} data-testid="progress-bar">
-								<div
-									class={styles.progressFill}
-									style={{ transform: `scaleX(${props.session.state!.progress! / 100})` }}
-								/>
-							</div>
-						</Show>
+						<span class={styles.subRowText}>{task()}</span>
+					</div>
+				</Show>
+
+				{/* Progress is its own signal (OSC 9;4), independent of the task text. */}
+				<Show when={props.session.state?.progress != null}>
+					<div class={styles.subRow} data-testid="progress-row">
+						<div class={styles.progressBar} data-testid="progress-bar">
+							<div
+								class={styles.progressFill}
+								style={{ transform: `scaleX(${props.session.state!.progress! / 100})` }}
+							/>
+						</div>
 					</div>
 				</Show>
 

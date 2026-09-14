@@ -1,4 +1,4 @@
-import { type Component, createMemo, createSignal, For, Show } from "solid-js";
+import { type Component, createSignal, For, Show } from "solid-js";
 import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
@@ -23,9 +23,22 @@ import s from "./Sidebar.module.css";
 
 export interface PrSectionProps {
 	title: string;
+	/** Already filtered by the parent — dismissed PRs are removed upstream so the
+	 *  keyboard navigation list and the rendered rows cannot drift apart. */
 	prs: BranchPrStatus[];
 	repoPath: string;
 	icon?: "pr" | "user";
+	/** Collapse, expansion and keyboard highlight are owned by GitHubPanel:
+	 *  collapse is persisted and the arrow keys walk rows across sections. */
+	collapsed: boolean;
+	onToggleCollapsed: () => void;
+	expandedKey: string | null;
+	onToggleExpanded: (branch: string) => void;
+	/** Branch of the row the arrow keys currently sit on, or null. */
+	activeKey: string | null;
+	dismissedCount: number;
+	onDismiss: (prNumber: number) => void;
+	onShowDismissed: () => void;
 	onCheckout: (branchName: string) => void;
 	onCreateWorktree?: (branchName: string) => void;
 	onConflictAssist?: (prNumber: number) => void;
@@ -34,31 +47,17 @@ export interface PrSectionProps {
 }
 
 export const PrSection: Component<PrSectionProps> = (props) => {
-	const [collapsed, setCollapsed] = createSignal(props.prs.length === 0);
-	const [expandedPr, setExpandedPr] = createSignal<string | null>(null);
 	const [mergingPr, setMergingPr] = createSignal<number | null>(null);
 	const [mergeError, setMergeError] = createSignal<string | null>(null);
 	const [diffLoadingPr, setDiffLoadingPr] = createSignal<number | null>(null);
 	const [approvingPr, setApprovingPr] = createSignal<number | null>(null);
 	const [approveError, setApproveError] = createSignal<string | null>(null);
-	const [dismissedPrs, setDismissedPrs] = createSignal<Set<number>>(new Set());
 
-	const visiblePrs = createMemo(() => props.prs.filter((pr) => !dismissedPrs().has(pr.number)));
-	const dismissedCount = createMemo(() => dismissedPrs().size);
-
-	const handleDismiss = (prNumber: number) => {
-		setDismissedPrs((prev) => {
-			const next = new Set(prev);
-			next.add(prNumber);
-			return next;
-		});
-	};
-
-	const handleShowDismissed = () => setDismissedPrs(new Set<number>());
+	const visiblePrs = () => props.prs;
 
 	const mergeLabel = (pr: BranchPrStatus) => {
 		const preferred =
-			repoSettingsStore.getEffective(props.repoPath)?.prMergeStrategy ?? repoDefaultsStore.state.prMergeStrategy;
+			repoSettingsStore.getEffectiveField(props.repoPath, "prMergeStrategy") ?? repoDefaultsStore.state.prMergeStrategy;
 		const method = effectiveMergeMethod(pr, preferred);
 		if (method === "squash") return t("sidebar.mergeSquash", "Squash & Merge");
 		if (method === "rebase") return t("sidebar.mergeRebase", "Rebase & Merge");
@@ -70,7 +69,8 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 		setMergeError(null);
 		try {
 			const preferred =
-				repoSettingsStore.getEffective(props.repoPath)?.prMergeStrategy ?? repoDefaultsStore.state.prMergeStrategy;
+				repoSettingsStore.getEffectiveField(props.repoPath, "prMergeStrategy") ??
+				repoDefaultsStore.state.prMergeStrategy;
 			const startMethod = effectiveMergeMethod(pr, preferred);
 			const usedMethod = await mergeWithFallback(props.repoPath, pr.number, startMethod);
 			if (usedMethod !== preferred) {
@@ -153,28 +153,28 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 				class={s.ghSectionHeader}
 				role="button"
 				tabIndex={0}
-				onClick={() => setCollapsed((v) => !v)}
-				onKeyDown={onClickKeyDown(() => setCollapsed((v) => !v))}
+				onClick={() => props.onToggleCollapsed()}
+				onKeyDown={onClickKeyDown(() => props.onToggleCollapsed())}
 			>
-				<span class={cx(s.ghSectionChevron, !collapsed() && s.ghSectionChevronOpen)}>{"›"}</span>
+				<span class={cx(s.ghSectionChevron, !props.collapsed && s.ghSectionChevronOpen)}>{"›"}</span>
 				<PrIcon />
 				<span>{props.title}</span>
 				<Show when={visiblePrs().length > 0}>
 					<span class={s.ghSectionCount}>{visiblePrs().length}</span>
 				</Show>
-				<Show when={dismissedCount() > 0}>
+				<Show when={props.dismissedCount > 0}>
 					<button
 						class={s.ghShowDismissed}
 						onClick={(e) => {
 							e.stopPropagation();
-							handleShowDismissed();
+							props.onShowDismissed();
 						}}
 					>
-						{t("sidebar.showDismissed", "Show")} {dismissedCount()}
+						{t("sidebar.showDismissed", "Show")} {props.dismissedCount}
 					</button>
 				</Show>
 			</div>
-			<Show when={!collapsed()}>
+			<Show when={!props.collapsed}>
 				<Show
 					when={visiblePrs().length > 0}
 					fallback={<div class={s.ghEmpty}>{t("github.noPrs", "No remote-only PRs")}</div>}
@@ -182,10 +182,11 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 					<div class={s.ghSectionList}>
 						<For each={visiblePrs()}>
 							{(pr) => (
-								<div class={cx(s.ghItem, expandedPr() === pr.branch && s.ghItemExpanded)}>
+								<div class={cx(s.ghItem, props.expandedKey === pr.branch && s.ghItemExpanded)}>
 									<div
-										class={s.ghItemRow}
-										onClick={() => setExpandedPr((prev) => (prev === pr.branch ? null : pr.branch))}
+										class={cx(s.ghItemRow, props.activeKey === pr.branch && s.ghItemRowActive)}
+										data-gh-active={props.activeKey === pr.branch ? "" : undefined}
+										onClick={() => props.onToggleExpanded(pr.branch)}
 									>
 										<span class={s.ghItemNum}>#{pr.number}</span>
 										<span class={s.ghItemTitle}>{pr.title}</span>
@@ -194,16 +195,17 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 											state={pr.state}
 											isDraft={pr.is_draft}
 											mergeable={pr.mergeable}
+											conflictState={pr.conflict_state}
 											reviewDecision={pr.review_decision}
 											ciFailed={pr.checks?.failed}
 											ciPending={pr.checks?.pending}
 										/>
 									</div>
-									<Show when={expandedPr() === pr.branch}>
+									<Show when={props.expandedKey === pr.branch}>
 										<div class={s.ghItemDetail} data-compact>
 											<button
 												class={s.ghItemDismiss}
-												onClick={() => handleDismiss(pr.number)}
+												onClick={() => props.onDismiss(pr.number)}
 												title={t("sidebar.dismissPr", "Hide this PR from view")}
 											>
 												&times;
@@ -279,7 +281,7 @@ export const PrSection: Component<PrSectionProps> = (props) => {
 														extraFilter={(p: SavedPrompt) => {
 															const cs = githubStore.getCheckSummary(props.repoPath, pr.branch);
 															if (p.id === "smart-fix-ci") return (cs?.failed ?? 0) > 0;
-															if (p.id === "smart-resolve-conflicts") return pr.mergeable === "CONFLICTING";
+															if (p.id === "smart-resolve-conflicts") return pr.conflict_state === "conflicting";
 															if (p.id === "smart-review-comments") return pr.review_decision === "CHANGES_REQUESTED";
 															return true;
 														}}

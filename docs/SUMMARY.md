@@ -8,6 +8,8 @@
 # User Guide
 
 - [Getting Started](./user-guide/getting-started.md)
+- [FastAF Modes](./user-guide/modes.md)
+- [Troubleshooting](./user-guide/troubleshooting.md)
 
 ## Workspace
 
@@ -22,6 +24,7 @@
 
 - [Agent Support](./user-guide/ai-agents.md)
 - [Agent Teams](./user-guide/agent-teams.md)
+- [AI Chat](./user-guide/ai-chat.md)
 - [Smart Prompts](./user-guide/smart-prompts.md)
 - [Prompt Library](./user-guide/prompt-library.md)
 - [Voice Dictation](./user-guide/dictation.md)
@@ -38,6 +41,7 @@
 - [Plugins](./user-guide/plugins.md)
 - [MCP Proxy Hub](./user-guide/mcp-proxy.md)
 - [Remote Access](./user-guide/remote-access.md)
+- [SSH Tunnels](./features/ssh-tunnels.md)
 
 ---
 
@@ -48,6 +52,10 @@
 - [State Management](./architecture/state-management.md)
 - [Terminal State Machine](./architecture/terminal-state-machine.md)
 
+## Architecture Decisions
+
+- [Atomic MCP Agent Submission](./decisions/2026-08-27-atomic-mcp-agent-submission.md)
+
 ## Agent Detection
 
 - [Agent UI Analysis](./architecture/agent-ui-analysis.md)
@@ -57,6 +65,38 @@
 - [Aider](./architecture/agents/aider.md)
 - [Gemini CLI](./architecture/agents/gemini-cli.md)
 - [OpenCode](./architecture/agents/opencode.md)
+- [pi](./architecture/agents/pi.md)
+
+---
+
+# Backend
+
+- [Configuration](./backend/config.md)
+- [PTY Management](./backend/pty.md)
+- [Output Parser](./backend/output-parser.md)
+- [Error Classification](./backend/error-classification.md)
+- [AI Watchers](./backend/ai-watchers.md)
+- [Git Operations](./backend/git.md)
+- [GitHub Integration](./backend/github.md)
+- [MCP & HTTP Server](./backend/mcp-http.md)
+- [MCP Proxy Hub](./backend/mcp-proxy.md)
+- [Voice Dictation](./backend/dictation.md)
+- [Alacritty Integration](./backend/alacritty-integration.md)
+- [VT100-to-PWA Protocol](./backend/vt100-PWA.md)
+
+---
+
+# Frontend
+
+- [Components](./frontend/components.md)
+- [Stores](./frontend/stores.md)
+- [Hooks](./frontend/hooks.md)
+- [Utilities](./frontend/utilities.md)
+- [Transport Layer](./frontend/transport.md)
+- [Terminal Features](./frontend/terminal-features.md)
+- [Custom Glyph Rendering](./frontend/custom-glyph-rendering.md)
+- [Visual Style Guide](./frontend/STYLE_GUIDE.md)
+- [Plugin Dashboard Style Guide](./plugins-style.md)
 
 ---
 
@@ -72,4 +112,15 @@
 # Developer Guide
 
 - [Development Setup](./guides/development-setup.md)
+- [Continuous Integration](./guides/ci.md)
 - [Performance Profiling](./guides/profiling.md)
+- [Documentation Sync Matrix](./sync-matrix.md)
+- [Release & Tag Checklist](./release-checklist.md)
+- [Project History](./guides/project-history.md)
+
+## Audits & Plans
+
+- [CanvasTerminal Feature Audit](./frontend/canvas-terminal-audit.md)
+- [Font Size Audit](./frontend/font-size-audit.md)
+- [Keyboard Shortcuts Comparison](./frontend/KEYBOARD_SHORTCUTS_COMPARISON.md)
+- [Solid Refactoring Plan](./frontend/solid-refactoring-plan.md)

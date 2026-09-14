@@ -34,7 +34,7 @@ You can exercise features through the **web UI** instead of the Tauri desktop ap
 
 - **Port:** the primary/only instance serves on **:9876**; if that's free (no conflict), point the browser there. If the orchestrator already holds 9876, bring up a **second debug instance** — it auto-retries to **:9877** (the single-instance lock is `#[cfg(not(debug_assertions))]`, so a *debug* build can run a 2nd copy alongside the orchestrator). Note: `TUIC_PORT` is honored ONLY by the headless `tuic-remote` binary — the desktop `make dev` build **ignores** it and relies on the `9876→9877→9878` retry. So: use :9876 when unconflicted, else :9877.
 - **Drive it with `agent-browser`**, always via the stealth wrapper (see global rules). `@ref` CDP clicks are trusted and work (open modals/panels/tabs); **JS-dispatched keydown is `isTrusted:false`** so app keyboard shortcuts (Cmd+P, etc.) are ignored — click UI, never synthesize keys. Use a persistent `--session <name>`, restart the browser periodically (snapshots/clicks degrade after many calls), and wrap each call in a `perl alarm` timeout (macOS has no `timeout`/`gtimeout`).
-- **Isolation caveat:** a 2nd debug instance has isolated backend/sessions BUT **shares the filesystem + config dir** with the orchestrator — never run repo-mutating tests against Boss's repos, and expect possible SQLite contention.
+- **Isolation caveat:** a 2nd debug instance has isolated backend/sessions (its own PTY/agent state), but there is no config-dir split — debug and release builds read and write the exact same config directory and the same `config.json`/`repositories.json` (see `docs/backend/config.md`), protected by a cross-process file lock so concurrent saves don't clobber each other. A toggle flipped in the dev build IS visible to the installed app and vice versa. It still **shares the filesystem** with the orchestrator — never run repo-mutating tests against Boss's repos, and expect possible SQLite contention on `tunnel_audit.db` (same shared dir, not covered by the config lock).
 - **Desktop-only features do NOT render in web mode** — Command Palette is `<Show when={isTauri()}>` (no Cmd+P/file/content search for browser users), plus IdeLauncher, Dictation, Global Hotkey, detach-panel windows, updater, native file drop, user-plugin install, MCP/hooks config. Built-in plugins DO load. See mdkb `web-mode-verification-2026-07-02` for the verified inventory before reporting a feature "missing".
 
 ## Visual
@@ -69,7 +69,7 @@ To debug the WebView in a release build, temporarily add `"devtools"` to the tau
 **Consequence for agents:** when your change touches Rust (`src-tauri/**`), it will NOT take effect in Boss's live `make dev` session. Do NOT assume it did. Instead:
 
 1. Make the Rust change as normal.
-2. **Create a story** capturing what changed and that it needs a rebuild (`/wiz:stories create` — title like "Rebuild: <what> (Rust change, needs make dev restart)").
+2. **Add an item to `to-test.md`** describing what to check after the rebuild. Never open a story for this — a story whose criteria are all post-restart checks can never close itself, so they pile up. `to-test.md` is the only tracker for anything a human must verify.
 3. **Tell Boss explicitly** that the Rust change is staged but requires a manual `make dev` restart (or `make build` for release) to load, and to run it when he's ready to lose the current session.
 
 Never silently ship a Rust edit expecting hot reload — it will look like your fix did nothing.
@@ -81,6 +81,8 @@ Targets macOS, Windows, Linux. Use Cmd/Ctrl abstractions, Tauri cross-platform p
 ## Panel Refresh
 
 Panels with repo-dependent data MUST use `repositoriesStore.getRevision(repoPath)` in `createEffect` — not file watchers or polling. `repo_watcher` emits `"repo-changed"` → `bumpRevision()`.
+
+**A panel that renders ONLY committed history** (commit log, file history, stashes) uses `getGitRevision(repoPath)` instead, so a plain file save no longer re-runs its git processes. The two counters are nested, not parallel: `bumpGitRevision` bumps **both**, and `getRevision` still moves on every event. `getRevision` is therefore always the safe default — a panel left on it cannot go stale, while a panel wrongly moved to `getGitRevision` silently misses working-tree changes. Move a panel only after checking every command it calls ignores uncommitted state.
 
 ## Architecture
 
@@ -102,11 +104,11 @@ NEVER write text + `\r` directly to a PTY. Always use `sendCommand()` from `src/
 
 TUIC tracks each agent's session ID for resume-after-restart. Two strategies coexist:
 
-**Discovery-based (Claude, Gemini, Codex, Grok).** TUIC does NOT inject `--session-id` at launch — the agent creates its own UUID. TUIC discovers the active session by scanning the agent's session directory for the newest file, re-checking every 30s poll. This survives `/clear` (all three agents have it: Claude `/clear`, Gemini `/clear`+`/new`, Codex `/clear`+`/new`+`/fork`) because re-discovery picks up the new session file. Resume uses `agentSessionId` (disk-discovered), not `tuicSession`. Grok stores each session as a UUIDv7-named directory under `~/.grok/sessions/<percent-encoded-cwd>/`; the newest dir is the active session (`grok --resume <id>`).
+**Discovery-based (Claude, Gemini, Codex, Grok).** TUIC does NOT inject `--session-id` at launch — the agent creates its own ID. TUIC discovers the active session by scanning the agent's session directory for the newest file, re-checking every 30s poll. This survives agents that start a replacement session because re-discovery picks up the new file. Resume uses `agentSessionId` (disk-discovered), not `tuicSession`. Grok stores each session as a UUIDv7-named directory under `~/.grok/sessions/<percent-encoded-cwd>/`; the newest dir is the active session (`grok --resume <id>`).
 
 **Forced injection (Goose).** Shell wrapper injects `--name $TUIC_SESSION` into `goose session/run` commands. The TUIC tab UUID IS the goose session name. Discovery returns `None` (SQLite storage, no filesystem scan). Resume uses `tuicSession`.
 
-**No session tracking (Aider, Amp, Cursor, Droid, OpenCode).** Either no local session files, cloud-only, or no UUID-based resume. `TUIC_SESSION` env var is available but unused.
+**No session tracking (Aider, Amp, Cursor, Droid, OpenCode, pi).** Either no local session files, cloud-only, or no UUID-based resume. `TUIC_SESSION` env var is available but unused.
 
 When adding a new agent: choose discovery-based if the agent writes session files to disk (add `sessionDiscovery` to `agents.ts` and a Rust `discover_*_session` to `agent_session.rs`). Choose forced injection only when discovery is impossible (e.g., SQLite-only storage).
 
@@ -136,16 +138,139 @@ curl http://localhost:9876/diagnostics
 curl 'http://localhost:9876/logs?source=diagnostics'
 ```
 
-When enabled, emits health snapshots every 30s and alerts on FD/thread growth trends. Each snapshot includes: CPU% (TUIC-self only, via `RUSAGE_SELF`), `children_cpu` (aggregate %cpu of PTY children + hottest child — the spike trigger deliberately ignores children, so this is the only place a hot `cargo`/agent surfaces when TUIC itself is calm), thread count, FD count, PTY session count, content index build state, semaphore permits, `grid_frame_in_flight` stuck sessions, event bus subscriber count, `head_emits_suppressed` (repo-watcher `head-changed` emits skipped by the resolved-HEAD-target guard — a high/climbing value signals a filesystem-event storm, issue #82).
+When enabled, emits health snapshots every 30s and alerts on FD/thread growth trends. Each snapshot includes: CPU% (TUIC-self only, via `RUSAGE_SELF`), `children_cpu` (aggregate %cpu of PTY children + hottest child — the spike trigger deliberately ignores children, so this is the only place a hot `cargo`/agent surfaces when TUIC itself is calm), thread count, FD count, PTY session count, content index build state, semaphore permits, sessions with grid frames outstanding (`GridGate`), event bus subscriber count, `head_emits_suppressed` (repo-watcher `head-changed` emits skipped by the resolved-HEAD-target guard — a high/climbing value signals a filesystem-event storm, issue #82).
 
 **When to enable:** Boss reports sluggishness, CPU spikes, or UI freezes. Enable it, reproduce the issue, then check the logs. The snapshot at the time of the spike tells you what subsystem is overloaded.
 
 **Known past failure patterns this catches:**
 - IPC flush loop (ack_terminal_frame sending frames in ack path → 240+ IPC/sec)
 - Content index build saturating CPU on large repos
-- `grid_frame_in_flight` stuck (WebView JS thread blocked)
+- grid frames outstanding on a session (WebView JS thread blocked)
 - FD/thread leak (progressive growth without cleanup)
 - Sleep/wake false idle cascades (tokio timers firing stale)
+
+## The bottom zone is not agent output — never parse it
+
+Below an agent's input box sits a status line **the user configures**: a Claude
+Code `statusLine` command, a HUD plugin, a shell theme. Its height, glyphs and
+wording are arbitrary, differ per install, and it may be absent entirely.
+
+```
+  ✻ Simmering… (5m 48s · ↓ 20.7k tokens)      ← agent output. Parse this.
+  ─────────────────────────────────────────
+  ❯                                           ← input box (2 rows)
+  ─────────────────────────────────────────
+  [Opus 5 (1M) | Team] ██░░ 22% | 📚 8        ← user's status line, ANY height.
+  5h: 0% | 7d: 2% | $15.48 | 📅 $136.41         Ignore all of it.
+  ◐ Bash: cargo test | ✓ Bash ×14
+  ⏵⏵ bypass permissions on (shift+tab)        ← agent chrome. Also ignore.
+```
+
+**Rule: nothing at or below the input box may reach a parser.** Whatever is down
+there is coincidence — a path reads as a plan file, a `?` as a question, a
+numbered list as a choice prompt, `$15.48` as a token count. The agent's own
+spinner sits *above* the input box, so trimming costs no signal.
+
+Enforced by `chrome::find_chrome_cutoff`, applied to changed rows in `pty.rs`
+before `parse_clean_lines`. It anchors on the input box and extends upward past
+its padding. The unwindowed fallback accepts either a strict empty prompt or a
+separator followed within four rows by a prompt; the latter preserves a draft
+in a non-empty input box above an arbitrarily tall HUD without treating a lone
+separator or markdown quote as chrome.
+
+**When you touch that cutoff, the failure mode to fear is failing open:** no
+anchor found returns `None`, and `None` means no trim, so *every* status-line row
+reaches *every* parser. That is exactly what happened with a status line taller
+than `CHROME_SCAN_ROWS` — silent and total. Hence the unwindowed fallback to the
+lowest empty prompt row (`lowest_input_box_row`). Never widen the loose
+`is_prompt_line` search: unwindowed it matches a markdown blockquote.
+
+**Deliberate exceptions** — these read the full screen on purpose:
+
+| Site | Why |
+|---|---|
+| `parse_slash_menu` | Claude Code v2.1+ renders autocomplete items *below* the prompt chrome |
+| `parse_choice_prompt` | scans bottom-up for a strict dialog shape (title + ≥2 numbered options) |
+| question dedup screen-absence check (`pty.rs`) | asks "is this prompt still visible anywhere", not "is this content" |
+
+## Agent state detection — capture before you theorise
+
+Working / idle / awaiting is decided from bytes an agent writes **once**. The
+per-session output ring holds only the last 8 KB, which one Ink repaint overruns
+in seconds, so by the time a wrong badge is reported the evidence is gone. Do not
+reason about the code first — record the stream, then replay it.
+
+```bash
+curl -X POST localhost:9876/diagnostics/capture -H 'content-type: application/json' \
+     -d '{"enabled":true}'                      # every session
+     -d '{"enabled":true,"session_id":"<id>"}'  # one session
+curl localhost:9876/diagnostics/capture         # state + bytes written per session
+```
+
+Captures land in `<config dir>/captures/<session-id>.tcap`, capped at 512 KB each. The framed format preserves output/input direction, original chunk boundaries, ordering, and monotonic timestamps. Legacy `.raw` fixtures remain readable as output-only captures.
+Off by default (one relaxed atomic load per chunk when off) — code in
+`src-tauri/src/pty_capture.rs`.
+
+**A reproduced failure becomes a fixture, always.** Drop the `.tcap` in
+`src-tauri/src/fixtures/agent_prompts/` and add a case to the
+`Awaiting-signal fixtures` block in `pty.rs` tests: it replays the capture
+through `raw_stream_events` + `parse_clean_lines` + `suppress_heuristic_question`
+— the same composition production runs, shared on purpose so a test can never
+assert against a pipeline that does not exist. Unit tests on the individual
+parsers were never the gap; the pipeline around them was.
+
+**Three signals report awaiting, and they are not interchangeable:**
+
+| Signal | Source | Applies to |
+|---|---|---|
+| OSC 7770 `state=awaiting` | TUIC hook | hook-instrumented agents, **only** on `PreToolUse(AskUserQuestion)` |
+| OSC 777 `notify` | agent's own desktop notification | any agent that emits it, any blocking prompt — but the body decides the confidence: `needs your permission` / `approval required` latch, `is waiting for your input` is low-confidence because Claude also sends it on its 60s idle timer |
+| `Enter to select` footer regex | screen scrape | non-hook agents (dropped for hook-instrumented ones by `suppress_heuristic_question`) |
+
+The footer regex anchors at **column 0 of the rendered row**, never the trimmed
+text (`is_ink_dialog_footer_row`). A dialog is drawn full-bleed; everything an
+agent streams is indented inside its own frame, so the indentation is the whole
+difference between the footer and an agent quoting it. Trim first and an agent
+that pastes a screen it just read marks *itself* awaiting, confidently, with
+nothing to retract it.
+
+A hook-instrumented agent showing a picker that is *not* AskUserQuestion (plan
+pickers, skill menus, anything with `Type something` / `Chat about this`) reports
+through OSC 777 and nothing else. Prefer protocol signals over screen scraping,
+and parse them off the **raw** stream — the VT parser consumes escape sequences,
+so they never reach the clean rows.
+
+**Every signal that sets awaiting needs a path that clears it.** The badge is
+`SessionState.awaiting_input`, not an event, and it is sticky by construction —
+whatever sets it owns nothing until something retracts it. Four paths clear it,
+and three of them wait for an event that may never arrive:
+
+| Clear | Fires on | Misses when |
+|---|---|---|
+| `user-input` | a non-empty typed line | the answer is a bare Enter |
+| `status-line` | a parsed busy tick (low-confidence only) | busy is inferred from screen movement |
+| `resolve_choice_prompt_input` | an option keypress | no `choice_prompt` was ever set |
+| `question-cleared` | silence timer sees the question gone from the screen | — (the backstop; low-confidence only) |
+
+`question-cleared` is the backstop that catches the rest. It never touches a
+confident question: grok repaints while it waits, so "not on screen this tick"
+is not proof of an answer.
+
+**The mirror failure is a SET that never comes back.** A multi-question
+`AskUserQuestion` answers one sub-question at a time; each repaints its title and
+options while the `Enter to select` footer stays byte-identical. The changed-rows
+parser needs a row to *change*, so sub-questions 2+ produce no signal at all and
+the tab reads "working" while the agent waits. `rearm_awaiting_for_open_dialog`
+(`pty.rs`) closes it by reading that footer off the **full screen** as a presence
+level, not an edge, and re-arming only when the badge is off — one event per
+spurious clear, never one per repaint. Do not extend it to parse the title,
+options or the `⊠ … ✓ Submit` tab bar: those all move as the wizard advances,
+which is precisely why the footer is the key.
+
+**Legacy output-only `.raw` fixtures cannot reproduce a latched badge.** New
+`.tcap` captures include user input and can replay SET/CLEAR ordering, but the
+`Awaiting RETRACTION` block must still drive the real event-bus accumulator and
+assert `SessionState` — the thing a tab actually renders.
 
 ## Frontend performance instrumentation (`perfDebug`)
 
@@ -183,6 +308,7 @@ Do NOT flag these as security issues in reviews — they are intentional design 
 - **`lazy_static` in `output_parser.rs`, `pty.rs`, etc.** — transitive deps (`portable-pty`, `symphonia`) also use it; removing the direct dep saves nothing. Modules outside `ai_agent/` will migrate opportunistically.
 - **`opener:allow-open-path` scope `"**"`** — FileBrowser must open any file the user can see. Narrower globs break external drives and network mounts.
 - **Iframe sandbox = `allow-scripts allow-same-origin`** — ALL iframes MUST use this. NEVER use bare `sandbox=""` — it kills JavaScript.
+- **Plugin capabilities do not isolate plugins from each other.** `plugin_id` is caller-supplied and plugins load into the same JS realm as the host, so any plugin can pass another plugin's id and inherit its grants. This is known, documented at the capability check in `plugins.rs`, at the `import()` in `pluginLoader.ts`, and in `docs/plugins.md`. A per-plugin token was considered and rejected — same-realm JS can read or proxy it, so it would be security theatre. Real isolation needs Worker/iframe + a host-created MessagePort; it is deferred, not overlooked. Do NOT propose the token.
 
 ## Ideas
 

@@ -115,22 +115,13 @@ pub async fn set_global_hotkey(
         register(&app, new_combo).map_err(|e| e.to_string())?;
     }
 
-    // Persist to config
-    {
-        let mut config = state.config.read().clone();
-        config.global_hotkey = combo;
-        *state.config.write() = config.clone();
-        crate::config::save_app_config(config).map_err(|e| e.to_string())?;
-    }
+    // Persist to config. Under the shared config lock: read-clone-mutate-save-store
+    // on its own raced every other writer, and the loser's fields were dropped.
+    crate::config::commit_config_change(state.inner(), |current| {
+        let mut next = current.clone();
+        next.global_hotkey = combo;
+        Ok(next)
+    })?;
 
     Ok(())
-}
-
-/// Get the currently configured global hotkey combo.
-// DEFERRED (2026-05-14) — wire to settings UI alongside set_global_hotkey.
-// Getter needed so settings panel can display current hotkey on load.
-#[tauri::command]
-pub fn get_global_hotkey(app: tauri::AppHandle) -> Option<String> {
-    let state = app.state::<Arc<AppState>>();
-    state.config.read().global_hotkey.clone()
 }

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>We stopped guessing what the agent was doing — FastAF Blog</title>
+  <meta name="description" content="Reading an AI agent's state off its terminal screen is a war you lose one redesign at a time. So we asked the agents to tell us instead — with a shell hook that emits an escape sequence." />
+
+  <meta property="og:title" content="We stopped guessing what the agent was doing — FastAF" />
+  <meta property="og:description" content="Screen-scraping an agent TUI is a losing game. Native settings-hooks report busy, idle and awaiting directly." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/sstraus/tuicommander/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>July 24, 2026</time>
+      <h1>We stopped guessing what the agent was doing</h1>
+      <p class="blog-post-summary">Knowing whether an agent is working, done, or waiting for you is the foundation everything else sits on. We built it by reading the screen. Then the screens changed. Here's why we tore it out and asked the agents to tell us instead.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>Everything depends on one bit</h2>
+      <p>Is this agent busy or not? Almost every feature we've built rests on that answer. The status dot on the tab. The chime when a turn finishes. The activity dashboard. Auto-standby. Whether a peer message gets typed into a terminal now or parked until later. Get that bit wrong and the whole surface lies to you at once.</p>
+      <p>For a long time we answered it the only way available: by reading the terminal. The output parser knew each agent's chrome — the spinner glyphs, the composer row, the ready prompt — and inferred state from what was painted. It worked. It also broke every single time an agent shipped a redesign, and it broke silently.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Three ways screen-reading failed</h2>
+      <p>These aren't hypotheticals. Each one is a bug we reproduced live, with a stopwatch.</p>
+      <p><strong>Grok moved its composer inside a rounded box.</strong> Our ready-screen adapter matched a bare prompt character, which no current build emits any more. "Ready" never fired. We watched a tab report busy <strong>132 seconds</strong> after the turn had visibly finished. The fixtures still encoded the older layout, so the test suite was green the entire time — the tests were asserting yesterday's Grok.</p>
+      <p><strong>Grok also paints a scrollbar.</strong> Once output outgrows the viewport, a column appears down the right edge, and every otherwise-blank row gets trimmed to a single block glyph. Our spinner detection read that column as Aider's animated progress bar. The screen therefore never classified as ready, and the tab stayed busy for the rest of the process — observed on a finished turn still reporting busy two minutes later.</p>
+      <p><strong>pi wasn't even visible.</strong> Its process path resolves to the Node interpreter, so classification saw <code>node</code>, there was no screen adapter at all, and a finished turn left the tab busy forever. Reproduced at <strong>71.6 seconds</strong> with the composer already back on screen.</p>
+      <p>The pattern is the same in all three: an agent's UI is not an API. It has no compatibility contract, no deprecation window, and no reason to warn you. Every redesign is a silent breaking change, and your fixtures keep passing because they encode the version you last looked at.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Ask, don't infer</h2>
+      <p>Modern coding agents have something better than a screen: a hook system. Claude Code, Gemini, Grok and Codex all let you register a shell command against lifecycle events. So we stopped inferring and started listening.</p>
+      <p>FastAF installs a small hook into the agent's own settings file. When the agent starts a turn, finishes one, or blocks on a question, the hook writes a single escape sequence to the terminal:</p>
+      <pre><code>\033]7770;state=busy\033\\
+\033]7770;state=idle\033\\
+\033]7770;state=awaiting\033\\</code></pre>
+      <p>OSC 7770 is our own private sequence. FastAF's terminal parses it out of the stream, the rest of the world ignores it. No screen parsing, no heuristics, no fixtures encoding someone else's layout. The agent says what it is doing, in one byte-cheap message, at the exact moment it changes.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The hook has to be a good guest</h2>
+      <p>This hook runs inside someone else's tool, on every turn, on your machine. Three properties are non-negotiable, and each one is a line of the generated command:</p>
+      <p><strong>It can never block the agent.</strong> The command always exits 0, with output redirected to <code>/dev/null</code>. If it fails, it fails invisibly and the agent carries on. A monitoring hook that can wedge the thing it monitors is worse than no hook.</p>
+      <p><strong>It is inert outside FastAF.</strong> The whole command is guarded on <code>$TUIC_SESSION</code>. Run the same agent in a plain terminal, or in another tool, and the hook does nothing at all — it doesn't spray escape sequences into a terminal that never asked for them.</p>
+      <p><strong>It has to find the terminal.</strong> This one was the surprise. A hook has no controlling tty of its own, and its stdout is captured by the agent — so writing to stdout writes into the agent's own output stream, not to the screen. The hook resolves its parent's tty instead (<code>ps -o tty= -p $PPID</code>) and writes there directly.</p>
+      <p>Every command ends with a trailing <code># tuic-managed-hook</code> comment. That sentinel is the entire ownership model.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Editing a file you don't own</h2>
+      <p>Your <code>settings.json</code> is yours. It may already contain your own hooks, your team's hooks, hooks from other tooling. We are a guest in that file, and the installer is built around that:</p>
+      <ul>
+        <li><strong>Ownership is only ever the sentinel.</strong> The installer prunes exclusively commands carrying <code># tuic-managed-hook</code>. Your entries are never read as ours, never reordered, never dropped.</li>
+        <li><strong>One read-modify-write.</strong> Load, prune ours, append the canonical set, write once, atomically. Never a write on an error path — a settings file we can't parse gets reported, not corrupted.</li>
+        <li><strong>Idempotent.</strong> Installing twice equals installing once, because it's always prune-then-append.</li>
+        <li><strong>Clean uninstall.</strong> Removing our hooks drops the groups that became empty as a result, leaving the file exactly as if FastAF had never touched it.</li>
+      </ul>
+      <p>Settings also tells you the truth about the current state: not installed, installed, or outdated — the last one meaning our hooks are there but from an older version and worth reinstalling.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Every agent needs its own map</h2>
+      <p>The escape sequence is universal; which events mean what is not. Each agent gets a hand-built map.</p>
+      <p><strong>Claude Code</strong> is the richest. <code>UserPromptSubmit</code> and a broad <code>PreToolUse</code> drive busy, <code>Stop</code> drives idle, and <code>Notification</code> drives awaiting. There's one extra entry that matters: a <code>PreToolUse</code> matcher on <code>AskUserQuestion</code>, which flips the tab to awaiting the instant the agent decides to ask you something — before the question has finished rendering.</p>
+      <p><strong>Codex</strong> is the sparse end. Its <code>PreToolUse</code> is Bash-only and not useful for this, and it has no session-end event at all. So the map is deliberately minimal: <code>SessionStart</code> and <code>UserPromptSubmit</code> for busy, <code>Stop</code> for idle, and the badge clears on idle rather than on teardown.</p>
+      <p><strong>OpenCode</strong> has no shell-hook system, so it gets a generated plugin instead — a few lines of JavaScript that check <code>TUIC_SESSION</code>, write the same OSC 7770 to <code>/dev/tty</code>, and never throw. Different mechanism, identical contract.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Two sources of truth is one too many</h2>
+      <p>The subtle part came after it worked. Once an agent is instrumented, the old heuristics are still running — and they're now competing with a source that is actually authoritative.</p>
+      <p>The specific collision was question detection. Our parser guesses "this looks like a prompt waiting for an answer" from the shape of the output. An instrumented agent reports awaiting explicitly. Leave both on and a false-positive heuristic can mark a working agent as awaiting your input, overriding the agent's own statement that it is busy.</p>
+      <p>So heuristic question events are dropped for instrumented sessions. Not deprioritised, not merged, not resolved by a tie-breaker — dropped. When you have a real answer, a guess in the same channel is noise with a chance of being wrong.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What we'd tell you to steal</h2>
+      <p>If you're building anything that supervises AI agents, the transferable lesson is that <em>an agent's terminal UI is not an interface</em>. Treat it as one and you inherit a maintenance burden that grows with every agent you support and every release they ship, and that fails in the worst possible way: silently, while your tests stay green.</p>
+      <p>Wherever an agent offers hooks, an event stream, or a status file, take it. It's a fraction of the code, it survives redesigns, and it tells you about state changes the screen never shows — like Claude deciding to ask you a question a moment before it prints one.</p>
+      <p>Heuristics still ship, because not every agent exposes hooks and we're not dropping support for the ones that don't. They're the fallback now instead of the foundation. That's the right place for a guess.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/sstraus/tuicommander/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

@@ -8,7 +8,9 @@ import { createGridRenderer } from "../gridRenderer";
 // CanvasTerminal (pixel paint parity is verified live, not here).
 function makeRenderer(fontWeight: number | string = 400) {
 	const ctx = {} as unknown as CanvasRenderingContext2D;
-	return createGridRenderer(ctx, { fontWeight: () => fontWeight, getFontFamily: () => "monospace" });
+	const gr = createGridRenderer(ctx, { fontWeight: () => fontWeight, getFontFamily: () => "monospace" });
+	gr.setTheme(DEF_BG, DEF_FG);
+	return gr;
 }
 
 const DEF_BG = "#101010";
@@ -19,26 +21,52 @@ const BLUE = 0x0000ff;
 describe("gridRenderer color resolution", () => {
 	it("returns the default fg/bg when the default-attr bit is set", () => {
 		const gr = makeRenderer();
-		expect(gr.resolveFg(RED, BLUE, ATTR_DEFAULT_FG, DEF_FG)).toBe(DEF_FG);
-		expect(gr.resolveBg(RED, BLUE, ATTR_DEFAULT_BG, DEF_BG)).toBe(DEF_BG);
+		expect(gr.resolveFg(RED, BLUE, ATTR_DEFAULT_FG)).toBe(DEF_FG);
+		expect(gr.resolveBg(RED, BLUE, ATTR_DEFAULT_BG)).toBe(DEF_BG);
 	});
 
 	it("returns explicit packed colors as rgb() strings", () => {
 		const gr = makeRenderer();
-		expect(gr.resolveFg(RED, BLUE, 0, DEF_FG)).toBe("rgb(255,0,0)");
-		expect(gr.resolveBg(RED, BLUE, 0, DEF_BG)).toBe("rgb(0,0,255)");
+		expect(gr.resolveFg(RED, BLUE, 0)).toBe("rgb(255,0,0)");
+		expect(gr.resolveBg(RED, BLUE, 0)).toBe("rgb(0,0,255)");
 	});
 
 	it("swaps fg/bg under the inverse attribute", () => {
 		const gr = makeRenderer();
 		// inverse fg uses the bg color (and vice-versa)
-		expect(gr.resolveFg(RED, BLUE, ATTR_INVERSE, DEF_FG)).toBe("rgb(0,0,255)");
-		expect(gr.resolveBg(RED, BLUE, ATTR_INVERSE, DEF_BG)).toBe("rgb(255,0,0)");
+		expect(gr.resolveFg(RED, BLUE, ATTR_INVERSE)).toBe("rgb(0,0,255)");
+		expect(gr.resolveBg(RED, BLUE, ATTR_INVERSE)).toBe("rgb(255,0,0)");
 	});
 
-	it("inverse with a default-bg cell paints the default color as fg", () => {
+	// GH #111: `printf '\e[7m \e[0m'` — a reverse-video space with BOTH defaults.
+	// The swapped fallbacks must cross over, otherwise the block paints bg-on-bg
+	// and the Pi composer caret is invisible.
+	it("inverse with both defaults swaps the fallbacks", () => {
 		const gr = makeRenderer();
-		expect(gr.resolveFg(RED, BLUE, ATTR_INVERSE | ATTR_DEFAULT_BG, DEF_FG)).toBe(DEF_FG);
+		const a = ATTR_INVERSE | ATTR_DEFAULT_FG | ATTR_DEFAULT_BG;
+		expect(gr.resolveBg(RED, BLUE, a)).toBe(DEF_FG);
+		expect(gr.resolveFg(RED, BLUE, a)).toBe(DEF_BG);
+	});
+
+	it("inverse with an explicit fg keeps that fg as the painted bg", () => {
+		const gr = makeRenderer();
+		const a = ATTR_INVERSE | ATTR_DEFAULT_BG;
+		expect(gr.resolveBg(RED, BLUE, a)).toBe("rgb(255,0,0)");
+		expect(gr.resolveFg(RED, BLUE, a)).toBe(DEF_BG);
+	});
+
+	it("inverse with an explicit bg keeps that bg as the painted fg", () => {
+		const gr = makeRenderer();
+		const a = ATTR_INVERSE | ATTR_DEFAULT_FG;
+		expect(gr.resolveFg(RED, BLUE, a)).toBe("rgb(0,0,255)");
+		expect(gr.resolveBg(RED, BLUE, a)).toBe(DEF_FG);
+	});
+
+	it("leaves non-inverse default cells on their own defaults", () => {
+		const gr = makeRenderer();
+		const a = ATTR_DEFAULT_FG | ATTR_DEFAULT_BG;
+		expect(gr.resolveFg(RED, BLUE, a)).toBe(DEF_FG);
+		expect(gr.resolveBg(RED, BLUE, a)).toBe(DEF_BG);
 	});
 });
 

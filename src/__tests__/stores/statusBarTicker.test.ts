@@ -1,3 +1,4 @@
+import { createEffect, createRoot } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { statusBarTicker } from "../../stores/statusBarTicker";
 
@@ -122,5 +123,52 @@ describe("statusBarTicker", () => {
 		statusBarTicker.addMessage({ id: "low", pluginId: "p1", text: "Low", priority: 5, ttlMs: 0 });
 		expect(statusBarTicker.getRotationState().message).toBeNull();
 		expect(statusBarTicker.getAll().length).toBe(1);
+	});
+});
+
+/**
+ * The scavenge timer fires once a second for as long as any message exists.
+ * `Array.prototype.filter` always allocates, so republishing the signal on a
+ * tick that expired nothing woke every ticker subscriber 60 times a minute for
+ * no change at all. The tick must be silent unless it actually removed a
+ * message.
+ */
+describe("statusBarTicker scavenge quiet ticks", () => {
+	/** Runs of an effect reading the message list — i.e. subscriber wakeups. */
+	const countWakeups = (drive: () => void): number => {
+		let runs = 0;
+		const dispose = createRoot((d) => {
+			createEffect(() => {
+				statusBarTicker.getAll();
+				runs++;
+			});
+			return d;
+		});
+		// The effect's first run is the subscription itself, not a wakeup.
+		const baseline = runs;
+		drive();
+		dispose();
+		return runs - baseline;
+	};
+
+	it("does not republish when nothing expired", () => {
+		statusBarTicker.addMessage({ id: "persistent", pluginId: "p1", text: "Always here", priority: 50, ttlMs: 0 });
+		const wakeups = countWakeups(() => {
+			for (let i = 0; i < 5; i++) statusBarTicker._scavenge();
+		});
+		expect(wakeups).toBe(0);
+	});
+
+	it("still republishes on the tick that removes a message", () => {
+		statusBarTicker.addMessage({ id: "short", pluginId: "p1", text: "Short", priority: 50, ttlMs: 500 });
+		statusBarTicker.addMessage({ id: "long", pluginId: "p1", text: "Long", priority: 50, ttlMs: 0 });
+		vi.advanceTimersByTime(600);
+		const wakeups = countWakeups(() => {
+			statusBarTicker._scavenge();
+			statusBarTicker._scavenge();
+		});
+		// One wakeup for the removal, silence for the tick that found nothing.
+		expect(wakeups).toBe(1);
+		expect(statusBarTicker.getAll().map((m) => m.text)).toEqual(["Long"]);
 	});
 });

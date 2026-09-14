@@ -1144,6 +1144,30 @@ section {
 .blog-section p:last-child {
   margin-bottom: 0;
 }
+.blog-section ul,
+.blog-section ol {
+  margin: 0 0 12px 20px;
+}
+.blog-section li {
+  font-size: 0.95rem;
+  color: var(--fg-secondary);
+  line-height: 1.7;
+  margin-bottom: 4px;
+}
+.blog-section pre {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+}
+.blog-section pre code {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: var(--fg-primary);
+}
 .blog-figure {
   margin: 40px 0;
 }

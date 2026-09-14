@@ -44,6 +44,38 @@ export function setOnTabAdded(hook: typeof onTabAdded): void {
 	onTabAdded = hook;
 }
 
+/**
+ * Deactivators for every pane-owning store, keyed by store name.
+ *
+ * TerminalArea renders terminals, diffs, markdown and editors as four independent
+ * `For` lists, each marking its pane `active` from its OWN store's `activeId`. So
+ * "only one pane is showing" is a cross-store invariant that no single store owned:
+ * each call site had to remember to null the other three, and the ones that forgot
+ * (MarkdownTab's Edit button) rendered the viewer and the editor on top of each
+ * other. Registering here lets the *activating* store enforce it once.
+ *
+ * Lives in tabManager because all four stores already import it and it imports
+ * none of them — putting the registry in any one store would make them cyclic.
+ */
+const paneDeactivators = new Map<string, () => void>();
+
+/** Register a store that owns a pane, so activating another pane can deactivate it. */
+export function registerPaneDeactivator(storeName: string, deactivate: () => void): void {
+	paneDeactivators.set(storeName, deactivate);
+}
+
+/**
+ * Make `storeName` the only store with an active tab.
+ *
+ * Call this from the paths that ACTIVATE a tab. Background/silent opens must not
+ * call it — they deliberately leave the current pane showing.
+ */
+export function activatePaneExclusively(storeName: string): void {
+	for (const [name, deactivate] of paneDeactivators) {
+		if (name !== storeName) deactivate();
+	}
+}
+
 export function createTabManager<T extends BaseTab>(storeName: string = "unknown") {
 	const [state, setState] = createStore<TabStoreState<T>>({
 		tabs: {} as Record<string, T>,
@@ -52,17 +84,21 @@ export function createTabManager<T extends BaseTab>(storeName: string = "unknown
 		_order: [],
 	});
 
+	registerPaneDeactivator(storeName, () => setState("activeId", null));
+
 	return {
 		state,
 
 		/** Internal: expose setState for domain-specific mutations. */
 		_setState: setState as SetStoreFunction<TabStoreState<T>>,
 
-		/** Internal: add a tab to the store and set it active. Returns the tab id. */
+		/** Internal: add a tab to the store and set it active. Returns the tab id.
+		 *  Activating makes this the ONLY pane showing — see activatePaneExclusively. */
 		_addTab(tab: T): string {
 			setState("tabs", tab.id, tab);
 			setState("activeId", tab.id);
 			setState("_order", (o) => [...o, tab.id]);
+			activatePaneExclusively(storeName);
 			onTabAdded?.(tab.id, storeName);
 			return tab.id;
 		},
@@ -97,8 +133,13 @@ export function createTabManager<T extends BaseTab>(storeName: string = "unknown
 			);
 		},
 
+		/** Activate a tab, or clear the active one with `null`.
+		 *  Activating deactivates every other pane store: TerminalArea marks each pane
+		 *  from its own store's activeId, so two stores holding an activeId render two
+		 *  panes on top of each other. `null` only clears this store. */
 		setActive(id: string | null): void {
 			setState("activeId", id);
+			if (id !== null) activatePaneExclusively(storeName);
 		},
 
 		clearAll(): void {

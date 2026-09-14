@@ -521,5 +521,24 @@ describe("tweakComments parser/serializer", () => {
 		it("returns source unchanged for out-of-range line", () => {
 			expect(toggleCheckbox(src, 99, "x")).toBe(src);
 		});
+
+		it("rewrites the exact table cell addressed by sourceCol", () => {
+			const src = ["| A | B |", "| --- | --- |", "| [ ] | [x] |"].join("\n");
+			// Second cell starts at column 8 on line 2.
+			const out = toggleCheckbox(src, 2, "~", 8);
+			expect(out.split("\n")[2]).toBe("| [ ] | [~] |");
+		});
+
+		it("rewrites the first table cell without disturbing the second", () => {
+			const src = ["| A | B |", "| --- | --- |", "| [ ] | [x] |"].join("\n");
+			const out = toggleCheckbox(src, 2, "x", 2);
+			expect(out.split("\n")[2]).toBe("| [x] | [x] |");
+		});
+
+		it("refuses a stale sourceCol that no longer points at a checkbox", () => {
+			const src = ["| A | B |", "| --- | --- |", "| [ ] | text |"].join("\n");
+			// Column 8 is prose now, not a `[x]` — must not corrupt it.
+			expect(toggleCheckbox(src, 2, "x", 8)).toBe(src);
+		});
 	});
 });

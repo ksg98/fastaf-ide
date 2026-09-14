@@ -19,6 +19,7 @@ Agent-specific documents:
 - [Gemini CLI](agents/gemini-cli.md) — Ink-like, relative positioning + prompt box
 - [Aider](agents/aider.md) — Sequential CLI, no TUI framework
 - [OpenCode](agents/opencode.md) — Bubble Tea full-screen TUI
+- [pi](agents/pi.md) — full-frame snapshot adapter around a stable footer
 
 ## Detection Strategy Per Agent
 
@@ -31,13 +32,14 @@ Each agent class requires a different parsing strategy:
 | OpenCode | Full-screen TUI (Bubble Tea) | Screen snapshot analysis | No (all rows are "chrome") |
 | Gemini CLI | CLI inline | Changed-rows delta analysis | Yes |
 | Aider | CLI sequential | Changed-rows delta analysis | Yes |
+| pi | Full-screen TUI | Screen snapshot analysis | No (footer adapter) |
 
 **CLI inline agents** (CC, Codex, Gemini, Aider) render output into the
 terminal sequentially, with chrome at specific positions. `chrome.rs`
 functions work for these — `is_separator_line`, `is_prompt_line`,
 `is_chrome_row` classify individual rows.
 
-**Full-screen TUI agents** (OpenCode) take over the entire screen. Every
+**Full-screen TUI agents** (OpenCode, pi) take over the entire screen. Every
 row changes on every update, making delta analysis useless. These need
 screen-snapshot-based parsing: identify panels by position, extract text
 from known regions, detect state changes by content comparison.
@@ -123,16 +125,35 @@ pipelines (pty.rs, session.rs, state.rs) all import from this single module:
 src-tauri/src/chrome.rs
 ├── is_separator_line()    — run-of-4 box-drawing chars (─ ━ ═ — ╌ ╍)
 ├── is_prompt_line()       — all agent prompt chars: ❯ › >
+├── is_agent_prompt_row()  — BARE prompt only (no echoed user message, no `> quote`)
 ├── is_chrome_row()        — 10 marker chars + dingbat range + Codex • disambiguation
 ├── CHROME_SCAN_ROWS       — single constant (15)
-└── find_chrome_cutoff()   — unified trim logic for REST and mobile pipelines
+├── find_chrome_cutoff()   — screen trim (transient: over-trim self-corrects next repaint)
+└── find_scrollback_chrome_cutoff() — history trim (permanent: prompt anchor only)
 ```
 
 | Pipeline | File | What it uses from `chrome.rs` |
 |----------|------|------------------------------|
 | Changed-rows parser | `pty.rs` | `is_chrome_row` (for `chrome_only`), `is_separator_line`, `is_prompt_line` |
 | Screen trim (REST) | `session.rs` | `find_chrome_cutoff` (replaces local `trim_screen_chrome` body) |
-| Log trim (mobile) | `state.rs` | `find_chrome_cutoff` (replaces local `find_prompt_cutoff` body) |
+| Log trim (mobile) | `state.rs` | `find_scrollback_chrome_cutoff` via `mark_agent_chrome` |
+
+#### Screen trim vs scrollback trim
+
+The two cutoffs are deliberately different because the cost of a false positive is
+different. The **screen** is re-rendered every frame, so an over-trim disappears on
+the next repaint — `find_chrome_cutoff` can afford a separator-only anchor and the
+loose `is_prompt_line`. **Scrollback is permanent history**, so
+`find_scrollback_chrome_cutoff` anchors only on a bare prompt row:
+
+- A standalone separator is **not** an anchor — markdown tables, progress bars and
+  Codex's `└ ────` dividers all carry box-drawing runs mid-output.
+- A prompt row carrying text is the agent echoing the **user's submitted message**
+  (`❯ rename is broken`, `› riprendiamo`) — that is the conversation, not chrome.
+
+Scrollback classification also **marks** rather than deletes (`LogLine::chrome`);
+readers skip flagged lines, so a misclassification hides text instead of destroying
+it.
 
 ### Parsing Functions
 
@@ -160,10 +181,16 @@ from `parse_status_line` events (for Gemini braille/Aider spinners). Gates:
 - `SilenceState::on_chunk()`
 
 **Gaps:**
-- Missing `⏸` (U+23F8) — plan mode chunks not classified as chrome
-- `1 shell` (no ⏵⏵) not detected — new CC format without mode-line markers
 - No positional awareness — cannot use "last row = always chrome" heuristic
-- CC status lines (below separator) transit PTY but have no chrome markers
+- A bare subprocess count (`1 shell`, no `⏵⏵`) carries no chrome glyph, so
+  `is_chrome_row` returns false for it — `parse_active_subtasks` still reads the
+  count via its bare-count path
+- User-defined status lines are only partially covered: a row with block glyphs
+  (`Context █░░░ 8%`) is chrome, a plain one (`[Opus 4.6 | Max] │ repo`) is not.
+  This is a *classification* gap only — no detection logic reads status-line
+  content, and `is_spinner_row`'s leading-glyph rule keeps a HUD progress bar
+  from faking liveness (#446-596f). See
+  [Claude Code § Status Lines](./agents/claude-code.md#status-lines-between-lower-separator-and-mode-line).
 
 #### Subprocess Count (`parse_active_subtasks`) — output_parser.rs:706
 
@@ -174,7 +201,11 @@ Extracts subprocess count from the mode line. Must handle:
 3. **Count only**: `N <type>` — no markers at all (e.g., `1 shell`)
 4. **Bare mode**: `⏵⏵ <mode>` — markers only, no count (count = 0)
 
-**Gap**: Only format 1 and 4 are currently implemented.
+All four formats are implemented: formats 1, 2 and 4 by the mode-marker path
+(`⏵⏵`/`››` anywhere on the row, count extracted from either side of the `·`),
+format 3 by the bare-count path, which is restricted to known subprocess types
+(`agents`, `shells`, `bash`, `background tasks`) so ordinary numbers in output
+cannot trigger it.
 
 #### Question Detection (`extract_last_chat_line`) — pty.rs:207
 

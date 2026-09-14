@@ -6,6 +6,7 @@ function makeRow(index: number, count = 8): DecodedRow {
 	return {
 		index,
 		count,
+		wrapped: false,
 		codepoints: new Uint32Array(count),
 		fg: new Uint32Array(count),
 		bg: new Uint32Array(count),
@@ -18,6 +19,7 @@ function makeFrame(opts: {
 	screenCols?: number;
 	displayOffset?: number;
 	historySize?: number;
+	altScreen?: boolean;
 	rows: DecodedRow[];
 }): DecodedFrame {
 	return {
@@ -30,6 +32,7 @@ function makeFrame(opts: {
 		historyBase: 0,
 		hasSelection: false,
 		keyboardFlags: 0,
+		altScreen: opts.altScreen ?? false,
 		bell: false,
 		mouseMode: 0,
 		sgrMouse: false,
@@ -38,11 +41,18 @@ function makeFrame(opts: {
 		screenRows: opts.screenRows,
 		screenCols: opts.screenCols ?? 80,
 		rows: opts.rows,
+		needsFullFrame: false,
 	};
 }
 
 describe("decideFrameGrid", () => {
-	const prev: FrameGridPrev = { lastScreenRows: 24, lastScreenCols: 80, lastDisplayOffset: 0, lastHistorySize: 100 };
+	const prev: FrameGridPrev = {
+		lastScreenRows: 24,
+		lastScreenCols: 80,
+		lastDisplayOffset: 0,
+		lastHistorySize: 100,
+		lastAltScreen: false,
+	};
 
 	it("flags geomChanged when screen rows or cols differ", () => {
 		expect(decideFrameGrid(prev, makeFrame({ screenRows: 30, rows: [] }), 24).geomChanged).toBe(true);
@@ -110,5 +120,38 @@ describe("decideFrameGrid", () => {
 		);
 		expect(fullScroll.scrollWait).toBe(false);
 		expect(fullScroll.fullReplace).toBe(true);
+	});
+
+	it("detects primary/alternate screen changes even when all numeric coordinates match", () => {
+		const primaryPrev = { ...prev, lastAltScreen: false } as FrameGridPrev;
+		const enterAlt = decideFrameGrid(
+			primaryPrev,
+			makeFrame({ screenRows: 24, historySize: 100, altScreen: true, rows: [makeRow(0)] }),
+			24,
+		);
+
+		expect(enterAlt.screenChanged).toBe(true);
+		expect(enterAlt.scrollWait).toBe(true);
+
+		const altPrev = { ...prev, lastAltScreen: true } as FrameGridPrev;
+		const exitAlt = decideFrameGrid(
+			altPrev,
+			makeFrame({ screenRows: 24, historySize: 100, altScreen: false, rows: [makeRow(0)] }),
+			24,
+		);
+
+		expect(exitAlt.screenChanged).toBe(true);
+		expect(exitAlt.scrollWait).toBe(true);
+	});
+
+	it("does not report a screen change while consecutive alternate frames stay in the same era", () => {
+		const altPrev = { ...prev, lastAltScreen: true } as FrameGridPrev;
+		const nextAlt = decideFrameGrid(
+			altPrev,
+			makeFrame({ screenRows: 24, historySize: 100, altScreen: true, rows: [makeRow(0)] }),
+			24,
+		);
+
+		expect(nextAlt.screenChanged).toBe(false);
 	});
 });

@@ -23,8 +23,10 @@ When modifying PluginHost API, capabilities, manifest schema, Tauri commands use
 | `src/plugins/types.ts` | PluginHost interface, PluginCapability union, snapshot types |
 | `src/plugins/pluginRegistry.ts` | Implementation in `buildHost()` |
 | `src/components/PluginPanel/pluginBaseStyles.ts` | Base CSS classes available to all plugin panels |
-| `src-tauri/src/plugins.rs` | `KNOWN_CAPABILITIES` list (new capabilities) |
+| `src-tauri/src/plugins.rs` | `KNOWN_CAPABILITIES` list (new capabilities); `set_plugin_output_watchers` sync |
+| `src-tauri/src/output_watchers.rs` | Rust-side OutputWatcher matching: `WatcherSpec`, `OutputWatcherRegistry::sync` (per-client sets; which patterns are rejected back to the frontend), `to_portable_pattern` (ECMAScript class escapes — Rust may over-match, never under-match), `clean_line` — a **port** of `src/utils/stripAnsi.ts` + the backtick strip — and `StreamLines`, the **only** line assembler. Changing `stripAnsi.ts` requires changing `clean_line`, or the two sides match on different text |
 | `src-tauri/src/lib.rs` | Register new Tauri commands in `invoke_handler` |
+| `docs/backend/command-threading.md` | Where a new command runs (`fn` = macOS main thread). Update the audit when a command changes placement |
 | `docs/plugins.md` | Plugin developer guide (API reference, capabilities table, **Panel CSS Design Strategy** section, examples) |
 | `src-tauri/src/mcp_http/plugin_docs.rs` | AI-optimized plugin reference (`PLUGIN_DOCS` const — **must stay in sync with `docs/plugins.md`**) |
 | `docs/api/tauri-commands.md` | Tauri commands reference table |
@@ -53,8 +55,11 @@ When adding or changing shortcuts:
 |------|----------------|
 | `src/keybindingDefaults.ts` | ACTION_NAMES + default key combo |
 | `src/actions/actionRegistry.ts` | ACTION_META (label, category) — auto-populates Settings and Command Palette |
+| `src-tauri/src/native_keys.rs` | macOS `NSEvent` monitor for keys WKWebView never forwards (Ctrl+Tab, F13–F20). **Keep it as ONE `KeyDown` monitor** — a second one doubles per-keystroke work on every key typed |
+| `src/hooks/useNativeKeyCombo.ts` | Turns `native-key-down` back into a combo string identical to `keyEventToCombo`'s; used by every recorder |
 | `docs/FEATURES.md` | Section 15 (Keyboard Shortcut Reference) |
 | `docs/user-guide/keyboard-shortcuts.md` | User-facing shortcut table |
+| `docs/frontend/hooks.md` | `useNativeKeyCombo` entry |
 
 ### Tauri Commands & IPC
 When adding or changing Tauri commands:
@@ -73,11 +78,24 @@ When adding a new `app.emit(event_name, payload)` call, document it here and lis
 |-------|---------|-------------|-------------------|
 | `session-standby` | `{ session_id: string, standby: bool }` | `pty.rs emit_standby_event()` | `useAppInit.ts` → `terminalsStore.update(termId, { standby })` |
 | `worktree-created` | `{ repo_path: string, branch: string, worktree_path: string }` | `mcp_transport.rs`, `session.rs`, `worktree_routes.rs` | TBD — frontend switch prompt |
-| `repo-changed` (git-state) | `{ repo_path: string }` | `repo_watcher.rs` — **only when the git-state fingerprint changed** (index size + resolved HEAD + porcelain status; skips no-op `.git` touches). Last fingerprint in `AppState.repo_git_fingerprints`. | `useAppInit.ts` → coalesced one bump/repo/frame via `revisionCoalescer` → `repositoriesStore.bumpRevision` |
+| `worktree-removed` | `{ repo_path: string, branch: string }` | `state.rs notify_worktree_removed()` — called by EVERY removal path: `worktree.rs` (`remove_worktree`, `finalize_merged_worktree`, `merge_and_archive_worktree`, `delete_local_branch`), `worktree_routes.rs` (`remove_worktree_http`, `finalize_merged_worktree_http`), `mcp_transport.rs` (`repo worktree_remove`) | `useWorktreeSwitchPrompt.ts` → `pruneRemovedWorktree()` closes the branch terminals and drops the sidebar row |
+| `repositories-changed` | `{}` — payload-free on purpose. One backend serves the desktop WebView, the browser and the PWA, and each keeps its own compare-and-swap baseline; the receiver only needs "disk moved, re-read it". Shipping the document would copy the whole repository set to every client on every save, including the one that just wrote it. | `state.rs notify_repositories_changed()` — called by both save paths, `config.rs save_repositories` (IPC) and `config_routes.rs put_repositories` (HTTP), and **only when `save_repositories_request` returns `Ok(true)`**, i.e. the delta actually moved the document. Also on `event_bus` for `/events` SSE | `repositories.ts` `startRemoteSync()` (registered by `hydrate`) → re-reads `load_repositories` → `adoptRemoteRepositories()`, which moves the store **and** the persisted baseline together for every key this client has no unsaved intent for. `activeRepoPath` is never adopted — focus is per-window |
+| `repo-changed` (git-state) | `{ repo_path: string, kind: "git-state" }` | `repo_watcher.rs` — **only when the git-state fingerprint changed** (index size + resolved HEAD + porcelain status + the sorted `.git/worktrees/*` set; skips no-op `.git` touches). The worktree set is an input because add/remove touches nothing else, so worktree-only changes used to be swallowed and left ghost sidebar rows. Last fingerprint in `AppState.repo_git_fingerprints`. | `useAppInit.ts` → coalesced one bump/repo/frame via `revisionCoalescer` → `repositoriesStore.bumpGitRevision`, which bumps **both** the general and the git revision |
+| `repo-changed` (working-tree) | `{ repo_path: string, kind: "working-tree" }` | `repo_watcher.rs` — non-`.git`, non-ignored file changes, debounced 1.5s when the repo is hot (has ≥1 open terminal, `set_hot_repos`) and 15s when cold. Ignore coverage is the **full git set**: the global `core.excludesFile`, the root `.gitignore` plus `.git/info/exclude`, and nested `.gitignore` files. `ALWAYS_EXCLUDED_DIRS` matches on **any path component**, so a nested git repo's `.git/` is treated as noise rather than a working-tree change. No fingerprint guard, but a firing git-state emit **cancels the pending working-tree emit** as a duplicate. Covers the main checkout **and every linked worktree** (`sync_worktree_watches`), which is what keeps a branch's sidebar diff badge live while an agent works in its worktree; the payload always names the parent repo. | `useAppInit.ts` → `revisionCoalescer` → `bumpRevision` (general revision **only**) + debounced `refreshAllBranchStats` |
 | `head-changed` | `{ repo_path: string, branch: string }` | `repo_watcher.rs` — **only when the resolved HEAD target changed** (`resolve_head_target`); skips the Linux inotify storm where `.git/HEAD` events recur without HEAD moving (issue #82). Last target in `AppState.repo_head_targets`; suppressed-emit count in `AppState.repo_head_emits_suppressed`. | `useAppInit.ts` → branch rename/activate (also dedupes on `activeBranch === branch`) |
-| `review-progress` | `{ repo_path: string, payload: { pr_number, summary, files, phase, done, llm_used, llm_model } }` | `diff_triage.rs` `ProgressSink::PrReview` during `run_pr_review`; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener updates per-PR review progress |
+| `review-progress` | `{ repo_path: string, payload: { pr_number, summary, files (COUNT, not the vector — the only consumer reads its length), phase, done, llm_used, llm_model } }` | `diff_triage.rs` `ProgressSink::PrReview` during `run_pr_review`; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener updates per-PR review progress |
 | `conflict-assist-status` | `{ repo_path: string, payload: { pr_number, status, conflicted_files } }` | `conflict_assist.rs` `emit_conflict_assist_status()` lifecycle; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener updates conflict-assist state |
-| `proposals-ready` | `{ repo_path: string, payload: ImprovementScanResult }` | `improvement_scan.rs` after `run_improvement_scan` completes; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener accumulates proposals for the GitHub Ops dashboard |
+| `proposals-ready` | `{ repo_path: string, payload: ImprovementScanResult }` | `improvement_scan.rs` after `run_improvement_scan` completes; also sent on `event_bus` for `/events` SSE | `githubOpsStore` listener accumulates proposals for the GitHub Ops dashboard — the sole publisher, since it reaches every window on both transports while the invoke's return value reaches only the caller |
+| `ctrl-tab` | `"next"` \| `"prev"` | `native_keys.rs` — macOS only; the `NSEvent` is swallowed so AppKit cannot also cycle tabs | `useNativeMenuBridge.ts` → tab switch |
+| `native-key-down` | `{ key: "F13".."F20", cmd, ctrl, alt, shift }` | `native_keys.rs` — macOS only, scoped to the `main` window; the event is passed through (nothing native to suppress) | `useNativeKeyCombo.ts`, attached only while a shortcut recorder is open |
+| `mcp-toast` | `{ title, message, level, sound, origin_repo_path?, origin_session_id? }` | `mcp_transport.rs` — `ui action=toast`; derives origin from the calling MCP session rather than accepting caller-supplied scope. `origin_session_id` is the caller's TUIC session, absent for an unbound caller | `useAppInit.ts` → repository-scoped toast + Messages item; the repo is carried as `repoPath`, NOT glued into the message text — `ToastContainer.tsx` renders it as its own badge and uses `origin_session_id` to navigate to the originating terminal on click |
+| `mcp-confirm` | `{ request_id, title, message, origin_repo_path?, origin_session_id? }` | `mcp_transport.rs` — `ui action=confirm`, dual-emitted, plus a mobile push. It used to be a native OS dialog, which no remote human could answer; every client now gets the request and the first answer wins | `McpConfirmHost.tsx` (mounted by BOTH `ApplicationOverlays.tsx` and `MobileApp.tsx`) → `stores/mcpConfirm.ts` queue → `ConfirmDialog` |
+| `mcp-confirm-resolved` | `{ request_id, confirmed }` | `mcp_http/mod.rs` `resolve_mcp_confirm()` on an answer, and `mcp_transport.rs` when the 300 s wait expires | `McpConfirmHost.tsx` → drops that request from the queue, so the clients that lost the race take the dialog down |
+| `pty-description-changed` | `{ session_id: string, description: string | null }` | `state.rs` — MCP `agent spawn` / `session submit` / `session input` updates the orchestrator-owned PTY description | `useAppInit.ts` → `terminalsStore.ptyDescription` → Context bar |
+| `pty-activity-{session_id}` | `{ session_id: string }` | `pty.rs emit_pty_activity()` via `ActivityPulse`, throttled to one pulse per `ACTIVITY_PULSE_WINDOW` (1 s). Payload-free and idempotent, so dropping pulses inside the window loses nothing — do NOT convert this throttle into a coalescer. Dual-emitted on `event_bus` as `PtyActivity` (`activity` WS frame on `/sessions/:id/stream`, plus `pty-activity` SSE); deliberately NOT forwarded on the `?format=grid` WS, which has no activity consumer. Ignored by `apply_event_to_session_state` — it must not restamp `SessionState.last_activity_ms`, which answers a different question | `Terminal.tsx` → `subscribePty(…, { onActivity })` → `terminalsStore.touchLastDataAt` + background-tab `activity` flag. **Not** in `useAppInit.ts` — per-session |
+| `pty-osc133-{session_id}` | `{ marker: string, line: number, exit_code: number \| null }` | `pty.rs` OSC 133 handler — serialised from `terminal_grid.rs Osc133Event`, so the field name is `exit_code`, NOT `exitCode`. Dual-emitted on `event_bus` as `PtyOsc133` (`osc133` frame on the `?format=grid` WS via `grid_ws_frame()`, plus `pty-osc133` SSE); the grid WS is the right lane because `CanvasTerminal` is the only consumer and it already holds that socket. Ignored by `apply_event_to_session_state` | `CanvasTerminal.tsx` → `transport.onEvent("osc133", …)` → `terminalsStore.handleOsc133()` → command blocks, gutter marks, Cmd+Up/Down. **Not** in `useAppInit.ts` — per-session |
+| `pty-cwd-{session_id}` | `{ cwd: string }` | `pty.rs` OSC 7 handler. The desktop payload is the `{ cwd }` object, not a bare string — both transports carry the same shape so the handler needs no branch. Dual-emitted on `event_bus` as `PtyCwd` (`cwd` frame on the `?format=grid` WS, plus `pty-cwd` SSE). Ignored by `apply_event_to_session_state` | `CanvasTerminal.tsx` → `transport.onEvent("cwd", …)` → `terminalsStore.update({ cwd })` + `onCwdChange`. **Not** in `useAppInit.ts` — per-session |
+| `pty-watcher-lines-{session_id}` | `{ session_id: string, lines: [{ text: string, matched_ids: string[] }] }` | `pty.rs emit_watcher_lines()` — one emit per 100 ms batch of assembled lines; `text` is the CLEANED text Rust matched on, `matched_ids` are qualified `client_id/watcher_id`. Rust ships every line only while a registered pattern could not be compiled, otherwise the matched ones alone. Dual-emitted on `event_bus` as `PluginWatcherLines` (`watcher-lines` WS frame on `/sessions/:id/stream` in both `?format=grid` and raw mode — **not** `?format=log|text`, which returns before the event loop — plus `plugin-watcher-lines` SSE) | `CanvasTerminal.tsx` → `transport.onEvent("watcher-lines", …)` → `pluginRegistry.handleWatcherLines()`, which re-runs the JS `RegExp` on each line. The listener is installed BEFORE the grid subscription — a line that lands while it is being attached is lost. **Not** in `useAppInit.ts` — the listener is per-session |
 
 ### HTTP & MCP Server
 When adding routes or changing server behavior:
@@ -99,6 +117,21 @@ When modifying `cpu_watchdog.rs` or the `/diagnostics` HTTP endpoint:
 | `AGENTS.md` | Diagnostics section (usage, known failure patterns) |
 | `docs/FEATURES.md` | Section 20.11 (Runtime Diagnostics) |
 
+### Agent state detection (working / idle / awaiting)
+When changing an awaiting/idle/busy signal — a parser, the hook suppression, or the raw-stream composition:
+
+| File | What to update |
+|------|----------------|
+| `src-tauri/src/output_parser.rs` | The parser itself (`parse_question`, `parse_osc777_notify`, …) |
+| `src-tauri/src/chrome.rs` | Bottom-zone cutoff — anything at or below the input box must stay unparsed |
+| `src-tauri/src/pty.rs` | `raw_stream_events` composition + `suppress_heuristic_question` gating |
+| `src-tauri/src/state.rs` | `apply_event_to_session_state` — the arms that SET and CLEAR `awaiting_input`. A signal nothing retracts latches the badge |
+| `src/components/Terminal/Terminal.tsx` | The frontend twin of those arms (`terminalsStore` awaiting flags) |
+| `src-tauri/src/fixtures/agent_prompts/` | A framed `.tcap` capture of the failure, recorded via `/diagnostics/capture` (`.raw` remains legacy-readable) |
+| `src-tauri/src/pty.rs` tests | A case in the `Awaiting-signal fixtures` block replaying that capture |
+| `src-tauri/src/pty.rs` tests | A case in the `Awaiting RETRACTION` block when the failure is a state that never clears — fixtures assert emitted events and cannot express a MISSING one |
+| `AGENTS.md` | "Agent state detection" section (signal table, capture workflow, retraction) |
+
 ### MCP Tool Surface (native tools, upstream proxy, meta-tools)
 When changing the tool list, tool handlers, `disabled_native_tools`, upstream allow/deny filters, or the Speakeasy meta-tools:
 
@@ -112,11 +145,15 @@ When changing the tool list, tool handlers, `disabled_native_tools`, upstream al
 | `docs/user-guide/settings.md` | Services Tab — "Collapse tools" checkbox description |
 
 #### Session tool actions added (swarm Layer 3–4)
+- `session action=submit` — submits one command to a confirmed-idle managed agent and returns a bounded terminal-movement receipt in the same response. It never queues or overwrites a partial composer; `session action=input` remains raw and write-only.
 - `session action=status` — returns `{shell_state, idle_since_ms, busy_duration_ms, exit_code, agent_type}`. Useful for polling agent progress without streaming output.
 - `session action=list` response now includes `shell_state` per entry.
 
 #### Agent tool actions added (swarm inbox)
 - `agent action=inbox` response now includes `missed_count` — number of messages evicted from the FIFO inbox since last read. Non-zero means the orchestrator missed messages and should increase polling frequency.
+- `agent action=send` response includes **`delivered`** (bool) plus, when false, `warning` and `recipient_has_terminal`. `delivered` is false exactly when `delivery_path == "inbox_only"`: no waiter, channel, direct terminal delivery, or already-pending coalesced orchestrator wake will surface it, so it stays unread until the recipient polls. Registered orchestrators add `wake_notification_and_inbox`, `coalesced_wake_and_inbox` and `lifecycle_summary_and_inbox`; none of them exposes a peer payload — the last one is reachable only for a window made entirely of server-authored `tuic-auto-*` lifecycle notifications, which it prints inline and acknowledges itself. A payload-free wake gets at most one retry after an uncertain PTY write per unread-mail group; coalesced mail does not reset that budget, and inbox/wait observation does. `accepted`/`ok` only mean "buffered". Keep these distinct in every client and in the tool descriptions — reporting `inbox_only` as success is how a reply to an agent with no PTY silently vanished.
+- `agent action=register` response includes **`terminal`** (bool): false means the identity resolves to no live PTY (`live_pty_for_peer` → `None`), so it can never be typed into or woken, and the peer must consume its own inbox via `wait`/`inbox`. Identities without a PTY arise from a bridge that sent no `x-tuic-session` header (agent launched outside a TUIC PTY) — the server then mints an MCP-scoped UUID.
+- `agent action=register` accepts **`orchestrator`** (bool) as the only role declaration seam; omission preserves the current role and child spawn never infers it. Register/list responses surface `orchestrator` plus **`mail_wake`** (`managed_pty_lifecycle` or `none`). External/headerless orchestrators are inbox/wait-only because MCP/SSE activity is not an authoritative idle or wake surface.
 
 ### Provider Registry
 When modifying provider types, slot names, credential storage, or the ProvidersTab UI:
@@ -150,12 +187,13 @@ When modifying AI Chat panel, settings, context menu actions, or streaming backe
 | `src-tauri/src/ai_chat.rs` | Backend: config, streaming, context assembly, Ollama detection |
 | `src-tauri/src/ai_chat_registry.rs` | Chat Registry: cross-window state sync, Channel fan-out, subscribe/unsubscribe |
 | `src/stores/aiChatStore.ts` | Frontend store: messages, streaming state, registry subscription (sessionId passed per-call, derived from focused terminal) |
-| `src/components/AIChatPanel/AIChatPanel.tsx` | Chat panel component + detach button + registry lifecycle |
+| `src/components/AIChatPanel/AIChatPanel.tsx` | Chat panel component + detach button + registry lifecycle + the optional `terminal` binding a detached window is handed |
+| `src/panelAdapters/aiChat.tsx` | Detached-window adapter: params handed over at detach, terminal + chat id adoption on mount, re-read on reattach |
 | `src/components/AIChatPanel/contextMenuActions.ts` | Terminal context menu integration |
 | `src/components/PanelOrchestrator.tsx` | Switches between AIChatPanel and DetachedPlaceholder |
 | `src/components/DetachedPlaceholder.tsx` | Placeholder shown in main window when panel is detached |
 | `src/components/SettingsPanel/tabs/AiChatTab.tsx` | Settings panel section |
-| `src/stores/ui.ts` | `aiChatPanelVisible` + `aiChatPanelWidth` + `detachedPanels` map |
+| `src/stores/ui.ts` | `aiChatPanelVisible` + `detachedPanels` map |
 | `src/panelRouter.tsx` | Panel adapter registry + routing for detached panel windows |
 | `src/utils/panelSync.ts` | PanelSyncProvider + PanelSyncReceiver for main↔detached communication |
 | `src/hooks/initPanelWindow.ts` | Bootstrap for detached panel windows (theme, font, settings) |
@@ -318,7 +356,7 @@ When modifying the tweak-comment format, the selection/popover UI, or the DOM hi
 | `src/utils/tweakDomHighlight.ts` | DOM-side sentinel→`.tweak-highlight` span wrapping |
 | `src/components/MarkdownTab/CommentOverlay.tsx` | Floating Comment button + inline popover + hover tooltip |
 | `src/components/MarkdownTab/MarkdownTab.tsx` | Save/delete wiring, write-back to disk |
-| `src/components/ui/ContentRenderer.tsx` | Sentinel injection + `applyTweakDomHighlights` on render (shared by PR detail) |
+| `src/components/ui/ContentRenderer.tsx` | Sentinel injection + `applyTweakDomHighlights` on render (shared with the AI Chat panel) |
 | `docs/FEATURES.md` | Section 3.3 (Markdown Panel) — Inline review comments |
 
 ### TUIC SDK & iframe Integration
@@ -340,6 +378,16 @@ When adding or changing `tuic://` schemes:
 |------|----------------|
 | `docs/FEATURES.md` | Section 17.4 (Deep Links) |
 | `docs/plugins.md` | If affecting plugin contentUri format |
+
+### Documentation Site (mdBook + Pagefind)
+When adding, renaming or moving a docs page:
+
+| File | What to update |
+|------|----------------|
+| `docs/SUMMARY.md` | **Required** — mdBook only renders, and Pagefind only indexes, chapters listed here. A file that is not in `SUMMARY.md` is invisible to readers and to search |
+| `docs/index.md` | "Popular articles" cards and "Browse by section" list, if the page belongs there |
+| `scripts/build-docs.sh` | Only when the pipeline changes (excluded pages, Pagefind flags, HTML rewrites) — CI and `make docs` both run this one script |
+| `docs/guides/development-setup.md` | "Documentation Site" section, if the build steps change |
 
 ## Documentation File Index
 

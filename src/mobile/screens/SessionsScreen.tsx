@@ -1,10 +1,11 @@
-import { createSignal, For, Index, Show } from "solid-js";
+import { createMemo, createSignal, For, Index, Show } from "solid-js";
 import { appLogger } from "../../stores/appLogger";
 import { rpc } from "../../transport";
 import { HeroMetrics } from "../components/HeroMetrics";
 import { NewSessionSheet } from "../components/NewSessionSheet";
 import { SessionCard } from "../components/SessionCard";
 import type { SessionInfo } from "../useSessions";
+import { ptysLast } from "../utils/sessionKind";
 import styles from "./SessionsScreen.module.css";
 
 interface SessionsScreenProps {
@@ -23,6 +24,10 @@ export function SessionsScreen(props: SessionsScreenProps) {
 	const [pullY, setPullY] = createSignal(0);
 	const [showNewSession, setShowNewSession] = createSignal(false);
 	const [repos, setRepos] = createSignal<string[]>([]);
+	// Memoized so the sort runs on a real list change, not on every render.
+	// `reconcileSessions` hands back the same array reference for an idle poll,
+	// which keeps this inert — and keeps `<For>` from rebuilding every card.
+	const ordered = createMemo(() => ptysLast(props.sessions));
 	let startY = 0;
 	let listEl: HTMLDivElement | undefined;
 
@@ -123,7 +128,7 @@ export function SessionsScreen(props: SessionsScreenProps) {
 				</div>
 			</Show>
 
-			<For each={props.sessions}>
+			<For each={ordered()}>
 				{(session) => <SessionCard session={session} onSelect={props.onSelectSession} onKill={handleKill} />}
 			</For>
 

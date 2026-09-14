@@ -94,9 +94,13 @@ There is no separate `swarm` action: callers compose the `agent` and `session` p
 
 ### How It Works
 
-Every PTY session gets a stable `TUIC_SESSION` UUID injected as an environment variable. Agents use this as their identity to register, discover peers, and exchange messages through FastAF's MCP `messaging` tool.
+Every PTY session gets a stable `TUIC_SESSION` UUID injected as an environment variable. Agents use this as their identity to register, discover peers, and exchange messages through FastAF's MCP `agent` tool.
 
-When a channel-enabled Claude Code recipient is connected via SSE and already working, messages are **pushed in real-time** into that turn as MCP channel notifications (`notifications/claude/channel`). Idle or completed managed agents use terminal submission to start a real next turn; managed non-Claude agents do the same even when their MCP bridge has an SSE stream. Every message also lands in a buffered inbox as a fallback.
+When a channel-enabled Claude Code worker is connected via SSE and already working, messages are **pushed in real-time** into that turn as MCP channel notifications (`notifications/claude/channel`). Idle or completed ordinary managed agents use terminal submission to start a real next turn; managed non-Claude workers do the same even when their MCP bridge has an SSE stream. Every message also lands in a buffered inbox.
+
+Once a registered peer spawns a managed child through FastAF, it is treated as an orchestrator. Peer results and lifecycle payloads stay in its inbox: a working orchestrator is never injected or steered, while an idle/completed orchestrator receives only one coalesced notice that a message is available and should be read with `agent action=inbox` (`[TUIC] message available …`). When that notice would cover nothing but child lifecycle events, it prints them instead (`[TUIC] child agent 8c261794 is now idle; child agent 8c261794 exited (exit 0)`) and no inbox read is needed — a peer message anywhere in the batch sends you back to the generic notice. An active `agent wait` receives the mail directly and suppresses that notice.
+
+If writing that payload-free notice has an uncertain outcome, FastAF retries it at most once after five seconds. A second uncertain result exhausts the wake budget for the whole unread-mail group; later and newly coalesced mail stays inbox-only until a successful `agent action=inbox` or `agent action=wait` observation clears the group. Later mail then receives a fresh initial wake and one-retry budget.
 
 ### What Gets Injected Automatically
 
@@ -116,16 +120,19 @@ FastAF injects these into every Claude Code PTY session — no manual configurat
 > name/project, or from a standalone/external session where the env-var route is unavailable.
 > External MCP clients do not need a plain-shell identity tab: call `agent action=register`
 > without `tuic_session` to receive an MCP-scoped UUID, or supply an explicit UUID when the same
-> identity must be reclaimed after reconnect.
+> identity must be reclaimed after reconnect. Reconnecting under a *new* UUID? Add
+> `replaces="<old-uuid>"` or the old inbox is left behind — nothing links the two identities
+> otherwise, and TUIC never guesses one from a name. The reply reports `mail_migrated`, or
+> `mail_stranded` with a warning when the old identity still has a live terminal of its own.
 
-> **Prefer blocking waits over polling.** `agent action=wait since=<ms>` returns as soon
+> **Prefer blocking waits over polling.** `agent action=wait` returns as soon
 > as new mail arrives; `session action=wait session_id=<id> until=idle|exited` blocks on a
 > peer's lifecycle. Both default to 60 seconds, cap at 300000 ms, and return
 > `{met, timed_out}`. They are event-driven end to end; the bridge deadline follows the
 > requested wait instead of its ordinary ten-second timeout. A successful agent wait also returns every retained fresh message (up to the
 > 100-message inbox capacity) and a per-recipient logical `next_since` cursor, so the normal path
-> needs no separate inbox call. Incoming messages are also **typed into an idle peer's terminal**, so a waiting
-> orchestrator is woken by its children without any poll loop.
+> needs no separate inbox call. Ordinary idle workers receive direct terminal delivery. An idle
+> orchestrator instead receives a payload-free `agent action=inbox` wake; an active wait suppresses it.
 
 1. **Register** *(optional — sets name/project)* — the agent reads its `$TUIC_SESSION`:
    ```
@@ -145,9 +152,12 @@ FastAF injects these into every Claude Code PTY session — no manual configurat
 
 4. **Wait for and receive messages** — one blocking call returns the message bodies:
    ```
-   agent action=wait since=1712000000000
+   agent action=wait
    ```
-   Pass the returned `next_since` to the next wait.
+   Omit `since`: the server remembers where you got to and resumes from there, so a plain
+   `wait` never re-reads mail you already saw. Pass it only to override — `since=0`
+   deliberately replays the whole inbox. `next_since` comes back on every response,
+   timeouts included.
 
 5. **Check inbox directly** — useful after a reported FIFO eviction or if channel push was missed:
    ```
@@ -167,10 +177,11 @@ not send that report.
 
 | Delivery | When | Latency | Requires |
 |----------|------|---------|----------|
-| **Channel push** | Recipient has active SSE stream | Real-time | `--dangerously-load-development-channels server:tuicommander` on the recipient's CC process |
+| **Channel push** | Ordinary Claude worker has an active turn and SSE stream | Real-time | `--dangerously-load-development-channels server:tuicommander` on the recipient's CC process |
+| **Orchestrator wake** | Registered parent is idle/completed and not waiting | Real-time, coalesced | Managed PTY + authoritative lifecycle |
 | **Inbox buffer** | Always | Poll-based | Registration only |
 
-Messages are always buffered in the inbox regardless of whether channel push succeeds. The inbox holds up to 100 messages per agent (FIFO eviction). Individual messages are capped at 64 KB.
+Messages are always buffered in the inbox regardless of whether another delivery path succeeds. The inbox holds up to 100 messages per agent (FIFO eviction). Individual messages are capped at 64 KB.
 
 ### Using Messaging from a Standalone Claude Code Session
 

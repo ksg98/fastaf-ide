@@ -1,5 +1,5 @@
 import { pathBasename } from "../utils/pathUtils";
-import { currentBranchKey } from "./repositories";
+import { branchKeyFor } from "./repositories";
 import { type BaseTab, createTabManager } from "./tabManager";
 
 /** Editor tab data */
@@ -53,32 +53,37 @@ function createEditorTabsStore() {
 		},
 
 		/** Add a new editor tab (or activate existing if same file already open).
-		 *  Pass `fsRoot` via opts when the file lives in a worktree that differs from the canonical repo path. */
+		 *  Deactivates the terminal/diff/markdown panes so the editor is the only one showing.
+		 *  Pass `fsRoot` via opts when the file lives in a worktree that differs from the canonical repo path.
+		 *  Pass `background` when the caller must not steal focus — an opener that
+		 *  deliberately leaves the user in another repo has to leave the tab inactive
+		 *  too, or its content shows with its tab button filtered out of the bar. */
 		add(
 			repoPath: string,
 			filePath: string,
 			initialLine?: number,
-			opts?: { fsRoot?: string; externalEditable?: boolean },
+			opts?: { fsRoot?: string; externalEditable?: boolean; background?: boolean },
 		): string {
 			const fsRoot = opts?.fsRoot ?? repoPath;
 			const existing = Object.values(base.state.tabs).find(
 				(tab) => tab.repoPath === repoPath && tab.fsRoot === fsRoot && tab.filePath === filePath,
 			);
 			if (existing) {
-				base.setActive(existing.id);
+				if (!opts?.background) base.setActive(existing.id);
 				return existing.id;
 			}
 
 			const id = base._nextId("edit");
 			const fileName = pathBasename(filePath) || filePath;
-			return base._addTab({
+			const add = opts?.background ? base._addTabBackground : base._addTab;
+			return add({
 				id,
 				repoPath,
 				fsRoot,
 				filePath,
 				fileName,
 				isDirty: false,
-				branchKey: currentBranchKey(),
+				branchKey: branchKeyFor(repoPath),
 				initialLine,
 				externalEditable: opts?.externalEditable,
 			});
@@ -105,6 +110,11 @@ function createEditorTabsStore() {
 		/** Clear all editor tabs for a repository */
 		clearForRepo(repoPath: string): void {
 			base._clearWhere((tab) => tab.repoPath === repoPath);
+		},
+
+		/** Get tabs for a specific repository */
+		getForRepo(repoPath: string): EditorTabData[] {
+			return Object.values(base.state.tabs).filter((tab) => tab.repoPath === repoPath);
 		},
 	};
 }

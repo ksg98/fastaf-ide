@@ -64,11 +64,28 @@ export default {
 ## Architecture
 
 ```
-PTY output ──> pluginRegistry.processRawOutput()
-                  |
-                  +-- LineBuffer (reassemble lines)
-                  +-- stripAnsi (clean ANSI codes)
-                  +-- dispatchLine() --> OutputWatcher.onMatch()
+PTY reader thread (Rust) ──> output_watchers.rs
+                                 |
+                                 +-- StreamLines (assemble lines — the only assembler)
+                                 +-- clean_line (strip ANSI codes + backticks)
+                                 +-- OutputWatcherRegistry (compiled patterns, per client)
+                                 +-- WatcherLineBatcher (one event per 100ms, lossless)
+                                            |
+                                            v
+                            pty-watcher-lines event  [{text, matched_ids}]
+                            (matched lines only, or every line while a
+                             pattern stays in the WebView)
+                                            |
+                                            v
+                            pluginRegistry.handleWatcherLines()
+                                            |
+                                            +-- fire the ids Rust matched
+                                            +-- dispatchLine() — the watchers Rust
+                                                could not compile, skipping the
+                                                ids already fired
+                                            |
+                                            v
+                                    OutputWatcher.onMatch()
                                               |
                                               +-- host.addItem() --> Activity Center bell
                                                                            |
@@ -182,7 +199,7 @@ host.registerSection({
 
 #### host.registerOutputWatcher(watcher) -> Disposable
 
-Watches every PTY output line (after ANSI stripping and line reassembly).
+Watches every PTY output line (after ANSI stripping, backtick removal, and line reassembly).
 
 ```typescript
 host.registerOutputWatcher({
@@ -196,10 +213,35 @@ host.registerOutputWatcher({
 ```
 
 **Rules:**
-- `onMatch` must be synchronous and fast (< 1ms) — it's in the PTY hot path
+- `onMatch` must be synchronous and fast (< 1ms) — it runs on the interface main thread (deferred to a microtask, but a slow handler still blocks painting)
 - `pattern.lastIndex` is reset before each test (safe to use global flag, but unnecessary)
 - Input is ANSI-stripped but may contain Unicode (checkmarks, arrows, emoji)
 - Arguments are positional: `onMatch(match, sessionId)` — NOT destructured
+
+**Where the matching runs.** The registry sends the pattern source and flags of every
+watcher to Rust (`set_plugin_output_watchers`). The PTY reader thread assembles the
+lines, cleans them (`output_watchers.rs`, a port of `stripAnsi` plus the backtick strip),
+and tests them against the compiled patterns. Rust is the only line assembler: the
+WebView reassembles nothing, so a watcher that registers halfway through a line still
+sees that line whole. The WebView is only woken for a line that matched: it receives that
+cleaned line, runs your `RegExp` on it again, and gives `onMatch` a genuine
+`RegExpExecArray`. The `i`, `m` and `s` flags apply on both sides.
+
+Rust may match a little more than your `RegExp` does, never less — the re-run in the
+WebView filters the difference. One accepted divergence: a pattern that counts UTF-16
+code units of astral characters (`/^.{2}$/` against an emoji) matches in JavaScript only.
+
+**Patterns that stay in the WebView.** The Rust `regex` crate is not a superset of JS
+`RegExp` — it has no lookaround, no backreferences, and no negated class escape inside a
+character class (`[\D.]`). Rust reports such a pattern as rejected instead of compiling
+it to something different, and the registry keeps matching that watcher itself, on the
+same assembled lines. The behavior of the watcher does not change; only the thread that
+tests the line does. One rejected pattern makes Rust ship every line instead of the
+matched ones alone, so prefer a portable pattern when you have the choice.
+
+Every line is tested. The events are rate-limited to one per 100 ms, but the lines inside
+a window are concatenated in order, never dropped, so no line is lost and no line is
+fabricated from two spliced chunks.
 
 #### host.registerStructuredEventHandler(type, handler) -> Disposable
 
@@ -449,6 +491,20 @@ Read a file's content as UTF-8 text. Maximum file size: 10 MB. **Requires `"fs:r
 const content = await host.readFile("/Users/me/.claude/projects/foo/conversation.jsonl");
 ```
 
+#### `host.readFiles(absolutePaths) -> Promise<(string | null)[]>`
+
+Read up to 1000 files in one round trip, in request order. An entry is `null` when that path could not be read — a file that vanished between the listing and the read does not lose the batch. **Requires `"fs:read"` capability.**
+
+Use this instead of looping over `readFile` whenever the paths are known up front: listing a directory and reading every entry costs two calls instead of one per file.
+
+```typescript
+const names = await host.listDirectory(dir, "*.md");
+const contents = await host.readFiles(names.map((name) => `${dir}/${name}`));
+const found = names
+  .map((filename, i) => ({ filename, content: contents[i] }))
+  .filter((entry) => entry.content != null);
+```
+
 #### `host.readFileBase64(absolutePath) -> Promise<string>`
 
 Read a file's raw bytes and return them as a base64 string. Maximum file size: 10 MB. Use this for binary previews such as `.docx`, images, or archives. **Requires `"fs:read"` capability.**
@@ -477,6 +533,8 @@ const activeFile = recent[0]; // most recently written
 #### `host.watchPath(path, callback, options?) -> Promise<Disposable>`
 
 Watch a path for filesystem changes. Emits batched events after a debounce period. **Requires `"fs:watch"` capability.**
+
+Each watch delivers only its own events — a plugin with several watches gets one callback per change, not one per watch.
 
 ```typescript
 const watcher = await host.watchPath(
@@ -528,7 +586,7 @@ await host.renamePath(
 
 Recursively scan the given repo roots for build-artifact directories (Rust/Maven `target/`, `node_modules/`, JS framework caches like `.next`/`.turbo`, Python `.venv`/`__pycache__`/tool caches, .NET `obj`/`bin`, Gradle/CMake/Flutter `build/`, SwiftPM `.build`/`Pods`, `.terraform`, Elixir `_build`, Zig, Haskell, Composer `vendor/`). Read-only. Unlike `listDirectory`, this **ignores `.gitignore`** (artifact dirs are gitignored by design) and stops descending on a match, so a nested `node_modules` is folded into the outer entry — never double counted. Ambiguously-named dirs (`target`, `bin`/`obj`, `build`, `vendor`, …) only count when a toolchain marker sits beside them (e.g. `Cargo.toml` or `pom.xml` for `target`; a `.csproj`/`.fsproj`/`.vbproj`/`.sln`/`.slnx` for `bin`/`obj`; `build.gradle`/`CMakeLists.txt`/`pubspec.yaml` for `build`; `composer.json` for `vendor`) — a Go sysroot `bin` or an Xcode `PIFCache/target` is walked like any other dir, not claimed. The full rule table is `ARTIFACT_RULES` in `src-tauri/src/plugin_fs.rs`. Each `repoPaths` entry is `$HOME`-scoped **and intersected server-side with the app's actual registered-repository list** — a path that isn't equal to or nested under a genuinely registered repo root is silently dropped, so a plugin cannot widen its scan surface by passing arbitrary `$HOME` paths. Results for the same normalized set of roots are shared across concurrent callers and reused for 30 seconds. Pass `{ forceRefresh: true }` to bypass a completed cached result; an already-running scan for the same roots is still shared. **Requires `"fs:scan"` capability.**
 
-Each `ArtifactEntry` is `{ path, kind, size_bytes, last_modified_secs, repo }` — `kind` is one of `rust | maven | node | jscache | python | dotnet | gradle | cmake | swift | flutter | terraform | elixir | zig | haskell | php`, `last_modified_secs` is the max mtime of the dir's direct children (a "last build" signal).
+Each `ArtifactEntry` is `{ path, kind, size_bytes, trimmable_bytes, last_modified_secs, repo }` — `kind` is one of `rust | maven | node | jscache | python | dotnet | gradle | cmake | swift | flutter | terraform | elixir | zig | haskell | php`, `last_modified_secs` is the max mtime of the dir's direct children (a "last build" signal), and `trimmable_bytes` is the share of `size_bytes` that `trimBuildArtifact` would reclaim (0 for kinds with no separable intermediates). Both sizes come from one filesystem walk.
 
 ```typescript
 const entries = await host.scanBuildArtifacts(host.getRepos().map((r) => r.path));
@@ -543,6 +601,29 @@ Delete a build-artifact directory. Destructive. The backend guard requires (all 
 
 ```typescript
 await host.deleteBuildArtifact("/Users/me/project/target", ["/Users/me/project"]);
+```
+
+#### `host.trimBuildArtifact(path, repoPaths) -> Promise<number>`
+
+Remove only a build-artifact directory's **regenerable intermediates**, leaving the built executables in place. Prefer this over `deleteBuildArtifact`: a full clean of a Rust `target/` also deletes the binary the user may be running, while reclaiming (measured across 5 real repos) only ~1% more disk.
+
+Authorization is `deleteBuildArtifact`'s, unchanged. On top of it, only paths produced by expanding the matched toolchain rule's own trim patterns are removed, and each is re-verified to sit strictly inside the artifact dir; symlinked directories are never followed or expanded into.
+
+Which sub-paths count as intermediates is a per-rule table (`ARTIFACT_RULES[].trim` in `src-tauri/src/plugin_fs.rs`):
+
+| Kind | Trimmed | Kept |
+| --- | --- | --- |
+| `rust` (`target/`) | `<profile>/{deps,build,incremental,.fingerprint}`, plus the same under a target triple | the linked executables at each profile root |
+| `swift` (`.build/`) | `index-build/`, `<triple>/<profile>/{ModuleCache,index,<Module>.build}` | the product binary, `Modules/`, `checkouts/`, `repositories/` |
+| `maven` (`target/`) | `classes`, `test-classes`, `generated-*`, `maven-status`, `maven-archiver`, `*-reports` | the packaged `*.jar`/`*.war` |
+| `gradle` (`build/`) | `classes`, `tmp`, `kotlin`, `intermediates`, `generated`, `reports`, `test-results`, `jacoco` | `libs/`, `outputs/`, `distributions/`, `install/` |
+
+The bar for inclusion is that rebuilding costs only local CPU — anything needing the network to restore (cargo registry, SwiftPM `checkouts`/`repositories`) is deliberately kept. Every other kind has an empty trim list: it reports `trimmable_bytes: 0` and rejects a trim, because there is no subset that spares an output (`node_modules`, `.venv`, `vendor`) or because the whole dir is already the intermediate half of a pair (.NET `obj` vs `bin`, which the scanner reports as two separate entries).
+
+Check `trimmable_bytes > 0` before offering it. It resolves with the bytes it actually reclaimed, measured as it deleted; `0` means there was nothing left to trim. Patch cached totals with that number and never with the `trimmable_bytes` of the last scan — a build between the scan and the trim moves the estimate, and subtracting it publishes a total no measurement supports. **Requires `"fs:delete"` capability** — same blast-radius class, on a subset.
+
+```typescript
+const reclaimed = await host.trimBuildArtifact("/Users/me/project/target", ["/Users/me/project"]);
 ```
 
 ### Tier 3c: Status Bar Ticker (capability-gated)
@@ -615,10 +696,28 @@ const panel = host.openPanel({
     // Send response back
     panel.send({ type: "response", ok: true });
   },
+  onVisibilityChange(visible) {
+    // A panel stays mounted behind display:none when another tab is selected.
+    // Skip work while hidden and catch up here.
+    if (visible && stale) rebuild();
+  },
+  onClose() {
+    // The tab is gone for good, whoever closed it — the ×, a middle-click, the
+    // context menu, or your own close(). A hidden panel comes back; a closed one
+    // does not, and isVisible() reports false for both. Release what the panel
+    // owned here or it outlives the tab.
+    watch.dispose();
+    panel = null;
+  },
 });
 
-// Update content later
-panel.update("<html><body><h1>Updated</h1></body></html>");
+// …and query it at any time, e.g. before an expensive re-render
+if (!panel.isVisible()) { stale = true; return; }
+
+// Update content later. Returns false once the user has closed the tab — a
+// plugin that renders on a timer or a file event should stop, or re-open with
+// openPanel() if the render was user-requested.
+if (!panel.update("<html><body><h1>Updated</h1></body></html>")) panel = null;
 
 // Send a message to the iframe at any time
 panel.send({ type: "refresh", items: [...] });
@@ -1116,6 +1215,28 @@ const cache = JSON.parse(raw);
 
 ## Capabilities
 
+> **What capabilities are, and what they are not.** Capabilities gate what a
+> plugin **declares** — a plugin that never asked for `exec:cli` cannot reach the
+> exec commands under its own id. They do **not** gate what a plugin can
+> **impersonate**. Plugins load with a bare dynamic `import()` into the *same
+> JavaScript realm* as the host, and `plugin_id` is caller-supplied — it is the
+> only key the Rust capability checks consult. Any plugin can therefore import
+> `invoke` itself and pass another plugin's id to inherit that plugin's exec,
+> credential and allowed-URL grants.
+>
+> **Plugins are isolated from the host's declared surface, not from each other.**
+> Treat every installed plugin as trusted with the union of all installed
+> capabilities, and vet what you install. This matches FastAF's threat
+> model — a local tool where the human user is the trust boundary.
+>
+> A per-plugin token was considered and deliberately rejected: same-realm
+> JavaScript can read it out of the module that holds it, proxy the function that
+> uses it, or monkey-patch the transport, so it would be a boundary in name only.
+> Real isolation requires running each plugin off-realm (a Worker or sandboxed
+> iframe) with a host-created `MessagePort` as its only channel to the backend,
+> so a plugin's identity is the port it was handed rather than a string it
+> supplies. That is tracked as future work, not a gap being quietly ignored.
+
 Capabilities gate access to Tier 3 and Tier 4 methods. Declare them in `manifest.json`:
 
 ```json
@@ -1136,13 +1257,13 @@ Capabilities gate access to Tier 3 and Tier 4 methods. Declare them in `manifest
 | `net:http` | `host.httpFetch()` | Can make HTTP requests (scoped to `allowedUrls`) |
 | `invoke:read_file` | `host.invoke("read_file", ...)` | Can read files on disk |
 | `invoke:list_markdown_files` | `host.invoke("list_markdown_files", ...)` | Can list directory contents |
-| `fs:read` | `host.readFile()`, `host.readFileBase64()`, `host.readFileTail()` | Can read files within `$HOME` (10 MB limit) |
+| `fs:read` | `host.readFile()`, `host.readFiles()`, `host.readFileBase64()`, `host.readFileTail()` | Can read files within `$HOME` (10 MB limit) |
 | `fs:list` | `host.listDirectory()` | Can list directory contents within `$HOME` |
 | `fs:watch` | `host.watchPath()` | Can watch filesystem paths within `$HOME` for changes |
 | `fs:write` | `host.writeFile()` | Can write files within `$HOME` (10 MB limit) |
 | `fs:rename` | `host.renamePath()` | Can rename/move files within `$HOME` |
 | `fs:scan` | `host.scanBuildArtifacts()` | Can recursively scan registered repos for build-artifact directories (read-only; ignores `.gitignore`) |
-| `fs:delete` | `host.deleteBuildArtifact()` | Can delete a build-artifact directory inside a registered repo (guarded `remove_dir_all`) |
+| `fs:delete` | `host.deleteBuildArtifact()`, `host.trimBuildArtifact()` | Can delete a build-artifact directory inside a registered repo (guarded `remove_dir_all`), or remove just its intermediates |
 | `exec:cli` | `host.execCli()` | Can execute CLI binaries declared in manifest `binaries` field |
 | `git:read` | `host.getGitBranches()`, `host.getRecentCommits()`, `host.getGitDiff()` | Read-only access to git repository state |
 | `ui:context-menu` | `host.registerTerminalAction()` | Can add actions to the terminal right-click "Actions" submenu |
@@ -1382,16 +1503,33 @@ beforeEach(() => {
 
 ### Testing output watchers
 
+Rust assembles the lines, so a test pushes an assembled line rather than raw PTY text:
+
 ```typescript
-it("detects deployment from PTY output", () => {
+it("detects deployment from PTY output", async () => {
   pluginRegistry.register(myPlugin);
-  pluginRegistry.processRawOutput("Deployed: api-server to prod\n", "session-1");
+  pluginRegistry.handleWatcherLines("session-1", [
+    { text: "Deployed: api-server to prod", matched_ids: [] },
+  ]);
+  // onMatch is deferred with queueMicrotask
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
 
   const items = activityStore.getForSection("my-section");
   expect(items).toHaveLength(1);
   expect(items[0].title).toBe("api-server");
 });
 ```
+
+`registerOutputWatcher` also calls `set_plugin_output_watchers`, so the `invoke` mock must
+return a promise. Until it resolves to `{ applied: true, rejected: [] }`, the registry
+treats every watcher as its own and scans the line itself — which is what the example
+above exercises with an empty `matched_ids`.
+
+To test the Rust path instead, resolve the sync with `{ applied: true, rejected: [] }` and
+put the qualified id (`<clientId>/<watcherId>`, both read from the invoke payload) in
+`matched_ids`. A watcher fires **once** per line either way: an id Rust flagged is skipped
+by the frontend scan that follows. A reply with `applied: false` is ignored, because the
+set it describes is not the set the backend holds.
 
 ### Testing capability gating
 

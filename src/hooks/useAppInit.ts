@@ -1,20 +1,27 @@
+import { AGENT_TYPES, type AgentType } from "../agents";
+import { handleAgentExitCompletion } from "../components/Terminal/agentExitCompletion";
 import { invoke, listen } from "../invoke";
+import { isNotificationSound } from "../notifications";
 import { activityStore } from "../stores/activityStore";
 import { appLogger } from "../stores/appLogger";
 import { editorTabsStore } from "../stores/editorTabs";
 import { githubStore } from "../stores/github";
-import { mdTabsStore } from "../stores/mdTabs";
+import { mdTabsStore, resolveRepoForCwd } from "../stores/mdTabs";
+import { notificationsStore } from "../stores/notifications";
 import { paneLayoutStore } from "../stores/paneLayout";
 import { repoSettingsStore } from "../stores/repoSettings";
-import { repositoriesStore } from "../stores/repositories";
+import { placementBranchFor, repositoriesStore, resolveRepoOwner, resolveRepoPathFor } from "../stores/repositories";
 import { settingsStore } from "../stores/settings";
+import { reconcileTerminalOwnership } from "../stores/terminalOwnership";
 import { terminalsStore } from "../stores/terminals";
 import { toastsStore } from "../stores/toasts";
+import { uiStore } from "../stores/ui";
 import { applyAppTheme, listenForThemeChanges, loadThemes } from "../themes";
 import { isTauri } from "../transport";
-import type { SavedTerminal } from "../types";
+import type { RepoChangeKind, SavedTerminal } from "../types";
 import { assignTabToActiveGroup } from "../utils/paneTabAssign";
-import { isAbsolutePath, normalizeSep, pathStartsWith, pathStripPrefix } from "../utils/pathUtils";
+import { isAbsolutePath, pathStripPrefix } from "../utils/pathUtils";
+import { unregisteredRepoRootFor } from "../utils/repoOwnership";
 import { syncVibrancy } from "../vibrancy";
 import { syncAppZoom } from "../zoom";
 import { createRevisionCoalescer } from "./revisionCoalescer";
@@ -32,6 +39,46 @@ const REMOTE_TAB_AUTOCLOSE_MS = 30_000;
 /** Shorter delay for agent-spawned sessions — they finish their task and can be cleaned up faster. */
 const AGENT_TAB_AUTOCLOSE_MS = 10_000;
 
+interface McpToastListenerState {
+	generation: number;
+	unlisten?: () => void;
+}
+
+interface McpToastPayload {
+	title: string;
+	message: string | null;
+	level: string;
+	sound: string | null;
+	origin_repo_path?: string;
+	origin_session_id?: string;
+}
+
+const MCP_TOAST_LISTENER_KEY = "__tuic_mcp_toast_listener__";
+
+function replaceMcpToastListener(handler: (event: { payload: McpToastPayload }) => void): void {
+	const globalState = globalThis as typeof globalThis & {
+		[MCP_TOAST_LISTENER_KEY]?: McpToastListenerState;
+	};
+	const state = globalState[MCP_TOAST_LISTENER_KEY] ?? (globalState[MCP_TOAST_LISTENER_KEY] = { generation: 0 });
+	const generation = ++state.generation;
+	state.unlisten?.();
+	state.unlisten = undefined;
+
+	listen<McpToastPayload>("mcp-toast", handler)
+		.then((unlisten) => {
+			if (state.generation !== generation) {
+				unlisten();
+				return;
+			}
+			state.unlisten = unlisten;
+		})
+		.catch((err) => appLogger.error("app", "Failed to register mcp-toast listener", err));
+}
+
+function parseAgentType(value: string | null | undefined): AgentType | null {
+	return value && (AGENT_TYPES as readonly string[]).includes(value) ? (value as AgentType) : null;
+}
+
 /** Dependencies injected into initApp */
 export interface AppInitDeps {
 	pty: {
@@ -40,9 +87,15 @@ export interface AppInitDeps {
 				session_id: string;
 				cwd: string | null;
 				display_name?: string | null;
+				pty_description?: string | null;
+				display_name_is_custom?: boolean;
+				is_remote?: boolean;
 				state?: {
 					shell_state?: "busy" | "idle";
 					agent_state?: "starting" | "working" | "awaiting_input" | "idle" | "completed";
+					awaiting_input?: boolean;
+					question_confident?: boolean;
+					agent_type?: string | null;
 					background_work?: boolean;
 				} | null;
 			}>
@@ -69,6 +122,12 @@ export interface AppInitDeps {
 	};
 	applyPlatformClass: () => string;
 	onCloseRequested: (handler: (event: { preventDefault: () => void }) => void) => void;
+	/** Register a repository by path. Same entry point as the `tuic://open-repo`
+	 *  deep link (`gitOps.addRepoByPath`), so registration has one implementation.
+	 *  Init NEVER calls this on its own — only the parked-tab toast's button does,
+	 *  from a click. addRepoByPath calls setActive(), and stealing the focused repo
+	 *  from a background event is exactly what b7e6c360 exists to stop. */
+	registerRepo: (path: string) => Promise<void>;
 }
 
 /** Collect terminal metadata from all repos/branches for persistence */
@@ -114,59 +173,77 @@ function collectTerminalSnapshots(): Map<string, Map<string, SavedTerminal[]>> {
  * Remote sessions may use a cwd below a repo or outside every configured repo,
  * so reconnect must use the same ancestor matching and active-branch fallback
  * as the live session-created path. */
-function assignSessionToRepoBranch(sessionId: string, terminalId: string, cwd: string | null): void {
-	let assigned = false;
-	if (cwd) {
-		const candidates: Array<{ repoPath: string; branchName: string | null; normalizedPath: string }> = [];
-		for (const repoPath of repositoriesStore.getPaths()) {
-			if (pathStartsWith(cwd, repoPath)) {
-				candidates.push({ repoPath, branchName: null, normalizedPath: normalizeSep(repoPath).replace(/\/+$/, "") });
-			}
-			const repoState = repositoriesStore.get(repoPath);
-			if (!repoState) continue;
-			for (const branch of Object.values(repoState.branches)) {
-				if (branch.worktreePath && pathStartsWith(cwd, branch.worktreePath)) {
-					candidates.push({
-						repoPath,
-						branchName: branch.name,
-						normalizedPath: normalizeSep(branch.worktreePath).replace(/\/+$/, ""),
-					});
-				}
-			}
-		}
+function assignSessionToRepoBranch(
+	sessionId: string,
+	terminalId: string,
+	cwd: string | null,
+	registerRepo: AppInitDeps["registerRepo"],
+): void {
+	const owner = resolveRepoOwner(cwd);
 
-		const matched = candidates.sort(
-			(left, right) =>
-				right.normalizedPath.length - left.normalizedPath.length ||
-				Number(normalizeSep(right.repoPath).replace(/\/+$/, "") === right.normalizedPath) -
-					Number(normalizeSep(left.repoPath).replace(/\/+$/, "") === left.normalizedPath) ||
-				Number(right.branchName !== null) - Number(left.branchName !== null),
-		)[0];
+	// Record the resolved owner on the terminal itself, BEFORE any placement. The
+	// branch arrays are a display index; this field is the truth, and it is what
+	// lets reconcileTerminalOwnership move a wrongly-placed tab home later. `null`
+	// means "no registered repo owns this cwd" — an honest unknown, not a guess.
+	terminalsStore.setRepoPath(terminalId, owner?.repoPath ?? null);
 
-		if (matched) {
-			const repoState = repositoriesStore.get(matched.repoPath);
-			const branchName = matched.branchName || repoState?.activeBranch;
-
-			if (branchName) {
-				repositoriesStore.addTerminalToBranch(matched.repoPath, branchName, terminalId);
-				assigned = true;
-			}
+	if (owner) {
+		const branchName = placementBranchFor(owner);
+		if (branchName) {
+			repositoriesStore.addTerminalToBranch(owner.repoPath, branchName, terminalId);
+			return;
 		}
 	}
 
-	if (assigned) return;
-
+	// No owner. The tab still needs somewhere to render or the user cannot even see
+	// that it exists, so the active repo lends it a slot — but `repoPath` above is
+	// null, so this is marked as the guess it is and reconcileTerminalOwnership
+	// re-homes it the moment the real repo is registered.
 	const fallbackRepo = repositoriesStore.state.activeRepoPath;
 	const fallbackState = fallbackRepo ? repositoriesStore.get(fallbackRepo) : undefined;
 	const fallbackBranch = fallbackState?.activeBranch;
 	if (fallbackRepo && fallbackBranch) {
+		// Which repo the user would have to register to fix this. Without it the
+		// warning named only the symptom, and a tab from an unregistered repo landed
+		// silently in whichever repo happened to have focus — indistinguishable, to
+		// the user, from the app filing it in the wrong place.
+		const unregisteredRoot = unregisteredRepoRootFor(cwd);
 		appLogger.warn(
 			"app",
-			`Remote session ${sessionId}: cwd "${cwd ?? "(null)"}" did not match any repo — falling back to active repo/branch`,
+			`Session ${sessionId}: cwd "${cwd ?? "(null)"}" is owned by no registered repo${
+				unregisteredRoot ? ` — register "${unregisteredRoot}" to give it a home` : ""
+			} — parking the tab in the active repo until one claims it`,
 		);
+		if (unregisteredRoot) {
+			// Repeats collapse: `hasVisible` dedups on title+message, so reconnecting
+			// twenty sessions from one unregistered repo raises one toast, not twenty.
+			//
+			// The button closes the loop the message opens: naming the directory still left
+			// the user to find it in the sidebar and add it by hand. Registration runs ONLY
+			// from this click — the user picked the moment, so the setActive() inside
+			// addRepoByPath is a repo switch they asked for, not one a background reconnect
+			// imposed (b7e6c360). addRepoByPath ends in reconcileTerminalOwnership(), which
+			// is what walks the parked tab home once the repo exists.
+			toastsStore.add(
+				"Tab parked in the wrong repo",
+				`Nothing claims "${unregisteredRoot}". Register it and the tab moves home by itself.`,
+				"warn",
+				false,
+				{
+					label: "Register",
+					onClick: () => {
+						void registerRepo(unregisteredRoot).catch((err) =>
+							appLogger.error("app", `Failed to register "${unregisteredRoot}" from the parked-tab toast`, err),
+						);
+					},
+				},
+				undefined,
+				fallbackRepo,
+			);
+		}
 		repositoriesStore.addTerminalToBranch(fallbackRepo, fallbackBranch, terminalId);
 	} else {
-		appLogger.error("app", `Remote session ${sessionId}: no repo/branch to assign tab to — tab will be invisible`);
+		appLogger.error("app", `Session ${sessionId}: no repo/branch to assign tab to — tab will be invisible`);
 	}
 }
 
@@ -202,7 +279,11 @@ export async function initApp(deps: AppInitDeps) {
 	// Snapshot terminal metadata, flush pending saves, and close PTY sessions on app exit
 	window.addEventListener("beforeunload", () => {
 		clearInterval(snapshotTimer);
+		// Every debounced persist has to land here: the timer dies with the
+		// WebView, so a preference toggled inside its window is simply lost.
 		activityStore.flushSave();
+		uiStore.flushSave();
+		paneLayoutStore.flushSave();
 
 		// 1. Snapshot terminal metadata per repo/branch before closing
 		const snapshots = collectTerminalSnapshots();
@@ -325,19 +406,22 @@ export async function initApp(deps: AppInitDeps) {
 	// The coalescer collapses the burst WITHOUT losing bumps (each repo is flushed
 	// next frame), so panels re-fetch exactly once. (Backend already skips emits
 	// when git-state is unchanged; this is defense-in-depth for residual bursts.)
-	const revisionCoalescer = createRevisionCoalescer((repoPath) => repositoriesStore.bumpRevision(repoPath));
-	listen<{ repo_path: string }>("repo-changed", (event) => {
-		const { repo_path } = event.payload;
-		// Invalidate caches for this repo so panels fetch fresh data
-		invoke("clear_repo_caches", { path: repo_path }).catch((err) =>
-			appLogger.debug("app", "Failed to clear repo caches", err),
-		);
+	const revisionCoalescer = createRevisionCoalescer((repoPath, isGitState) =>
+		isGitState ? repositoriesStore.bumpGitRevision(repoPath) : repositoriesStore.bumpRevision(repoPath),
+	);
+	listen<{ repo_path: string; kind: RepoChangeKind }>("repo-changed", (event) => {
+		const { repo_path, kind } = event.payload;
+		// No cache invalidation here: every backend producer of this event calls
+		// `invalidate_repo_caches` before sending it, and `clear_repo_caches` does
+		// nothing more — the round trip only ever re-cleared empty caches.
 		// Reload .tuic.json (may have changed)
 		repoSettingsStore.loadLocalConfig(repo_path).catch(() => {});
 		// Signal panels to re-fetch on every logical change, coalesced per frame.
 		// (Not folded into the branchStatsTimer below — that setTimeout is cleared
 		// on each event, which would drop bumps and leave panels stale, story 1277-31a0.)
-		revisionCoalescer.bump(repo_path);
+		// The kind decides how far the bump reaches: a working-tree change moves
+		// only the general revision, so panels reading committed history sit still.
+		revisionCoalescer.bump(repo_path, kind === "git-state");
 		// Discover external worktree changes for THIS repo only. Use 500ms when
 		// idle, 1000ms when this repo's refresh is already running so the next
 		// scoped run doesn't race it. Only the branch-stats refresh is debounced;
@@ -370,17 +454,30 @@ export async function initApp(deps: AppInitDeps) {
 	}).catch((err) => appLogger.error("app", "Failed to register worktree-create-failed listener", err));
 
 	// Listen for MCP toast notifications from the Rust backend
-	listen<{ title: string; message: string | null; level: string; sound: boolean | null }>("mcp-toast", (event) => {
-		const { title, message, level, sound } = event.payload;
+	replaceMcpToastListener((event) => {
+		const { title, message, level, sound, origin_repo_path, origin_session_id } = event.payload;
 		const safeLevel = level === "warn" || level === "error" ? level : "info";
-		toastsStore.add(title, message ?? "", safeLevel, sound === true);
-	}).catch((err) => appLogger.error("app", "Failed to register mcp-toast listener", err));
+		// The repo is not glued into the message any more — the toast renders it as
+		// its own badge, so an unregistered origin still names its repo and a
+		// registered one does not say it twice.
+		// Still only a REGISTERED repo: this field scopes the toast (and the bell
+		// item mirrored from it), so an unregistered cwd must not become a repo key.
+		const repoPath = resolveRepoForCwd(origin_repo_path) ?? undefined;
+		const visibleMessage = message ?? "";
+		const duplicate = toastsStore.hasVisible(title, visibleMessage, safeLevel, repoPath);
+		// repoPath is already undefined without an origin, and the session id is
+		// independent of it — an agent can be bound to a PTY whose cwd resolves to
+		// no registered repo — so both ride along on one call.
+		toastsStore.add(title, visibleMessage, safeLevel, false, undefined, undefined, repoPath, origin_session_id);
+		if (!duplicate && isNotificationSound(sound)) void notificationsStore.play(sound);
+	});
 
 	// Listen for sessions created/closed by remote clients (browser UI or other Tauri windows)
 	listen<{ session_id: string; cwd: string | null; agent_type?: string | null; display_name?: string | null }>(
 		"session-created",
 		(event) => {
 			const { session_id, cwd, agent_type, display_name } = event.payload;
+			const parsedAgentType = parseAgentType(agent_type);
 			// Skip if this session was created by the local browser client or is already tracked
 			if (browserCreatedSessions.has(session_id)) return;
 			const existing = terminalsStore.getIds().find((id) => terminalsStore.get(id)?.sessionId === session_id);
@@ -390,19 +487,28 @@ export async function initApp(deps: AppInitDeps) {
 			const id = terminalsStore.add({
 				sessionId: session_id,
 				fontSize: deps.getDefaultFontSize(),
-				name: display_name || `PTY: Session ${terminalsStore.getCount() + 1}`,
-				nameIsCustom: Boolean(display_name),
+				name:
+					display_name ||
+					(parsedAgentType
+						? `Session ${terminalsStore.getCount() + 1}`
+						: `PTY: Session ${terminalsStore.getCount() + 1}`),
+				// A spawn-assigned display name is the base title, not a manual rename.
+				// Intent/OSC titles may replace it until the user explicitly renames the tab.
+				nameIsCustom: false,
 				cwd: cwd ?? null,
 				awaitingInput: null,
 				isRemote: true,
+				agentType: parsedAgentType,
+				ptyDescription: null,
 			});
 			remoteSessionTabs.set(session_id, id);
 
-			assignSessionToRepoBranch(session_id, id, cwd);
+			assignSessionToRepoBranch(session_id, id, cwd, deps.registerRepo);
 
-			// Auto-focus agent-spawned tabs so swarm workers are immediately visible.
-			// Only activate when agent_type is present (MCP agent spawn), not for
-			// manually created sessions which should stay in the background.
+			// Dock agent-spawned tabs so swarm workers show up in the tab strip.
+			// Only for agent_type (MCP agent spawn), not for manually created
+			// sessions. The tab is docked but never selected: an MCP spawn must
+			// not take over the pane the user is working in.
 			if (agent_type) {
 				// In split mode, ensure there is an active group so assignTabToActiveGroup
 				// doesn't silently no-op and leave the tab invisible.
@@ -412,7 +518,7 @@ export async function initApp(deps: AppInitDeps) {
 						paneLayoutStore.setActiveGroup(leafIds[0]);
 					}
 				}
-				assignTabToActiveGroup(id, "terminal");
+				assignTabToActiveGroup(id, "terminal", false);
 				// Only steal focus when there is no existing active terminal.
 				if (!terminalsStore.state.activeId) {
 					terminalsStore.setActive(id);
@@ -420,6 +526,11 @@ export async function initApp(deps: AppInitDeps) {
 			}
 		},
 	).catch((err) => appLogger.error("app", "Failed to register session-created listener", err));
+
+	listen<{ session_id: string; description?: string | null }>("pty-description-changed", (event) => {
+		const termId = terminalsStore.getTerminalForSession(event.payload.session_id);
+		if (termId) terminalsStore.setPtyDescription(termId, event.payload.description ?? null);
+	}).catch((err) => appLogger.error("app", "Failed to register pty-description listener", err));
 
 	listen<{ session_id: string; alias: string }>("term-alias-assigned", (event) => {
 		const { session_id, alias } = event.payload;
@@ -454,12 +565,13 @@ export async function initApp(deps: AppInitDeps) {
 				if (!filePath && cmd !== "terminal") return;
 
 				const activeRepoPath = repositoriesStore.state.activeRepoPath;
-				// Resolve: absolute path → find owning repo, relative → active repo
+				// Resolve: absolute path → the repo that owns it, relative → active repo
+				// (a relative path typed into a tuic:// link means "here", so focus IS
+				// the right answer for that case and only that case).
 				let repoPath: string | null = null;
 				let relPath = filePath;
 				if (isAbsolutePath(filePath)) {
-					const repos = repositoriesStore.getPaths();
-					repoPath = repos.find((rp) => pathStartsWith(filePath, rp)) ?? null;
+					repoPath = resolveRepoPathFor(filePath);
 					if (repoPath) relPath = pathStripPrefix(filePath, repoPath)!;
 				} else {
 					repoPath = activeRepoPath ?? null;
@@ -477,16 +589,26 @@ export async function initApp(deps: AppInitDeps) {
 					deps.setCurrentBranch(repo?.activeBranch ?? null);
 				}
 
+				// A background open must also stay in the background. Activating it
+				// produces the same ghost from the other direction: the repo was
+				// deliberately not switched, so an active tab in another repo has its
+				// own tab button filtered out of the bar.
+				const background = focus === false;
+
 				if (cmd === "open" && repoPath) {
-					mdTabsStore.add(repoPath, relPath);
+					if (background) mdTabsStore.addFileBackground(repoPath, relPath);
+					else mdTabsStore.add(repoPath, relPath);
 				} else if (cmd === "open" && isAbsolutePath(filePath)) {
-					editorTabsStore.add("__external__", filePath, undefined, { externalEditable: false });
+					editorTabsStore.add("__external__", filePath, undefined, { externalEditable: false, background });
 				} else if (cmd === "edit") {
 					const line = parseInt(parsed.searchParams.get("line") || "0", 10);
 					if (repoPath) {
-						editorTabsStore.add(repoPath, relPath, line || undefined);
+						editorTabsStore.add(repoPath, relPath, line || undefined, { background });
 					} else if (isAbsolutePath(filePath)) {
-						editorTabsStore.add("__external__", filePath, line || undefined, { externalEditable: true });
+						editorTabsStore.add("__external__", filePath, line || undefined, {
+							externalEditable: true,
+							background,
+						});
 					} else {
 						appLogger.warn("app", `tuic://edit relative path without active repo: ${filePath}`);
 					}
@@ -526,6 +648,8 @@ export async function initApp(deps: AppInitDeps) {
 		const t0 = terminalsStore.get(termId);
 		if (!t0?.isRemote) return;
 
+		const parsedAgentType = parseAgentType(agent_type);
+		handleAgentExitCompletion(termId, parsedAgentType != null);
 		terminalsStore.update(termId, { shellState: "exited", sessionId: null });
 
 		// Agent-spawned sessions get a shorter grace period — they finish their task
@@ -619,7 +743,10 @@ export async function initApp(deps: AppInitDeps) {
 					sessionId: session.session_id,
 					fontSize: deps.getDefaultFontSize(),
 					name: session.display_name || terminalsStore.nextDefaultName(),
-					nameIsCustom: Boolean(session.display_name),
+					nameIsCustom: session.display_name_is_custom ?? false,
+					ptyDescription: session.pty_description ?? null,
+					isRemote: session.is_remote ?? false,
+					agentType: parseAgentType(session.state?.agent_type),
 					cwd: session.cwd,
 					awaitingInput: null,
 				});
@@ -635,11 +762,18 @@ export async function initApp(deps: AppInitDeps) {
 					: currentRevision === 0);
 			terminalsStore.update(id, {
 				...(canApplySnapshotShell && session.state?.shell_state ? { shellState: session.state.shell_state } : {}),
+				...(session.is_remote !== undefined ? { isRemote: session.is_remote } : {}),
+				...(session.display_name_is_custom !== undefined ? { nameIsCustom: session.display_name_is_custom } : {}),
+				...(session.state?.agent_type !== undefined ? { agentType: parseAgentType(session.state.agent_type) } : {}),
+				ptyDescription: session.pty_description ?? null,
 				agentState: session.state?.agent_state ?? null,
+				awaitingInput: session.state?.awaiting_input === true ? "question" : null,
+				awaitingInputConfident: session.state?.question_confident === true,
 				backgroundWork: session.state?.background_work ?? false,
 			});
+			if (session.is_remote) remoteSessionTabs.set(session.session_id, id);
 
-			assignSessionToRepoBranch(session.session_id, id, session.cwd);
+			assignSessionToRepoBranch(session.session_id, id, session.cwd, deps.registerRepo);
 		}
 		terminalsStore.setActive(terminalsStore.getIds()[0]);
 	}
@@ -658,6 +792,11 @@ export async function initApp(deps: AppInitDeps) {
 			repositoriesStore.setActiveBranch(repoPath, shellBranch);
 		}
 	}
+
+	// Sessions were attached before the shell-branch migration above ran, so a
+	// non-git repo had no branch to claim its own terminals and they were parked
+	// elsewhere. Ask again now that every repo can answer.
+	reconcileTerminalOwnership();
 
 	// Refresh git stats for persisted repos
 	deps.refreshAllBranchStats();

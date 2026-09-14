@@ -61,6 +61,17 @@ describe("keyEventToCombo (macOS)", () => {
 		expect(keyEventToCombo(makeKeyEvent({ key: "F5", code: "F5" }))).toBe("F5");
 	});
 
+	// F13–F24 are two-digit and sit above the F1–F12 range every other layer
+	// enumerates, so they are the ones a narrowing regex would silently drop.
+	// The `global-hotkey` crate accepts F13–F24, so nothing in our chain may reject
+	// them: when F14/F15 appear dead it is macOS consuming the key (keyboard
+	// illumination) before the WebView ever sees a keydown, not this code.
+	it("converts the two-digit function keys F13–F24", () => {
+		for (const key of ["F13", "F14", "F15", "F19", "F24"]) {
+			expect(keyEventToCombo(makeKeyEvent({ key, code: key }))).toBe(key);
+		}
+	});
+
 	it("converts Shift+F5", () => {
 		expect(
 			keyEventToCombo(
@@ -129,6 +140,10 @@ describe("validateGlobalHotkeyCombo", () => {
 		expect(validateGlobalHotkeyCombo("F5")).toBe("F5");
 		expect(validateGlobalHotkeyCombo("Cmd+F12")).toBe("Cmd+F12");
 		expect(validateGlobalHotkeyCombo("F24")).toBe("F24");
+		// F13–F15 are all in `global-hotkey`'s Shortcut::from_str table, so the
+		// validator must not narrow the range to F1–F12.
+		expect(validateGlobalHotkeyCombo("F14")).toBe("F14");
+		expect(validateGlobalHotkeyCombo("Cmd+F15")).toBe("Cmd+F15");
 	});
 
 	it("accepts named keys", () => {

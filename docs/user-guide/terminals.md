@@ -41,7 +41,9 @@ Terminals are **never unmounted** from the DOM. When you switch branches or tabs
 - Default naming: "Terminal 1", "Terminal 2", etc.
 - **Double-click** a tab to rename it (inline editing)
 - Press **Enter** to confirm, **Escape** to cancel
-- Custom names persist through the session
+- Explicit custom names persist through reconnects and are never replaced by agent output
+- Spawn-assigned agent labels are base names: an `intent: text (Title)` marker may replace them with the current work phase
+- Agent terminals show an expandable **Context** bar. It separates the model's current **Intent**, the orchestrator-owned **Assignment**, and the last substantial user **Prompt**. MCP-connected models are instructed to refresh intent at task start and whenever the material work phase changes
 
 ### Tab Reordering
 
@@ -65,11 +67,21 @@ Sidebar branch icons also show purple when they contain unseen terminals.
 
 Agent activity combines native lifecycle hooks, terminal movement (text
 changing above the input area means the agent is active), and the visible
-ready prompt. Claude, Codex, Gemini, and Aider require a stable ready
+ready prompt. Claude, Codex, Gemini, Aider, Grok, pi, and OpenCode require a stable ready
 screen before safety-sensitive actions such as auto-standby or queued agent
 message delivery. Pressing Ctrl-C or Escape requests interruption but does not
 turn the dot green until the agent confirms the interruption, returns to its
 prompt, or exits.
+
+A newly launched detected agent remains in its starting state until terminal
+activity is actually observed. Question and answer transitions are retained by
+the backend even if a browser or event-stream client temporarily falls behind.
+
+Current Claude and Codex status lines are also recognized when their interface
+keeps an empty composer visible or freezes during a long tool. Completed timing
+summaries are not treated as work, so the indicator can still return to idle.
+Grok keeps its composer visible while responding, so FastAF waits for the
+animated status row to disappear before treating that composer as ready.
 
 A ready prompt means the terminal can accept input; it does not necessarily
 mean the agent's turn is finished. If the agent still owns a background command,
@@ -89,6 +101,16 @@ Hover a tab to see its shortcut badge: "Terminal N (Cmd+N)". Use `Cmd+1` through
 | `Cmd+End` | Scroll to bottom |
 | `Shift+PageUp` | Scroll one page up |
 | `Shift+PageDown` | Scroll one page down |
+
+### Scrollback in fullscreen apps
+
+Apps that take over the screen (`gh run watch`, `less`, `man`, TUIs) run on the terminal's *alternate screen*, which by the original terminal spec has no scrollback at all — anything printed past the bottom of the window is gone. FastAF enables an isolated alternate-screen history, giving the same user-visible result as iTerm2's save-to-scrollback option: the scrollbar stays available and you can reach what rolled off the top.
+
+Two details worth knowing:
+
+- The scrollback of a fullscreen app is **wiped when it exits**, and never mixes with your shell's history.
+- FastAF preserves the application's actual output. A live view that reprints a frame taller than the viewport can therefore leave repeated snapshots in history; they are not deduplicated.
+- Apps with mouse support (`vim`, `htop`, `lazygit`) receive the wheel themselves — use **Shift+wheel** or drag the scrollbar to scroll FastAF's history instead.
 
 ## Zoom
 
@@ -176,7 +198,7 @@ Also accessible via the "Search Terminals" command in the palette.
 
 ## Copy & Paste
 
-- **Copy:** Select text in the terminal, then `Cmd+C`. A "Copied to clipboard" confirmation appears in the status bar.
+- **Copy:** Select text in the terminal, then `Cmd+C`. A "Copied to clipboard" confirmation appears in the status bar. Multi-line Claude messages paste as clean text: the repeated `▎` visual gutter is removed while bullets, numbering, and indentation are preserved. Inside such a quote, rows that Claude broke only to fit the terminal width are joined back into one paragraph, so pasting into Slack or an email keeps whole sentences. Blank rows, list items and deeper indents keep their own line, and a quote that never reaches the terminal edge is copied exactly as shown.
 - **Paste:** `Cmd+V` writes clipboard content to the active terminal
 
 ### Copy on Select
@@ -220,6 +242,42 @@ FastAF detects rate limits, prompts, and status messages from AI agents:
 - **Progress indicators** — Shows progress bars for long-running operations
 
 When an agent asks a question, the tab indicator changes and a notification sound plays (if enabled).
+Remote HTTP/MCP workers respect **Silence orchestration completions** even after
+a frontend reload, and a single busy cycle produces at most one completion
+notification when idle and process exit arrive separately.
+Generic desktop notifications such as “needs your attention” do not by
+themselves mark the tab as awaiting input; FastAF requires explicit
+permission, approval, or waiting-for-input wording, an agent hook, or a verified
+question on screen.
+
+### Queueing Follow-up Commands
+
+The Compose panel can leave work for an agent without steering its current turn:
+
+- **Ctrl+Enter** sends immediately.
+- **Shift+Ctrl+Enter** or the queue button submits immediately when the agent is
+  already idle; otherwise it waits for the next idle window.
+- Queued user commands and peer messages share one FIFO and are delivered one
+  item per idle window in acceptance order.
+- The `N queued` badge counts only Compose commands. Clicking it discards those
+  commands but never clears peer or orchestrator messages waiting in the same
+  delivery queue.
+
+Queueing is available only for detected agent sessions, not plain shells.
+
+### Submitting through MCP
+
+Automation that must start a new managed-agent turn uses one
+`session action=submit session_id=<id> input=<command>` call. FastAF
+refuses busy agents, interactive dialogs, partial drafts, and sessions with
+older queued work instead of steering or overwriting them. The same response
+reports whether the complete PTY write occurred and whether the child terminal
+moved after Enter; no follow-up polling call is required. Terminal movement
+does not mean the agent understood the command or completed the work. If a
+complete write times out without movement, do not replay it automatically.
+
+`session action=input` remains available for raw text, prefilling, and
+interactive keys. Its `ok:true` reports only that bytes were written.
 
 ### Session Restore
 

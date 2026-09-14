@@ -252,6 +252,20 @@ Expand an issue to see:
 | Close / Reopen | Changes issue state via GitHub API |
 | Copy number | Copies `#123` to clipboard |
 
+## Panel Keyboard Navigation
+
+The GitHub panel is keyboard-navigable without ever moving focus off the panel itself:
+
+| Key | Action |
+|-----|--------|
+| ↓ / ↑ | Move between rows, walking across the My Pull Requests, Pull Requests and Issues sections in order. Rows of a collapsed section are skipped. |
+| Enter | Expand or collapse the highlighted row |
+| Escape | Collapse an expanded issue, or close the panel when nothing is expanded |
+
+Section collapse state is remembered per section and survives closing the panel and restarting the
+app (stored in the UI prefs alongside panel widths). A section that has never been toggled keeps its
+own default: PR sections start collapsed when empty, Issues starts open.
+
 ## Troubleshooting
 
 **No PR data showing:**

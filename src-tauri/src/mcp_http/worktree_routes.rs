@@ -206,6 +206,7 @@ pub(super) async fn create_worktree_shared(
 }
 
 pub(super) async fn remove_worktree_http(
+    State(state): State<Arc<AppState>>,
     Path(branch): Path<String>,
     Query(q): Query<RemoveWorktreeQuery>,
 ) -> Response {
@@ -215,10 +216,14 @@ pub(super) async fn remove_worktree_http(
     let repo_path = q.repo_path.clone();
     let delete_branch = q.delete_branch.unwrap_or(true);
     let force = q.force.unwrap_or(false);
+    let branch_for_event = branch.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::worktree::remove_worktree_by_branch(&repo_path, &branch, delete_branch, None, force)
     })
     .await;
+    if matches!(result, Ok(Ok(_))) {
+        state.notify_worktree_removed(&q.repo_path, &branch_for_event);
+    }
     match result {
         Ok(Ok(outcome)) => (
             StatusCode::OK,
@@ -247,13 +252,7 @@ pub(super) async fn detect_orphan_worktrees_http(Query(q): Query<OptionalRepoQue
     if let Err(e) = validate_repo_path(&repo_path) {
         return e.into_response();
     }
-    let result =
-        tokio::task::spawn_blocking(move || crate::worktree::detect_orphan_worktrees(repo_path))
-            .await;
-    match result {
-        Ok(r) => json_result(r),
-        Err(e) => err_500(&format!("task panic: {e}")),
-    }
+    json_result(crate::worktree::detect_orphan_worktrees(repo_path).await)
 }
 
 pub(super) async fn remove_orphan_worktree_http(
@@ -364,47 +363,27 @@ pub(super) async fn finalize_merged_worktree_http(
     if let Err(e) = validate_repo_path(&body.repo_path) {
         return e.into_response();
     }
-    let repo_path = body.repo_path.clone();
-    let branch_name = body.branch_name.clone();
-    let action = body.action.clone();
-    let result = match tokio::task::spawn_blocking(move || {
-        let base_repo = std::path::PathBuf::from(&repo_path);
-        match action.as_str() {
-            "archive" => crate::worktree::archive_worktree(&base_repo, &branch_name, None).map(
-                |ap| serde_json::json!({"merged": true, "action": "archived", "archive_path": ap}),
-            ),
-            "delete" => crate::worktree::remove_worktree_by_branch(
-                &repo_path,
-                &branch_name,
-                true,
-                None,
-                false,
-            )
-            .map(|outcome| {
-                serde_json::json!({
-                    "merged": true,
-                    "action": "deleted",
-                    "archive_path": null,
-                    "branch_delete_warning": outcome.branch_delete_warning,
-                })
-            }),
-            other => Err(format!(
-                "Unknown action '{other}': expected 'archive' or 'delete'"
-            )),
-        }
+    let FinalizeMergeRequest {
+        repo_path,
+        branch_name,
+        action,
+        force,
+    } = body;
+    // Shares `finalize_merged_worktree_impl` with the Tauri command: the dirty-worktree
+    // gate and the "worktree removed" notification live there, once, for both transports.
+    let res = tokio::task::spawn_blocking(move || {
+        crate::worktree::finalize_merged_worktree_impl(
+            &state,
+            repo_path,
+            branch_name,
+            action,
+            force.unwrap_or(false),
+        )
     })
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => Err(format!("task panic: {e}")),
-    };
-    let repo_path = body.repo_path.clone();
-    match result {
-        Ok(json) => {
-            state.invalidate_repo_caches(&repo_path);
-            (StatusCode::OK, Json(json)).into_response()
-        }
-        Err(e) => err_500(&e),
+    .await;
+    match res {
+        Ok(r) => json_result(r),
+        Err(e) => err_500(&format!("task panic: {e}")),
     }
 }
 
@@ -443,6 +422,7 @@ pub(super) async fn merge_and_archive_worktree_http(
         branch_name,
         target_branch,
         after_merge,
+        force,
     } = body;
     let res = tokio::task::spawn_blocking(move || {
         crate::worktree::merge_and_archive_worktree_impl(
@@ -451,6 +431,7 @@ pub(super) async fn merge_and_archive_worktree_http(
             branch_name,
             target_branch,
             after_merge,
+            force.unwrap_or(false),
         )
     })
     .await;

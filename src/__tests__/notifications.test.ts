@@ -201,3 +201,55 @@ describe("DEFAULT_NOTIFICATION_CONFIG", () => {
 		expect(mod.DEFAULT_NOTIFICATION_CONFIG.sounds.warning).toBe(true);
 	});
 });
+
+describe("browser attention sound", () => {
+	const originalTauriInternals = (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
+	const originalTauriShim = (globalThis as Record<string, unknown>).__TAURI_SHIM__;
+
+	afterEach(() => {
+		(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = originalTauriInternals;
+		if (originalTauriShim === undefined) {
+			delete (globalThis as Record<string, unknown>).__TAURI_SHIM__;
+		} else {
+			(globalThis as Record<string, unknown>).__TAURI_SHIM__ = originalTauriShim;
+		}
+		vi.unstubAllGlobals();
+	});
+
+	it("schedules the approved G4-G4-E5 double-knock motif", async () => {
+		(globalThis as Record<string, unknown>).__TAURI_SHIM__ = true;
+		const oscillators = Array.from({ length: 3 }, () => ({
+			type: "sine" as OscillatorType,
+			frequency: { value: 0 },
+			connect: vi.fn(),
+			disconnect: vi.fn(),
+			start: vi.fn(),
+			stop: vi.fn(),
+			onended: null as (() => void) | null,
+		}));
+		let oscillatorIndex = 0;
+		vi.stubGlobal(
+			"AudioContext",
+			class {
+				currentTime = 10;
+				state = "running";
+				destination = {};
+				resume = vi.fn();
+				createGain = () => ({ gain: { value: 0 }, connect: vi.fn() });
+				createOscillator = () => oscillators[oscillatorIndex++];
+			},
+		);
+		vi.resetModules();
+
+		const { NotificationManager } = await import("../notifications");
+		await new NotificationManager().play("attention");
+
+		const starts = oscillators.map((oscillator) => oscillator.start.mock.calls[0][0]);
+		const stops = oscillators.map((oscillator) => oscillator.stop.mock.calls[0][0]);
+		expect(starts.map((time) => Math.round((time - 10) * 1000))).toEqual([0, 125, 250]);
+		expect(stops.map((time) => Math.round((time - 10) * 1000))).toEqual([75, 200, 390]);
+		expect(starts.slice(1).map((time, index) => Math.round((time - stops[index]) * 1000))).toEqual([50, 50]);
+		expect(oscillators.map((oscillator) => oscillator.frequency.value)).toEqual([392, 392, 659]);
+		expect(oscillators.map((oscillator) => oscillator.type)).toEqual(["triangle", "triangle", "triangle"]);
+	});
+});

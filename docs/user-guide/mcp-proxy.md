@@ -13,11 +13,11 @@ VS Code ──────┘                           ├──▶ Filesystem 
 
 When a tool call arrives at FastAF's MCP endpoint, it routes the request to the correct upstream server and returns the result. Upstream tools appear prefixed with the server name — for example, a tool called `search_code` from an upstream named `github` becomes `github__search_code`.
 
-The MCP server must be enabled (Settings > Services > MCP Server).
+The MCP server must be enabled (Settings > Services & MCP > MCP Server).
 
 ## Adding an Upstream Server
 
-Open Settings > Services > MCP Upstreams. Click **Add Server** and fill in:
+Open Settings > Services & MCP > MCP Upstreams. Click **Add Server** and fill in:
 
 ### HTTP Server
 
@@ -58,7 +58,7 @@ The server name becomes the namespace prefix for all its tools. Choose names tha
 
 For HTTP upstream servers that require a Bearer token:
 
-1. Go to Settings > Services > MCP Upstreams
+1. Go to Settings > Services & MCP > MCP Upstreams
 2. Find your server in the list
 3. Click the key icon next to it
 4. Enter your token
@@ -142,7 +142,7 @@ Only `http://` and `https://` URLs are accepted. Other schemes (ftp, file, javas
 ### Credential not found
 
 If the upstream returns 401 errors:
-1. Go to Settings > Services > MCP Upstreams.
+1. Go to Settings > Services & MCP > MCP Upstreams.
 2. Click the key icon for the server.
 3. Re-enter the Bearer token and save.
 
@@ -155,7 +155,7 @@ Install the server:
 npm install -g @modelcontextprotocol/server-filesystem
 ```
 
-Add it in Settings > Services > MCP Upstreams:
+Add it in Settings > Services & MCP > MCP Upstreams:
 - Name: `filesystem`
 - Type: Stdio
 - Command: `npx`

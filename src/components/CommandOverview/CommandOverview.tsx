@@ -1,4 +1,5 @@
 import { type Component, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { appLogger } from "../../stores/appLogger";
 import { type CommandBlock, terminalsStore } from "../../stores/terminals";
 import { onClickKeyDown } from "../../utils/a11y";
 import s from "./CommandOverview.module.css";
@@ -88,7 +89,17 @@ export const CommandOverview: Component = () => {
 								setCommandText("");
 								return;
 							}
-							getCommandText(entry.termId, b).then(setCommandText);
+							// The buffer read can reject (closed session, failed backend
+							// read). An overview row with no command text is a far better
+							// outcome than an unhandled rejection from a render pass.
+							getCommandText(entry.termId, b)
+								.then(setCommandText)
+								.catch((e) => {
+									appLogger.warn("terminal", "command overview block text read failed", {
+										error: String(e),
+									});
+									setCommandText("");
+								});
 						};
 						const b = block();
 						resolve(b ?? active());

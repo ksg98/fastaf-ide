@@ -16,6 +16,9 @@ FastAF uses `alacritty_terminal` 0.26.0 as its terminal emulation backend. We ma
 | `src/term/mod.rs` | `fn osc7770(&mut self, verb, payload)` | OSC 7770 TUIC protocol handler. Fires `Event::Tuic { verb, payload }` for in-band state/suggest/intent signalling. |
 | `src/term/color.rs` | `pub fn named_color_to_index(NamedColor) -> Option<u8>` | Maps named colors to xterm-256 indices. Eliminates 30-line match duplication in our serializer. |
 | `src/event.rs` | `Event::Tuic { verb, payload }` variant | Carries parsed OSC 7770 events from VTE to the application layer. |
+| `src/term/mod.rs` | `Config.alt_scrolling_history` + alt-grid history in `Term::new`/`set_options`, era reset in `swap_alt` | User-visible parity with iTerm2's optional alternate-screen scrollback, implemented with Alacritty's separate grids rather than iTerm2's shared persistent line buffer. Upstream gives the alternate grid capacity 0 (XTerm semantics), so an app printing more than a screenful (`gh run watch`, `less`, `man`) loses whatever scrolls off. The field defaults to `0`, preserving upstream behavior for consumers that do not opt in; FastAF uses the primary cap. Each enter/exit starts a fresh alternate era, so sessions never inherit one another and no alternate lines remain logically retained after exit. Oversized repeated redraws remain repeated because the emulator is byte-faithful, not a semantic snapshot deduplicator. |
+| `src/term/mod.rs` | `pub fn primary_history_size()` | Returns primary-grid history even while the alternate grid is active. Durable-log resize synchronization must stay in this coordinate space; using active alternate history can suppress the first normal-shell lines after exit. |
+| `src/grid/mod.rs` | `pub fn reset_history_era()` | `clear_history()` keeps `lines_scrolled` monotonic because absolute row ids must be stable for the life of a physical line. The alternate screen is a separate content universe wiped on every enter/exit, so it gets a fresh era instead: history *and* counter reset. Frame-protocol `keyboard_flags` bit 5 marks the transition; the frontend then atomically invalidates row, scroll, selection, search, and link state. |
 | `src/grid/mod.rs` | `lines_scrolled` field + `pub fn total_scrolled()` | Monotonic count of lines ever scrolled into history (incremented in `scroll_up`). `total_scrolled() - history_size()` gives lines evicted from the top, the base for an eviction-stable absolute row coordinate. Excluded from `PartialEq`; `serde(default)` so old ref fixtures still load. |
 
 ## VTE patch (`src-tauri/patches/vte/`)
@@ -63,6 +66,22 @@ In-band signalling via the PTY stream. Never written to the grid (consumed by VT
 | `term.selection` / `term.selection_to_string()` | Native selection API |
 | `RegexSearch::new(query)` + `term.regex_search_right()` | Native DFA regex search across grid + scrollback |
 | `EventListener` trait | Capture bell, title, clipboard, PTY write-back events |
+
+Canonical HTTP text snapshots read a single absolute range from this grid.
+They must not rebuild a snapshot by appending a separately retained log to the
+screen: increasing terminal rows can move history back into the viewport and
+make the two representations overlap.
+
+Clipboard selections use the same absolute grid coordinates. FastAF joins
+rows marked with `WRAPLINE`, trims terminal padding, and then removes only
+coherent multi-line Claude `NBSP NBSP ▎` visual gutters. This normalization is
+outside the Alacritty fork and is shared by desktop IPC and HTTP clients.
+
+Atomic MCP agent-submission receipts require no Alacritty patch. The receipt
+boundary is the raw child-output ring offset captured before Enter; after that
+offset moves, the current agent screen adapter may classify the already-built
+grid as working, ready, or interrupted. Neither grid mutation nor local input
+bookkeeping is itself an acknowledgement.
 
 ## Notable forks and patches (external)
 

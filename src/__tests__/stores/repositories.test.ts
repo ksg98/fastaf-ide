@@ -12,6 +12,23 @@ describe("repositoriesStore", () => {
 	let store: typeof import("../../stores/repositories").repositoriesStore;
 	let sortRepos: typeof import("../../stores/repositories").sortRepos;
 
+	function lastRepositoryMutation() {
+		const calls = mockInvoke.mock.calls.filter((call: unknown[]) => call[0] === "save_repositories");
+		const last = calls[calls.length - 1];
+		return (
+			last[1] as {
+				config: {
+					// `before` is half of the compare-and-swap, not optional detail: the
+					// conflict-rebase tests assert the backend is handed the baseline it
+					// actually holds on disk.
+					repos: Array<{ id: string; before: unknown; after: unknown }>;
+					groups: Array<{ id: string; before: unknown; after: unknown }>;
+					groupOrder?: { after: string[] };
+				};
+			}
+		).config;
+	}
+
 	beforeEach(async () => {
 		vi.resetModules();
 		vi.useFakeTimers();
@@ -60,9 +77,13 @@ describe("repositoriesStore", () => {
 				vi.advanceTimersByTime(500);
 				expect(mockInvoke).toHaveBeenCalledWith("save_repositories", {
 					config: expect.objectContaining({
-						repos: expect.objectContaining({
-							"/path/to/repo": expect.objectContaining({ displayName: "test" }),
-						}),
+						mutationVersion: 1,
+						repos: expect.arrayContaining([
+							expect.objectContaining({
+								id: "/path/to/repo",
+								after: expect.objectContaining({ displayName: "test" }),
+							}),
+						]),
 					}),
 				});
 			});
@@ -75,9 +96,10 @@ describe("repositoriesStore", () => {
 				store.addTerminalToBranch("/repo", "main", "term-1");
 				vi.advanceTimersByTime(500);
 				// Find the last save_repositories call
-				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
-				const lastCall = calls[calls.length - 1];
-				expect(lastCall[1].config.repos["/repo"].branches["main"].terminals).toEqual([]);
+				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after as {
+					branches: Record<string, { terminals: string[] }>;
+				};
+				expect(repo.branches.main.terminals).toEqual([]);
 			});
 		});
 	});
@@ -89,9 +111,10 @@ describe("repositoriesStore", () => {
 				store.setBranch("/repo", "main");
 				store.setCiAutoHeal("/repo", "main", { enabled: true, attempts: 1 });
 				vi.advanceTimersByTime(500);
-				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
-				const last = calls[calls.length - 1];
-				expect(last[1].config.repos["/repo"].branches["main"].ciAutoHeal).toEqual({ enabled: true, attempts: 1 });
+				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after as {
+					branches: Record<string, { ciAutoHeal: unknown }>;
+				};
+				expect(repo.branches.main.ciAutoHeal).toEqual({ enabled: true, attempts: 1 });
 			});
 		});
 
@@ -101,9 +124,10 @@ describe("repositoriesStore", () => {
 				store.setBranch("/repo", "main");
 				store.setCiAutoHeal("/repo", "main", { enabled: true, attempts: 2, healing: true });
 				vi.advanceTimersByTime(500);
-				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
-				const last = calls[calls.length - 1];
-				expect(last[1].config.repos["/repo"].branches["main"].ciAutoHeal.healing).toBe(false);
+				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after as {
+					branches: Record<string, { ciAutoHeal: { healing: boolean } }>;
+				};
+				expect(repo.branches.main.ciAutoHeal.healing).toBe(false);
 			});
 		});
 	});
@@ -133,6 +157,22 @@ describe("repositoriesStore", () => {
 				store.add({ path: "/path/to/repo", displayName: "test" });
 				store.setActive("/path/to/repo");
 				expect(store.state.activeRepoPath).toBe("/path/to/repo");
+			});
+		});
+
+		it("persists active selection as an expected field mutation", () => {
+			testInScope(() => {
+				store.add({ path: "/path/to/repo", displayName: "test" });
+				store.setActive("/path/to/repo");
+				vi.advanceTimersByTime(500);
+
+				const calls = mockInvoke.mock.calls.filter((call: unknown[]) => call[0] === "save_repositories");
+				const mutation = (
+					calls[0][1] as {
+						config: { activeRepoPath?: { before: string | null; after: string | null } };
+					}
+				).config.activeRepoPath;
+				expect(mutation).toEqual({ before: null, after: "/path/to/repo" });
 			});
 		});
 	});
@@ -406,6 +446,30 @@ describe("repositoriesStore", () => {
 		});
 	});
 
+	describe("isGitRepo()", () => {
+		it("returns false for a registered plain directory", () => {
+			testInScope(() => {
+				store.add({ path: "/plain", displayName: "plain", isGitRepo: false });
+				expect(store.isGitRepo("/plain")).toBe(false);
+			});
+		});
+
+		it("returns true for a registered git repo", () => {
+			testInScope(() => {
+				store.add({ path: "/repo", displayName: "repo" });
+				expect(store.isGitRepo("/repo")).toBe(true);
+			});
+		});
+
+		// Worktree paths are not registered under their own key — callers pass the
+		// worktree path and must not be gated out of git calls.
+		it("returns true for an unknown path", () => {
+			testInScope(() => {
+				expect(store.isGitRepo("/never-registered")).toBe(true);
+			});
+		});
+	});
+
 	describe("getPaths()", () => {
 		it("returns all repo paths", () => {
 			testInScope(() => {
@@ -522,6 +586,95 @@ describe("repositoriesStore", () => {
 			errorSpy.mockRestore();
 		});
 
+		it("refuses to hydrate a mutation delta left by a stale backend", async () => {
+			// Exactly what was on disk after the 2026-08-21 incident: a backend too old
+			// to apply the keyed delta stored the delta itself as the whole document.
+			store._testSetHydrated(false);
+			mockInvoke.mockResolvedValueOnce({ mutationVersion: 1, repos: [], groups: [] });
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.getPaths()).toEqual([]);
+				expect(errorSpy).toHaveBeenCalledWith("[store]", expect.stringContaining("mutation delta"), "");
+
+				// The file is still the user's only copy. Saving the empty in-memory state
+				// over it is what made the incident unrecoverable, so saves stay blocked.
+				mockInvoke.mockClear();
+				store.add({ path: "/test-repo", displayName: "Test" });
+				vi.advanceTimersByTime(1000);
+				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				expect(saveCalls).toHaveLength(0);
+			});
+
+			errorSpy.mockRestore();
+		});
+
+		it("drops a persisted agentType the current build no longer knows", async () => {
+			// `fx` was a first-class agent for five days before being reverted, long
+			// enough to reach savedTerminals on disk. AGENT_DISPLAY and AGENTS are
+			// exhaustive `Record<AgentType, …>` indexed without an existence check, so
+			// restoring the value verbatim throws inside StatusBar's render — and no
+			// ErrorBoundary wraps it. Sanitise once, at the disk boundary.
+			store._testSetHydrated(false);
+			mockInvoke.mockResolvedValueOnce({
+				repos: {
+					"/repo": {
+						path: "/repo",
+						displayName: "Repo",
+						branches: {
+							main: {
+								savedTerminals: [
+									{ name: "t1", cwd: null, fontSize: 12, agentType: "fx" },
+									{ name: "t2", cwd: null, fontSize: 12, agentType: "claude" },
+								],
+							},
+						},
+					},
+				},
+				repoOrder: ["/repo"],
+			});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				const saved = store.get("/repo")?.branches.main?.savedTerminals ?? [];
+				expect(saved.map((t) => t.agentType)).toEqual([null, "claude"]);
+			});
+		});
+
+		it("refuses a delta recognised by its array `repos` alone", async () => {
+			// The envelope carries no `mutationVersion` once a future protocol drops it,
+			// so the shape of `repos` has to be enough on its own.
+			store._testSetHydrated(false);
+			mockInvoke.mockResolvedValueOnce({ repos: [], groups: [] });
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(errorSpy).toHaveBeenCalledWith("[store]", expect.stringContaining("mutation delta"), "");
+			});
+
+			errorSpy.mockRestore();
+		});
+
+		it("hydrates a first-run empty document instead of reading it as a delta", async () => {
+			// Failing closed here would brick every fresh install: no file yet means an
+			// empty document, which must hydrate to an empty store with saves ENABLED.
+			store._testSetHydrated(false);
+			mockInvoke.mockResolvedValueOnce({});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.getPaths()).toEqual([]);
+
+				mockInvoke.mockClear();
+				store.add({ path: "/first-repo", displayName: "First" });
+				vi.advanceTimersByTime(1000);
+				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
+				expect(saveCalls).toHaveLength(1);
+			});
+		});
+
 		it("migrates from localStorage on first run", async () => {
 			const staleData = {
 				"/repo": {
@@ -542,6 +695,33 @@ describe("repositoriesStore", () => {
 				await store.hydrate();
 				expect(localStorage.getItem("tui-commander-repos")).toBeNull();
 			});
+		});
+
+		it("keeps legacy repositories when the migration conflicts", async () => {
+			const staleData = {
+				"/repo": {
+					path: "/repo",
+					displayName: "test",
+					initials: "TE",
+					expanded: true,
+					collapsed: false,
+					parked: false,
+					branches: {},
+					activeBranch: null,
+				},
+			};
+			localStorage.setItem("tui-commander-repos", JSON.stringify(staleData));
+			mockInvoke.mockRejectedValueOnce(new Error("repository configuration conflict"));
+			mockInvoke.mockResolvedValueOnce({ repos: {} });
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(localStorage.getItem("tui-commander-repos")).not.toBeNull();
+				expect(errorSpy).toHaveBeenCalledWith("[store]", "Failed to migrate legacy repositories", expect.any(Error));
+			});
+
+			errorSpy.mockRestore();
 		});
 	});
 
@@ -664,6 +844,47 @@ describe("repositoriesStore", () => {
 				expect(store.getRevision("/test")).toBe(1);
 				store.bumpRevision("/test");
 				expect(store.getRevision("/test")).toBe(2);
+			});
+		});
+
+		// The git revision is a strict subset of the general one: panels that only
+		// read committed history (log, reflog, stashes) subscribe to it so a mere
+		// file save stops re-running their git processes. The subset direction
+		// matters — a git-state change also changes what those panels show, so it
+		// MUST bump both. Bumping only the narrow counter would leave every
+		// `getRevision` subscriber stale on commits.
+		describe("git revision tracking", () => {
+			it("returns 0 for unknown repo", () => {
+				testInScope(() => {
+					expect(store.getGitRevision("/unknown-repo")).toBe(0);
+				});
+			});
+
+			it("leaves the git revision alone on a working-tree bump", () => {
+				testInScope(() => {
+					store.add({ path: "/test", displayName: "test" });
+					store.bumpRevision("/test");
+					expect(store.getRevision("/test")).toBe(1);
+					expect(store.getGitRevision("/test")).toBe(0);
+				});
+			});
+
+			it("bumps both counters on a git-state bump", () => {
+				testInScope(() => {
+					store.add({ path: "/test", displayName: "test" });
+					store.bumpGitRevision("/test");
+					expect(store.getGitRevision("/test")).toBe(1);
+					expect(store.getRevision("/test")).toBe(1);
+				});
+			});
+
+			it("drops the git revision when the repo is removed", () => {
+				testInScope(() => {
+					store.add({ path: "/test", displayName: "test" });
+					store.bumpGitRevision("/test");
+					store.remove("/test");
+					expect(store.getGitRevision("/test")).toBe(0);
+				});
 			});
 		});
 	});
@@ -826,11 +1047,10 @@ describe("repositoriesStore", () => {
 			testInScope(() => {
 				const id = store.createGroup("Work")!;
 				vi.advanceTimersByTime(500);
-				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
-				const lastCall = saveCalls[saveCalls.length - 1];
-				expect(lastCall[1].config.groups).toBeDefined();
-				expect(lastCall[1].config.groups[id].name).toBe("Work");
-				expect(lastCall[1].config.groupOrder).toContain(id);
+				const mutation = lastRepositoryMutation();
+				const group = mutation.groups.find((entry) => entry.id === id)?.after as { name: string };
+				expect(group.name).toBe("Work");
+				expect(mutation.groupOrder?.after).toContain(id);
 			});
 		});
 	});
@@ -946,6 +1166,59 @@ describe("repositoriesStore", () => {
 				expect(layout.groups[0].repos[0].path).toBe("/a");
 				expect(layout.ungrouped).toHaveLength(1);
 				expect(layout.ungrouped[0].path).toBe("/c");
+			});
+		});
+
+		/**
+		 * Every consumer of this layout renders it through a reference-keyed
+		 * `<For>`. Allocating a fresh wrapper and a fresh repos array on every
+		 * call means every group header and every repo row is torn down and
+		 * rebuilt whenever anything in the repo store moves — a branch poll, a
+		 * file save, an unrelated repo's revision bump.
+		 */
+		it("getGroupedLayout() reuses the wrapper when nothing changed", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/a", gid);
+
+				const first = store.getGroupedLayout();
+				const second = store.getGroupedLayout();
+				expect(second.groups[0]).toBe(first.groups[0]);
+				expect(second.groups[0].repos).toBe(first.groups[0].repos);
+				expect(second.ungrouped).toBe(first.ungrouped);
+			});
+		});
+
+		it("getGroupedLayout() builds a new wrapper when its repos change", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				const gid = store.createGroup("Work")!;
+				store.addRepoToGroup("/a", gid);
+				const first = store.getGroupedLayout();
+
+				store.addRepoToGroup("/b", gid);
+				const second = store.getGroupedLayout();
+				expect(second.groups[0]).not.toBe(first.groups[0]);
+				expect(second.groups[0].repos.map((r) => r.path)).toEqual(["/a", "/b"]);
+			});
+		});
+
+		it("getGroupedLayout() leaves an untouched group alone when another one changes", () => {
+			testInScope(() => {
+				store.add({ path: "/a", displayName: "A" });
+				store.add({ path: "/b", displayName: "B" });
+				const stable = store.createGroup("Stable")!;
+				const moving = store.createGroup("Moving")!;
+				store.addRepoToGroup("/a", stable);
+				const first = store.getGroupedLayout();
+
+				store.addRepoToGroup("/b", moving);
+				const second = store.getGroupedLayout();
+				expect(second.groups[0]).toBe(first.groups[0]);
+				expect(second.groups[1]).not.toBe(first.groups[1]);
 			});
 		});
 
@@ -1074,9 +1347,10 @@ describe("repositoriesStore", () => {
 				store.add({ path: "/repo", displayName: "test" });
 				store.setPark("/repo", true);
 				vi.advanceTimersByTime(500);
-				const saveCalls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
-				const lastCall = saveCalls[saveCalls.length - 1];
-				expect(lastCall[1].config.repos["/repo"].parked).toBe(true);
+				const repo = lastRepositoryMutation().repos.find((mutation) => mutation.id === "/repo")?.after as {
+					parked: boolean;
+				};
+				expect(repo.parked).toBe(true);
 			});
 		});
 
@@ -1160,6 +1434,172 @@ describe("repositoriesStore", () => {
 
 				expect(mockInvoke).not.toHaveBeenCalled();
 			});
+		});
+
+		it("uses the last successful snapshot as the same-record expectation", async () => {
+			await testInScopeAsync(async () => {
+				store.add({ path: "/repo", displayName: "Original" });
+				await vi.advanceTimersByTimeAsync(500);
+
+				store.setDisplayName("/repo", "Renamed");
+				await vi.advanceTimersByTimeAsync(500);
+
+				const calls = mockInvoke.mock.calls.filter((call: unknown[]) => call[0] === "save_repositories");
+				const second = (
+					calls[1][1] as { config: { repos: Array<{ id: string; before: unknown; after: unknown }> } }
+				).config.repos.find((mutation) => mutation.id === "/repo");
+				expect(second?.before).toEqual(expect.objectContaining({ displayName: "Original" }));
+				expect(second?.after).toEqual(expect.objectContaining({ displayName: "Renamed" }));
+			});
+		});
+
+		it("surfaces a rejected repository mutation at error level", async () => {
+			mockInvoke.mockImplementation((command: string) => {
+				if (command === "save_repositories") {
+					return Promise.reject(new Error("repository configuration conflict: repository '/repo' changed"));
+				}
+				return Promise.resolve(undefined);
+			});
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				store.add({ path: "/repo", displayName: "Repo" });
+				await vi.advanceTimersByTimeAsync(500);
+				expect(errorSpy).toHaveBeenCalledWith(
+					"[store]",
+					"Repository changes were not saved",
+					expect.objectContaining({ message: expect.stringContaining("repository configuration conflict") }),
+				);
+			});
+
+			errorSpy.mockRestore();
+		});
+
+		it("does not discard a newer mutation queued behind a rejected save", async () => {
+			let rejectFirst!: (reason?: unknown) => void;
+			let saveCount = 0;
+			mockInvoke.mockImplementation((command: string) => {
+				if (command !== "save_repositories") return Promise.resolve(undefined);
+				saveCount += 1;
+				if (saveCount === 1) {
+					return new Promise((_, reject) => {
+						rejectFirst = reject;
+					});
+				}
+				return Promise.resolve(undefined);
+			});
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				store.add({ path: "/repo", displayName: "Original" });
+				await vi.advanceTimersByTimeAsync(500);
+				store.setDisplayName("/repo", "Queued");
+				await vi.advanceTimersByTimeAsync(500);
+				expect(saveCount).toBe(1);
+
+				rejectFirst(new Error("repository configuration conflict"));
+				await vi.advanceTimersByTimeAsync(0);
+
+				// Position-independent on purpose: a conflict now also emits a rebased
+				// retry, so the queued mutation is no longer call #2. What must hold is
+				// that it reaches the backend at all.
+				const queuedAfters = mockInvoke.mock.calls
+					.filter((call: unknown[]) => call[0] === "save_repositories")
+					.flatMap(
+						(call: unknown[]) => (call[1] as { config: { repos: Array<{ id: string; after: unknown }> } }).config.repos,
+					)
+					.filter((mutation) => mutation.id === "/repo")
+					.map((mutation) => mutation.after);
+				expect(queuedAfters).toContainEqual(expect.objectContaining({ displayName: "Queued" }));
+			});
+
+			errorSpy.mockRestore();
+		});
+
+		it("rebases a conflicting mutation on the current disk state and retries it once", async () => {
+			// Another client renamed /repo behind our back, so our `before` no longer
+			// matches disk. The retry must carry disk's value as `before` and our value
+			// as `after` — last-writer-wins for the record we meant to change.
+			const onDisk = {
+				repos: { "/repo": { path: "/repo", displayName: "RenamedElsewhere", branches: {} } },
+				repoOrder: ["/repo"],
+				activeRepoPath: null,
+				groups: {},
+				groupOrder: [],
+			};
+			let saveCount = 0;
+			mockInvoke.mockImplementation((command: string) => {
+				if (command === "load_repositories") return Promise.resolve(onDisk);
+				if (command !== "save_repositories") return Promise.resolve(undefined);
+				saveCount += 1;
+				if (saveCount === 1) {
+					return Promise.reject(
+						new Error("repository configuration conflict: repository '/repo' changed in another window"),
+					);
+				}
+				return Promise.resolve(undefined);
+			});
+
+			await testInScopeAsync(async () => {
+				store.add({ path: "/repo", displayName: "Mine" });
+				await vi.advanceTimersByTimeAsync(500);
+				await vi.advanceTimersByTimeAsync(0);
+
+				expect(saveCount).toBe(2);
+				const retry = lastRepositoryMutation().repos.find((m) => m.id === "/repo");
+				expect(retry?.before).toEqual(expect.objectContaining({ displayName: "RenamedElsewhere" }));
+				expect(retry?.after).toEqual(expect.objectContaining({ displayName: "Mine" }));
+			});
+		});
+
+		it("does not wedge future saves after a conflict", async () => {
+			// The regression: a conflict left `persistedSnapshot` stale forever, so every
+			// later save diffed against a baseline disk had already moved past and was
+			// rejected too — permanently, for every repo, not just the conflicting one.
+			const onDisk = {
+				repos: { "/repo": { path: "/repo", displayName: "RenamedElsewhere", branches: {} } },
+				repoOrder: ["/repo"],
+				activeRepoPath: null,
+				groups: {},
+				groupOrder: [],
+			};
+			const conflicts: string[] = [];
+			let saveCount = 0;
+			mockInvoke.mockImplementation((command: string, args: unknown) => {
+				if (command === "load_repositories") return Promise.resolve(onDisk);
+				if (command !== "save_repositories") return Promise.resolve(undefined);
+				saveCount += 1;
+				const batch = (args as { config: { repos: Array<{ id: string; before: unknown }> } }).config;
+				const mutation = batch.repos.find((m) => m.id === "/repo");
+				// Emulate the backend CAS: reject unless `before` matches disk.
+				if (
+					mutation &&
+					(mutation.before as { displayName?: string } | null)?.displayName !== onDisk.repos["/repo"].displayName
+				) {
+					conflicts.push(`save#${saveCount}`);
+					return Promise.reject(new Error("repository configuration conflict: repository '/repo' changed"));
+				}
+				return Promise.resolve(undefined);
+			});
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await testInScopeAsync(async () => {
+				store.add({ path: "/repo", displayName: "Mine" });
+				await vi.advanceTimersByTimeAsync(500);
+				await vi.advanceTimersByTimeAsync(0);
+				const afterFirst = saveCount;
+
+				// A completely unrelated, later user edit must still reach disk.
+				store.setDisplayName("/repo", "MineAgain");
+				await vi.advanceTimersByTimeAsync(500);
+				await vi.advanceTimersByTimeAsync(0);
+
+				expect(saveCount).toBeGreaterThan(afterFirst);
+				// The last save attempted must have been accepted, not rejected.
+				expect(conflicts).not.toContain(`save#${saveCount}`);
+			});
+
+			errorSpy.mockRestore();
 		});
 	});
 
@@ -1270,7 +1710,8 @@ describe("repositoriesStore", () => {
 				vi.advanceTimersByTime(500);
 				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
 				const last = calls[calls.length - 1];
-				expect(last[1].config.sortMode).toBe("name");
+				// Saves are keyed mutation batches: scalar fields carry before/after.
+				expect(last[1].config.sortMode).toEqual({ before: "manual", after: "name" });
 			});
 		});
 
@@ -1472,10 +1913,12 @@ describe("repositoriesStore", () => {
 				vi.advanceTimersByTime(500);
 				const calls = mockInvoke.mock.calls.filter((c: unknown[]) => c[0] === "save_repositories");
 				const last = calls[calls.length - 1];
-				expect(last[1].config.workspaces[id].repoPaths).toEqual(["/a"]);
-				expect(last[1].config.workspaceOrder).toEqual([id]);
-				expect(last[1].config.activeWorkspaceId).toBe(id);
-				expect(last[1].config.sortMode).toBe("recent");
+				// Saves are keyed mutation batches (see repositoryMutationBatch).
+				const ws = last[1].config.workspaces.find((m: { id: string }) => m.id === id);
+				expect(ws.after.repoPaths).toEqual(["/a"]);
+				expect(last[1].config.workspaceOrder.after).toEqual([id]);
+				expect(last[1].config.activeWorkspaceId.after).toBe(id);
+				expect(last[1].config.sortMode.after).toBe("recent");
 			});
 		});
 

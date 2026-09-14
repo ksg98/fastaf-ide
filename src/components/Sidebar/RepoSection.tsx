@@ -236,7 +236,7 @@ export const BranchItem: Component<{
 	const ctxMenu = createContextMenu();
 
 	const branchLabel = createMemo(
-		() => repoSettingsStore.getEffective(props.repoPath)?.branchLabels?.[props.branch.name],
+		() => repoSettingsStore.getEffectiveField(props.repoPath, "branchLabels")?.[props.branch.name],
 	);
 
 	const pr = createMemo(() => activePrStatus(props.repoPath, props.branch.name));
@@ -489,6 +489,7 @@ export const BranchItem: Component<{
 							state={pr()!.state}
 							isDraft={pr()!.is_draft}
 							mergeable={pr()!.mergeable}
+							conflictState={pr()!.conflict_state}
 							reviewDecision={pr()!.review_decision}
 							ciPassed={checks()?.passed}
 							ciFailed={checks()?.failed}
@@ -807,7 +808,14 @@ export const RepoSection: Component<{
 						>
 							⋯
 						</button>
-						<Show when={props.repo.isGitRepo !== false}>
+						{/* Non-git repos have no worktrees, so the add button is absent. The
+						    fallback keeps its slot occupied — without it the whole trailing
+						    cluster (⋯ + chevron) would shift right and stop lining up with
+						    the git-repo headers above and below it. */}
+						<Show
+							when={props.repo.isGitRepo !== false}
+							fallback={<span class={cx(s.repoActionBtn, s.addBtn, s.repoActionSlot)} aria-hidden="true" />}
+						>
 							<button
 								class={cx(s.repoActionBtn, s.addBtn)}
 								disabled={props.isCreatingWorktree}

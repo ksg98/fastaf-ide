@@ -47,6 +47,30 @@
       <p class="blog-index-subtitle">Deep-dives into why we build what we build.</p>
 
       <div class="blog-list">
+        <a href="/blog/keyboard-shortcuts.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>August 9, 2026</time></div>
+          <h3>The shortcuts that matter when twelve agents are working</h3>
+          <p>A shortcut list is usually a feature dump. These are the handful that changed how we work once the terminal stopped being where you type and became where you supervise: Cmd+U to reach the agent that's blocked, Cmd+Ctrl+Backspace to get back, Cmd+I to queue the next instruction without derailing the current one — plus the block, split and branch keys, and how to rebind all of it.</p>
+        </a>
+        <a href="/blog/delivery-receipts.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>August 5, 2026</time></div>
+          <h3>"ok" was a lie</h3>
+          <p>We shipped agent-to-agent messaging and it worked. Then an orchestrator's reply vanished while both sides believed delivery had happened. A post-mortem on acknowledging a message whose recipient is an LLM in a terminal: why storage acknowledgement is not delivery acknowledgement, the field we had to delete twice, and why ambiguity is more dangerous when the client is a model.</p>
+        </a>
+        <a href="/blog/ci-auto-heal.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>July 30, 2026</time></div>
+          <h3>When the PR goes red, the agent fixes it</h3>
+          <p>Auto-heal fetches the failing job's logs and types them into the agent that wrote the code, capped at three real attempts. The part worth writing about is what those logs are: on a fork PR they're attacker-authored text going into an agent that holds a shell — and what we do about it, including the residual risk we accept on purpose.</p>
+        </a>
+        <a href="/blog/agent-hooks.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>July 24, 2026</time></div>
+          <h3>We stopped guessing what the agent was doing</h3>
+          <p>Reading an agent's state off its terminal screen is a war you lose one redesign at a time — a rounded composer box left a tab busy 132 seconds after the turn had finished, with the tests green throughout. So we install a hook into the agent's own settings file and let it report busy, idle and awaiting directly.</p>
+        </a>
         <a href="/blog/ipad-couch.html" class="blog-card">
           <div class="blog-card-meta">
             <time>June 27, 2026</time></div>
@@ -82,6 +106,12 @@
             <time>May 18, 2026</time></div>
           <h3>A built-in process monitor for your terminal trees</h3>
           <p>When one of a dozen agents pins a core, which one is it? A process monitor reports CPU and RSS for TUIC and every child process tree — over MCP, over HTTP, and as a self-contained dashboard.</p>
+        </a>
+        <a href="/blog/agent-messaging.html" class="blog-card">
+          <div class="blog-card-meta">
+            <time>May 16, 2026</time></div>
+          <h3>Agent-to-agent messaging: from terminal scraping to structured channels</h3>
+          <p>AI agents working together shouldn't have to read each other's terminal output. FastAF provides two direct communication paths: peer messaging for structured coordination, and MCP channels for real-time event push. Here's how they work and when to use each.</p>
         </a>
         <a href="/blog/beta-features.html" class="blog-card">
           <div class="blog-card-meta">

@@ -288,6 +288,7 @@ export const RemoteOnlyPrPopover: Component<{
 											state={pr.state}
 											isDraft={pr.is_draft}
 											mergeable={pr.mergeable}
+											conflictState={pr.conflict_state}
 											reviewDecision={pr.review_decision}
 											ciFailed={pr.checks?.failed}
 											ciPending={pr.checks?.pending}

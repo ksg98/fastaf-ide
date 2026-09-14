@@ -1,6 +1,9 @@
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::path::Path;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 /// True when a GPU backend is compiled into this build.
 /// - macOS: Metal (always, via target-specific dep).
@@ -53,7 +56,18 @@ pub trait Transcriber: Send + Sync {
 
 /// Whisper model wrapper for transcription.
 pub struct WhisperTranscriber {
-    ctx: WhisperContext,
+    /// Decoder state, created once at load and reused for every transcription.
+    ///
+    /// `create_state` allocates the decoder's KV cache and mel buffers, which
+    /// the streaming loop otherwise paid on every 1.5–3 s window.
+    /// `whisper_full_with_state` resets the state at the start of each run, so
+    /// reuse is exactly what whisper.cpp's own streaming example does.
+    ///
+    /// The mutex is only there to satisfy `full()`'s `&mut self`; it never
+    /// contends, because the streaming thread is joined before the final pass
+    /// runs. The state owns an `Arc` to the loaded model, so the model lives as
+    /// long as this transcriber.
+    state: Mutex<WhisperState>,
 }
 
 impl WhisperTranscriber {
@@ -71,9 +85,14 @@ impl WhisperTranscriber {
 
         let ctx = WhisperContext::new_with_params(path_str, params)
             .map_err(|e| format!("Failed to load Whisper model: {e}"))?;
+        let state = ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create Whisper state: {e}"))?;
 
         tracing::info!(backend, "Whisper model loaded");
-        Ok(Self { ctx })
+        Ok(Self {
+            state: Mutex::new(state),
+        })
     }
 }
 
@@ -111,10 +130,7 @@ impl Transcriber for WhisperTranscriber {
             });
         }
 
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| format!("Failed to create Whisper state: {e}"))?;
+        let mut state = self.state.lock();
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(language);
@@ -164,19 +180,102 @@ impl Transcriber for WhisperTranscriber {
 }
 
 /// Known hallucination phrases Whisper produces on silence/noise.
-/// These are artifacts of YouTube subtitle training data.
+/// These are artifacts of YouTube subtitle training data, so they come in the
+/// language Whisper was told to transcribe: quiet Italian audio yields a bare
+/// "Grazie.", quiet English audio a bare "Thank you.".
+///
+/// Two lists, because the two shapes need different matching:
+///
+/// - [`HALLUCINATION_EXACT`] holds words a person genuinely dictates ("grazie",
+///   "thank you"). Substring matching would delete a real sentence that merely
+///   contains one, so these only count when they ARE the whole transcript.
+/// - [`HALLUCINATION_SUBSTRING`] holds channel boilerplate nobody dictates into
+///   a terminal; it may appear anywhere in the text.
+///
+/// Both lists cover every language offered in `WHISPER_LANGUAGES`, because the
+/// default setting is `auto`: the language of the hallucination is whatever
+/// Whisper decided the silence was.
+const HALLUCINATION_EXACT: &[&str] = &[
+    // en
+    "thank you",
+    "thanks",
+    "thank you very much",
+    // es
+    "gracias",
+    "muchas gracias",
+    // fr
+    "merci",
+    "merci beaucoup",
+    // de
+    "danke",
+    "danke schön",
+    "vielen dank",
+    // it
+    "grazie",
+    "grazie mille",
+    // pt
+    "obrigado",
+    "obrigada",
+    // nl
+    "bedankt",
+    "dank je wel",
+    // ja
+    "ご視聴ありがとうございました",
+    // zh
+    "谢谢观看",
+    "谢谢大家",
+    // ko
+    "감사합니다",
+    "시청해주셔서 감사합니다",
+    // ru
+    "спасибо",
+    "спасибо за просмотр",
+];
+
+const HALLUCINATION_SUBSTRING: &[&str] = &[
+    // The Amara subtitle credit is the single most common one and appears
+    // translated into every language, so match the domain and cover them all.
+    "amara.org",
+    // en
+    "thanks for watching",
+    "thanks for listening",
+    "subtitles by",
+    "transcribed by",
+    "subscribe",
+    "like and subscribe",
+    // es
+    "gracias por ver el video",
+    "subtítulos realizados por",
+    // fr
+    "sous-titres réalisés par",
+    "merci d'avoir regardé cette vidéo",
+    "sous-titrage société radio-canada",
+    // de
+    "untertitel der",
+    "untertitelung im auftrag des",
+    // it
+    "grazie per aver guardato il video",
+    "sottotitoli e revisione a cura di",
+    // pt
+    "legendas pela comunidade",
+    "obrigado por assistir",
+    // nl
+    "ondertiteld door",
+    // zh
+    "请不吝点赞",
+    // ko
+    "시청해주셔서",
+    // ru
+    "субтитры сделал",
+    "редактор субтитров",
+];
+
 fn is_hallucination(text: &str) -> bool {
     let lower = text.to_lowercase();
-    const HALLUCINATIONS: &[&str] = &[
-        "thank you",
-        "thanks for watching",
-        "thanks for listening",
-        "subtitles by",
-        "transcribed by",
-        "subscribe",
-        "like and subscribe",
-    ];
-    HALLUCINATIONS.iter().any(|h| lower.contains(h))
+    // Whisper punctuates its hallucinations ("Grazie." / "Thank you!"), so the
+    // exact match compares against the bare words.
+    let bare = lower.trim_matches(|c: char| !c.is_alphanumeric());
+    HALLUCINATION_EXACT.contains(&bare) || HALLUCINATION_SUBSTRING.iter().any(|h| lower.contains(h))
 }
 
 #[cfg(test)]
@@ -201,5 +300,95 @@ mod tests {
     #[test]
     fn build_context_params_does_not_panic() {
         let _params = build_context_params();
+    }
+
+    #[test]
+    fn bare_thanks_in_any_language_is_a_hallucination() {
+        // What quiet audio actually produces, punctuation and casing included.
+        assert!(is_hallucination("Grazie."));
+        assert!(is_hallucination("grazie"));
+        assert!(is_hallucination("Grazie mille!"));
+        assert!(is_hallucination("Thank you."));
+        assert!(is_hallucination("  Thanks!  "));
+        assert!(is_hallucination("Gracias."));
+        assert!(is_hallucination("Merci."));
+        assert!(is_hallucination("Vielen Dank!"));
+        assert!(is_hallucination("Obrigado."));
+        assert!(is_hallucination("Bedankt."));
+        assert!(is_hallucination("Спасибо."));
+        assert!(is_hallucination("ご視聴ありがとうございました。"));
+        assert!(is_hallucination("谢谢观看"));
+        assert!(is_hallucination("감사합니다."));
+    }
+
+    #[test]
+    fn the_amara_credit_is_caught_in_every_language() {
+        // One pattern, every translation of the same subtitle credit.
+        assert!(is_hallucination(
+            "Sottotitoli creati dalla comunità Amara.org"
+        ));
+        assert!(is_hallucination("Subtitles by the Amara.org community"));
+        assert!(is_hallucination("Untertitel der Amara.org-Community"));
+        assert!(is_hallucination(
+            "Sous-titres réalisés par la communauté d'Amara.org"
+        ));
+    }
+
+    #[test]
+    fn channel_boilerplate_is_a_hallucination_anywhere_in_the_text() {
+        assert!(is_hallucination(
+            "Grazie per aver guardato il video, ci vediamo alla prossima"
+        ));
+        assert!(is_hallucination("Sottotitoli e revisione a cura di QTSS"));
+        assert!(is_hallucination("Thanks for watching!"));
+    }
+
+    #[test]
+    fn a_real_sentence_containing_thanks_survives() {
+        // The whole reason the short phrases are matched exactly: these are
+        // things Boss dictates on purpose.
+        assert!(!is_hallucination("grazie, ora committa e pusha"));
+        assert!(!is_hallucination("thank you for the review, apply it"));
+        assert!(!is_hallucination("scrivi grazie nel commento"));
+    }
+
+    #[test]
+    fn ordinary_dictation_is_not_filtered() {
+        assert!(!is_hallucination("apri il file browser"));
+        assert!(!is_hallucination("run the tests"));
+        assert!(!is_hallucination(""));
+    }
+
+    /// Reusing one decoder state across windows is only safe if
+    /// `whisper_full_with_state` really resets it per run. Transcribing the same
+    /// audio twice must therefore give the same text — greedy sampling is
+    /// deterministic, so any drift means the previous run leaked into this one.
+    ///
+    /// Ignored by default: it needs the ~1.6 GB model on disk. Run with
+    /// `cargo nextest run --run-ignored all decoder_state`.
+    #[test]
+    #[ignore = "requires a downloaded whisper model"]
+    fn a_reused_decoder_state_gives_identical_results_across_calls() {
+        use std::f32::consts::PI;
+
+        let path = crate::dictation::model::model_path(
+            crate::dictation::model::WhisperModel::LargeV3Turbo,
+        );
+        let transcriber = WhisperTranscriber::load(&path).expect("model load");
+
+        // Two seconds of tone: the text is irrelevant, its stability is not.
+        let audio: Vec<f32> = (0..32_000)
+            .map(|i| (2.0 * PI * 220.0 * i as f32 / 16_000.0).sin() * 0.3)
+            .collect();
+
+        let first = transcriber
+            .transcribe(&audio, Some("en"))
+            .expect("first run");
+        let second = transcriber
+            .transcribe(&audio, Some("en"))
+            .expect("second run");
+
+        assert_eq!(first.text, second.text, "reused state leaked between runs");
+        assert_eq!(first.skip_reason, second.skip_reason);
     }
 }

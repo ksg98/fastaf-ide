@@ -17,7 +17,29 @@ The same panel switches modes — no separate UI.
 - **Toolbar:** chat icon in the right section of the toolbar.
 - **Context menu:** right-click a terminal → *Send selection to AI Chat* or *Explain this error*.
 
-The panel docks on the right. Width is remembered per window (`aiChatPanelWidth`).
+The panel docks on the right. Drag its left edge to resize it; the width applies
+for the session and is not persisted across restarts.
+
+### Detaching it into its own window
+
+Click the detach icon in the header to move the chat into a separate 500x700
+window. The main window shows a *Bring back* placeholder until you reattach or
+close the detached one.
+
+The detached window is a full chat, not a viewer: it opens on the conversation
+you detached, and it sends, runs the agent, and pauses or stops it against the
+terminal it was detached from. It stays on that terminal for its whole life — if
+you focus a different terminal in the main window, the detached chat does not
+follow. Detach with no terminal focused and the window is read-only, exactly as
+the docked panel is.
+
+The two windows hand the conversation over through disk; they are not linked
+live. While both are open, neither sees what the other adds. When the detached
+window closes or reattaches, the main window re-reads the conversation, so the
+messages you sent from it are there.
+
+One action does not work in the detached window: *Run* on a code block. It needs
+the terminal's live view, which cannot cross a window boundary.
 
 ## Providers
 
@@ -117,8 +139,9 @@ The panel follows the focused terminal automatically — the header shows the ac
 ## Conversations
 
 - **Per-terminal state** — each terminal tab maintains its own independent chat history, streaming state, and conversation ID (keyed by `tuicSession`). Switching tabs switches the conversation. Messages sent from a tab always target that tab's PTY session.
+- **Desktop and browser/PWA persistence** — conversations autosave to the same backend store on every transport, and closing a terminal flushes pending messages immediately. Reloading the page restores the latest conversation for that terminal. The history panel lists, opens, and deletes the same saved conversations in desktop and browser/PWA mode.
 - Hard cap: **100 messages** per conversation in memory; older messages are evicted FIFO. Saved conversations keep the full history on disk.
-- Streaming uses a Tauri `Channel<ChatStreamEvent>` — you see tokens as they arrive. Cancel mid-stream with the stop button or `cancel_ai_chat`.
+- Streaming uses a Tauri `Channel<ChatStreamEvent>` on desktop and a dedicated WebSocket in browser/PWA mode — you see tokens as they arrive. Cancel mid-stream with the stop button or `cancel_ai_chat`.
 - **Conversation history panel** — click the clock/history icon in the header to open a slide-in list of all saved conversations. Each row shows the title, terminal session name, message count, and date. Click a row to load that conversation into the current terminal's chat.
 
 ## Run-this, copy, and actions

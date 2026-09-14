@@ -187,6 +187,11 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 			return;
 		}
 		void repositoriesStore.getRevision(repoPath);
+		// Plain directories have no git index — asking would fail on every revision bump.
+		if (!repositoriesStore.isGitRepo(repoPath)) {
+			setChangesCount(0);
+			return;
+		}
 		let cancelled = false;
 		onCleanup(() => {
 			cancelled = true;

@@ -16,7 +16,7 @@ const PluginPanel = lazy(() => import("../PluginPanel").then((module) => ({ defa
 const PrDiffTab = lazy(() => import("../PrDiffTab").then((module) => ({ default: module.PrDiffTab })));
 
 /** Renders the correct component for a given MdTab type. Shared between TerminalArea and PaneTree. */
-export const MdTabContent: Component<{ tab: MdTabData; onClose: () => void }> = (props) => {
+export const MdTabContent: Component<{ tab: MdTabData; onClose: () => void; visible?: () => boolean }> = (props) => {
 	const tab = props.tab;
 	return (
 		<Suspense>
@@ -24,7 +24,8 @@ export const MdTabContent: Component<{ tab: MdTabData; onClose: () => void }> = 
 				if (tab.type === "claude-usage") return <ClaudeUsageDashboard />;
 				if (tab.type === "github-ops") return <GithubOpsDashboard repoPath={(tab as GithubOpsTabData).repoPath} />;
 				if (tab.type === "command-overview") return <CommandOverview />;
-				if (tab.type === "plugin-panel") return <PluginPanel tab={tab} onClose={props.onClose} />;
+				if (tab.type === "plugin-panel")
+					return <PluginPanel tab={tab} onClose={props.onClose} visible={props.visible} />;
 				if (tab.type === "pr-diff") {
 					const pr = tab as PrDiffTabData;
 					return <PrDiffTab prNumber={pr.prNumber} prTitle={pr.prTitle} diff={pr.diff} />;

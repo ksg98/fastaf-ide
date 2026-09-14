@@ -134,6 +134,14 @@ impl TokenManager {
     /// 2. If expired, acquire the refresh lock.
     /// 3. Re-check under lock (another caller may have refreshed already).
     /// 4. If still expired, perform the refresh request.
+    ///
+    /// "Another caller refreshed" means the stored access token is no longer the
+    /// one `current` holds — not merely that its `expires_at` reads valid. The
+    /// distinction is the whole point: a server can revoke a token years before
+    /// its stated expiry (and some issuers state a nonsense expiry to begin
+    /// with), so a caller that just ate a 401 arrives here with a token the
+    /// keyring still believes in. Trusting `expires_at` alone handed that exact
+    /// dead token straight back and made 401 recovery a no-op.
     pub(crate) async fn refresh_if_needed(
         &self,
         current: &OAuthTokenSet,
@@ -143,11 +151,6 @@ impl TokenManager {
             return Ok(None);
         }
 
-        let refresh_token = current
-            .refresh_token
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Token expired and no refresh_token available"))?;
-
         // Acquire refresh lock — serializes concurrent refresh attempts
         let _guard = self.refresh_lock.lock().await;
 
@@ -155,10 +158,16 @@ impl TokenManager {
         if let Ok(Some(cred)) =
             crate::mcp_upstream_credentials::read_stored_credential(&self.upstream_name)
             && let crate::mcp_upstream_credentials::StoredCredential::Oauth2(ref fresh) = cred
+            && fresh.access_token != current.access_token
             && is_token_valid(fresh)
         {
             return Ok(Some(fresh.clone()));
         }
+
+        let refresh_token = current
+            .refresh_token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Token expired and no refresh_token available"))?;
 
         // Still expired — perform refresh
         let http_client = reqwest::Client::new();
@@ -204,6 +213,24 @@ impl TokenManager {
 
         save_oauth_tokens(&self.upstream_name, &token_set).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Some(token_set))
+    }
+
+    /// Recover after the server rejected a specific access token.
+    ///
+    /// `stored` is the latest credential available when recovery begins, while
+    /// `rejected_access_token` is the bearer that was actually sent. Keeping
+    /// those generations distinct lets the double-check under `refresh_lock`
+    /// reuse a valid credential written between the request and its 401
+    /// response instead of immediately refreshing that replacement.
+    pub(crate) async fn refresh_after_rejection(
+        &self,
+        stored: &OAuthTokenSet,
+        rejected_access_token: &str,
+    ) -> Result<Option<OAuthTokenSet>> {
+        let mut rejected = stored.clone();
+        rejected.access_token = rejected_access_token.to_string();
+        rejected.expires_at = Some(0);
+        self.refresh_if_needed(&rejected).await
     }
 
     /// Convert a raw token endpoint response into our internal type.
@@ -614,6 +641,98 @@ mod tests {
         let token_b = b.unwrap().access_token;
         assert_eq!(token_a, "refreshed-at");
         assert_eq!(token_b, "refreshed-at");
+
+        mock.assert_async().await;
+    }
+
+    /// A server can revoke an access token long before its stated expiry — and
+    /// some issuers state an absurd one (mcp-s.com hands out `expires_in`
+    /// ~86_400_000, parking `expires_at` in 2029 for a token that dies daily).
+    /// The caller then arrives here after a 401 holding a token the keyring
+    /// still believes in. The double-check must not hand that same dead token
+    /// back: it must notice the stored token IS the one being rejected and go
+    /// to the AS.
+    #[tokio::test]
+    async fn refresh_if_needed_renews_a_revoked_token_the_keyring_still_calls_valid() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "access_token": "genuinely-new",
+                    "refresh_token": "rt",
+                    "expires_in": 3600,
+                    "token_type": "Bearer"
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let name = "test-revoked-but-unexpired";
+        let endpoint = format!("{}/token", server.url());
+
+        // What the keyring holds: the revoked token, with a far-future expiry.
+        let stored = OAuthTokenSet {
+            access_token: "revoked-but-unexpired".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: Some(i64::MAX / 2),
+            token_endpoint: endpoint.clone(),
+            client_id: "client".into(),
+            client_secret: None,
+            scope: None,
+            resource: None,
+        };
+        crate::mcp_upstream_credentials::save_oauth_tokens(name, &stored).unwrap();
+
+        let mgr = TokenManager::new(name.into(), "client".into(), None, endpoint, None);
+        let refreshed = mgr
+            .refresh_after_rejection(&stored, "revoked-but-unexpired")
+            .await
+            .expect("refresh must reach the AS")
+            .expect("a revoked token must yield a new one");
+        assert_eq!(refreshed.access_token, "genuinely-new");
+
+        mock.assert_async().await;
+    }
+
+    /// The flip side: when a *different* caller already rotated the credential,
+    /// the stored token is not the one we were rejected on, so the double-check
+    /// still short-circuits and no second request hits the AS.
+    #[tokio::test]
+    async fn refresh_if_needed_yields_to_a_peer_rotation_without_calling_the_as() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server.mock("POST", "/token").expect(0).create_async().await;
+
+        let name = "test-peer-rotated";
+        let endpoint = format!("{}/token", server.url());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let rotated = OAuthTokenSet {
+            access_token: "rotated-by-a-peer".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: Some(now + 3600),
+            token_endpoint: endpoint.clone(),
+            client_id: "client".into(),
+            client_secret: None,
+            scope: None,
+            resource: None,
+        };
+        crate::mcp_upstream_credentials::save_oauth_tokens(name, &rotated).unwrap();
+
+        let mgr = TokenManager::new(name.into(), "client".into(), None, endpoint, None);
+        let result = mgr
+            .refresh_after_rejection(&rotated, "the-one-we-got-401-on")
+            .await
+            .expect("peer rotation must satisfy the caller")
+            .expect("the peer's token must be returned");
+        assert_eq!(result.access_token, "rotated-by-a-peer");
 
         mock.assert_async().await;
     }

@@ -114,7 +114,9 @@ When a prompt contains variables that cannot be auto-resolved, a **Variable Inpu
 
 ### Inject Mode (Default)
 
-The resolved prompt is written directly into the active terminal's PTY — as if you typed it. The agent processes it like any other input. Before sending, FastAF checks that the agent is idle (configurable per prompt).
+The resolved prompt is inserted into the active terminal. With **Auto-execute** enabled, FastAF submits it exactly once through the agent-aware command path and checks that the agent is idle first (configurable per prompt). With Auto-execute disabled, the text remains editable in the Compose box or terminal input and is not idle-gated. If the Compose box is unavailable, the terminal input is used without pressing Enter.
+
+An explicit **Insert** action always keeps the text editable. **Insert & Run** and double-click always submit once, regardless of the saved Auto-execute setting.
 
 ### Shell Script Mode
 

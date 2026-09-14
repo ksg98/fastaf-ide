@@ -235,6 +235,14 @@ describe("canExecuteInject — idle gate by inject target", () => {
 		expect(mockedIsBusy).not.toHaveBeenCalled();
 	});
 
+	it("compose target with autoExecute=true is gated because it will submit", () => {
+		mockedIsBusy.mockReturnValue(true);
+		const { canExecute } = useSmartPrompts();
+		const result = canExecute(makePrompt({ executionMode: "inject", injectTarget: "compose", autoExecute: true }));
+		expect(result.ok).toBe(false);
+		expect(result.reason).toBe("Agent is busy");
+	});
+
 	it("terminal target is blocked while the agent is busy", () => {
 		mockedIsBusy.mockReturnValue(true);
 		const { canExecute } = useSmartPrompts();
@@ -255,6 +263,14 @@ describe("canExecuteInject — idle gate by inject target", () => {
 		const { canExecute } = useSmartPrompts();
 		const result = canExecute(makePrompt({ executionMode: "inject", injectTarget: "terminal", requiresIdle: false }));
 		expect(result.ok).toBe(true);
+	});
+
+	it("terminal target with autoExecute=false is not gated because it only inserts text", () => {
+		mockedIsBusy.mockReturnValue(true);
+		const { canExecute } = useSmartPrompts();
+		const result = canExecute(makePrompt({ executionMode: "inject", injectTarget: "terminal", autoExecute: false }));
+		expect(result.ok).toBe(true);
+		expect(mockedIsBusy).not.toHaveBeenCalled();
 	});
 
 	it("requires an active terminal with a detected agent regardless of target", () => {
@@ -300,6 +316,22 @@ describe("executeInject — routing by inject target", () => {
 		expect(ptyMocks.write).not.toHaveBeenCalled();
 	});
 
+	it("autoExecute=true submits even when the legacy inject target defaults to compose", async () => {
+		const openCompose = vi.fn();
+		mockedGetActive.mockReturnValue(activeWith(openCompose));
+		const { executeSmartPrompt } = useSmartPrompts();
+
+		const res = await executeSmartPrompt(
+			makePrompt({ executionMode: "inject", injectTarget: undefined, autoExecute: true }),
+		);
+
+		expect(res.ok).toBe(true);
+		expect(openCompose).not.toHaveBeenCalled();
+		expect(ptyMocks.sendCommand).toHaveBeenCalledOnce();
+		expect(ptyMocks.sendCommand).toHaveBeenCalledWith("s1", PROCESSED, "claude", true);
+		expect(ptyMocks.write).not.toHaveBeenCalled();
+	});
+
 	it("terminal target sends straight to the agent via sendCommand", async () => {
 		mockedGetActive.mockReturnValue(activeWith());
 		const { executeSmartPrompt } = useSmartPrompts();
@@ -307,11 +339,11 @@ describe("executeInject — routing by inject target", () => {
 		const res = await executeSmartPrompt(makePrompt({ executionMode: "inject", injectTarget: "terminal" }));
 
 		expect(res.ok).toBe(true);
-		expect(ptyMocks.sendCommand).toHaveBeenCalledWith("s1", PROCESSED, "claude");
+		expect(ptyMocks.sendCommand).toHaveBeenCalledWith("s1", PROCESSED, "claude", true);
 		expect(ptyMocks.write).not.toHaveBeenCalled();
 	});
 
-	it("terminal target with autoExecute=false writes for review (no Enter), not sendCommand", async () => {
+	it("terminal target with autoExecute=false uses sendCommand without Enter", async () => {
 		mockedGetActive.mockReturnValue(activeWith());
 		const { executeSmartPrompt } = useSmartPrompts();
 
@@ -320,9 +352,9 @@ describe("executeInject — routing by inject target", () => {
 		);
 
 		expect(res.ok).toBe(true);
-		expect(ptyMocks.sendCommand).not.toHaveBeenCalled();
-		// \x15 (NAK) clears the line before writing the reviewable text.
-		expect(ptyMocks.write).toHaveBeenCalledWith("s1", `\x15${PROCESSED}`);
+		expect(ptyMocks.sendCommand).toHaveBeenCalledOnce();
+		expect(ptyMocks.sendCommand).toHaveBeenCalledWith("s1", PROCESSED, "claude", false);
+		expect(ptyMocks.write).not.toHaveBeenCalled();
 	});
 
 	it("compose target with no compose panel (web/PWA) falls back to a reviewable write", async () => {
@@ -332,7 +364,8 @@ describe("executeInject — routing by inject target", () => {
 		const res = await executeSmartPrompt(makePrompt({ executionMode: "inject", injectTarget: "compose" }));
 
 		expect(res.ok).toBe(true);
-		expect(ptyMocks.sendCommand).not.toHaveBeenCalled();
-		expect(ptyMocks.write).toHaveBeenCalledWith("s1", `\x15${PROCESSED}`);
+		expect(ptyMocks.sendCommand).toHaveBeenCalledOnce();
+		expect(ptyMocks.sendCommand).toHaveBeenCalledWith("s1", PROCESSED, "claude", false);
+		expect(ptyMocks.write).not.toHaveBeenCalled();
 	});
 });

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import "../mocks/tauri";
-import { testInScope } from "../helpers/store";
+import { testInScope, testInScopeAsync } from "../helpers/store";
+import { mockInvoke } from "../mocks/tauri";
 
 describe("githubOpsStore", () => {
 	let store: typeof import("../../stores/githubOps").githubOpsStore;
@@ -34,6 +34,22 @@ describe("githubOpsStore", () => {
 			expect(review.findingsCount).toBe(2);
 			expect(review.phase).toBe("analyzing");
 			expect(review.done).toBe(false);
+		});
+	});
+
+	/**
+	 * The backend sends `files` as a COUNT, not the classification vector: the
+	 * event fires per classified file and this store reads nothing but the
+	 * length. The array form is still accepted so a new client keeps working
+	 * against an older backend.
+	 */
+	it("accepts a numeric files count from the backend", () => {
+		testInScope(() => {
+			store.handleEvent("review-progress", {
+				repo_path: "/repo1",
+				payload: { pr_number: 7, files: 12, phase: "analyzing", done: false },
+			});
+			expect(store.getState("/repo1").reviews[7].findingsCount).toBe(12);
 		});
 	});
 
@@ -118,6 +134,35 @@ describe("githubOpsStore", () => {
 			expect(proposals).toHaveLength(1);
 			expect(proposals[0].issue_title).toBe("Add retry tests");
 			expect(proposals[0].labels).toEqual(["testing"]);
+		});
+	});
+
+	// A scan used to publish its proposals twice: once from the invoke's return
+	// value and once from the `proposals-ready` event the backend emits just
+	// before returning. The event is the path that has to exist — it reaches
+	// every window and both transports — so the return value must not write.
+	it("does not publish proposals from the scan's return value", async () => {
+		mockInvoke.mockResolvedValueOnce({
+			proposals: [
+				{
+					title: "From the return value",
+					summary: "s",
+					rationale: "r",
+					issue_title: "Should not appear",
+					issue_body: "b",
+					labels: [],
+					impact: "medium",
+					effort: "small",
+				},
+			],
+		});
+
+		await testInScopeAsync(async () => {
+			const result = await store.runImprovementScan("/repo1", "testing");
+			// The caller still gets the result…
+			expect(result.proposals).toHaveLength(1);
+			// …but the store waits for the event.
+			expect(store.getState("/repo1").proposals).toEqual([]);
 		});
 	});
 

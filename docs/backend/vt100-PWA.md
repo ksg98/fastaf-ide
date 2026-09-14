@@ -127,13 +127,17 @@ Algorithm:
 
 This is critical: Claude Code shows inline suggestions in dim text (e.g., `❯ /wiz:status` where `/wiz:status` is grey). Without the dim check, the suggestion text would appear in the PWA textarea.
 
-### `trim_agent_chrome()` — Log Line Filtering
+### `mark_agent_chrome()` — Log Line Filtering
 
-Removes agent UI chrome (prompt, status bar, separator) from captured log lines.
+Flags agent UI chrome (prompt box, status bar, separator) on captured log lines.
 
-- Scans last 8 rows for prompt pattern
-- Extends cutoff upward past separator and empty lines
-- Uses `is_separator_line()` — checks for 4+ consecutive box-drawing chars
+- Uses `find_scrollback_chrome_cutoff()` — anchors only on a **bare** prompt row
+  (`is_agent_prompt_row`), never on a standalone separator
+- Extends cutoff upward past separator, empty and task-list lines
+- Sets `LogLine::chrome`; the line stays in the buffer and `lines_since_owned()`
+  skips it. Nothing is deleted from history, so a misclassification hides text
+  rather than destroying it — the failure mode that made the mobile log show
+  paragraphs starting mid-sentence.
 
 ---
 
@@ -150,12 +154,17 @@ Initial data fetch before WebSocket connects.
 {
   "lines": [LogLine, ...],
   "total_lines": 1234,
+  "offset": 1134,
   "screen": ["row1", "row2", ...],
   "input_line": "user typed text"
 }
 ```
 
 - `total_lines` serves as the offset cursor for WS catch-up
+- `offset` is the absolute start of the returned window. Clients must use it
+  instead of `total_lines - lines.length`: chrome lines occupy offset slots
+  without being returned, so the subtraction lands inside the window already
+  held and replays those lines on scroll-up
 - `screen` has chrome trimmed via `trim_screen_chrome()`
 - `input_line` from `prompt_input_text()` (dim text excluded). **Only agent prompts (`❯`, `›`, `>`) are recognized — a plain shell prompt (`$`/`#`/`%`/`➜`) yields `null`, so the textarea gets no PTY-driven reconciliation for shells.**
 
@@ -281,6 +290,8 @@ interface SubscribePtyOptions {
 | `"exit"` / `"closed"` | `onExit` | Session ended |
 
 On reconnect the WebSocket reopens with `?offset=<last total_lines>` (log mode) so the server's catch-up only sends lines committed since the last one the client received. The raw (`format` omitted) path uses `total_written` byte offsets for the same purpose.
+
+**Returns** a `PtySubscription`: callable to dispose, plus `pause()` / `resume()`. A backgrounded PWA renders nothing, so `OutputView` pauses on `visibilitychange` and the socket is dropped. The cursor above is what makes that safe — `resume()` reopens from it, so a hide/show cycle neither duplicates nor drops scrollback, and `onExit` is not raised for a close the client asked for.
 
 ### `rpc("write_pty", { sessionId, data })`
 

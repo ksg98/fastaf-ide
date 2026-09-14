@@ -20,8 +20,12 @@ REST API served by the Axum HTTP server when MCP server is enabled. All Tauri co
 GET /sessions
 ```
 
-Returns array of active session info (ID, cwd, worktree path, branch, and
-nested state). For detected agents, `state.agent_state` distinguishes PTY
+Returns array of active session info (ID, cwd, worktree path, branch,
+`display_name`, `display_name_is_custom`, `is_remote`, optional
+`pty_description`, and nested state). The
+origin fields let browser and desktop clients preserve manual-title protection
+and remote-completion muting across reconnects. For detected agents,
+`state.agent_state` distinguishes PTY
 silence (`idle`) from explicit protocol completion (`completed`); the latter
 requires a parsed `suggest: [ ... ]` marker. Other values are `starting`,
 `working`, and `awaiting_input`. `state.background_work` is true when meaningful
@@ -75,6 +79,50 @@ Content-Type: application/json
 { "data": "ls -la\n" }
 ```
 
+### Write Several Inputs at Once
+
+```
+POST /sessions/:id/write-parts
+Content-Type: application/json
+
+{ "parts": ["/", "help", "\r"] }
+```
+
+One round trip and one PTY writer lock for the whole batch, but the parts stay
+separate: the backend applies its post-write bookkeeping once per part. This is
+**not** the same as joining them into `/write` — that bookkeeping reads each part
+as one keystroke, so a lone `/` opens slash mode and an exact option key answers
+a choice prompt, and a joined payload matches neither. The transport uses this
+route when keystrokes arrive while an earlier write is still in flight; a
+solitary keystroke keeps the plain `/write` route.
+
+### Queue a Command for the Next Idle Window
+
+```
+POST /sessions/:id/queue
+Content-Type: application/json
+
+{ "text": "run the tests" }        -> { "typed": false, "queued": 2 }
+
+GET /sessions/:id/queue            -> [ { "id": 7, "text": "run the tests" } ]
+
+DELETE /sessions/:id/queue         -> 2   (commands dropped)
+
+DELETE /sessions/:id/queue/:cmdId  -> true  (false when it already drained)
+```
+
+Hands the text to the same idle gate peer messages use instead of typing it now:
+submitted immediately when the agent is idle (`typed: true`, `queued: 0`),
+otherwise parked until the agent's next busy→idle transition, so a running turn
+is never steered. User commands and peer messages share one typed FIFO and are
+submitted one per idle window in backend acceptance order. `queued`,
+`state.queued_commands`, and `DELETE` count or remove only user commands;
+clearing Compose commands never deletes pending peer/orchestrator delivery.
+
+Agent sessions only — `400` for a plain shell (`"Session is not running an
+agent"`) or empty text, `404` when the PTY is gone. The current depth is also on
+every session snapshot as `state.queued_commands` (omitted when zero).
+
 ### Resize Session
 
 ```
@@ -95,16 +143,21 @@ Returns recent output. Format controls what is returned:
 | `format` | Response shape | Description |
 |----------|----------------|-------------|
 | (omit) | `{ "data": "<string>", "data_length": N, "total_written": N }` | Raw PTY output as a lossy-UTF-8 string (not base64), read from the ring buffer |
-| `text` | `{ "data": "<string>", "data_length": N, "total_written": N }` | Clean VT100 lines from `VtLogBuffer` plus visible screen rows, joined by `\n` (not from the ring buffer) |
+| `text` | `{ "data": "<string>", "data_length": N, "total_written": N }` | One canonical terminal-grid snapshot, joined by `\n` (not from the ring buffer) |
 | `log` | `{ "lines": [...], "total_lines": N, "screen": [...], "input_line"? }` | VT100-extracted clean lines (no ANSI, no TUI garbage) plus current screen rows and optional input line |
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `limit` | raw: 8192 bytes; text/log: all | `raw`/`text`: max bytes; `log`: max lines to return |
-| `offset` | (tail) | `log` only: absolute start offset. When omitted, returns the newest `limit` lines (tail). When provided, returns lines starting from that offset |
+| `limit` | raw: 8192 bytes; text/log: all | `raw`: max bytes; `text`/`log`: max lines to return |
+| `offset` | (tail) | `text`/`log`: absolute start row/line offset. When omitted, returns the newest `limit` rows/lines. When provided, returns data starting from that offset |
 | `format` | (raw) | See table above |
 
 `format=log` reads from `VtLogBuffer` — a VT100-aware buffer that extracts only scrolled-off lines, suppressing alternate-screen TUI apps (vim, htop, claude). Ideal for mobile clients.
+
+`format=text` is a point-in-time canonical grid view. It does not concatenate
+the finalized log cursor with the visible screen, because growing a viewport can
+move history rows back onto the screen and make that concatenation overlap.
+`total_written` is the snapshot's total grid-row count for this format.
 
 `total_lines` in the response is a monotonically increasing counter — it never decreases when old lines are evicted from the buffer. Use it as a stable cursor for paginated reads. The `offset` parameter operates in the same coordinate space.
 
@@ -136,14 +189,27 @@ POST /sessions/:id/visible              { "visible": bool }   -> { "ok": true }
 GET  /sessions/:id/terminal/selection-text?startRow=&startCol=&endRow=&endCol=  -> { "text": string }
 GET  /sessions/:id/terminal/logical-line?row=N         -> [logicalStartRow, text]
 GET  /sessions/:id/terminal/hyperlink-span?row=R&col=C -> [startCol, endCol, url] | null
+GET  /sessions/:id/terminal/styled-rows?start=N&count=N -> application/octet-stream (packed rows)
 GET  /process/stats                                    -> ProcessStats[]
 ```
+
+`terminal/styled-rows` fills the CanvasTerminal client-side row cache and answers
+**binary**, not JSON: a 64-row chunk is ~141 KB of packed cells, which as a JSON
+number array becomes ~350 KB of decimal text for the client to parse back into the
+bytes it started as. The desktop `terminal_styled_rows` command returns the same
+payload raw (`tauri::ipc::Response`), and `rpcImpl` decides between
+`arrayBuffer()` and `json()` on the content-type alone. An empty body means "no
+such session or range" — a valid empty chunk, not an error.
 
 Read-only PTY/terminal state mirroring the desktop Tauri commands (story 062). The
 `{field}`-wrapped responses are unwrapped by the frontend transport to match the
 command's bare return (e.g. `Option<String>` → `null`). The desktop-only commands
 themselves are absent from the remote binary, so these handlers read `AppState`
 directly.
+
+`terminal/selection-text` reads absolute scrollback coordinates, rejoins
+soft-wrapped rows, trims terminal padding, and removes only coherent multi-line
+Claude `NBSP NBSP ▎` visual gutter runs. Desktop IPC returns the same string.
 
 ### Pause/Resume
 
@@ -158,10 +224,12 @@ POST /sessions/:id/resume
 PUT /sessions/:id/name
 Content-Type: application/json
 
-{ "name": "my-session" }
+{ "name": "my-session", "isCustom": true }
 ```
 
-Sets a custom display name for a session.
+Sets a display name and its origin. `isCustom: true` protects an explicit user
+rename from subsequent OSC/intent titles; spawn-assigned and dynamic titles use
+`false`. Omitting the field preserves the legacy custom-rename behavior.
 
 ### Close Session
 
@@ -186,6 +254,7 @@ WebSocket connections to `/sessions/:id/stream` receive JSON-framed messages:
 ```json
 {"type": "output", "data": "raw terminal output text"}
 {"type": "parsed", "event": {"type": "question", "text": "Allow?"}}
+{"type": "watcher-lines", "session_id": "abc", "lines": [{"text": "clean line", "matched_ids": ["<client_id>/w0"]}]}
 {"type": "exit"}
 {"type": "closed"}
 ```
@@ -194,6 +263,7 @@ Frame types:
 - `output` — Raw PTY output (ANSI-stripped when `?format=text`)
 - `log` — VT100-extracted clean lines batch (when `?format=log`): `{"type":"log","lines":[...],"offset":N}`
 - `parsed` — Structured events (questions, rate limits, errors) from the output parser
+- `watcher-lines` — A batch of assembled PTY lines for the plugin OutputWatchers registered through `POST /api/plugins/output-watchers`. Sent on the raw stream and on `?format=grid`; `?format=log|text` does not carry it. Each entry is `{text, matched_ids}`: `text` is the cleaned line Rust matched on, so the client can run its own `RegExp` on it and obtain the capture groups; `matched_ids` are the qualified ids (`<client_id>/<watcher_id>`) of the watchers Rust matched. A client ignores the ids of other clients. While every registered pattern compiles, only the matched lines are sent; while one does not, every line is sent
 - `exit` — Session process exited
 - `closed` — Session was closed
 
@@ -208,25 +278,86 @@ When `?format=log` is specified, the connection streams VT100-extracted log line
 - While running: polls every 200ms and sends new lines batched by offset
 - PTY input passthrough is still available (write text/binary frames to send to PTY)
 
+#### WebSocket format=grid
+
+```
+WS /sessions/:id/stream?format=grid
+```
+
+The transport behind `CanvasTerminal` in browser/PWA mode. Binary frames carry the
+serialised terminal grid; JSON text frames carry the side-channel events the canvas
+needs, each one the desktop Tauri payload plus a `type` key:
+
+```json
+{"type": "osc133", "marker": "D", "line": 42, "exit_code": 0}
+{"type": "cwd", "cwd": "/Users/me/project"}
+{"type": "watcher-lines", "session_id": "abc", "lines": [{"text": "clean line", "matched_ids": ["<client_id>/w0"]}]}
+```
+
+- `osc133` — Shell-integration marker (`A` prompt, `B` command start, `C` output start,
+  `D` command end). Drives command blocks, gutter marks and Cmd+Up/Down navigation.
+  `exit_code` is `null` for every marker except `D`, and `null` on a `D` without one.
+  The field is `exit_code`, not `exitCode` — it is serialised from the same Rust struct
+  as the desktop `pty-osc133-{id}` event, and the two must not drift
+- `cwd` — OSC 7 working-directory change. Same `{ cwd }` object as the desktop event
+- `watcher-lines` — See the frame list above; carried here as well as on the raw stream
+
+Frames the server has no grid consumer for are dropped rather than forwarded, so this
+socket does not carry `output`, `parsed` or the activity pulse.
+
+**Dropped-frame recovery.** Binary frames are deltas, and the `watch` channel behind
+this socket keeps only the newest value — a client that cannot keep up skips frames
+and would apply a delta onto a row map missing rows. Each published frame therefore
+carries a Rust-internal sequence number; when the reader sees a gap it re-serialises
+the full grid and sends that instead. The sequence never reaches the wire, so the
+binary frame format is unchanged.
+
 ### Server-Sent Events (SSE)
 
 ```
-GET /events?types=repo-changed,pty-parsed
+GET /events?types=repo-changed,pty-parsed&stream_id=<uuid>
 ```
 
-Broadcasts server-side events to all browser/mobile clients. Supports optional `?types=` query parameter for comma-separated event name filtering. Uses monotonic event IDs and 15-second keep-alive pings.
+Broadcasts server-side events to all browser/mobile clients. Supports optional `?types=` query parameter for comma-separated event name filtering. Omitting `types` asks for every event; sending it empty is an empty allowlist and delivers none. Uses monotonic event IDs and 15-second keep-alive pings.
+
+`stream_id` is a client-chosen id for the connection. With one, `types` is only the
+*initial* filter and the client can widen it later on the same connection:
+
+```
+POST /events/types
+Content-Type: application/json
+
+{ "stream_id": "<uuid>", "types": ["repo-changed", "dir-changed"] }
+```
+
+`types` is the full set the client wants from now on, not a delta. `204` applies it to
+the live stream; `404` means the server is not tracking that stream (it ended, or more
+than 64 streams are already tracked), and the client must fall back to reconnecting with
+a wider `?types=`.
+
+A panel that mounts late needs an event type the stream was not opened with, and
+reconnecting to get it loses every event published between the close and the new
+subscription — the server subscribes to the event bus at connect time and replays
+nothing. That is what this route exists to avoid. A client that lets `EventSource`
+auto-reconnect must re-post its set on every `onopen`: the reconnect replays the URL, so
+the server is back to the filter the connection was opened with.
 
 | Event | Payload | Description |
 |-------|---------|-------------|
 | `session-created` | `{session_id, cwd, agent_type, display_name}` | New session started; `display_name` is the optional stable assigned name |
+| `pty-description-changed` | `{session_id, description}` | Orchestrator updates the short task description shown above a PTY |
 | `session-closed` | `{session_id}` | Session ended |
-| `repo-changed` | `{repo_path}` | Git repository state changed |
+| `repo-changed` | `{repo_path, kind}` | Repository changed. `kind` is `"git-state"` (`.git/` was written — a commit, ref or index change) or `"working-tree"` (files changed and `.git` did not). A git-state emit cancels the pending working-tree one, so `"git-state"` does **not** mean "only `.git` changed" — a client that needs working-tree news must react to both kinds. |
 | `head-changed` | `{repo_path, branch}` | Git HEAD changed (branch switch) |
 | `pty-parsed` | `{session_id, parsed}` | Structured output event from PTY parser |
 | `pty-exit` | `{session_id}` | PTY process exited |
+| `pty-activity` | `{session_id}` | Bytes are flowing from the PTY. Payload-free pulse, at most one per second — a dropped pulse loses nothing |
+| `pty-osc133` | `{session_id, marker, line, exit_code}` | Shell-integration marker (OSC 133). `exit_code` is `null` except on a `D` marker that reported one |
+| `pty-cwd` | `{session_id, cwd}` | Working directory changed (OSC 7) |
+| `plugin-watcher-lines` | `{session_id, lines}` | A batch of assembled PTY lines for the plugin OutputWatchers; each line is `{text, matched_ids}`, where `text` is the cleaned text the match was made on |
 | `plugin-changed` | `{plugin_ids}` | Plugin(s) installed/removed/updated |
 | `upstream-status-changed` | `{name, status}` | MCP upstream server status change |
-| `mcp-toast` | `{title, message, level, sound}` | Toast notification from MCP layer |
+| `mcp-toast` | `{title, message, level, sound, origin_repo_path?, origin_session_id?}` | Toast notification from MCP layer, including the caller repository/cwd and the caller's TUIC session when known. Clients use the session id to focus the terminal that raised the toast |
 | `triage-progress` | `{repo_path, summary, files, phase, done, llm_used, llm_model}` | Diff-triage classification progress (browser parity for the desktop window event) |
 | `lagged` | `{missed}` | Client fell behind; N events were dropped |
 
@@ -240,6 +371,13 @@ Content-Type: application/json
 ```
 
 Single endpoint for all MCP JSON-RPC requests (initialize, tools/list, tools/call). Returns JSON-RPC responses directly in the HTTP response body. Session ID returned via `Mcp-Session-Id` header on initialize.
+
+The native `session` tool includes `action=submit` for a managed-agent command
+and bounded terminal-movement receipt in that same JSON-RPC response. It is
+loopback-only, never queues, and rejects a busy/dialog/partial composer before
+writing. `action=input` and `POST /sessions/:id/write` remain raw write-only
+surfaces; neither returns submission acknowledgement. See
+[MCP & HTTP Server](../backend/mcp-http.md#mcp-tool-session-atomic-submission).
 
 ```
 GET /mcp          → 405 Method Not Allowed
@@ -544,8 +682,12 @@ POST /repo/conflict-assist   { repoPath, prNumber }        -> ConflictAssistResu
 returns line-level findings. `/repo/changelog` summarizes merged PRs (Headless
 slot) into markdown + a structured JSON breakdown; `sinceTag` filters to PRs
 merged at/after that tag's date. `/repo/conflict-assist` creates a worktree on
-the PR head, rebases onto the base, and reports `status` (`clean`/`conflicts`)
-with the conflicted-file list and an agent prompt — it never pushes or merges.
+the PR head and rebases it onto the base. `status` is `clean` only when the base
+was refreshed from origin, `clean_unverified` when a conflict-free result used
+an existing tracking ref or local fallback, and `conflicts` when manual
+resolution is needed. The response includes `base_source`, an optional
+`base_warning`, the conflicted-file list, and an agent prompt; it never pushes
+or merges.
 
 ### Remote URL
 
@@ -660,7 +802,7 @@ POST /repo/delete-branch       { path, name, force }                        -> D
 POST /repo/delete-local-branch { repoPath, branchName, keepWorktree? }      -> { ok: true }
 POST /repo/update-from-base    { path, branchName, strategy? }              -> string
 POST /repo/switch-branch       { repoPath, branchName, force, stash }       -> SwitchBranchResult
-POST /repo/merge-archive-worktree { repoPath, branchName, targetBranch, afterMerge } -> MergeArchiveResult
+POST /repo/merge-archive-worktree { repoPath, branchName, targetBranch, afterMerge, force? } -> MergeArchiveResult
 ```
 
 Powers the Git panel's Branches tab, commit graph, and editor gutter in
@@ -739,6 +881,39 @@ POST /logs
 DELETE /logs
 ```
 
+### Capture Raw PTY Streams
+
+Start capture before reproducing an agent-state detection failure:
+
+```text
+POST /diagnostics/capture
+Content-Type: application/json
+
+{ "enabled": true, "session_id": "<session-id>" }
+```
+
+Omit `session_id` to capture every session. Starting capture creates a fresh set
+of files rather than appending to an earlier run. `GET /diagnostics/capture`
+returns `enabled`, the optional `session_filter`, the capture `dir`, and each
+recorded session's byte count. Stop with:
+
+```text
+POST /diagnostics/capture
+Content-Type: application/json
+
+{ "enabled": false }
+```
+
+Files are written as framed PTY timelines to
+`<app config dir>/captures/<session-id>.tcap`, capped at 512 KiB per session.
+Each record preserves input/output direction, original chunk boundaries and a
+monotonic timestamp. Legacy `.raw` fixtures remain readable as one output record.
+Copy the relevant file into `src-tauri/src/fixtures/agent_prompts/` and replay it
+through the production parser composition. Do not acquire state-detection
+fixtures from `GET /sessions/:id/output`: its ring is bounded, may already have
+overwritten the one-shot signal, and its string response is lossy UTF-8 rather
+than a byte-preserving fixture.
+
 ### Execute JS in WebView (debug)
 
 ```
@@ -767,6 +942,15 @@ PUT /config
 ```
 
 Load/save `AppConfig`.
+
+`PUT /config` **merges** its body onto the live config rather than replacing it, so
+a caller may send only the fields it wants changed. Objects merge key by key;
+arrays and scalars replace wholesale (an empty array still clears a list, `""`
+still blanks a string). A wrongly-typed field is a `400`, never a silent default.
+When the body moves `services.server.{enabled,port,ipv6_enabled}` or
+`services.auth.{username,password_hash}`, the HTTP listener is rebound just as the
+IPC `save_config` does, so the running process cannot keep serving a configuration
+the disk no longer agrees with.
 
 `GET /config` redacts remote-access secrets (`services.auth.password_hash`,
 `services.auth.session_token`, `services.relay.token`, and
@@ -884,7 +1068,21 @@ GET /config/repositories
 PUT /config/repositories
 ```
 
-Load/save the repositories list.
+`GET` loads the repositories document. Every `PUT` must send the same versioned
+`mutationVersion: 1` delta as desktop `save_repositories`: keyed
+`repos`/`groups` entries carry `{id,before,after}`, while `repoOrder`,
+`activeRepoPath`, and `groupOrder` optionally carry `{before,after}`. The
+backend applies the delta to the latest document under the cross-process lock.
+Different repository/group IDs and independent order membership changes
+compose; incompatible changes to the same record return `409 Conflict` and a
+malformed or unversioned delta returns `400 Bad Request`.
+
+A `PUT` that actually moves the document broadcasts a payload-free
+`repositories-changed` SSE event (subscribe with `GET /events?types=repositories-changed`)
+so the other clients re-read the document instead of saving over it from a stale
+baseline. A delta that was already applied changes nothing on disk and is not
+announced. See `docs/backend/config.md` for what a receiving client is allowed to
+adopt.
 
 ### Prompt Library
 
@@ -915,6 +1113,26 @@ Returns MCP server status (enabled, port, connected clients).
 ### MCP Upstream Status
 
 ```
+PUT /mcp/upstreams
+Content-Type: application/json
+
+{
+  "base": { "servers": [...] },
+  "config": { "servers": [...] }
+}
+```
+
+`base` is the configuration previously loaded by the caller and `config` is its
+desired result. The backend derives an ID-keyed three-way delta, then applies it
+to the latest `mcp-upstreams.json` under the cross-process file lock. Removing a
+server from `config` explicitly deletes that ID; removing an optional `auth`
+field explicitly clears it. Fields and servers unchanged from `base` preserve
+concurrent updates, including OAuth/DCR auth written by another process. After
+the atomic write, the live registry hot-reloads the exact locked pre/post
+configurations. Returns `200` with an empty body, `400` for invalid config or
+duplicate IDs, and `500` for persistence or conflicting-add failures.
+
+```
 GET /mcp/upstream-status
 ```
 
@@ -943,6 +1161,7 @@ POST /fs/rename        { "repoPath": "...", "from": "...", "to": "..." }
 POST /fs/copy          { "repoPath": "...", "from": "...", "to": "..." }
 POST /fs/gitignore     { "repoPath": "...", "pattern": "..." }
 GET  /fs/resolve-terminal-path?cwd=/repo&candidate=src/x.ts   -> ResolvedFilePath | null
+POST /fs/resolve-terminal-paths { "cwd": "/repo", "candidates": [...] } -> (ResolvedFilePath | null)[]
 GET  /fs/stat?path=/absolute/path                              -> PathStat (exists/is_dir/size/modified_at)
 POST /fs/warm-index    { "repoPath": "..." }                   -> { "ok": true } (fire-and-forget BM25 build)
 POST /fs/write-external { "path": "/abs", "content": "..." }   -> { "ok": true }
@@ -950,6 +1169,11 @@ POST /fs/copy-abs      { "from": "/abs", "to": "/abs" }        -> { "ok": true }
 POST /fs/move-abs      { "from": "/abs", "to": "/abs" }        -> { "ok": true }
 POST /fs/transfer      { "destDir": "/abs", "paths": [...], "mode": "move"|"copy", "allowRecursive": bool } -> TransferResult
 ```
+
+Content-search results expose `match_start` and `match_end` as zero-based,
+end-exclusive UTF-16 code-unit offsets within `line_text`. They can be passed
+directly to JavaScript `String.slice`, including when text before the match
+contains multibyte characters or non-BMP emoji.
 
 Sandboxed filesystem operations for the file manager panel. `/fs/read-external` reads an arbitrary absolute path (not sandboxed to a repo).
 
@@ -967,7 +1191,7 @@ Powers the Claude Usage dashboard in browser/PWA/remote. `scope` is `"all"`,
 commands; the handlers call non-gated `*_impl` siblings so they also serve the
 remote daemon.
 
-**Absolute-path write boundary.** `/fs/write-external`, `/fs/copy-abs`, and `/fs/move-abs` are gated to **registered repository roots** for the HTTP boundary (a 403 otherwise), mirroring `/fs/read-external`. `/fs/transfer` gates only its `destDir` — sources are commonly external (a file dragged in from the desktop). `/fs/stat` and `/fs/resolve-terminal-path` return only metadata (no content) so they are not repo-gated; both also refuse macOS TCC-protected directories. `/fs/resolve-terminal-path` returns JSON `null` on a miss (`Option<ResolvedFilePath>`).
+**Absolute-path write boundary.** `/fs/write-external`, `/fs/copy-abs`, and `/fs/move-abs` are gated to **registered repository roots** for the HTTP boundary (a 403 otherwise), mirroring `/fs/read-external`. The gate rejects traversal syntax (`..`), NUL bytes, and relative paths *before* the containment check: containment is `Path::starts_with`, which is purely lexical, so `/repo/../../etc/passwd` is "inside" `/repo` by components while the OS resolves it far outside. Paths are deliberately **not** canonicalized — a symlink inside a registered repo that points outside it is an accepted design decision in this project. `/fs/transfer` gates only its `destDir` — sources are commonly external (a file dragged in from the desktop). `/fs/stat` and `/fs/resolve-terminal-path` return only metadata (no content) so they are not repo-gated; both also refuse macOS TCC-protected directories. `/fs/resolve-terminal-path` returns JSON `null` on a miss (`Option<ResolvedFilePath>`). `/fs/resolve-terminal-paths` is its batched sibling and is a POST for one reason: a whole terminal screen's candidates do not fit a query string, and being able to send many of them is the point. It answers **positionally** — the array it returns has one entry per input candidate, in order, `null` where that candidate resolved to nothing — so a caller may index the response by the index of the request.
 
 ## Monitoring Endpoints
 
@@ -1091,9 +1315,14 @@ Chat registry live stream (event-bridge plan Step 4). WebSocket upgrade: the fir
 frame is a `ChatEvent::Snapshot` (`{"kind":"snapshot",...}`), then live `ChatEvent`
 frames (`chunk`/`error`/`cleared`/`snapshot`) as they are fanned out. Closing the
 socket unsubscribes (no explicit `chat_unsubscribe` call). Browser parity for the
-desktop `chat_subscribe` Tauri Channel — frames are byte-identical so the same
-`applyRegistryEvent` handler consumes both. Dedicated per-chat WS, NOT the global
+desktop `chat_subscribe` Tauri Channel. Dedicated per-chat WS, NOT the global
 `/events` bus (high-frequency token stream).
+
+**No producer, and no client.** Nothing in the backend calls `fan_out` or any
+`ConversationState` setter, so the only frame this stream ever sends is the empty
+default snapshot. The frontend consumer was removed in story `600-d664`: applying
+that snapshot ran `setMessages([])` and wiped the history `loadConversation` had
+just read from disk. The route stays, unused, until something produces the events.
 
 ### AI Agent Loop control + knowledge + scheduler (story 068 RPC slice)
 
@@ -1233,6 +1462,7 @@ POST /api/plugins/:plugin_id/fs/write    { path, content }        -> { ok }     
 POST /api/plugins/:plugin_id/fs/rename   { from, to }             -> { ok }        (plugin_rename_path)
 POST /api/plugins/:plugin_id/build-artifacts/scan   { repoPaths, forceRefresh? } -> BuildArtifact[]
 POST /api/plugins/:plugin_id/build-artifacts/delete { path, repoPaths } -> { ok }
+POST /api/plugins/:plugin_id/build-artifacts/trim   { path, repoPaths } -> { ok }   (intermediates only; keeps executables)
 POST /api/plugins/:plugin_id/exec        { binary, args, cwd? }   -> string        (plugin_exec_cli)
 POST /api/plugins/:plugin_id/http        { url, method?, headers?, body?, allowedUrls } -> HttpResponse
 GET  /api/plugins/:plugin_id/pty/output?sessionId=<id>&maxLines=  -> string        (plugin_read_session_output)
@@ -1250,6 +1480,45 @@ Intentionally **not** mapped (native/host-only, stay Tauri-only): `plugin_watch_
 (OS keychain), and user-plugin install/uninstall (`install_plugin_from_*`,
 `uninstall_plugin` — local-FS install + AppHandle emit). `delete_plugin_data` is unmapped
 for lack of a frontend caller (YAGNI).
+
+### Plugin Output Watchers
+
+```
+POST /api/plugins/output-watchers
+Content-Type: application/json
+
+{
+  "client_id": "b7d1…",
+  "seq": 3,
+  "watchers": [{ "id": "w0", "pattern": "model is at capacity", "flags": "i" }]
+}
+```
+
+Replaces the compiled OutputWatcher set the PTY reader thread matches lines against
+(`set_plugin_output_watchers`). `pattern` and `flags` are the source and flags of a JS
+`RegExp`; `i`, `m` and `s` are applied. The route is not `:plugin_id`-scoped: one
+frontend owns one set, holding the watchers of all its plugins, and pushes all of it on
+every add or remove.
+
+`client_id` identifies the frontend. Sets are per client (at most 8; the least recently
+synced is evicted, and an empty `watchers` array leaves a parked record so a delayed
+older sync cannot resurrect the disposed set), so a desktop window and a browser tab
+cannot overwrite each other. A client is expected to re-post its set every 30 s while it
+holds any watcher: nothing signals a disconnect, so that heartbeat is both what keeps it
+from being evicted as dead and how it recovers if it was. It must not contain `/`, which qualifies the
+watcher ids reported back. `seq` is a monotonic per-client counter that orders the
+mutations: a sync whose `seq` is not above the stored one is stale and changes nothing.
+
+Returns `{ "applied": bool, "rejected": [id] }`. `rejected` lists the ids the Rust
+`regex` crate cannot compile (lookaround, backreferences, a negated class escape inside
+a character class). A rejected id is not an error — the frontend keeps matching that
+watcher itself, and Rust ships every assembled line for as long as one is registered.
+When `applied` is `false` the sync was stale: the client must ignore `rejected`, because
+it describes a set the backend does not hold.
+
+Assembled lines are pushed back as the `watcher-lines` WebSocket frame (on
+`/sessions/:id/stream` in both `?format=grid` and raw mode; `?format=log|text` does not
+carry it) and the `plugin-watcher-lines` SSE event.
 
 ## Worktree Endpoints
 
@@ -1306,11 +1575,13 @@ Returns a unique worktree name.
 POST /worktrees/finalize
 Content-Type: application/json
 
-{ "repoPath": "/path/to/repo", "branchName": "feature-x", "action": "archive" }
+{ "repoPath": "/path/to/repo", "branchName": "feature-x", "action": "archive", "force": false }
 ```
 
 Finalizes a merged worktree branch. `action` must be `"archive"` (moves to archive directory) or `"delete"` (removes worktree and branch).
 For `action: "delete"`, the response includes `branch_delete_warning` when the worktree was removed but safe branch deletion failed, for example because the branch has unmerged commits.
+
+`force` (optional, default `false`) skips the dirty-worktree gate. Both actions end in `git worktree remove --force`, so a worktree that is **not known to be clean** comes back as `{ "action": "needs_confirmation", "merged": true }` without touching anything — ask the user, then re-send with `"force": true`. A dirty check that fails to run blocks the same way (`worktree_dirty` stays `false`, because git never reported "dirty"). This route shares `finalize_merged_worktree_impl` with the Tauri command, so both transports pass the identical gate.
 
 ### Remove Worktree
 

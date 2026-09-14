@@ -47,6 +47,7 @@ describe("useDetachedPanelBridge", () => {
 	beforeEach(() => {
 		for (const key of Object.keys(panelRegistry)) delete panelRegistry[key];
 		for (const key of Object.keys(uiStore.state.detachedPanels)) uiStore.clearDetached(key);
+		uiStore._testCancelPendingSave();
 		handlers = new Map();
 		unlisteners.length = 0;
 		mockInvoke.mockReset().mockResolvedValue(undefined);
@@ -66,9 +67,13 @@ describe("useDetachedPanelBridge", () => {
 		dispose = undefined;
 	});
 
+	// Both paths mean the same thing to a panel: the detached copy is gone and
+	// this window owns it again. A panel that caches state the detached copy
+	// was mutating has to be told on BOTH, not just on the explicit reattach.
 	it("routes close and reattach events through the registered adapter", async () => {
 		const toggle = vi.fn();
-		registerPanel(makeAdapter({ toggle }));
+		const onReattach = vi.fn();
+		registerPanel(makeAdapter({ toggle, onReattach }));
 		uiStore.setDetached("test-panel", "panel-test-panel");
 		await startBridge();
 
@@ -76,11 +81,46 @@ describe("useDetachedPanelBridge", () => {
 
 		expect(uiStore.isDetached("test-panel")).toBe(false);
 		expect(toggle).toHaveBeenCalledOnce();
+		expect(onReattach).toHaveBeenCalledOnce();
 
 		uiStore.setDetached("test-panel", "panel-test-panel");
 		handlers.get("panel-action")?.({ payload: { panelId: "test-panel", action: "reattach", data: {} } });
 		expect(uiStore.isDetached("test-panel")).toBe(false);
 		expect(toggle).toHaveBeenCalledTimes(2);
+		expect(onReattach).toHaveBeenCalledTimes(2);
+	});
+
+	// `reattachPanel` emits panel-action AND then closes the window, and closing
+	// it emits panel-window-closed — so the real reattach click delivers BOTH
+	// events for one homecoming. Handling each on its own toggled the panel open
+	// and straight back closed, and ran the adapter's disk re-read twice.
+	it("comes home once when reattach is followed by the window closing", async () => {
+		const toggle = vi.fn();
+		const onReattach = vi.fn();
+		registerPanel(makeAdapter({ toggle, onReattach }));
+		uiStore.setDetached("test-panel", "panel-test-panel");
+		await startBridge();
+
+		handlers.get("panel-action")?.({ payload: { panelId: "test-panel", action: "reattach", data: {} } });
+		handlers.get("panel-window-closed")?.({ payload: "test-panel" });
+
+		expect(uiStore.isDetached("test-panel")).toBe(false);
+		expect(toggle).toHaveBeenCalledOnce();
+		expect(onReattach).toHaveBeenCalledOnce();
+	});
+
+	// A window closed while the panel is not marked detached is not a homecoming
+	// — nothing to clear, nothing to toggle back on.
+	it("ignores a close for a panel that is not detached", async () => {
+		const toggle = vi.fn();
+		const onReattach = vi.fn();
+		registerPanel(makeAdapter({ toggle, onReattach }));
+		await startBridge();
+
+		handlers.get("panel-window-closed")?.({ payload: "test-panel" });
+
+		expect(toggle).not.toHaveBeenCalled();
+		expect(onReattach).not.toHaveBeenCalled();
 	});
 
 	it("routes non-lifecycle actions to the adapter", async () => {
@@ -122,6 +162,22 @@ describe("useDetachedPanelBridge", () => {
 			height: 400,
 		});
 		expect(uiStore.isDetached("missing-panel")).toBe(false);
+	});
+
+	// Restoring with a hardcoded `{}` reopened the AI Chat window with no chat
+	// id, so it came back blank after every restart — the exact symptom the
+	// param exists to prevent.
+	it("restores a panel with the params it would be detached with", async () => {
+		registerPanel(makeAdapter({ detachParams: () => ({ chatId: "conv-7" }) }));
+		uiStore.setDetached("test-panel", "panel-test-panel");
+		await startBridge();
+
+		restoreDetachedPanels?.();
+
+		expect(mockInvoke).toHaveBeenCalledWith(
+			"open_panel_window",
+			expect.objectContaining({ panelId: "test-panel", params: { chatId: "conv-7" } }),
+		);
 	});
 
 	it("cleans up both native listeners on disposal", async () => {
