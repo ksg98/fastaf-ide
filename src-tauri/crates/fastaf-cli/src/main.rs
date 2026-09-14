@@ -1,4 +1,4 @@
-//! `tuic` — CLI companion for FastAF.
+//! `fastaf` — CLI companion for FastAF.
 //!
 //! Editor opener (like `code`/`zed`), session multiplexer (like `tmux`),
 //! and agent orchestrator. Communicates with a running FastAF
@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "tuic",
+    name = "fastaf",
     version,
     about = "FastAF CLI — editor, multiplexer, orchestrator"
 )]
@@ -65,7 +65,7 @@ enum Command {
     },
     /// Create a session and run a command in it (shells only)
     Run {
-        /// Command to run, e.g. `tuic run pnpm dev`
+        /// Command to run, e.g. `fastaf run pnpm dev`
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
         /// Session name
@@ -116,10 +116,10 @@ enum Command {
     },
     /// Show FastAF status
     Status,
-    /// Install the tuic CLI to system PATH
+    /// Install the fastaf CLI to system PATH
     InstallCli {
-        /// Target path (default: /usr/local/bin/tuic on Unix,
-        /// %LOCALAPPDATA%\Microsoft\WindowsApps\tuic.exe on Windows)
+        /// Target path (default: /usr/local/bin/fastaf on Unix,
+        /// %LOCALAPPDATA%\Microsoft\WindowsApps\fastaf.exe on Windows)
         #[arg(long)]
         path: Option<String>,
     },
@@ -157,7 +157,7 @@ enum AgentAction {
     Ls,
     /// Send a message to a registered peer's inbox (peer registry, not the PTY).
     ///
-    /// To type a prompt into an agent's terminal instead, use `tuic agent type`.
+    /// To type a prompt into an agent's terminal instead, use `fastaf agent type`.
     Send {
         /// Recipient peer's tuic_session UUID
         target: String,
@@ -166,7 +166,7 @@ enum AgentAction {
     },
     /// Type a prompt into an agent's PTY and submit it (no peer routing).
     ///
-    /// Unlike `tuic send`, this uses the agent-safe framing: the text and the
+    /// Unlike `fastaf send`, this uses the agent-safe framing: the text and the
     /// Enter go in separate PTY writes, because a raw-mode Ink TUI treats a
     /// combined `text\r` as a prefill and leaves it unsent.
     Type {
@@ -211,7 +211,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("tuic: {e}");
+        eprintln!("fastaf: {e}");
         std::process::exit(1);
     }
 }
@@ -277,7 +277,7 @@ fn cmd_open(path: Option<String>, _wait: bool, goto: Option<String>) -> Result<(
         // A directory is a REPO, not a terminal: hand it to the app, which adds it
         // to the sidebar if it is new (asking first) and activates it. Creating a
         // PTY here instead — as this used to — left the sidebar untouched, which is
-        // never what `tuic .` means. Use `tuic new` when you want a shell.
+        // never what `fastaf .` means. Use `fastaf new` when you want a shell.
         open_deep_link(&format!("tuic://open-repo?path={}", urlencod(actual_path)))
             .map_err(|e| e.to_string())?;
         eprintln!("Opening {actual_path}");
@@ -436,8 +436,8 @@ fn cmd_new(name: Option<&str>, repo: Option<&str>) -> Result<String, String> {
         let name_body = serde_json::json!({ "name": n });
         match ipc::put(&format!("/sessions/{id}/name"), &name_body.to_string()) {
             Ok(r) if r.is_success() => {}
-            Ok(r) => eprintln!("tuic: warning: could not set session name: {}", r.body),
-            Err(e) => eprintln!("tuic: warning: could not set session name: {e}"),
+            Ok(r) => eprintln!("fastaf: warning: could not set session name: {}", r.body),
+            Err(e) => eprintln!("fastaf: warning: could not set session name: {e}"),
         }
     }
 
@@ -607,7 +607,7 @@ fn cmd_agent(action: AgentAction) -> Result<(), String> {
             // resolves PTYs, and a registered external orchestrator has no PTY,
             // so routing through it answered "Session not found" while the MCP
             // tool delivered the same UUID fine. PTY text injection stays
-            // available, and explicit, as `tuic send` / `tuic send-keys`.
+            // available, and explicit, as `fastaf send` / `fastaf send-keys`.
             let report = mcp::agent_send(&target, &message)?;
             println!("{}", mcp::delivery_line(&target, &report));
         }
@@ -692,11 +692,11 @@ fn cmd_status() -> Result<(), String> {
 fn cmd_install_cli(target: Option<&str>) -> Result<(), String> {
     let default_path = if cfg!(target_os = "windows") {
         // %LOCALAPPDATA%\Microsoft\WindowsApps is user-writable and already in
-        // PATH on modern Windows — matches the GUI installer (tuic_cli.rs).
+        // PATH on modern Windows — matches the GUI installer (fastaf_cli.rs).
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        format!("{local_app_data}\\Microsoft\\WindowsApps\\tuic.exe")
+        format!("{local_app_data}\\Microsoft\\WindowsApps\\fastaf.exe")
     } else {
-        "/usr/local/bin/tuic".to_string()
+        "/usr/local/bin/fastaf".to_string()
     };
 
     let target_path = target.unwrap_or(&default_path);
@@ -778,7 +778,7 @@ fn cmd_alias(remove: bool) -> Result<(), String> {
         std::env::current_exe().map_err(|e| format!("Cannot find own executable: {e}"))?;
 
     let tmux_path = if cfg!(target_os = "windows") {
-        // Same user-writable, in-PATH location as the tuic install (see cmd_install_cli).
+        // Same user-writable, in-PATH location as the fastaf install (see cmd_install_cli).
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
         format!("{local_app_data}\\Microsoft\\WindowsApps\\tmux.exe")
     } else {
@@ -793,14 +793,18 @@ fn cmd_alias(remove: bool) -> Result<(), String> {
                 if target == self_exe
                     || target
                         .file_name()
-                        .map(|f| f.to_string_lossy().contains("tuic"))
+                        .map(|f| {
+                            let name = f.to_string_lossy();
+                            // `tuic`: an alias created before the CLI was renamed.
+                            name.contains("fastaf") || name.contains("tuic")
+                        })
                         .unwrap_or(false)
                 {
                     remove_with_elevation(&tmux_path)?;
                     println!("Removed tmux alias at {tmux_path}");
                 } else {
                     return Err(format!(
-                        "{tmux_path} exists but points to {}, not tuic — refusing to remove",
+                        "{tmux_path} exists but points to {}, not fastaf — refusing to remove",
                         target.display()
                     ));
                 }
@@ -834,13 +838,13 @@ fn cmd_alias(remove: bool) -> Result<(), String> {
         }
 
         eprintln!("Warning: real tmux is installed. The alias will shadow it.");
-        eprintln!("Use `tuic alias --remove` to restore the original tmux.");
+        eprintln!("Use `fastaf alias --remove` to restore the original tmux.");
     }
 
     #[cfg(unix)]
     {
         if std::os::unix::fs::symlink(&self_exe, &tmux_path).is_ok() {
-            println!("Created tmux -> tuic alias at {tmux_path}");
+            println!("Created tmux -> fastaf alias at {tmux_path}");
             return Ok(());
         }
 
@@ -875,7 +879,7 @@ fn cmd_alias(remove: bool) -> Result<(), String> {
             }
         }
 
-        println!("Created tmux -> tuic alias at {tmux_path}");
+        println!("Created tmux -> fastaf alias at {tmux_path}");
     }
 
     #[cfg(windows)]
@@ -998,7 +1002,7 @@ fn tmux_compat() {
             dispatch(Command::Status)
         }
         _ => {
-            eprintln!("tmux (tuic compat): unknown command '{subcmd}'");
+            eprintln!("tmux (fastaf compat): unknown command '{subcmd}'");
             eprintln!("Supported: new-session, list-sessions, kill-session, kill-server,");
             eprintln!("           send-keys, capture-pane, resize-pane, attach-session,");
             eprintln!("           has-session, display-message");
@@ -1018,7 +1022,7 @@ fn tmux_compat() {
 
 fn resolve_path(path: &str) -> String {
     let absolute = absolute_path(path);
-    // `tuic .` must not register the repo as `/repo/.` — canonicalize when the
+    // `fastaf .` must not register the repo as `/repo/.` — canonicalize when the
     // path exists. Non-existent paths (a file being created, `file.rs:42` before
     // the line suffix is split off) keep the plain absolute form.
     std::fs::canonicalize(&absolute)
@@ -1091,8 +1095,8 @@ fn resolve_session_id(target: &str) -> Result<String, String> {
         }
     }
 
-    // Then ID prefix (what `tuic ls` prints) or name prefix, case-insensitive —
-    // typing `tuic send buil…` should not require the full name.
+    // Then ID prefix (what `fastaf ls` prints) or name prefix, case-insensitive —
+    // typing `fastaf send buil…` should not require the full name.
     let needle = target.to_lowercase();
     let matches: Vec<_> = arr
         .iter()
@@ -1124,7 +1128,7 @@ fn resolve_session_id(target: &str) -> Result<String, String> {
 /// Translate one argument if it is EXACTLY a key name, else `None`.
 ///
 /// Whole-token matching is the point: the old substring rewrite turned
-/// `tuic send x "Enter the room"` into a carriage return followed by
+/// `fastaf send x "Enter the room"` into a carriage return followed by
 /// "the room", and any text containing "Tab", "Space" or "C-c" was
 /// corrupted the same way. tmux resolves key names per argument too.
 fn key_sequence(token: &str) -> Option<String> {

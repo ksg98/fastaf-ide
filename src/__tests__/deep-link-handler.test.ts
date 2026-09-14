@@ -70,7 +70,7 @@ describe("deep link handler — OAuth callback", () => {
 	});
 });
 
-describe("deep link handler — open-repo (`tuic <dir>`)", () => {
+describe("deep link handler — open-repo (`fastaf <dir>`)", () => {
 	beforeEach(() => {
 		callbacks.confirm.mockReset().mockResolvedValue(true);
 		callbacks.openRepoPath.mockReset().mockResolvedValue(undefined);
@@ -87,7 +87,7 @@ describe("deep link handler — open-repo (`tuic <dir>`)", () => {
 		expect(callbacks.openRepoPath).not.toHaveBeenCalled();
 	});
 
-	it("adds an unknown repo after confirmation — this is what `tuic .` does in a new project", async () => {
+	it("adds an unknown repo after confirmation — this is what `fastaf .` does in a new project", async () => {
 		await handleDeepLink("tuic://open-repo?path=/src/new-project", callbacks);
 
 		expect(callbacks.confirm).toHaveBeenCalledTimes(1);

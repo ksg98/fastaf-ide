@@ -13,7 +13,7 @@ export interface DeepLinkCallbacks {
 	/** Show an in-app error notification — replaces native browser alert() */
 	onInstallError: (message: string) => void;
 	/** Add a not-yet-known repo by path and make it active (same flow as the
-	 *  sidebar's "Add Repository"). Used by `tuic <dir>`. */
+	 *  sidebar's "Add Repository"). Used by `fastaf <dir>`. */
 	openRepoPath: (path: string) => Promise<void>;
 }
 
@@ -103,7 +103,7 @@ export async function handleDeepLink(urlString: string, callbacks: DeepLinkCallb
 				appLogger.warn("app", "Deep link open-repo: missing path parameter");
 				return;
 			}
-			// Known repo → activate, no questions asked (this is `tuic .` in a repo
+			// Known repo → activate, no questions asked (this is `fastaf .` in a repo
 			// you already work in). Unknown repo → confirm first: a deep link can be
 			// opened by any local page, and adding a repo starts a watcher and an
 			// index over that directory.

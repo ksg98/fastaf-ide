@@ -2,7 +2,7 @@
 members = [
     ".",
     "crates/tuic-bridge",
-    "crates/tuic-cli",
+    "crates/fastaf-cli",
     "patches/alacritty_terminal",
     "patches/vte",
 ]

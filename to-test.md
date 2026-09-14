@@ -609,14 +609,14 @@ tests replaying a real `gh run watch` PTY capture
 
 - [ ] [VISUAL] Open `vim`/`htop`/`lazygit`: wheel still goes to the app; `Shift+wheel` scrolls TUIC history; quitting restores the shell scrollback unchanged. _(only the mouse-reporting forwarding is left unverified — the enter/exit half is covered above.)_
 
-## tuic CLI: repo opening + command ergonomics (2026-08-03)
+## fastaf CLI: repo opening + command ergonomics (2026-08-03)
 
-The `tuic` sidecar was rebuilt (`node src-tauri/build-sidecar.mjs`), so the CLI half is live
+The `fastaf` sidecar was rebuilt (`node src-tauri/build-sidecar.mjs`), so the CLI half is live
 immediately. The app half — the `open-repo` deep link adding an unknown folder — is frontend
 code and needs the WebView to have reloaded.
 
-- [ ] [HUMAN] `tuic <dir>` on a folder NOT in the sidebar: one confirmation appears, then the repo is added and activated exactly like the "Add Repository" button (branch selected, terminal opened, watcher started).
-- [ ] [HUMAN] `tuic run pnpm dev` in a repo: a session appears and the command is running in it.
+- [ ] [HUMAN] `fastaf <dir>` on a folder NOT in the sidebar: one confirmation appears, then the repo is added and activated exactly like the "Add Repository" button (branch selected, terminal opened, watcher started).
+- [ ] [HUMAN] `fastaf run pnpm dev` in a repo: a session appears and the command is running in it.
 
 ## Smart Prompts settings tab + HelpPanel system-menu note (2026-08-05, frontend only — Vite HMR is enough)
 

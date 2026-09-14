@@ -201,7 +201,7 @@ bump:
 	sed -i '' '/^\[workspace.package\]/,/^\[/ s/^version = ".*"/version = "$(V)"/' src-tauri/Cargo.toml; \
 	sed -i '' 's/"version": "[^"]*"/"version": "$(V)"/' src-tauri/tauri.conf.json; \
 	sed -i '' 's/^  "version": "[^"]*"/  "version": "$(V)"/' package.json; \
-	echo "  src-tauri/Cargo.toml [workspace.package] → $(V) (tuicommander, tuic-bridge, tuic-cli inherit)"; \
+	echo "  src-tauri/Cargo.toml [workspace.package] → $(V) (tuicommander, tuic-bridge, fastaf-cli inherit)"; \
 	echo "  src-tauri/tauri.conf.json → $(V)"; \
 	echo "  package.json          → $(V)"; \
 	(cd src-tauri && (cargo metadata --offline --format-version 1 >/dev/null 2>&1 || cargo metadata --format-version 1 >/dev/null)); \

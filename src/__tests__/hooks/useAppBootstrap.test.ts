@@ -140,7 +140,7 @@ describe("runAppBootstrap", () => {
 		await runAppBootstrap(makeOptions({ confirm }));
 		await flushPromises();
 
-		expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: "Install tuic CLI?", kind: "info" }));
+		expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: "Install fastaf CLI?", kind: "info" }));
 		expect(mockInvoke).toHaveBeenCalledWith("install_cli");
 		expect(mockInvoke).toHaveBeenCalledWith("dismiss_cli_prompt");
 	});

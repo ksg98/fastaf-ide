@@ -143,13 +143,13 @@ export const GeneralTab: Component = () => {
 
 			<Show when={isTauri() && cliStatus()}>
 				<h3>
-					{t("general.heading.cli", "TUIC CLI")}
+					{t("general.heading.cli", "fastaf CLI")}
 					<span class={s.infoBadge}>
 						?
 						<span class={s.infoBadgeTip}>
 							{t(
 								"general.hint.cliInfo",
-								"The TUIC CLI lets you control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions (create, list, send input, read output), and query repository status. Useful for scripting automation.",
+								"The fastaf CLI lets you control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions (create, list, send input, read output), and query repository status. Useful for scripting automation.",
 							)}
 						</span>
 					</span>
@@ -163,7 +163,7 @@ export const GeneralTab: Component = () => {
 								<p class={s.hint}>
 									{t(
 										"general.hint.cliNotInstalled",
-										"Install the TUIC CLI to control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions, and query repository status. Useful for scripting automation.",
+										"Install the fastaf CLI to control FastAF from any terminal or script. Open files and URLs as tabs, manage PTY sessions, and query repository status. Useful for scripting automation.",
 									)}
 								</p>
 								<button
@@ -174,7 +174,7 @@ export const GeneralTab: Component = () => {
 								>
 									{cliInstalling()
 										? t("general.btn.installing", "Installing...")
-										: t("general.btn.installCli", "Install TUIC CLI")}
+										: t("general.btn.installCli", "Install fastaf CLI")}
 								</button>
 							</>
 						}

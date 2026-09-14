@@ -1,12 +1,12 @@
 [package]
-name = "tuic-cli"
+name = "fastaf-cli"
 version.workspace = true
 description = "CLI companion for FastAF — editor opener, session multiplexer, tmux replacement"
 authors = ["Stefano Straus <github.com/sstraus>"]
 edition = "2024"
 
 [[bin]]
-name = "tuic"
+name = "fastaf"
 path = "src/main.rs"
 
 [dependencies]

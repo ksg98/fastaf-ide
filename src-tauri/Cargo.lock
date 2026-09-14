@@ -2290,6 +2290,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastaf-cli"
+version = "1.8.1"
+dependencies = [
+ "clap",
+ "dirs",
+ "serde_json",
+]
+
+[[package]]
 name = "faster-hex"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9077,15 +9086,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
-]
-
-[[package]]
-name = "tuic-cli"
-version = "1.8.1"
-dependencies = [
- "clap",
- "dirs",
- "serde_json",
 ]
 
 [[package]]

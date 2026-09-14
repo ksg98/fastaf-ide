@@ -281,7 +281,7 @@ pub async fn install_mdkb(state: State<'_, Arc<AppState>>) -> Result<String, Str
         let staged = tmp_dir.join(asset);
         std::fs::write(&staged, &bytes).map_err(|e| format!("Failed to stage binary: {e}"))?;
 
-        crate::tuic_cli::copy_with_elevation(
+        crate::fastaf_cli::copy_with_elevation(
             &staged.to_string_lossy(),
             &install_path.to_string_lossy(),
         )?;
@@ -344,7 +344,7 @@ pub async fn uninstall_mdkb(state: State<'_, Arc<AppState>>) -> Result<(), Strin
     }
 
     if std::fs::remove_file(&actual_path).is_err() {
-        crate::tuic_cli::remove_with_elevation(&path_str)?;
+        crate::fastaf_cli::remove_with_elevation(&path_str)?;
     }
 
     tracing::info!(source = "mdkb", path = %actual_path.display(), "mdkb uninstalled");
