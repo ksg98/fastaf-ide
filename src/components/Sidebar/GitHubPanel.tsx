@@ -10,6 +10,7 @@ import { mdTabsStore } from "../../stores/mdTabs";
 import { repoSettingsStore } from "../../stores/repoSettings";
 import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
+import { uiStore } from "../../stores/ui";
 import type { BranchPrStatus, GitHubIssue, IssueFilterMode } from "../../types";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
@@ -36,6 +37,17 @@ const FILTER_OPTIONS: { value: IssueFilterMode; label: string }[] = [
 	{ value: "all", label: "All open" },
 ];
 
+/** Sections the panel can navigate, in visual order */
+type SectionId = "my-prs" | "prs" | "issues";
+
+/** A keyboard-navigable row: PR rows are keyed by branch, issues by number */
+interface NavRow {
+	section: SectionId;
+	key: string;
+}
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
 /** Unified GitHub panel showing remote-only PRs and Issues */
 export const GitHubPanel: Component<{
 	prs: BranchPrStatus[];
@@ -49,11 +61,16 @@ export const GitHubPanel: Component<{
 	onAutofix?: (issueNumber: number, prompt: string) => void;
 	onCleanupActive?: (active: boolean) => void;
 }> = (props) => {
-	const [issuesCollapsed, setIssuesCollapsed] = createSignal(false);
 	const [showChangelog, setShowChangelog] = createSignal(false);
 
 	// Issue accordion state
 	const [expandedIssue, setExpandedIssue] = createSignal<number | null>(null);
+	// PR accordion state, lifted out of PrSection: Enter on a keyboard-navigated
+	// row has to reach whichever section that row belongs to.
+	const [expandedPr, setExpandedPr] = createSignal<string | null>(null);
+	// Dismissed PRs per section — lifted for the same reason, so the navigable
+	// row list cannot include a PR the section has hidden.
+	const [dismissedPrs, setDismissedPrs] = createSignal<Record<string, number[]>>({});
 	const [closingIssue, setClosingIssue] = createSignal<number | null>(null);
 	const [issueActionError, setIssueActionError] = createSignal<{ num: number; msg: string } | null>(null);
 	// Auto-fix prompt dialog target (issue number), and in-flight PR create.
@@ -151,7 +168,9 @@ export const GitHubPanel: Component<{
 		const prHideCiFailing = effective?.prHideCiFailing ?? settingsStore.state.prHideCiFailing;
 		return props.prs.filter((pr) => {
 			if (prHideDrafts && pr.is_draft) return false;
-			if (prHideConflicting && pr.mergeable === "CONFLICTING") return false;
+			// Backend verdict, not the raw field: a PR being recomputed must not vanish
+			// from the list on a stale CONFLICTING (#8537).
+			if (prHideConflicting && pr.conflict_state === "conflicting") return false;
 			if (prHideCiFailing && (pr.checks?.failed ?? 0) > 0) return false;
 			return true;
 		});
@@ -160,14 +179,114 @@ export const GitHubPanel: Component<{
 	const issues = createMemo(() => githubStore.getRepoIssues(props.repoPath));
 	const issuesLoading = () => githubStore.state.issuesLoading;
 	const circuitOpen = () => githubStore.state.circuitBreakerOpen;
+	const issuesEnabled = () => settingsStore.state.issueFilter !== "disabled";
+
+	// ── Section collapse (persisted in ui prefs, keyed by section id) ──────────
+	// An untouched section falls back to its own default: PR sections start
+	// collapsed when they are empty, Issues starts open.
+	const sectionCollapsed = (id: SectionId, fallback: boolean) => uiStore.getGithubSectionCollapsed(id) ?? fallback;
+	const toggleSection = (id: SectionId, fallback: boolean) =>
+		uiStore.setGithubSectionCollapsed(id, !sectionCollapsed(id, fallback));
+
+	const dismissedIn = (id: SectionId) => dismissedPrs()[id] ?? [];
+	const visiblePrsFor = (id: SectionId, prs: BranchPrStatus[]) => {
+		const hidden = dismissedIn(id);
+		return hidden.length === 0 ? prs : prs.filter((pr) => !hidden.includes(pr.number));
+	};
+
+	const handleDismissPr = (id: SectionId, prNumber: number) =>
+		setDismissedPrs((prev) => ({ ...prev, [id]: [...(prev[id] ?? []), prNumber] }));
+	const handleShowDismissedPrs = (id: SectionId) => setDismissedPrs((prev) => ({ ...prev, [id]: [] }));
+
+	const visibleMyPrs = createMemo(() => visiblePrsFor("my-prs", myPrs()));
+	const visiblePrs = createMemo(() => visiblePrsFor("prs", filteredPrs()));
+
+	// ── Keyboard navigation ───────────────────────────────────────────────────
+	// Rows of every expanded section, in visual order. Arrow keys walk this list
+	// while DOM focus stays on the panel, so no unrelated control steals it.
+	const navRows = createMemo<NavRow[]>(() => {
+		const rows: NavRow[] = [];
+		if (viewerLogin() && !sectionCollapsed("my-prs", myPrs().length === 0)) {
+			for (const pr of visibleMyPrs()) rows.push({ section: "my-prs", key: pr.branch });
+		}
+		if (!sectionCollapsed("prs", filteredPrs().length === 0)) {
+			for (const pr of visiblePrs()) rows.push({ section: "prs", key: pr.branch });
+		}
+		if (issuesEnabled() && !sectionCollapsed("issues", false)) {
+			for (const issue of issues()) rows.push({ section: "issues", key: String(issue.number) });
+		}
+		return rows;
+	});
+
+	const [activeRow, setActiveRow] = createSignal<NavRow | null>(null);
+
+	const activeKeyFor = (section: SectionId) => {
+		const row = activeRow();
+		return row && row.section === section ? row.key : null;
+	};
+
+	/** Index of the active row in the current list, or -1 when it no longer exists. */
+	const activeIndex = () => {
+		const row = activeRow();
+		if (!row) return -1;
+		return navRows().findIndex((r) => r.section === row.section && r.key === row.key);
+	};
+
+	const moveActive = (delta: number) => {
+		const rows = navRows();
+		if (rows.length === 0) return;
+		const current = activeIndex();
+		// Nothing active (or the row vanished): Down starts at the top, Up at the bottom.
+		const next = current === -1 ? (delta > 0 ? 0 : rows.length - 1) : clamp(current + delta, 0, rows.length - 1);
+		setActiveRow(rows[next]);
+	};
+
+	const toggleExpandedIssue = (issueNumber: number) =>
+		setExpandedIssue((prev) => (prev === issueNumber ? null : issueNumber));
+	const toggleExpandedPr = (branch: string) => setExpandedPr((prev) => (prev === branch ? null : branch));
+
+	const activateRow = () => {
+		const row = activeRow();
+		if (!row) return;
+		if (row.section === "issues") {
+			toggleExpandedIssue(Number(row.key));
+		} else {
+			toggleExpandedPr(row.key);
+		}
+	};
+
+	let panelRef: HTMLDivElement | undefined;
+
+	// Keep the keyboard row in view without moving DOM focus.
+	createEffect(() => {
+		if (!activeRow()) return;
+		panelRef?.querySelector("[data-gh-active]")?.scrollIntoView({ block: "nearest" });
+	});
 
 	const handleKeyDown = (e: KeyboardEvent) => {
+		// Escape keeps its existing behaviour: collapse an expanded issue first,
+		// otherwise close the panel.
 		if (e.key === "Escape") {
 			if (expandedIssue()) {
 				setExpandedIssue(null);
 			} else {
 				props.onClose();
 			}
+			return;
+		}
+		if (e.key === "ArrowDown") {
+			e.preventDefault();
+			moveActive(1);
+			return;
+		}
+		if (e.key === "ArrowUp") {
+			e.preventDefault();
+			moveActive(-1);
+			return;
+		}
+		if (e.key === "Enter" && activeRow()) {
+			e.preventDefault();
+			activateRow();
 		}
 	};
 
@@ -250,7 +369,15 @@ export const GitHubPanel: Component<{
 			</Show>
 			<Show when={!cleanupCtx()}>
 				<div class={s.ghPanelOverlay} onClick={props.onClose} onKeyDown={handleKeyDown} tabIndex={-1} />
-				<div class={s.ghPanel} onKeyDown={handleKeyDown} tabIndex={-1} ref={(el) => onMount(() => el.focus())}>
+				<div
+					class={s.ghPanel}
+					onKeyDown={handleKeyDown}
+					tabIndex={-1}
+					ref={(el) => {
+						panelRef = el;
+						onMount(() => el.focus());
+					}}
+				>
 					{/* Rate limit warning */}
 					<Show when={circuitOpen()}>
 						<div class={s.ghRateLimitBanner}>
@@ -317,9 +444,17 @@ export const GitHubPanel: Component<{
 						<Show when={viewerLogin()}>
 							<PrSection
 								title={t("github.myPullRequests", "My Pull Requests")}
-								prs={myPrs()}
+								prs={visibleMyPrs()}
 								repoPath={props.repoPath}
 								icon="user"
+								collapsed={sectionCollapsed("my-prs", myPrs().length === 0)}
+								onToggleCollapsed={() => toggleSection("my-prs", myPrs().length === 0)}
+								expandedKey={expandedPr()}
+								onToggleExpanded={toggleExpandedPr}
+								activeKey={activeKeyFor("my-prs")}
+								dismissedCount={dismissedIn("my-prs").length}
+								onDismiss={(n) => handleDismissPr("my-prs", n)}
+								onShowDismissed={() => handleShowDismissedPrs("my-prs")}
 								onCheckout={props.onCheckout}
 								onCreateWorktree={props.onCreateWorktree}
 								onConflictAssist={props.onConflictAssist}
@@ -331,9 +466,17 @@ export const GitHubPanel: Component<{
 						{/* ── Pull Requests section ── */}
 						<PrSection
 							title={t("github.pullRequests", "Pull Requests")}
-							prs={filteredPrs()}
+							prs={visiblePrs()}
 							repoPath={props.repoPath}
 							icon="pr"
+							collapsed={sectionCollapsed("prs", filteredPrs().length === 0)}
+							onToggleCollapsed={() => toggleSection("prs", filteredPrs().length === 0)}
+							expandedKey={expandedPr()}
+							onToggleExpanded={toggleExpandedPr}
+							activeKey={activeKeyFor("prs")}
+							dismissedCount={dismissedIn("prs").length}
+							onDismiss={(n) => handleDismissPr("prs", n)}
+							onShowDismissed={() => handleShowDismissedPrs("prs")}
 							onCheckout={props.onCheckout}
 							onCreateWorktree={props.onCreateWorktree}
 							onConflictAssist={props.onConflictAssist}
@@ -343,15 +486,17 @@ export const GitHubPanel: Component<{
 
 						{/* ── Issues section ── */}
 						<div class={s.ghSection}>
-							<Show when={settingsStore.state.issueFilter !== "disabled"}>
+							<Show when={issuesEnabled()}>
 								<div
 									class={s.ghSectionHeader}
 									role="button"
 									tabIndex={0}
-									onClick={() => setIssuesCollapsed((v) => !v)}
-									onKeyDown={onClickKeyDown(() => setIssuesCollapsed((v) => !v))}
+									onClick={() => toggleSection("issues", false)}
+									onKeyDown={onClickKeyDown(() => toggleSection("issues", false))}
 								>
-									<span class={cx(s.ghSectionChevron, !issuesCollapsed() && s.ghSectionChevronOpen)}>{"›"}</span>
+									<span class={cx(s.ghSectionChevron, !sectionCollapsed("issues", false) && s.ghSectionChevronOpen)}>
+										{"›"}
+									</span>
 									<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
 										<path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" />
 										<path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z" />
@@ -361,7 +506,7 @@ export const GitHubPanel: Component<{
 										<span class={s.ghSectionCount}>{issues().length}</span>
 									</Show>
 								</div>
-								<Show when={!issuesCollapsed()}>
+								<Show when={!sectionCollapsed("issues", false)}>
 									{/* Loading skeleton */}
 									<Show when={issuesLoading() && issues().length === 0}>
 										<div class={s.ghSectionList}>
@@ -389,10 +534,12 @@ export const GitHubPanel: Component<{
 													{(issue: GitHubIssue) => (
 														<div class={cx(s.ghItem, expandedIssue() === issue.number && s.ghItemExpanded)}>
 															<div
-																class={s.ghItemRow}
-																onClick={() =>
-																	setExpandedIssue((prev) => (prev === issue.number ? null : issue.number))
-																}
+																class={cx(
+																	s.ghItemRow,
+																	activeKeyFor("issues") === String(issue.number) && s.ghItemRowActive,
+																)}
+																data-gh-active={activeKeyFor("issues") === String(issue.number) ? "" : undefined}
+																onClick={() => toggleExpandedIssue(issue.number)}
 															>
 																<span class={s.ghItemNum}>#{issue.number}</span>
 																<span class={s.ghItemTitle}>{issue.title}</span>

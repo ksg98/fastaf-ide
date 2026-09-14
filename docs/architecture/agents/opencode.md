@@ -3,7 +3,7 @@
 Agent-specific layout reference for OpenCode.
 See [agent-ui-analysis.md](../agent-ui-analysis.md) for shared concepts.
 
-**Observed version**: v1.2.20 (2026-03-22)
+**Observed version**: v1.2.20 (2026-03-22), re-audited on v1.18.5 (2026-08-02)
 **Rendering engine**: Bubble Tea (Go TUI framework)
 **Rendering approach**: Full-screen TUI, ANSI absolute positioning, mouse tracking
 
@@ -225,6 +225,36 @@ or input box background color change.
 - **Mode label**: changes from `Build` to `Plan` in prompt box
 - **Interrupt hint**: `esc interrupt` in footer during work
 - **No spinner chars** — uses progress bar instead
+
+### Busy/idle detection (v1.18.5, 2026-08-02)
+
+`detect_opencode_screen_activity` in `src-tauri/src/pty.rs` owns the transition. Neither
+generic signal applies: OpenCode paints no prompt glyph, and `is_spinner_row` does not
+recognise the `⬝`/`■` progress bar (deliberately — a leading `■` run is not a spinner). The
+adapter therefore keys on the composer frame plus the status bar painted under it:
+
+| Row | Idle | Working |
+| --- | --- | --- |
+| frame | `┃` rows closed by `╹▀▀▀…` | identical |
+| status bar | `/abs/path    18.1K (9%)  ctrl+p commands` | `⬝⬝⬝⬝⬝■■■  esc interrupt   18.1K (9%)  ctrl+p commands` |
+
+- **Working** = a row below the frame-close row contains `esc interrupt`. Verified live to
+  hold for the whole turn, including a tool phase (`⠼ sleep 20 && echo done`) and at 62
+  columns, where the status bar drops fields but keeps both hints.
+- **Ready** = OpenCode frame present and no interrupt hint, *and* the status bar's
+  `ctrl+p commands` hint is on screen. That last condition is what stops a half-painted
+  frame from reading Ready mid-turn.
+- **Unknown** otherwise — notably a plain shell after OpenCode exits.
+
+Without this adapter OSC 133 marked the long-lived `opencode` foreground command busy once
+and nothing ever cleared it, so the session stayed busy for the whole process (#535-d4f5).
+
+Status-bar drift since v1.2.20: the welcome screen still shows
+`tab agents  ctrl+p commands` plus a `~path:branch … <version>` row, but once the first turn
+has run the footer collapses into a single bottom row carrying the absolute cwd, a
+`N.NK (N%)` context gauge and `ctrl+p commands`. `tab agents` and the `• OpenCode X.Y.Z`
+version suffix are gone from that state — `ctrl+p commands` is the part present in every
+state, which is why the adapter anchors on it.
 
 ### Error Display
 Errors shown inline in the `┃` frame:

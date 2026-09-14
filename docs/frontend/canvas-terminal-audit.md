@@ -1,6 +1,6 @@
 # CanvasTerminal Feature Audit
 
-**Last updated:** 2026-07-21
+**Last updated:** 2026-08-17
 **Branch:** refactor/solid-architecture
 
 CanvasTerminal is the sole terminal renderer. xterm.js has been fully removed. The renderer is powered by `alacritty_terminal` (Rust) sending binary grid frames over a Tauri Channel.
@@ -28,7 +28,7 @@ Terminal.tsx (outer shell)
         +-- Keyboard input (VT100 + Kitty protocol)
         +-- Touch input (tap/swipe/pinch for mobile/tablet via offscreen textarea)
         +-- IntersectionObserver flow control (skip paint when hidden)
-        +-- Plugin raw output forwarding (pluginRegistry.processRawOutput)
+        +-- Plugin watcher lines from Rust (pluginRegistry.handleWatcherLines)
         +-- OSC 7 CWD + OSC 133 shell integration
         +-- Imperative controllers (no reactive frame-path state)
               +-- selection + search
@@ -45,13 +45,21 @@ Key insight: Terminal.tsx handles parsed events, session lifecycle, banners, and
 
 ## Binary Frame Format
 
-Each frame: 26-byte header + variable row data. The header ends with a `historyBase: u32` (lines evicted from the history top so far); `historyBase + (historySize - displayOffset + screenRow)` is the eviction-stable absolute index the smooth-scroll row cache keys by, so a cached row never aliases onto a different line after the scrollback cap rotates. Per cell: 4 bytes codepoint + 3 bytes fg RGB + 3 bytes bg RGB + 1 byte attrs bitmask = 11 bytes. Decoded in `decodeBinaryFrame` using struct-of-arrays (SoA) typed arrays — zero per-cell object allocation.
+Each frame: 26-byte header + variable row data. The header ends with a `historyBase: u32` (lines evicted from the history top so far); `historyBase + (historySize - displayOffset + screenRow)` is the eviction-stable absolute index the smooth-scroll row cache keys by, so a cached row never aliases onto a different line after the scrollback cap rotates. `keyboard_flags` bits 0–4 remain the public keyboard-mode mask; bit 5 carries the active primary/alternate-screen identity and is removed before exposing `keyboardFlags` to input code. Per cell: 4 bytes codepoint + 3 bytes fg RGB + 3 bytes bg RGB + 1 byte attrs bitmask = 11 bytes. Decoded in `decodeBinaryFrame` using struct-of-arrays (SoA) typed arrays — zero per-cell object allocation.
+
+Primary and alternate grids can reuse identical numeric row coordinates while representing unrelated content. A bit-5 transition therefore starts a new renderer generation: smooth-scroll animation, delayed row fetches, selection, search, link verification, reconciliation, and absolute-row caches are invalidated as one transaction. Partial transition frames wait for a full replacement instead of merging into the previous grid.
 
 ## Performance Notes
 
 - **RAF coalescing:** All paint triggers (frame arrival, keydown selection clear, mousedown) go through `scheduleRepaint()` which schedules a single `requestAnimationFrame`. No synchronous paint calls — prevents double-paint in a single event loop turn.
 - **`send_grid_frame` clone guard:** Frame is only cloned for the `grid_watch` channel when `receiver_count() > 0` (i.e. WS clients connected). Desktop-only path (Tauri Channel) is zero-copy.
+- **Raw bytes over the IPC:** the channel carries `tauri::ipc::Response`, not `Vec<u8>`. A bare `Vec<u8>` matches Tauri's blanket `IpcResponse` impl and is serialised as a JSON array of decimal numbers — a 110 KB frame becomes a ~250 KB string plus an extra IPC round trip, and JS receives a `number[]` to walk instead of an `ArrayBuffer`. Same for `terminal_styled_rows`. `toBinaryPayload` still accepts `number[]`, because Tauri's postMessage fallback (custom-protocol IPC blocked) delivers that shape.
+- **Frame acks are counters, not a flag:** the frontend echoes its total receipt count, so an ack for a frame the ticker already abandoned is a number in the past and cannot release a burst. See `grid_gate.rs`.
+- **Hidden terminals:** a background tab is `display:none` and never unmounted, so its producer keeps running. It decodes each frame (the bell rides in the header) and skips paint, links and cache fill, then acks on a 400 ms trailing timer — enough to keep the gate moving at ~2 frames/s without making the backend log a stuck frontend. Reconciliation (`shouldFireReconcile`) is off for it entirely: each fire would build and drop a full frame.
+- **Row cache bounds:** `cacheRows()` evicts FIFO at `ROW_CACHE_MAX`, so the *fill* path is bounded too — trimming on scroll alone left an unbounded map for a session that only ever fetched forward.
 - **`screen_text_rows_ref()`:** `TerminalGrid` exposes a borrowed `&[String]` view of cached screen rows. Used in `process_chunk` for chrome cutoff detection to avoid cloning 50 Strings per PTY chunk. Downstream parsers (slash-menu, choice-prompt) share a single owned snapshot computed once per chunk.
+- **Plugin OutputWatcher matching moved to Rust:** the reader thread assembles the lines, cleans them, and tests the compiled patterns (`output_watchers.rs`). Rust is now the only line assembler — the per-session `LineBuffer`s and the raw-output listener are gone, so the thread that paints the terminal no longer ANSI-strips and regex-tests every line. It is woken once per 100 ms window with the lines that matched. A pattern the `regex` crate cannot express (lookaround, backreferences) is reported back as rejected and keeps matching in the WebView, which then receives every assembled line.
+- **No per-chunk parser logs:** Slash-menu detection can remain active during a large output burst, so its hot path emits events only when a menu is found and never writes a debug record for every parse.
 - **Trim in-place:** `read_screen_text()` and `row_to_text()` use `String::truncate()` instead of `.trim_end().to_string()`, eliminating one allocation per row.
 
 ## Feature Table
@@ -126,6 +134,7 @@ Each frame: 26-byte header + variable row data. The header ends with a `historyB
 | Cmd+Enter passthrough | OK | |
 | IME composition | OK | `compositionstart/compositionend`; hidden input positioned at cursor coords via `syncImePosition()` for East Asian IME candidate windows |
 | Bracketed paste | OK | `\x1b[200~...\x1b[201~` |
+| MCP atomic agent submission | OK | Backend-only `session action=submit`; the shared PTY writer lock spans payload, raw-mode gap, and Enter, so CanvasTerminal input cannot splice the submitted command. No renderer state or new frontend transport exists. |
 | Image paste detection | OK | Checks `items[i].type.startsWith("image/")` |
 | Resume banner keyboard | OK | Space/Enter/Escape/printable |
 | Touch tap/swipe/pinch (mobile) | OK | `installTouchHandlers` via offscreen textarea |
@@ -137,10 +146,10 @@ Each frame: 26-byte header + variable row data. The header ends with a `historyB
 | Mouse drag selection | OK | |
 | Double-click word select | OK | `terminal_select_start` with `word:true` |
 | Triple-click line select | OK | |
-| Cmd+C copy with selection | OK | `terminal_select_text` IPC |
-| Trailing-space trim on copy | OK | `line.replace(/\s+$/, "")` |
+| Cmd+C copy with selection | OK | `terminal_get_selection_text` IPC/HTTP parity path |
+| Selection normalization | OK | Rust unwraps soft-wrapped rows, trims row padding, and removes coherent Claude `NBSP NBSP ▎` gutter runs |
 | Copy-on-select | OK | `copySelection()` called from `onMouseUp` |
-| getSelection() ref method | OK | `getLocalSelectionText()` reads from rowMap codepoints |
+| getSelection() ref method | OK | Returns the cached backend selection; `getLocalSelectionText()` is the transient fallback |
 
 ### Focus
 
@@ -184,9 +193,9 @@ Each frame: 26-byte header + variable row data. The header ends with a `historyB
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| OSC 0/2 title change | OK | Handled in Terminal.tsx wrapper |
-| OSC 7 cwd tracking | OK | `pty-cwd-{sessionId}` event |
-| OSC 133 command blocks | OK | `pty-osc133-{sessionId}` event |
+| OSC 0/2 and structured intent title change | OK | Handled in Terminal.tsx wrapper; spawn labels remain replaceable, explicit user renames are protected |
+| OSC 7 cwd tracking | OK | `pty-cwd-{sessionId}` on desktop, `{"type":"cwd","cwd":…}` on the grid WS. Both carry the same `{ cwd }` object, so the handler needs no per-transport branch. |
+| OSC 133 command blocks | OK | `pty-osc133-{sessionId}` on desktop, `{"type":"osc133",…}` on the grid WS — both serialised from `Osc133Event`, so the payload is `{ marker, line, exit_code }` on either transport. Subscribed **only** here, and subscribed before the canvas waits for its fonts — that await used to sit between mount and subscription, which is the window the first prompt marker of a session falls in. Nothing replays either event, so a marker emitted before the terminal mounts at all is still lost; the fix closes the font window, not the whole race. `handleOsc133` is not idempotent for the `A` marker, so a second listener invents one empty command block per prompt. |
 | OSC 133 gutter decoration | OK | `paintGutterMarkers` on overlay canvas |
 | User-prompt scrollbar markers | OK | Green ticks at `userPromptLines` — distinct from command-block marks, drawn in `paintGutterMarkers` |
 | Cmd+Up/Down block navigation | OK | Reads `commandBlocks` + `activeBlock` |
@@ -227,7 +236,7 @@ Each frame: 26-byte header + variable row data. The header ends with a `historyB
 | Intent row highlight | OK | |
 | Notifications (sounds) | OK | Handled by Terminal.tsx wrapper |
 | Flow control / backpressure | OK | IntersectionObserver: skip paint+ack when hidden |
-| Plugin raw output forwarding | OK | `pty-output-{sessionId}` → `pluginRegistry.processRawOutput` |
+| Plugin watcher lines | OK | `pty-watcher-lines-{sessionId}` (browser: `watcher-lines` WS frame) → `pluginRegistry.handleWatcherLines`. Rust assembled, cleaned and matched the lines on the reader thread; no raw stream is reassembled or scanned here. The listener is installed BEFORE the grid subscription — an event that lands while it is still being attached is gone, and nothing replays a watcher line |
 
 ## Remaining Gaps
 

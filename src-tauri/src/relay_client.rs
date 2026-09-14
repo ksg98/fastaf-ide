@@ -10,6 +10,7 @@
 //! read message contents. True E2E would require a key the relay never sees
 //! (e.g. X25519 ECDH per `docs/research/e2e-relay-server.md`).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,15 +111,58 @@ fn decrypt(cipher: &Aes256Gcm, data: &[u8]) -> anyhow::Result<Vec<u8>> {
 /// Returns `(new_awaiting, should_push)` where `should_push` is true when the
 /// agent transitions from working to awaiting input (i.e. a "question" event
 /// while not already awaiting).
-fn evaluate_push_hint(parsed: &serde_json::Value, was_awaiting: bool) -> (bool, bool) {
+fn evaluate_push_hint(
+    parsed: &serde_json::Value,
+    prior_confidence: Option<bool>,
+) -> (Option<bool>, bool) {
     let event_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let new_awaiting = match event_type {
-        "question" => true,
-        "user-input" => false,
-        _ => was_awaiting,
+    let new_confidence = match event_type {
+        "question" => Some(
+            parsed
+                .get("confident")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        ),
+        "choice-prompt" => Some(true),
+        "user-input" | "question-cleared" | "choice-cleared" => None,
+        "status-line" if prior_confidence == Some(false) => None,
+        _ => prior_confidence,
     };
-    let should_push = new_awaiting && !was_awaiting;
-    (new_awaiting, should_push)
+    let should_push = new_confidence.is_some() && prior_confidence.is_none();
+    (new_confidence, should_push)
+}
+
+// ---------------------------------------------------------------------------
+// What reaches the phone
+// ---------------------------------------------------------------------------
+
+/// Whether a mobile peer is on the other end of the relay.
+///
+/// `Waiting` is the relay holding the slot open for a peer that has not arrived,
+/// so it is not an audience: encrypting and shipping the whole event bus to it
+/// burns CPU and uplink on frames nobody reads.
+fn peer_is_attached(status: &PeerStatus) -> bool {
+    match status {
+        PeerStatus::Connected => true,
+        PeerStatus::Waiting | PeerStatus::Disconnected | PeerStatus::Timeout => false,
+    }
+}
+
+/// Whether an event means anything to a remote client.
+///
+/// The dropped variants are instructions aimed at the desktop process itself —
+/// a phone cannot open a tab in the app's webview, drive the desktop browser
+/// through an OAuth flow, or reload a locally-installed plugin — plus raw
+/// filesystem-watcher churn, which fires per write during a build.
+fn is_relayable(event: &AppEvent) -> bool {
+    !matches!(
+        event,
+        AppEvent::UiTab { .. }
+            | AppEvent::CloseHtmlTabs { .. }
+            | AppEvent::McpOAuthStart { .. }
+            | AppEvent::PluginChanged { .. }
+            | AppEvent::DirChanged { .. }
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +294,10 @@ async fn connect_and_run(
 
     // Subscribe to event bus — reset backoff on successful connection
     let mut event_rx = state.event_bus.subscribe();
-    let mut awaiting_input = false;
+    let mut awaiting_by_session: HashMap<String, bool> = HashMap::new();
+    // The relay tells us when a phone is actually listening. Until it does, the
+    // only thing worth sending is a push hint — that is what wakes the phone up.
+    let mut peer_attached = false;
 
     loop {
         tokio::select! {
@@ -266,8 +313,9 @@ async fn connect_and_run(
                     Ok(ref evt) => {
                         // Check for question/user-input transition → send push hint
                         if let AppEvent::PtyParsed { parsed, session_id, .. } = evt {
-                            let (new_awaiting, should_push) =
-                                evaluate_push_hint(parsed, awaiting_input);
+                            let prior_confidence = awaiting_by_session.get(session_id).copied();
+                            let (new_confidence, should_push) =
+                                evaluate_push_hint(parsed, prior_confidence);
                             if should_push {
                                 let push_hint = serde_json::json!({
                                     "type": "relay:push",
@@ -278,14 +326,25 @@ async fn connect_and_run(
                                     push_hint.to_string().into()
                                 )).await;
                             }
-                            awaiting_input = new_awaiting;
+                            if let Some(confidence) = new_confidence {
+                                awaiting_by_session.insert(session_id.clone(), confidence);
+                            } else {
+                                awaiting_by_session.remove(session_id);
+                            }
+                        } else if let AppEvent::PtyExit { session_id } = evt {
+                            awaiting_by_session.remove(session_id);
                         }
 
-                        // Encrypt and forward event
-                        let json = serde_json::to_vec(evt)?;
-                        let encrypted = encrypt(cipher, &json)?;
-                        if ws_sink.send(Message::Binary(encrypted.into())).await.is_err() {
-                            return Ok(ShutdownReason::Disconnected);
+                        // Encrypt and forward the event — but only when a peer is
+                        // there to read it, and only for events it can use. The
+                        // awaiting bookkeeping above runs either way, so the state
+                        // is already correct when a phone attaches.
+                        if peer_attached && is_relayable(evt) {
+                            let json = serde_json::to_vec(evt)?;
+                            let encrypted = encrypt(cipher, &json)?;
+                            if ws_sink.send(Message::Binary(encrypted.into())).await.is_err() {
+                                return Ok(ShutdownReason::Disconnected);
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -314,6 +373,7 @@ async fn connect_and_run(
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<RelayMessage>(&text) {
                             Ok(RelayMessage::Status { peer }) => {
+                                peer_attached = peer_is_attached(&peer);
                                 let label = match peer {
                                     PeerStatus::Connected => "mobile peer connected",
                                     PeerStatus::Disconnected => "mobile peer disconnected",
@@ -416,46 +476,134 @@ mod tests {
     #[test]
     fn push_hint_triggers_on_question_event() {
         let parsed = serde_json::json!({ "type": "question", "prompt_text": "Allow?" });
-        let (new_awaiting, should_push) = evaluate_push_hint(&parsed, false);
-        assert!(new_awaiting);
+        let (new_awaiting, should_push) = evaluate_push_hint(&parsed, None);
+        assert_eq!(new_awaiting, Some(false));
         assert!(should_push);
     }
 
     #[test]
     fn push_hint_does_not_retrigger_while_already_awaiting() {
         let parsed = serde_json::json!({ "type": "question", "prompt_text": "Again?" });
-        let (new_awaiting, should_push) = evaluate_push_hint(&parsed, true);
-        assert!(new_awaiting);
+        let (new_awaiting, should_push) = evaluate_push_hint(&parsed, Some(true));
+        assert_eq!(new_awaiting, Some(false));
         assert!(!should_push, "should not push when already awaiting");
     }
 
     #[test]
     fn push_hint_clears_on_user_input() {
         let parsed = serde_json::json!({ "type": "user-input", "content": "yes" });
-        let (new_awaiting, should_push) = evaluate_push_hint(&parsed, true);
-        assert!(!new_awaiting);
+        let (new_awaiting, should_push) = evaluate_push_hint(&parsed, Some(true));
+        assert_eq!(new_awaiting, None);
         assert!(!should_push);
+    }
+
+    #[test]
+    fn push_hint_clears_on_question_or_choice_retraction() {
+        for event_type in ["question-cleared", "choice-cleared"] {
+            let parsed = serde_json::json!({ "type": event_type });
+            assert_eq!(evaluate_push_hint(&parsed, Some(false)), (None, false));
+        }
+    }
+
+    #[test]
+    fn low_confidence_wait_clears_on_working_status_but_confident_wait_does_not() {
+        let status = serde_json::json!({ "type": "status-line" });
+        assert_eq!(evaluate_push_hint(&status, Some(false)), (None, false));
+        assert_eq!(evaluate_push_hint(&status, Some(true)), (Some(true), false));
     }
 
     #[test]
     fn push_hint_preserves_state_on_unrelated_events() {
         let status = serde_json::json!({ "type": "status-line" });
         // was false → stays false
-        let (aw, push) = evaluate_push_hint(&status, false);
-        assert!(!aw);
+        let (aw, push) = evaluate_push_hint(&status, None);
+        assert_eq!(aw, None);
         assert!(!push);
         // was true → stays true (no re-push)
-        let (aw2, push2) = evaluate_push_hint(&status, true);
-        assert!(aw2);
+        let (aw2, push2) = evaluate_push_hint(&status, Some(true));
+        assert_eq!(aw2, Some(true));
         assert!(!push2);
     }
 
     #[test]
     fn push_hint_handles_missing_type_field() {
         let parsed = serde_json::json!({ "content": "no type" });
-        let (aw, push) = evaluate_push_hint(&parsed, false);
-        assert!(!aw);
+        let (aw, push) = evaluate_push_hint(&parsed, None);
+        assert_eq!(aw, None);
         assert!(!push);
+    }
+
+    // -----------------------------------------------------------------------
+    // What reaches the phone (F65)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn only_a_connected_peer_counts_as_an_audience() {
+        assert!(peer_is_attached(&PeerStatus::Connected));
+        // `Waiting` is a reserved slot, not a listener. Treating it as one is how
+        // the whole event bus got encrypted and shipped to nobody.
+        assert!(!peer_is_attached(&PeerStatus::Waiting));
+        assert!(!peer_is_attached(&PeerStatus::Disconnected));
+        assert!(!peer_is_attached(&PeerStatus::Timeout));
+    }
+
+    #[test]
+    fn desktop_only_instructions_are_not_relayed() {
+        for event in [
+            AppEvent::UiTab {
+                id: "panel".to_string(),
+                title: "Panel".to_string(),
+                html: String::new(),
+                url: None,
+                pinned: false,
+                focus: false,
+                origin_repo_path: None,
+            },
+            AppEvent::CloseHtmlTabs {
+                tab_ids: vec!["panel".to_string()],
+            },
+            AppEvent::McpOAuthStart {
+                name: "upstream".to_string(),
+                authorization_url: "https://example.test/auth".to_string(),
+            },
+            AppEvent::PluginChanged {
+                plugin_ids: vec!["p".to_string()],
+            },
+            AppEvent::DirChanged {
+                dir_path: "/tmp".to_string(),
+            },
+        ] {
+            assert!(
+                !is_relayable(&event),
+                "a phone cannot act on {event:?} — it must not cost an encrypt"
+            );
+        }
+    }
+
+    #[test]
+    fn session_and_repo_events_are_relayed() {
+        for event in [
+            AppEvent::PtyExit {
+                session_id: "s1".to_string(),
+            },
+            AppEvent::SessionClosed {
+                session_id: "s1".to_string(),
+                reason: "exit".to_string(),
+            },
+            AppEvent::RepoChanged {
+                repo_path: "/repo".to_string(),
+                kind: crate::repo_watcher::RepoChangeKind::WorkingTree,
+            },
+            AppEvent::PtyParsed {
+                session_id: "s1".to_string(),
+                parsed: serde_json::json!({ "type": "question" }).into(),
+            },
+        ] {
+            assert!(
+                is_relayable(&event),
+                "{event:?} is what a remote client is watching for"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

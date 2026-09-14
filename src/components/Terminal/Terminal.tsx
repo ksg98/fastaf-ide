@@ -1,7 +1,8 @@
-import { type Component, createEffect, createSignal, lazy, onCleanup, onMount, Show, Suspense } from "solid-js";
+import { type Component, createEffect, createSignal, lazy, on, onCleanup, onMount, Show, Suspense } from "solid-js";
 import { detectAgentForTerminal } from "../../hooks/useAgentPolling";
 import { browserCreatedSessions } from "../../hooks/useAppInit";
 import { usePty } from "../../hooks/usePty";
+import { t } from "../../i18n";
 import { invoke } from "../../invoke";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
 import { agentConfigsStore } from "../../stores/agentConfigs";
@@ -18,11 +19,15 @@ import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
 import { isPerfDebug } from "../../utils/perfDebug";
+import { safeUnlisten } from "../../utils/safeUnlisten";
+import { createSearchVisibility } from "../shared/SearchBar";
+import { handleAgentExitCompletion } from "./agentExitCompletion";
 import { getAwaitingInputSound } from "./awaitingInputSound";
 import CanvasTerminal, { type CanvasTerminalRef } from "./CanvasTerminal";
 import { gridDimsForBox, snapLineHeight } from "./canvasTerminalUtils";
+import { focusIsInsideOwnInput } from "./focusGuards";
 import { getSharedMetrics } from "./glyphCache";
-import { shouldApplyIntentTitle } from "./intentTitle";
+import { handleIntentEvent } from "./intentTitle";
 import { LastPromptBar } from "./LastPromptBar";
 import s from "./Terminal.module.css";
 import { TerminalSearch } from "./TerminalSearch";
@@ -46,6 +51,8 @@ type ParsedEvent =
 	| { type: "status-line"; task_name: string; full_line: string; time_info: string | null; token_info: string | null }
 	| { type: "progress"; state: number; value: number }
 	| { type: "question"; prompt_text: string; confident: boolean }
+	| { type: "question-cleared" }
+	| { type: "choice-cleared" }
 	| { type: "usage-limit"; percentage: number; limit_type: string }
 	| { type: "usage-exhausted"; reset_time: string | null }
 	| { type: "plan-file"; path: string }
@@ -66,6 +73,15 @@ type ParsedEvent =
 	| { type: "shell-state"; state: "busy" | "idle" }
 	| { type: "agent-session-conflict"; matched_text: string; kind: "in-use" | "not-found" }
 	| { type: "agent-block"; action: "start" | "end"; line: number; exit_code?: number };
+
+type BackendSessionState = {
+	shell_state?: "busy" | "idle";
+	agent_state?: "starting" | "working" | "awaiting_input" | "idle" | "completed";
+	awaiting_input?: boolean;
+	question_confident?: boolean;
+	background_work?: boolean;
+	queued_commands?: number;
+};
 
 export interface TerminalProps {
 	id: string;
@@ -104,10 +120,17 @@ export function cleanOscTitle(title: string): string {
 
 	// Strip leading spinner/symbol noise: *, middle dots, bullets, braille patterns,
 	// dingbats, geometric shapes, and other non-alphanumeric decorators agents prepend.
+	// The dingbat range starts at U+2713 (\u2713\u2714\u2715\u2716\u2717\u2718) rather than U+2720 so completion and
+	// error indicators are stripped too \u2014 pi ends a turn with "\u2713 | \u03C0 | repo" and a failure
+	// with "\u2717 | \u03C0 | repo", which would otherwise leak a status glyph into the tab name.
 	let cleaned = title.replace(
-		/^[\s*\u00B7\u2022\u2219\u22C5\u2027\u25A0-\u25FF\u2800-\u28FF\u2720-\u273F\u2580-\u259F]+/,
+		/^[\s*\u00B7\u2022\u2219\u22C5\u2027\u25A0-\u25FF\u2800-\u28FF\u2713-\u273F\u2580-\u259F]+/,
 		"",
 	);
+	// Then drop the separator the indicator was attached to, so a status-prefixed title
+	// (pi emits "\u2826 | \u03C0 | repo", "\u25CB | \u03C0 | repo", "\u2713 | \u03C0 | repo") does not leave a dangling
+	// "| " once the animated glyph is gone.
+	cleaned = cleaned.replace(/^[|\u2502\u00B7\-\u2013\u2014:]+\s*/, "");
 	// Strip "user@host:" or bare "user@host" prefix
 	cleaned = cleaned.replace(/^[^@\s]+@[^:\s]+(:\s*)?/, "");
 	// Strip leading env var assignments (KEY=value pairs, including empty values)
@@ -157,18 +180,26 @@ export const Terminal: Component<TerminalProps> = (props) => {
 	const [canvasTerminalRef, setCanvasTerminalRef] = createSignal<CanvasTerminalRef | undefined>();
 	let pendingCanvasFocus = false;
 
-	const [searchVisible, setSearchVisible] = createSignal(false);
+	const {
+		visible: searchVisible,
+		focusToken: searchFocusToken,
+		open: openSearchBar,
+		close: closeSearchBar,
+	} = createSearchVisibility();
 	const [composeOpen, setComposeOpen] = createSignal(false);
 	const [pendingComposeText, setPendingComposeText] = createSignal("");
 	const [reconnecting, setReconnecting] = createSignal<{ attempt: number; max: number } | null>(null);
 	let sessionInitialized = false;
 	let disposed = false;
 	let unsubscribePty: Unsubscribe | undefined;
-	let unlistenParsed: (() => void) | undefined;
-	let unlistenKitty: (() => void) | undefined;
-	let unlistenOsc133: (() => void) | undefined;
-	let unlistenTitle: (() => void) | undefined;
-	let unlistenClipboardStore: (() => void) | undefined;
+	// Tauri's `listen()` resolves to `async () => _unlisten(...)`: calling these
+	// returns a PROMISE that rejects when the listener is already gone. Typed as
+	// such so every teardown goes through `safeUnlisten` instead of a
+	// synchronous try/catch that cannot see the rejection.
+	let unlistenParsed: (() => unknown) | undefined;
+	let unlistenKitty: (() => unknown) | undefined;
+	let unlistenTitle: (() => unknown) | undefined;
+	let unlistenClipboardStore: (() => unknown) | undefined;
 
 	let kittyFlags = 0;
 
@@ -234,10 +265,19 @@ export const Terminal: Component<TerminalProps> = (props) => {
 	const pty = usePty();
 
 	/** Track PTY activity for the activity dashboard. CanvasTerminal handles
-	 *  rendering and plugin dispatch; this callback only updates store metadata. */
-	const handlePtyData = (_data: string) => {
+	 *  rendering and plugin dispatch; this callback only updates store metadata.
+	 *
+	 *  Driven by the backend's payload-free activity pulse, not by output bytes:
+	 *  it never needed the data, and on desktop no output crosses IPC at all.
+	 *  Deriving this from grid frames instead would not work — CanvasTerminal
+	 *  stops acking frames while a terminal is hidden (the IntersectionObserver
+	 *  flow control), which is exactly the background-tab case the unread flag
+	 *  exists to report. */
+	const handlePtyActivity = () => {
 		if (disposed) return;
 		const now = Date.now();
+		// The producer already throttles to ~1/s; this guard keeps the store
+		// write bounded regardless of what that window is set to.
 		if (!lastDataAtTimestamp || now - lastDataAtTimestamp > 1000) {
 			lastDataAtTimestamp = now;
 			terminalsStore.touchLastDataAt(props.id, now);
@@ -256,10 +296,6 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			if (disposed) return;
 			switch (parsed.type) {
 				case "progress": {
-					const awProg = terminalsStore.get(props.id)?.awaitingInput;
-					if (awProg && awProg !== "error" && awProg !== "question") {
-						terminalsStore.clearAwaitingInput(props.id);
-					}
 					if (parsed.state === 0) {
 						terminalsStore.update(props.id, { progress: null });
 					} else if (parsed.state === 1 || parsed.state === 2 || parsed.state === 3) {
@@ -269,14 +305,8 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				}
 				case "status-line": {
 					retryCount = 0;
-					const awState = terminalsStore.get(props.id)?.awaitingInput;
-					const clearAw = awState && awState !== "question" && awState !== "error";
-					if (clearAw) {
-						appLogger.debug("terminal", `clearAwaitingInput(${props.id}) was "${awState}" → null`);
-					}
 					terminalsStore.update(props.id, {
 						currentTask: parsed.task_name,
-						...(clearAw ? { awaitingInput: null, awaitingInputConfident: false } : {}),
 					});
 					break;
 				}
@@ -319,15 +349,12 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					break;
 				}
 				case "question": {
-					const qTerminal = terminalsStore.get(props.id);
-					if (!parsed.confident && (qTerminal?.shellState === "busy" || (qTerminal?.activeSubTasks ?? 0) > 0)) {
-						appLogger.debug(
-							"terminal",
-							`[ParsedEvent] ${props.id} question IGNORED (busy=${qTerminal?.shellState === "busy"} subTasks=${qTerminal?.activeSubTasks} low-confidence) prompt="${parsed.prompt_text}"`,
-						);
-						break;
-					}
-					terminalsStore.setAwaitingInput(props.id, "question", !!parsed.confident);
+					// One-shot effects/plugins consume parsed events; the backend
+					// SessionState snapshot is the only durable awaiting authority.
+					break;
+				}
+				case "question-cleared": {
+					// Snapshot reconciliation clears the durable badge.
 					break;
 				}
 				case "usage-limit": {
@@ -439,20 +466,16 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				}
 				case "intent": {
 					retryCount = 0;
-					terminalsStore.setAgentIntent(props.id, parsed.text);
 					const term = terminalsStore.get(props.id);
 					const agentType = term?.agentType;
 					const perAgentEnabled = agentType ? (agentConfigsStore.getIntentTabTitle(agentType) ?? true) : true;
-					if (
-						shouldApplyIntentTitle({
-							title: parsed.title,
-							globalEnabled: settingsStore.state.intentTabTitle,
-							perAgentEnabled,
-							nameIsCustom: term?.nameIsCustom ?? false,
-						})
-					) {
-						terminalsStore.update(props.id, { name: parsed.title });
-					}
+					handleIntentEvent({
+						terminalId: props.id,
+						text: parsed.text,
+						title: parsed.title,
+						globalEnabled: settingsStore.state.intentTabTitle,
+						perAgentEnabled,
+					});
 					// Intent/suggest row overlays handled by installRenderObserver
 					break;
 				}
@@ -525,6 +548,10 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					}
 					break;
 				}
+				case "choice-cleared":
+					// Durable choice state comes from the backend snapshot; plugins
+					// still receive this one-shot lifecycle event below.
+					break;
 				case "agent-block": {
 					if (parsed.action === "start") {
 						terminalsStore.handleOsc133(props.id, "A", parsed.line);
@@ -538,16 +565,20 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			pluginRegistry.dispatchStructuredEvent(parsed.type, parsed, targetSessionId);
 		};
 
-		// PTY output + exit via transport abstraction (Tauri listen or WebSocket)
+		// PTY activity + exit via transport abstraction (Tauri listen or WebSocket).
+		// The output bytes are ignored: browser mode still streams them over this
+		// socket for other consumers, desktop sends none, and neither is what this
+		// component needs — see handlePtyActivity.
 		unsubscribePty = await subscribePty(
 			targetSessionId,
-			(data: string) => handlePtyData(data),
+			() => {},
 			() => {
 				if (disposed) return;
 				// Guard: terminal may have been removed from the store already
 				// (e.g. pane closed). Updating a removed entry would recreate it as a ghost.
 				const stillExists = terminalsStore.get(props.id);
 				const hadAgent = stillExists?.agentType != null;
+				const notifyOnExit = handleAgentExitCompletion(props.id);
 				if (stillExists) {
 					// Restore original tab name if it was overwritten by OSC title
 					if (originalName && !stillExists.nameIsCustom) {
@@ -557,9 +588,20 @@ export const Terminal: Component<TerminalProps> = (props) => {
 						// Agent finished: keep the tab with a grey "exited" dot so the user
 						// can read the final output and re-launch. Without this a dead session
 						// keeps its last shellState forever — a ghost tab that looks idle.
+						//
+						// DEFERRED (2026-09-02) — this does not actually deliver either half of
+						// that promise. `sessionId: null` collapses the <Show> around
+						// CanvasTerminal, so the final output is erased at the moment of exit;
+						// `agentType: null` then discards what would have to be re-launched. The
+						// content area now says so (see the exited fallback below) instead of
+						// going black, which was the visible bug. Keeping the output needs
+						// CanvasTerminal mounted against a dead sid — its ~35 async IPC handlers
+						// would keep polling a session the backend reaps after TOMBSTONE_TTL_MS
+						// (5 min), so it is a real design change, not a tweak. Needs Boss.
 						terminalsStore.update(props.id, {
 							shellState: "exited",
 							sessionId: null,
+							...(notifyOnExit ? { completionNotified: true } : {}),
 							currentTask: null,
 							agentType: null,
 							agentSessionId: null,
@@ -583,9 +625,8 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				props.onSessionExit?.(props.id);
 				// Completion chime only for an agent finishing in a background tab.
 				// A plain shell exit closes its tab, so it stays silent.
-				if (hadAgent && terminalsStore.state.activeId !== props.id) {
-					appLogger.info("terminal", `[Notify] ${props.id} completion — session exited (background tab)`);
-					notificationsStore.playCompletion();
+				if (!notifyOnExit && hadAgent && terminalsStore.state.activeId !== props.id) {
+					appLogger.debug("terminal", `[Notify] ${props.id} completion SUPPRESSED — cycle already notified`);
 				}
 				// Plain shell exit: close the tab via the app-level onShellExit handler.
 				// This is the single owner of local session-exit handling; the global
@@ -595,12 +636,33 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				}
 			},
 			{
+				onActivity: handlePtyActivity,
 				onReconnecting: (attempt, max) => setReconnecting({ attempt, max }),
 				onReconnected: () => setReconnecting(null),
 				// Browser mode: receive parsed events via WebSocket JSON frames
 				onParsed: (frame) => {
 					if (frame.type === "parsed" && frame.event) {
 						handleParsedEvent(frame.event as ParsedEvent);
+					}
+				},
+				onStateChange: (snapshot) => {
+					const state = snapshot as BackendSessionState;
+					const wasAwaiting = terminalsStore.get(props.id)?.awaitingInput === "question";
+					const isAwaiting = state.awaiting_input === true;
+					terminalsStore.update(props.id, {
+						agentState: state.agent_state ?? null,
+						backgroundWork: state.background_work === true,
+						queuedCommands: state.queued_commands ?? 0,
+						awaitingInput: state.awaiting_input === true ? "question" : null,
+						awaitingInputConfident: state.question_confident === true,
+						...(state.shell_state ? { shellState: state.shell_state } : {}),
+					});
+					if (wasAwaiting !== isAwaiting) {
+						pluginRegistry.dispatchStructuredEvent(
+							"awaiting",
+							{ awaiting: isAwaiting, confident: state.question_confident === true },
+							targetSessionId,
+						);
 					}
 				},
 			},
@@ -613,7 +675,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				handleParsedEvent(event.payload);
 			});
 			if (disposed) {
-				unlistenParsed();
+				safeUnlisten(unlistenParsed);
 				unlistenParsed = undefined;
 				return;
 			}
@@ -623,25 +685,18 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				kittyFlags = event.payload;
 			});
 			if (disposed) {
-				unlistenKitty();
+				safeUnlisten(unlistenKitty);
 				unlistenKitty = undefined;
 				return;
 			}
 
-			// Listen for OSC 133 shell integration markers from Rust (native renderer)
-			unlistenOsc133 = await listen<{ marker: string; line: number; exit_code: number | null }>(
-				`pty-osc133-${targetSessionId}`,
-				(event) => {
-					if (disposed) return;
-					const { marker, line, exit_code } = event.payload;
-					terminalsStore.handleOsc133(props.id, marker, line, exit_code ?? undefined);
-				},
-			);
-			if (disposed) {
-				unlistenOsc133();
-				unlistenOsc133 = undefined;
-				return;
-			}
+			// No `pty-osc133` listener here: CanvasTerminal subscribes to the same
+			// event through the transport, and is the only subscriber.
+			// A second desktop delivery would reach a sink that is not idempotent
+			// for the `A` marker — `handleOsc133` finalizes the block the first
+			// delivery had just installed, inventing one empty command block per
+			// prompt. `agent-block` above still feeds the same sink, but that is a
+			// different source for agents with no shell integration, not a copy.
 
 			// Listen for OSC 0/2 title changes from Rust (native renderer)
 			unlistenTitle = await listen<string>(`pty-title-${targetSessionId}`, (event) => {
@@ -661,6 +716,14 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					}
 				}
 			});
+			// Unmounting during the await above leaves this listener attached:
+			// onCleanup already ran and saw `unlistenTitle` still undefined. Every
+			// sibling listener has this guard; this one was missing it.
+			if (disposed) {
+				safeUnlisten(unlistenTitle);
+				unlistenTitle = undefined;
+				return;
+			}
 
 			// Listen for OSC 52 clipboard store from Rust (native renderer).
 			// OSC 52 is honored from anywhere in the byte stream, so a displayed file/log
@@ -674,7 +737,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				toastsStore.add("Clipboard updated", `by ${name}`, "info");
 			});
 			if (disposed) {
-				unlistenClipboardStore();
+				safeUnlisten(unlistenClipboardStore);
 				unlistenClipboardStore = undefined;
 				return;
 			}
@@ -752,41 +815,15 @@ export const Terminal: Component<TerminalProps> = (props) => {
 					);
 					sessionId = null;
 					setCurrentSessionId(null);
-					try {
-						unsubscribePty?.();
-					} catch {
-						/* listener already gone */
-					}
+					safeUnlisten(unsubscribePty);
 					unsubscribePty = undefined;
-					try {
-						unlistenParsed?.();
-					} catch {
-						/* */
-					}
+					safeUnlisten(unlistenParsed);
 					unlistenParsed = undefined;
-					try {
-						unlistenKitty?.();
-					} catch {
-						/* */
-					}
+					safeUnlisten(unlistenKitty);
 					unlistenKitty = undefined;
-					try {
-						unlistenOsc133?.();
-					} catch {
-						/* */
-					}
-					unlistenOsc133 = undefined;
-					try {
-						unlistenTitle?.();
-					} catch {
-						/* */
-					}
+					safeUnlisten(unlistenTitle);
 					unlistenTitle = undefined;
-					try {
-						unlistenClipboardStore?.();
-					} catch {
-						/* */
-					}
+					safeUnlisten(unlistenClipboardStore);
 					unlistenClipboardStore = undefined;
 				}
 			}
@@ -860,8 +897,14 @@ export const Terminal: Component<TerminalProps> = (props) => {
 
 	// When this terminal becomes visible: init PTY session and auto-focus.
 	// CanvasTerminal handles its own rendering lifecycle.
-	createEffect(() => {
-		if (isVisible()) {
+	//
+	// `on(isVisible, …)` so the body runs ONLY on a visibility transition. A bare
+	// createEffect re-ran on every tracked-store write and each re-run scheduled
+	// another `canvasTerminalRef().focus()`, which yanked the caret out of the
+	// search bar (and the compose panel) while the user was still typing in it.
+	createEffect(
+		on(isVisible, (visible) => {
+			if (!visible) return;
 			rafHandle = requestAnimationFrame(() => {
 				rafHandle = 0;
 				if (!containerRef || containerRef.offsetWidth <= 0 || containerRef.offsetHeight <= 0) {
@@ -880,7 +923,9 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				}
 				initSession();
 
-				if (terminalsStore.state.activeId === props.id) {
+				// Never steal the caret from a field the user is typing in — the search
+				// bar and the compose panel live inside this same terminal wrapper.
+				if (terminalsStore.state.activeId === props.id && !focusIsInsideOwnInput(document.activeElement, props.id)) {
 					canvasTerminalRef()?.focus();
 				}
 			});
@@ -888,8 +933,8 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			onCleanup(() => {
 				if (rafHandle) cancelAnimationFrame(rafHandle);
 			});
-		}
-	});
+		}),
+	);
 
 	// Alt-screen recovery: when an agent exits without leaving alt-screen,
 	// inject exit sequences directly into the terminal grid (display side only).
@@ -917,21 +962,12 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		clearTimeout(retryTimer);
 		clearTimeout(agentDetectTimer);
 		clearTimeout(questionDebounceTimer);
-		const safeUnlisten = (fn: (() => void) | undefined) => {
-			try {
-				fn?.();
-			} catch {
-				/* listener already gone */
-			}
-		};
 		safeUnlisten(unsubscribePty);
 		unsubscribePty = undefined;
 		safeUnlisten(unlistenParsed);
 		unlistenParsed = undefined;
 		safeUnlisten(unlistenKitty);
 		unlistenKitty = undefined;
-		safeUnlisten(unlistenOsc133);
-		unlistenOsc133 = undefined;
 		safeUnlisten(unlistenTitle);
 		unlistenTitle = undefined;
 		safeUnlisten(unlistenClipboardStore);
@@ -971,8 +1007,8 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			else pendingCanvasFocus = true;
 		},
 		getSessionId: () => sessionId,
-		openSearch: () => setSearchVisible(true),
-		closeSearch: () => setSearchVisible(false),
+		openSearch: () => openSearchBar(),
+		closeSearch: () => closeSearchBar(),
 		toggleCompose: () => {
 			if (composeOpen()) {
 				setComposeOpen(false);
@@ -1106,6 +1142,12 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		canvasTerminalRef()?.focus();
 	};
 
+	/** True once this tab's backend session is gone for good: an agent finished
+	 *  (pty-exit handler above) or a remote session closed. Deliberately keyed on
+	 *  shellState, not on a null sessionId — that is also the pre-init state of a
+	 *  freshly opened tab, which must not flash the notice before its PTY exists. */
+	const sessionEnded = () => terminalsStore.get(props.id)?.shellState === "exited";
+
 	const handleFileDragOver = (e: DragEvent) => {
 		if (e.dataTransfer?.types?.includes("application/x-tuic-path")) {
 			e.preventDefault();
@@ -1132,9 +1174,10 @@ export const Terminal: Component<TerminalProps> = (props) => {
 		>
 			<TerminalSearch
 				visible={searchVisible()}
+				focusToken={searchFocusToken()}
 				canvasRef={canvasTerminalRef()}
 				onClose={() => {
-					setSearchVisible(false);
+					closeSearchBar();
 					canvasTerminalRef()?.focus();
 				}}
 			/>
@@ -1142,10 +1185,16 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				when={
 					settingsStore.state.showLastPrompt &&
 					terminalsStore.get(props.id)?.agentType &&
-					terminalsStore.get(props.id)?.lastPrompt
+					(terminalsStore.get(props.id)?.agentIntent ||
+						terminalsStore.get(props.id)?.lastPrompt ||
+						terminalsStore.get(props.id)?.ptyDescription)
 				}
 			>
-				<LastPromptBar prompt={() => terminalsStore.get(props.id)?.lastPrompt ?? null} />
+				<LastPromptBar
+					intent={() => terminalsStore.get(props.id)?.agentIntent ?? null}
+					ptyDescription={() => terminalsStore.get(props.id)?.ptyDescription ?? null}
+					prompt={() => terminalsStore.get(props.id)?.lastPrompt ?? null}
+				/>
 			</Show>
 			<Show when={reconnecting()}>
 				{(info) => (
@@ -1179,14 +1228,33 @@ export const Terminal: Component<TerminalProps> = (props) => {
 				    SolidJS root (whole UI frozen, hover-only, backend alive). keyed makes sid a
 				    plain string captured at mount, immune to stale reads. Transitions are always
 				    null↔id so CanvasTerminal already remounts on session change — no behavior change. */}
-				<Show keyed when={_currentSessionId()}>
+				{/* fallback: an exited tab is kept on purpose (grey dot, readable name), but
+				    unmounting CanvasTerminal leaves .content an empty flex column — a black
+				    void indistinguishable from a broken terminal. Say what happened instead. */}
+				<Show
+					keyed
+					when={_currentSessionId()}
+					fallback={
+						<Show when={sessionEnded()}>
+							<div class={s.exitedNotice} data-testid="terminal-exited-notice">
+								<span class={s.exitedTitle}>{t("terminal.exited.title", "Session ended")}</span>
+								<span class={s.exitedHint}>
+									{t(
+										"terminal.exited.hint",
+										"The process exited and its output was released. Close this tab to remove it.",
+									)}
+								</span>
+							</div>
+						</Show>
+					}
+				>
 					{(sid) => (
 						<CanvasTerminal
 							sessionId={sid}
 							terminalId={props.id}
 							onOpenFilePath={props.onOpenFilePath}
-							onSearchOpen={() => setSearchVisible(true)}
-							onSearchClose={() => setSearchVisible(false)}
+							onSearchOpen={() => openSearchBar()}
+							onSearchClose={() => closeSearchBar()}
 							searchVisible={searchVisible()}
 							onResume={handleResume}
 							onResumeDismiss={() => terminalsStore.update(props.id, { pendingResumeCommand: null })}
@@ -1196,8 +1264,13 @@ export const Terminal: Component<TerminalProps> = (props) => {
 							onRef={(ref) => {
 								setCanvasTerminalRef(ref);
 								if (pendingCanvasFocus) {
+									// A focus requested before the canvas existed is replayed here, so
+									// it can land arbitrarily late — after the user opened the search
+									// bar and started typing. Same guard as the visibility effect:
+									// the request is dropped, not queued, since by now the user has
+									// told us where the caret belongs (#ce43).
 									pendingCanvasFocus = false;
-									ref.focus();
+									if (!focusIsInsideOwnInput(document.activeElement, props.id)) ref.focus();
 								}
 							}}
 							onBell={handleBell}
@@ -1229,6 +1302,53 @@ export const Terminal: Component<TerminalProps> = (props) => {
 						isOpen={composeOpen}
 						initialText={pendingComposeText}
 						onTextChange={setPendingComposeText}
+						canEnqueue={() => !!terminalsStore.get(props.id)?.agentType}
+						queuedCount={() => terminalsStore.get(props.id)?.queuedCommands ?? 0}
+						onClearQueue={async () => {
+							if (!sessionId) return;
+							try {
+								await pty.clearQueuedCommands(sessionId);
+								terminalsStore.update(props.id, { queuedCommands: 0 });
+							} catch (err) {
+								appLogger.error("terminal", "ComposePanel clear queue failed", { sessionId, error: err });
+							}
+						}}
+						onLoadQueue={async () => {
+							if (!sessionId) return [];
+							try {
+								return await pty.listQueuedCommands(sessionId);
+							} catch (err) {
+								appLogger.error("terminal", "ComposePanel list queue failed", { sessionId, error: err });
+								return [];
+							}
+						}}
+						onRemoveQueued={async (commandId) => {
+							if (!sessionId) return;
+							try {
+								await pty.removeQueuedCommand(sessionId, commandId);
+								// Same reason the enqueue path trusts its own count: the badge
+								// and the list must react to the click, not to the 1s poll.
+								const remaining = await pty.listQueuedCommands(sessionId);
+								terminalsStore.update(props.id, { queuedCommands: remaining.length });
+							} catch (err) {
+								appLogger.error("terminal", "ComposePanel remove queued failed", { sessionId, error: err });
+							}
+						}}
+						onEnqueue={async (text) => {
+							if (!sessionId) return;
+							try {
+								const outcome = await pty.enqueueCommand(sessionId, text);
+								// Trust the call's own count instead of waiting for the next 1s
+								// lifecycle poll — the badge must react to the click.
+								terminalsStore.update(props.id, { queuedCommands: outcome.queued });
+								setPendingComposeText("");
+								setComposeOpen(false);
+								canvasTerminalRef()?.focus();
+							} catch (err) {
+								appLogger.error("terminal", "ComposePanel enqueue failed", { sessionId, error: err });
+								toastsStore.add("Could not queue the command", String(err), "error");
+							}
+						}}
 						onClose={() => {
 							setComposeOpen(false);
 							canvasTerminalRef()?.focus();

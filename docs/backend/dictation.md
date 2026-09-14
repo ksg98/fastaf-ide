@@ -24,7 +24,7 @@ Local voice-to-text using Whisper with Metal acceleration on macOS. Push-to-talk
 | Command | Description |
 |---------|-------------|
 | `start_dictation()` | Start recording + streaming transcription |
-| `stop_dictation_and_transcribe()` | Stop streaming, final pass on full captured audio, return `TranscribeResponse { text, skip_reason, duration_s }` |
+| `stop_dictation_and_transcribe()` | Stop streaming, final pass on full captured audio, return `TranscribeResponse { text, skip_reason, duration_s, truncated_s }` |
 | `inject_text(text)` | Apply corrections to text (called after transcription) |
 
 ### Tauri Events
@@ -121,7 +121,7 @@ stop_dictation_and_transcribe()  [async]
     │   ├── ProcessingGuard (drop guard) clears processing=false on completion/panic
     │   ├── Apply text corrections
     │   └── Return TranscribeResponse
-    └── Return TranscribeResponse { text, skip_reason, duration_s }
+    └── Return TranscribeResponse { text, skip_reason, duration_s, truncated_s }
     │
     ▼
 Frontend injects text into focus target
@@ -136,6 +136,31 @@ Ported from whisper.cpp `common.cpp` `vad_simple()`:
 - **Threshold:** `vad_thold = 0.6` — if `energy_last / energy_all < 0.6`, silence detected
 - **Relative:** Microphone gain doesn't affect detection (ratio-based)
 
+## Recording cap
+
+Dictation is push-to-talk, so a real utterance lasts seconds. `MAX_RECORDING_S`
+(300 s) bounds the audio kept for the final pass — without it a stuck key is both
+an unbounded allocation and an unbounded whisper pass. The cap keeps the newest
+audio and drops the oldest, `TRIM_HYSTERESIS_S` at a time.
+
+The cap is applied twice, because the streaming thread only sees what it drained
+itself: once per poll inside `streaming_loop` (past `TRIM_HYSTERESIS_S`, so the
+memmove is rare), and once by `cap_finished_recording` in
+`stop_dictation_and_transcribe` after the capture-buffer tail is appended to the
+joined result. A slow final whisper window makes that tail long, so without the
+second pass the buffer handed to the final transcription can exceed the cap.
+
+The trim is reported, never silent: both passes count the dropped samples,
+`StreamingSession::stop()` returns the loop's count in `StreamingAudio`, and the
+command converts the sum to `truncated_s`. `useDictation` turns a non-zero value
+into a status message instead of "Ready", so a transcription missing its
+beginning cannot read as a complete one.
+
+`StreamingAudio.interrupted` marks a panicked streaming thread. Its audio is
+gone, so what remains in the capture buffer is a fragment; the command returns
+`skip_reason` rather than transcribing that fragment and presenting it as the
+recording.
+
 ## Streaming Constants
 
 | Constant | Value | Purpose |
@@ -146,6 +171,8 @@ Ported from whisper.cpp `common.cpp` `vad_simple()`:
 | `KEEP_MS` | 200 | Overlap from previous window |
 | `POLL_INTERVAL_MS` | 50 | Audio buffer polling interval |
 | `MAX_BUFFER_S` | 30 | Force flush on very long recordings |
+| `MAX_RECORDING_S` | 300 | Cap on the audio retained for the final pass |
+| `TRIM_HYSTERESIS_S` | 30 | Slack before the cap trims, to make trimming rare |
 | `VAD_THRESHOLD` | 0.6 | Energy ratio threshold |
 | `VAD_FREQ_THRESHOLD` | 100.0 | High-pass cutoff Hz |
 

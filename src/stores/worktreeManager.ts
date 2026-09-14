@@ -15,29 +15,34 @@ function createWorktreeManagerStore() {
 		textFilter: "",
 	});
 
+	function open(): void {
+		setState("isOpen", true);
+	}
+
+	function close(): void {
+		setState({
+			isOpen: false,
+			selectedIds: new Set<string>(),
+			repoFilter: null,
+			textFilter: "",
+		});
+	}
+
+	function toggle(): void {
+		if (state.isOpen) {
+			close();
+		} else {
+			open();
+		}
+	}
+
+	// `toggle` is handed around as a bare reference (keyboard handler map), which
+	// would strip a `this` binding — so it calls the closures directly.
 	return {
 		state,
-
-		open(): void {
-			setState("isOpen", true);
-		},
-
-		close(): void {
-			setState({
-				isOpen: false,
-				selectedIds: new Set<string>(),
-				repoFilter: null,
-				textFilter: "",
-			});
-		},
-
-		toggle(): void {
-			if (state.isOpen) {
-				this.close();
-			} else {
-				this.open();
-			}
-		},
+		open,
+		close,
+		toggle,
 
 		toggleSelect(id: string): void {
 			const next = new Set(state.selectedIds);

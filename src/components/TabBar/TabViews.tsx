@@ -162,6 +162,9 @@ export const TerminalTabView: Component<TerminalTabViewProps> = (props) => {
 					when={props.isEditing}
 					fallback={
 						<span class={s.tabName}>
+							<Show when={terminal()?.isRemote && terminal()?.agentType}>
+								<span class={s.ptyPrefix}>PTY · </span>
+							</Show>
 							{terminal()?.name}
 							<Show when={terminal()?.standby}>
 								<span class={s.standbyBadge} title="Standby (paused)">

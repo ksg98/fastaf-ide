@@ -1,6 +1,3 @@
-import { diffTabsStore } from "../stores/diffTabs";
-import { editorTabsStore } from "../stores/editorTabs";
-import { mdTabsStore } from "../stores/mdTabs";
 import { paneLayoutStore } from "../stores/paneLayout";
 import { repositoriesStore } from "../stores/repositories";
 import { terminalsStore } from "../stores/terminals";
@@ -27,10 +24,8 @@ export function navigateToTerminal(id: string): void {
 			}
 		}
 	}
+	// setActive deactivates the diff/markdown/editor panes itself.
 	terminalsStore.setActive(id);
-	diffTabsStore.setActive(null);
-	mdTabsStore.setActive(null);
-	editorTabsStore.setActive(null);
 
 	if (paneLayoutStore.isSplit()) {
 		const groupId = paneLayoutStore.getGroupForTab(id);

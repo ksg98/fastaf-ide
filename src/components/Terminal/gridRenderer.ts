@@ -60,8 +60,10 @@ export interface GridRenderer {
 	invalidateCaches(): void;
 	paintGrid(rowMap: Map<number, DecodedRow>, m: CellMetrics, opts: PaintGridOptions): void;
 	paintRow(row: DecodedRow, y: number, m: CellMetrics, fontFamily?: string): void;
-	resolveFg(fgP: number, bgP: number, a: number, defaultColor: string): string;
-	resolveBg(fgP: number, bgP: number, a: number, defaultColor: string): string;
+	/** Cell fg, honouring ATTR_INVERSE — falls back to the theme defaults set via setTheme. */
+	resolveFg(fgP: number, bgP: number, a: number): string;
+	/** Cell bg, honouring ATTR_INVERSE — falls back to the theme defaults set via setTheme. */
+	resolveBg(fgP: number, bgP: number, a: number): string;
 	buildFontStyle(a: number, fontSize: number, fontFamily: string): string;
 }
 
@@ -106,18 +108,22 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 		return s;
 	}
 
-	function resolveFg(fgP: number, bgP: number, a: number, defaultColor: string): string {
+	// Under ATTR_INVERSE fg and bg swap, so a default-attr cell must fall back to
+	// the OTHER default — reading both from the closure makes that impossible to
+	// get wrong at a call site (GH #111: a reverse-video space with both defaults
+	// used to paint bg-on-bg, i.e. an invisible block).
+	function resolveFg(fgP: number, bgP: number, a: number): string {
 		if (a & ATTR_INVERSE) {
-			return a & ATTR_DEFAULT_BG ? defaultColor : cachedRgbString((bgP >> 16) & 0xff, (bgP >> 8) & 0xff, bgP & 0xff);
+			return a & ATTR_DEFAULT_BG ? cachedBgDefault : cachedRgbString((bgP >> 16) & 0xff, (bgP >> 8) & 0xff, bgP & 0xff);
 		}
-		return a & ATTR_DEFAULT_FG ? defaultColor : cachedRgbString((fgP >> 16) & 0xff, (fgP >> 8) & 0xff, fgP & 0xff);
+		return a & ATTR_DEFAULT_FG ? cachedFgDefault : cachedRgbString((fgP >> 16) & 0xff, (fgP >> 8) & 0xff, fgP & 0xff);
 	}
 
-	function resolveBg(fgP: number, bgP: number, a: number, defaultColor: string): string {
+	function resolveBg(fgP: number, bgP: number, a: number): string {
 		if (a & ATTR_INVERSE) {
-			return a & ATTR_DEFAULT_FG ? defaultColor : cachedRgbString((fgP >> 16) & 0xff, (fgP >> 8) & 0xff, fgP & 0xff);
+			return a & ATTR_DEFAULT_FG ? cachedFgDefault : cachedRgbString((fgP >> 16) & 0xff, (fgP >> 8) & 0xff, fgP & 0xff);
 		}
-		return a & ATTR_DEFAULT_BG ? defaultColor : cachedRgbString((bgP >> 16) & 0xff, (bgP >> 8) & 0xff, bgP & 0xff);
+		return a & ATTR_DEFAULT_BG ? cachedBgDefault : cachedRgbString((bgP >> 16) & 0xff, (bgP >> 8) & 0xff, bgP & 0xff);
 	}
 
 	function buildFontStyle(a: number, fontSize: number, fontFamily: string): string {
@@ -685,8 +691,8 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 	): boolean {
 		const w = m.cellWidth;
 		const h = m.cellHeight;
-		const fg = resolveFg(fgP, bgP, a, cachedFgDefault);
-		const bg = resolveBg(fgP, bgP, a, cachedBgDefault);
+		const fg = resolveFg(fgP, bgP, a);
+		const bg = resolveBg(fgP, bgP, a);
 
 		switch (cp) {
 			// Right-pointing triangle (filled)
@@ -1221,7 +1227,7 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 			// glyph, producing dark bands misaligned to the text rows.
 			if (!hasExplicitBg && (cp === 0 || (cp === 0x20 && c > lastVisibleCol))) continue;
 			if (hasExplicitBg) {
-				ctx.fillStyle = resolveBg(row.fg[c], row.bg[c], a, cachedBgDefault);
+				ctx.fillStyle = resolveBg(row.fg[c], row.bg[c], a);
 				ctx.fillRect(c * m.cellWidth, y, m.cellWidth, m.cellHeight);
 			}
 		}
@@ -1243,7 +1249,7 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 			const x = c * m.cellWidth;
 
 			if (cp >= 0x2500 && cp <= 0x257f) {
-				ctx.fillStyle = resolveFg(fgP, bgP, a, cachedFgDefault);
+				ctx.fillStyle = resolveFg(fgP, bgP, a);
 				ctx.strokeStyle = ctx.fillStyle;
 				if (!drawBoxDrawingChar(cp, x, y, m)) {
 					ctx.font = buildFontStyle(a, m.fontSize, fontFamily);
@@ -1253,7 +1259,7 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 				continue;
 			}
 			if ((cp >= 0x2580 && cp <= 0x2593) || (cp >= 0x2596 && cp <= 0x259f)) {
-				ctx.fillStyle = resolveFg(fgP, bgP, a, cachedFgDefault);
+				ctx.fillStyle = resolveFg(fgP, bgP, a);
 				drawBlockChar(cp, x, y, m);
 				lastFg = "";
 				continue;
@@ -1265,13 +1271,13 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 				}
 			}
 			if (cp >= 0x2800 && cp <= 0x28ff) {
-				ctx.fillStyle = resolveFg(fgP, bgP, a, cachedFgDefault);
+				ctx.fillStyle = resolveFg(fgP, bgP, a);
 				drawBrailleChar(cp, x, y, m);
 				lastFg = "";
 				continue;
 			}
 			if (cp >= 0x1fb00 && cp <= 0x1fb8b) {
-				ctx.fillStyle = resolveFg(fgP, bgP, a, cachedFgDefault);
+				ctx.fillStyle = resolveFg(fgP, bgP, a);
 				if (drawLegacyComputingChar(cp, x, y, m)) {
 					lastFg = "";
 					continue;
@@ -1279,7 +1285,7 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 			}
 
 			const font = buildFontStyle(a, m.fontSize, fontFamily);
-			const fg = resolveFg(fgP, bgP, a, cachedFgDefault);
+			const fg = resolveFg(fgP, bgP, a);
 			const dim = (a & ATTR_DIM) !== 0;
 
 			if (font !== lastFont) {
@@ -1305,7 +1311,7 @@ export function createGridRenderer(ctx: GridContext2D, deps: GridRendererDeps): 
 			const a = row.attrs[c];
 			if (!(a & (ATTR_UNDERLINE | ATTR_STRIKEOUT))) continue;
 			const x = c * m.cellWidth;
-			const fg = resolveFg(row.fg[c], row.bg[c], a, cachedFgDefault);
+			const fg = resolveFg(row.fg[c], row.bg[c], a);
 			if (a & ATTR_UNDERLINE) {
 				ctx.fillStyle = fg;
 				ctx.fillRect(x, y + m.cellHeight - 1, m.cellWidth, 1);

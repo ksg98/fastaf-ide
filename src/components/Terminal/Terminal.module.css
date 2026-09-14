@@ -147,3 +147,30 @@
   opacity: 1;
   color: var(--fg-primary);
 }
+
+/* Shown in place of CanvasTerminal once the backend session has exited. */
+.exitedNotice {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px;
+  text-align: center;
+  font-family: var(--font-ui);
+  user-select: none;
+}
+
+.exitedTitle {
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.exitedHint {
+  font-size: 11px;
+  color: var(--fg-muted);
+  opacity: 0.7;
+  max-width: 42ch;
+  line-height: 1.5;
+}

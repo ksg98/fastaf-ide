@@ -1,0 +1,17 @@
+{
+  "captured_at": "2026-07-29T09:32:42+0200",
+  "session_id": "c843de7b-c42a-4556-90ed-7019d92dc497",
+  "base_url": "http://127.0.0.1:9879",
+  "scroll_info": {
+    "display_offset": 0,
+    "screen_lines": 12,
+    "total_lines": 84
+  },
+  "canonical_range": {
+    "start": 0,
+    "end": 82
+  },
+  "raw_length": 2763,
+  "raw_total_written": 3430,
+  "sanitized": "Shell-startup and command-echo rows trimmed; home paths redacted. Payload is synthetic REC-NNNN data from the reflow producer \u2014 no secrets, credentials or user prompts."
+}

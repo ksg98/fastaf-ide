@@ -1,3 +1,5 @@
+import { terminalsStore } from "../../stores/terminals";
+
 /**
  * Decide whether an agent's `intent:` title should overwrite the tab name.
  *
@@ -12,4 +14,26 @@ export function shouldApplyIntentTitle(opts: {
 	nameIsCustom: boolean;
 }): boolean {
 	return Boolean(opts.title) && opts.globalEnabled && opts.perAgentEnabled && !opts.nameIsCustom;
+}
+
+/** Apply one parsed intent event through the same store path used by Terminal. */
+export function handleIntentEvent(opts: {
+	terminalId: string;
+	text: string;
+	title: string | null | undefined;
+	globalEnabled: boolean;
+	perAgentEnabled: boolean;
+}): void {
+	terminalsStore.setAgentIntent(opts.terminalId, opts.text);
+	const terminal = terminalsStore.get(opts.terminalId);
+	if (
+		shouldApplyIntentTitle({
+			title: opts.title,
+			globalEnabled: opts.globalEnabled,
+			perAgentEnabled: opts.perAgentEnabled,
+			nameIsCustom: terminal?.nameIsCustom ?? false,
+		})
+	) {
+		terminalsStore.update(opts.terminalId, { name: opts.title! });
+	}
 }

@@ -69,6 +69,20 @@ impl InputLineBuffer {
         self.chars.iter().collect()
     }
 
+    /// Whether the line is empty.
+    ///
+    /// `write_pty` runs this and [`Self::starts_with`] on every keystroke. Going
+    /// through `content()` allocated and collected the whole typed line to answer
+    /// one bit, then threw it away.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.chars.is_empty()
+    }
+
+    /// Whether the line begins with `c`. See [`Self::is_empty`].
+    pub(crate) fn starts_with(&self, c: char) -> bool {
+        self.chars.first() == Some(&c)
+    }
+
     /// Get current cursor position.
     #[cfg(test)]
     pub(crate) fn cursor_pos(&self) -> usize {
@@ -707,7 +721,7 @@ mod tests {
     #[test]
     fn test_empty_submit() {
         let mut buf = InputLineBuffer::new();
-        assert_eq!(feed_and_get_line(&mut buf, "\r"), Some("".into()));
+        assert_eq!(feed_and_get_line(&mut buf, "\r"), Some(String::new()));
     }
 
     #[test]
@@ -1698,5 +1712,34 @@ mod tests {
         let line = feed_and_get_line(&mut buf, "fix the login bug\r");
         assert_eq!(line, Some("fix the login bug".into()));
         assert!(!line.unwrap().contains("[noop] reply ."));
+    }
+
+    /// The two probes `write_pty` needs on every keystroke must answer exactly what
+    /// `content()` would, without building the line to do it.
+    #[test]
+    fn the_cheap_probes_agree_with_content() {
+        for input in [
+            "",
+            "/",
+            "/model sonnet",
+            "not a slash",
+            " /leading space",
+            "\u{00e8}accented",
+            "\u{1f600} emoji first",
+        ] {
+            let mut buf = InputLineBuffer::new();
+            buf.feed(input);
+            let content = buf.content();
+            assert_eq!(
+                buf.is_empty(),
+                content.is_empty(),
+                "is_empty disagreed on {input:?}"
+            );
+            assert_eq!(
+                buf.starts_with('/'),
+                content.starts_with('/'),
+                "starts_with disagreed on {input:?}"
+            );
+        }
     }
 }

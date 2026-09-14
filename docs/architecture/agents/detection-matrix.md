@@ -59,7 +59,7 @@ agent is considered fully supported.
 | **Time display** | `(1m 32s)` | `(10s • esc to interrupt)` | `(esc to cancel, Ns)` | None | None |
 | **Token display** | `↓ 2.2k tokens` | None | None | `Tokens: Nk sent, N received. Cost: $X.XX` | None |
 | **Tip text** | Spinner verb names | None | Italic tips during spinner | None | None |
-| **Detected by** | `is_chrome_row` ✓ | `is_chrome_row` ✓ | `parse_status_line` ✓ | `parse_status_line` ✓ | N/A (full TUI) |
+| **Detected by** | `is_chrome_row` ✓ | `is_chrome_row` ✓ | `parse_status_line` ✓ | `parse_status_line` ✓ | `detect_opencode_screen_activity` ✓ (footer `esc interrupt`, not the bar glyphs) |
 
 ### 6. Interactive Menus
 
@@ -68,7 +68,7 @@ agent is considered fully supported.
 | **Permission prompt** | Multiselect (`❯ 1. Yes`) | Not observed (sandbox) | None (model-level refusal) | File add: `Y/N/A/S/D` | `△ Permission required` inline |
 | **Selection char** | `❯` (blue) | Not observed | N/A | N/A | `⇆ select` |
 | **Footer pattern** | `Esc to cancel/close` | `esc to interrupt` | `esc to cancel` (in spinner) | None | `enter confirm` |
-| **OSC 777 notify** | Yes | No | No | No | No |
+| **OSC 777 notify** | Yes — `needs your permission` (blocked, high-confidence); `is waiting for your input` (blocked picker OR 60s idle timer, low-confidence); `needs your attention` (ignored) | No | No | No | No |
 | **OSC 0 window title** | Yes (task + spinner) | Yes | Yes (`◇ Ready (workspace)`) | No | No |
 | **Slash commands** | `/mcp`, `/stats`, `/status` | `/model`, `/mcp`, `/fast` | `/help`, `/settings`, `/model`, `/stats` | `/help` | None observed |
 

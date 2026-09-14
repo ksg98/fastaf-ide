@@ -2,6 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../../agents";
 import { buildAgentLaunchCommand, buildResumeCommand, verifyAndBuildResumeCommand } from "../../utils/agentSession";
 
+const { mockAgentConfigsStore } = vi.hoisted(() => ({
+	mockAgentConfigsStore: {
+		getDefaultConfig: vi.fn().mockReturnValue(undefined),
+		getRunConfigs: vi.fn().mockReturnValue([]),
+	},
+}));
+
+vi.mock("../../stores/agentConfigs", () => ({
+	agentConfigsStore: mockAgentConfigsStore,
+}));
+
 // Mock rpc for verifyAndBuildResumeCommand tests
 const mockRpc = vi.fn();
 vi.mock("../../transport", () => ({
@@ -139,6 +150,8 @@ describe("sessionDiscovery in AgentConfig", () => {
 describe("verifyAndBuildResumeCommand", () => {
 	beforeEach(() => {
 		mockRpc.mockReset();
+		mockAgentConfigsStore.getDefaultConfig.mockReset().mockReturnValue(undefined);
+		mockAgentConfigsStore.getRunConfigs.mockReset().mockReturnValue([]);
 	});
 
 	it("uses agentSessionId (not tuicSession) for claude verification", async () => {
@@ -189,16 +202,45 @@ describe("verifyAndBuildResumeCommand", () => {
 		expect(result).toBeNull();
 	});
 
-	it("verifies gemini tuicSession correctly", async () => {
+	it("verifies gemini agentSessionId instead of tuicSession", async () => {
 		mockRpc.mockResolvedValueOnce(true);
-		const result = await verifyAndBuildResumeCommand("gemini", "/tmp/repo", "tuic-uuid-1", null);
+		const result = await verifyAndBuildResumeCommand("gemini", "/tmp/repo", "tuic-uuid-1", "discovered-gemini-id");
 		expect(mockRpc).toHaveBeenCalledWith("verify_agent_session", {
 			agentType: "gemini",
-			sessionId: "tuic-uuid-1",
+			sessionId: "discovered-gemini-id",
 			cwd: "/tmp/repo",
 			agentPid: null,
 			envOverrides: {},
 		});
-		expect(result).toBe("gemini --resume tuic-uuid-1");
+		expect(result).toBe("gemini --resume discovered-gemini-id");
+	});
+
+	it("does not verify a stale Gemini tuicSession when discovery has no agentSessionId", async () => {
+		const result = await verifyAndBuildResumeCommand("gemini", "/tmp/repo", "stale-tuic-uuid", null);
+
+		expect(mockRpc).not.toHaveBeenCalled();
+		expect(result).toBe("gemini --resume");
+	});
+
+	it("preserves persisted Gemini launch args while resuming the discovered ID", async () => {
+		mockAgentConfigsStore.getDefaultConfig.mockReturnValue({
+			name: "Gemini current",
+			command: "gemini",
+			args: ["--model", "current-model"],
+			env: { HOME: "/tmp/gemini-current-home" },
+			is_default: true,
+		});
+		mockRpc.mockResolvedValueOnce(true);
+
+		const result = await verifyAndBuildResumeCommand("gemini", "/tmp/repo", "stale-tuic-uuid", "discovered-gemini-id");
+
+		expect(mockRpc).toHaveBeenCalledWith("verify_agent_session", {
+			agentType: "gemini",
+			sessionId: "discovered-gemini-id",
+			cwd: "/tmp/repo",
+			agentPid: null,
+			envOverrides: { HOME: "/tmp/gemini-current-home" },
+		});
+		expect(result).toBe("gemini --resume discovered-gemini-id --model current-model");
 	});
 });

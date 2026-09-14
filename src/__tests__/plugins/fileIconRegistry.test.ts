@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fileIconRegistry } from "../../plugins/fileIconRegistry";
 import type { FileIconProvider } from "../../plugins/types";
 
@@ -60,6 +60,56 @@ describe("fileIconRegistry", () => {
 			a.dispose();
 			a.dispose();
 			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<b/>");
+		});
+	});
+
+	// A file row resolves its icon on every mount, and a directory listing mounts
+	// thousands of rows — the provider must be asked once per distinct name.
+	describe("resolve cache", () => {
+		it("asks the provider once per name/kind pair", () => {
+			const resolveFileIcon = vi.fn((name: string) => `<${name}/>`);
+			fileIconRegistry.register({ resolveFileIcon });
+
+			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<index.ts/>");
+			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<index.ts/>");
+			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<index.ts/>");
+
+			expect(resolveFileIcon).toHaveBeenCalledTimes(1);
+		});
+
+		it("keys the cache on the directory flag, not the name alone", () => {
+			const resolveFileIcon = vi.fn((_name: string, isDir: boolean) => (isDir ? "<folder/>" : "<file/>"));
+			fileIconRegistry.register({ resolveFileIcon });
+
+			expect(fileIconRegistry.resolve("build", true)).toBe("<folder/>");
+			expect(fileIconRegistry.resolve("build", false)).toBe("<file/>");
+			expect(resolveFileIcon).toHaveBeenCalledTimes(2);
+		});
+
+		it("caches a provider's null answer instead of re-asking", () => {
+			const resolveFileIcon = vi.fn(() => null);
+			fileIconRegistry.register({ resolveFileIcon });
+
+			expect(fileIconRegistry.resolve("weird.xyz", false)).toBeNull();
+			expect(fileIconRegistry.resolve("weird.xyz", false)).toBeNull();
+			expect(resolveFileIcon).toHaveBeenCalledTimes(1);
+		});
+
+		it("drops cached icons when a new provider registers", () => {
+			fileIconRegistry.register(iconProvider("<a/>"));
+			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<a/>");
+
+			fileIconRegistry.register(iconProvider("<b/>"));
+			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<b/>");
+		});
+
+		it("drops cached icons when a provider is disposed", () => {
+			fileIconRegistry.register(iconProvider("<a/>"));
+			const d = fileIconRegistry.register(iconProvider("<b/>"));
+			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<b/>");
+
+			d.dispose();
+			expect(fileIconRegistry.resolve("index.ts", false)).toBe("<a/>");
 		});
 	});
 

@@ -17,6 +17,10 @@ describe("notesStore", () => {
 		vi.doMock("@tauri-apps/api/core", () => ({ invoke: mockInvoke }));
 
 		store = (await import("../../stores/notes")).notesStore;
+		// Mirror the real boot order (useAppBootstrap hydrates before any UI can mutate).
+		// Without a successful hydrate the store refuses to persist — see GH #107 below.
+		await store.hydrate();
+		mockInvoke.mockClear();
 	});
 
 	describe("addNote()", () => {
@@ -141,16 +145,54 @@ describe("notesStore", () => {
 			});
 		});
 
-		it("keeps empty state on invoke failure", async () => {
-			const consoleSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+		it("keeps empty state on invoke failure and reports it as an error", async () => {
+			const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 			mockInvoke.mockRejectedValueOnce(new Error("backend error"));
 
 			await testInScopeAsync(async () => {
 				await store.hydrate();
 				expect(store.state.notes).toEqual([]);
-				expect(consoleSpy).toHaveBeenCalledWith("[store]", "Failed to hydrate notes", expect.any(Error));
+				expect(consoleSpy).toHaveBeenCalledWith(
+					"[store]",
+					expect.stringContaining("Failed to hydrate notes"),
+					expect.any(Error),
+				);
 			});
 			consoleSpy.mockRestore();
+		});
+	});
+
+	// GH #107: after a failed hydrate the store holds [], and persisting that would
+	// atomically overwrite notes.json with an empty array — a permanent, silent loss.
+	describe("persistence guard after a failed hydrate", () => {
+		async function freshStore(invokeImpl: () => Promise<unknown>) {
+			vi.resetModules();
+			mockInvoke.mockReset().mockImplementation(invokeImpl);
+			vi.doMock("@tauri-apps/api/core", () => ({ invoke: mockInvoke }));
+			return (await import("../../stores/notes")).notesStore;
+		}
+
+		it("does not call save_notes for a mutation issued after a failed hydrate", async () => {
+			const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			const fresh = await freshStore(() => Promise.reject(new Error("notes.json unreadable")));
+
+			await testInScopeAsync(async () => {
+				await fresh.hydrate();
+				fresh.addNote("must not wipe notes.json");
+				expect(fresh.state.notes.length).toBe(1);
+				expect(mockInvoke).not.toHaveBeenCalledWith("save_notes", expect.anything());
+			});
+			consoleSpy.mockRestore();
+		});
+
+		it("does persist after a successful hydrate of a missing/empty file", async () => {
+			const fresh = await freshStore(() => Promise.resolve(null));
+
+			await testInScopeAsync(async () => {
+				await fresh.hydrate();
+				fresh.addNote("kept");
+				expect(mockInvoke).toHaveBeenCalledWith("save_notes", expect.anything());
+			});
 		});
 	});
 

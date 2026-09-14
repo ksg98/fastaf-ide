@@ -281,6 +281,20 @@ describe("cleanOscTitle", () => {
 		expect(cleanOscTitle("\\\\server\\share")).toBe("");
 	});
 
+	it("renders pi's status-prefixed title as one stable name across every state", () => {
+		// pi's terminal-status-title extension repaints the title ~8x/second with an animated
+		// braille frame; every frame plus the idle/done/error glyphs must collapse to the same
+		// tab name, or the tab flickers. The separator the glyph sat on must go with it.
+		const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "○", "✓", "✗"];
+		for (const glyph of frames) {
+			expect(cleanOscTitle(`${glyph} | π | tuicommander`)).toBe("π | tuicommander");
+		}
+	});
+
+	it("keeps a legitimate leading separator-like word intact", () => {
+		expect(cleanOscTitle("npm run build")).toBe("npm run build");
+	});
+
 	it("keeps subcommands but strips flags", () => {
 		expect(cleanOscTitle("vim file.txt")).toBe("vim file.txt");
 		expect(cleanOscTitle("npm test")).toBe("npm test");

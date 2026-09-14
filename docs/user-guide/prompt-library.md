@@ -27,8 +27,8 @@ Use the category tabs to narrow the list:
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Move selection up/down |
-| `Enter` | Insert selected prompt into terminal |
-| Double-click | Insert and immediately execute (adds newline) |
+| `Enter` | Run the selected prompt using its Auto-execute setting |
+| Double-click | Insert and submit exactly once |
 | `Ctrl+N` / `Cmd+N` | Create a new prompt |
 | `Ctrl+E` / `Cmd+E` | Edit the selected prompt |
 | `Ctrl+F` / `Cmd+F` | Toggle favorite on the selected prompt |
@@ -41,6 +41,7 @@ Use the category tabs to narrow the list:
    - **Name** (required) — shown in the list
    - **Description** — optional subtitle, also searchable
    - **Content** (required) — the text to insert; use `{{variable}}` for dynamic values
+   - **Auto-execute** — submit immediately, or leave the inserted text editable for review
    - **Keyboard Shortcut** — optional global shortcut to trigger this prompt directly
 3. Click **Save**
 
@@ -78,7 +79,9 @@ Any `{{name}}` not in the built-in list becomes a custom input field in the vari
 The variable dialog offers two actions:
 
 - **Insert** — writes the resolved text to the terminal input line (you can review before pressing Enter)
-- **Insert & Run** — appends a newline, sending the command immediately
+- **Insert & Run** — submits the resolved text once through the agent-aware command path
+
+These explicit actions override the saved Auto-execute setting for that use.
 
 ## Favorites and Pinning
 
@@ -90,7 +93,7 @@ The **Recent** tab shows the last 10 prompts you sent, in order of use. Recency 
 
 ## Sending to Terminal
 
-Selecting a prompt (click or Enter) writes its content to the currently active terminal. If the prompt has no variables, it is injected immediately. If it does, the variable dialog appears first.
+Selecting a prompt (click or Enter) writes its content to the currently active terminal. Auto-execute submits it immediately; otherwise the text remains editable. If the prompt has variables, the variable dialog appears first and its **Insert** or **Insert & Run** choice takes precedence.
 
 The drawer closes automatically after a successful injection and focus returns to the terminal.
 

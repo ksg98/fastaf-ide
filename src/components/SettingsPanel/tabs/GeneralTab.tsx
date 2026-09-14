@@ -325,8 +325,8 @@ export const GeneralTab: Component = () => {
 			<SettingToggle
 				checked={settingsStore.state.showLastPrompt}
 				onChange={(v) => settingsStore.setShowLastPrompt(v)}
-				label="Show last prompt bar"
-				hint="Display a collapsible overlay at the top of the terminal showing the last prompt sent to an agent"
+				label="Show agent context bar"
+				hint="Display the model's current intent, its orchestrator-assigned task, and the last prompt sent to an agent"
 			/>
 
 			<h3>{t("general.heading.powerManagement", "Power Management")}</h3>

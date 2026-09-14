@@ -5,8 +5,9 @@ import { setOnTabAdded } from "../stores/tabManager";
  *  No-op when not in split mode. Safe to call unconditionally after tab creation.
  *  New terminals stack with the other terminals when the active group holds
  *  none (e.g. focus sits in a file pane) — a fresh terminal must not bury the
- *  file pane's content. */
-export function assignTabToActiveGroup(tabId: string, type: PaneTabType): void {
+ *  file pane's content.
+ *  `activate=false` docks the tab without switching the pane to it. */
+export function assignTabToActiveGroup(tabId: string, type: PaneTabType, activate = true): void {
 	if (!paneLayoutStore.isSplit()) return;
 	let targetGroupId = paneLayoutStore.state.activeGroupId;
 	const tabsOf = (g: string) => paneLayoutStore.state.groups[g]?.tabs ?? [];
@@ -15,8 +16,8 @@ export function assignTabToActiveGroup(tabId: string, type: PaneTabType): void {
 			paneLayoutStore.getAllGroupIds().find((g) => tabsOf(g).some((t) => t.type === "terminal")) ?? targetGroupId;
 	}
 	if (!targetGroupId) return;
-	paneLayoutStore.addTab(targetGroupId, { id: tabId, type });
-	if (targetGroupId !== paneLayoutStore.state.activeGroupId) {
+	paneLayoutStore.addTab(targetGroupId, { id: tabId, type }, activate);
+	if (activate && targetGroupId !== paneLayoutStore.state.activeGroupId) {
 		paneLayoutStore.setActiveGroup(targetGroupId);
 	}
 }

@@ -18,9 +18,7 @@ use tauri::State;
 
 use crate::mcp_oauth::callback_server;
 use crate::mcp_oauth::dcr::{DcrRequest, register_client};
-use crate::mcp_oauth::discovery::{
-    discover_auth_server, discover_auth_server_relaxed, discover_protected_resource,
-};
+use crate::mcp_oauth::discovery::{discover_auth_server, discover_protected_resource};
 use crate::mcp_upstream_config::UpstreamAuth;
 use crate::state::AppState;
 
@@ -30,6 +28,10 @@ use crate::state::AppState;
 pub(crate) struct StartOAuthResponse {
     pub(crate) authorization_url: String,
     pub(crate) state: String,
+    /// `true` when the authorization server sits on a different registrable
+    /// domain than the MCP server (gateways, hosted IdP tenants). Advisory:
+    /// the consent dialog spells it out, the flow is never blocked.
+    pub(crate) cross_domain_as: bool,
 }
 
 /// Start the OAuth flow for the given upstream. Returns the authorization URL
@@ -123,7 +125,7 @@ pub(crate) async fn start_mcp_upstream_oauth(
                         .map_err(|e| format!("Invalid server URL '{server_url}': {e}"))?
                         .origin()
                         .unicode_serialization();
-                    discover_auth_server_relaxed(&http_client, &origin)
+                    discover_auth_server(&http_client, &origin)
                         .await
                         .map_err(|e| format!(
                             "OAuth discovery failed for '{name}': no RFC 9728 metadata \
@@ -187,6 +189,7 @@ pub(crate) async fn start_mcp_upstream_oauth(
         Ok::<_, String>(StartOAuthResponse {
             authorization_url: outcome.authorization_url,
             state: outcome.state,
+            cross_domain_as: outcome.cross_domain_as,
         })
     }.await;
 
@@ -247,6 +250,7 @@ mod tests {
         let resp = StartOAuthResponse {
             authorization_url: "https://as.example/authorize?x=1".into(),
             state: "nonce".into(),
+            cross_domain_as: true,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(
@@ -254,5 +258,6 @@ mod tests {
             "https://as.example/authorize?x=1"
         );
         assert_eq!(json["state"], "nonce");
+        assert_eq!(json["cross_domain_as"], true);
     }
 }

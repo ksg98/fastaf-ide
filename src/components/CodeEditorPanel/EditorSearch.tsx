@@ -14,6 +14,8 @@ const onIdle: (cb: (deadline: { timeRemaining: () => number }) => void) => void 
 
 export interface EditorSearchProps {
 	visible: boolean;
+	/** Forwarded to <SearchBar> so a repeat Cmd+F re-focuses an already-open bar. */
+	focusToken?: number;
 	view: EditorView | undefined;
 	/** When true, the replace row is offered (read-only files get search only). */
 	editable: boolean;
@@ -164,6 +166,7 @@ export const EditorSearch: Component<EditorSearchProps> = (props) => {
 	return (
 		<SearchBar
 			visible={props.visible}
+			focusToken={props.focusToken}
 			onSearch={handleSearch}
 			onNext={handleNext}
 			onPrev={handlePrev}

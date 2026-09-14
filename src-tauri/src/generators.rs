@@ -185,7 +185,7 @@ mod tests {
             symbols: true,
         });
         assert_eq!(r.value.len(), 32);
-        assert!(r.value.chars().all(|c| c.is_ascii()));
+        assert!(r.value.is_ascii());
     }
 
     #[test]

@@ -206,8 +206,10 @@ mod tests {
 
     #[test]
     fn config_agent_hook_flag_roundtrips() {
-        let mut s = crate::config::AgentSettings::default();
-        s.hook_instrumentation = Some(true);
+        let s = crate::config::AgentSettings {
+            hook_instrumentation: Some(true),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&s).unwrap();
         let back: crate::config::AgentSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.hook_instrumentation, Some(true));

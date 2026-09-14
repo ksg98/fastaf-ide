@@ -1110,20 +1110,27 @@ pub async fn get_claude_session_stats_impl(
     state: &Arc<crate::AppState>,
     scope: String,
 ) -> Result<SessionStats, String> {
+    let projects_dir =
+        claude_projects_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+    get_claude_session_stats_from_dir(state, scope, &projects_dir).await
+}
+
+async fn get_claude_session_stats_from_dir(
+    state: &Arc<crate::AppState>,
+    scope: String,
+    projects_dir: &std::path::Path,
+) -> Result<SessionStats, String> {
     let cache_mutex = state.claude_usage_cache.lock();
     // Clone the cache so we can release the lock during I/O
     let mut cache = cache_mutex.clone();
     drop(cache_mutex);
-
-    let projects_dir =
-        claude_projects_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
 
     if !projects_dir.exists() {
         return Ok(SessionStats::default());
     }
 
     // List project directories
-    let project_dirs: Vec<(String, PathBuf)> = std::fs::read_dir(&projects_dir)
+    let project_dirs: Vec<(String, PathBuf)> = std::fs::read_dir(projects_dir)
         .map_err(|e| format!("Failed to read projects dir: {e}"))?
         .filter_map(|entry| {
             let entry = entry.ok()?;
@@ -1617,6 +1624,126 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn transcript(input: u64, output: u64, session: &str, hour: &str) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-test\",\"usage\":{{\"input_tokens\":{input},\"output_tokens\":{output},\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}}}}}\n{{\"type\":\"system\",\"subtype\":\"turn_duration\",\"timestamp\":\"{hour}:00:00Z\",\"sessionId\":\"{session}\",\"durationMs\":1}}\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn session_stats_cache_tracks_growth_truncation_and_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().join("config"));
+        let projects = dir.path().join("projects");
+        let project = projects.join("project-a");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = project.join("session.jsonl");
+        std::fs::write(&session, transcript(100, 50, "s1", "2026-07-30T10")).unwrap();
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let first = get_claude_session_stats_from_dir(&state, "all".into(), &projects)
+            .await
+            .unwrap();
+        assert_eq!(first.total_input_tokens, 100);
+        assert_eq!(first.total_sessions, 1);
+
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&session)
+            .unwrap()
+            .write_all(transcript(200, 80, "s1", "2026-07-30T11").as_bytes())
+            .unwrap();
+        let grown = get_claude_session_stats_from_dir(&state, "all".into(), &projects)
+            .await
+            .unwrap();
+        assert_eq!(grown.total_input_tokens, 300);
+        assert_eq!(grown.active_hours, 2);
+
+        std::fs::write(&session, transcript(7, 3, "s2", "2026-07-30T12")).unwrap();
+        let truncated = get_claude_session_stats_from_dir(&state, "all".into(), &projects)
+            .await
+            .unwrap();
+        assert_eq!(truncated.total_input_tokens, 7);
+        assert_eq!(truncated.total_sessions, 1);
+
+        std::fs::remove_file(&session).unwrap();
+        let deleted_file = get_claude_session_stats_from_dir(&state, "all".into(), &projects)
+            .await
+            .unwrap();
+        assert_eq!(deleted_file.total_input_tokens, 0);
+        assert_eq!(deleted_file.total_sessions, 0);
+
+        std::fs::remove_dir(&project).unwrap();
+        let deleted_project = get_claude_session_stats_from_dir(&state, "all".into(), &projects)
+            .await
+            .unwrap();
+        assert!(deleted_project.per_project.is_empty());
+        assert!(!state.claude_usage_cache.lock().contains_key("project-a"));
+    }
+
+    #[tokio::test]
+    async fn session_stats_scope_excludes_other_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().join("config"));
+        let projects = dir.path().join("projects");
+        for (slug, tokens) in [("project-a", 10), ("project-b", 90)] {
+            let project = projects.join(slug);
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(
+                project.join("session.jsonl"),
+                transcript(tokens, 1, slug, "2026-07-30T10"),
+            )
+            .unwrap();
+        }
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+
+        let scoped = get_claude_session_stats_from_dir(&state, "project-a".into(), &projects)
+            .await
+            .unwrap();
+
+        assert_eq!(scoped.total_input_tokens, 10);
+        assert_eq!(scoped.per_project.len(), 1);
+        assert!(scoped.per_project.contains_key("project-a"));
+    }
+
+    #[tokio::test]
+    async fn session_stats_migrates_cache_without_hourly_buckets() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(dir.path().join("config"));
+        let projects = dir.path().join("projects");
+        let project = projects.join("project-a");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = project.join("session.jsonl");
+        let content = transcript(25, 5, "s1", "2026-07-30T10");
+        std::fs::write(&session, &content).unwrap();
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        state.claude_usage_cache.lock().insert(
+            "project-a".into(),
+            HashMap::from([(
+                "session.jsonl".into(),
+                CachedFileStats {
+                    file_size: content.len() as u64,
+                    assistant_message_count: 1,
+                    hourly_tokens: HashMap::new(),
+                    ..CachedFileStats::default()
+                },
+            )]),
+        );
+
+        let migrated = get_claude_session_stats_from_dir(&state, "all".into(), &projects)
+            .await
+            .unwrap();
+
+        assert_eq!(migrated.total_input_tokens, 25);
+        assert_eq!(migrated.active_hours, 1);
+        assert!(
+            !state.claude_usage_cache.lock()["project-a"]["session.jsonl"]
+                .hourly_tokens
+                .is_empty()
+        );
     }
 
     #[test]

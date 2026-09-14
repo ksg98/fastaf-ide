@@ -21,6 +21,7 @@ pub(crate) enum NotificationSound {
     Error,
     Warning,
     Info,
+    Attention,
 }
 
 /// Waveform shape for tone generation.
@@ -41,6 +42,8 @@ struct Note {
 struct SoundSequence {
     notes: Vec<Note>,
     gap: Duration,
+    /// Per-sequence attenuation applied on top of the user's volume.
+    gain: f32,
 }
 
 /// Get the sound definition for a notification type.
@@ -62,6 +65,7 @@ fn sound_sequence(sound: NotificationSound) -> SoundSequence {
                     waveform: Waveform::Sine,
                 },
             ],
+            gain: 1.0,
             gap: Duration::from_millis(30),
         },
         // Satisfying major triad arpeggio: C5 -> E5 -> G5
@@ -83,6 +87,7 @@ fn sound_sequence(sound: NotificationSound) -> SoundSequence {
                     waveform: Waveform::Sine,
                 },
             ],
+            gain: 1.0,
             gap: Duration::from_millis(30),
         },
         // Low descending minor interval: E4 -> C4 (triangle = warmer)
@@ -99,6 +104,7 @@ fn sound_sequence(sound: NotificationSound) -> SoundSequence {
                     waveform: Waveform::Triangle,
                 },
             ],
+            gain: 1.0,
             gap: Duration::from_millis(40),
         },
         // Quick double-tap: A4 x 2 (triangle = softer)
@@ -115,6 +121,7 @@ fn sound_sequence(sound: NotificationSound) -> SoundSequence {
                     waveform: Waveform::Triangle,
                 },
             ],
+            gain: 1.0,
             gap: Duration::from_millis(60),
         },
         // Soft single pluck: G5
@@ -124,7 +131,33 @@ fn sound_sequence(sound: NotificationSound) -> SoundSequence {
                 duration: Duration::from_millis(80),
                 waveform: Waveform::Sine,
             }],
+            gain: 1.0,
             gap: Duration::ZERO,
+        },
+        // Callback motif: two quick G4 knocks followed by a longer E5 call.
+        // Triangle waves remain audible across a room without the harsh odd
+        // harmonics of the old square-wave buzzer. The repeated opening makes
+        // the pattern unmistakable, while the longer rise supplies urgency.
+        NotificationSound::Attention => SoundSequence {
+            notes: vec![
+                Note {
+                    frequency: 392.0,
+                    duration: Duration::from_millis(75),
+                    waveform: Waveform::Triangle,
+                },
+                Note {
+                    frequency: 392.0,
+                    duration: Duration::from_millis(75),
+                    waveform: Waveform::Triangle,
+                },
+                Note {
+                    frequency: 659.0,
+                    duration: Duration::from_millis(140),
+                    waveform: Waveform::Triangle,
+                },
+            ],
+            gain: 0.8,
+            gap: Duration::from_millis(50),
         },
     }
 }
@@ -325,6 +358,7 @@ pub(crate) fn play(sound: NotificationSound, volume: f32, device_name: Option<St
         let player = Player::connect_new(stream.mixer());
 
         let seq = sound_sequence(sound);
+        let volume = volume * seq.gain;
         for (i, note) in seq.notes.iter().enumerate() {
             player.append(EnvelopedTone::new(
                 note.frequency,
@@ -376,6 +410,7 @@ mod tests {
             NotificationSound::Error,
             NotificationSound::Warning,
             NotificationSound::Info,
+            NotificationSound::Attention,
         ];
         for sound in types {
             let seq = sound_sequence(sound);
@@ -400,7 +435,7 @@ mod tests {
     fn envelope_attack_ramps_up() {
         let tone = EnvelopedTone::new(440.0, Duration::from_millis(100), 1.0, Waveform::Sine);
         // At sample 0, envelope should be 0
-        assert_eq!(tone.envelope(), 0.0);
+        assert!(tone.envelope().abs() < f32::EPSILON);
         // At half of attack (attack = 10ms = 480 samples at 48kHz)
         let mut tone = tone;
         tone.sample_index = 240;
@@ -416,7 +451,7 @@ mod tests {
         let mut tone = EnvelopedTone::new(440.0, Duration::from_millis(100), 1.0, Waveform::Sine);
         // After attack ends (480 samples), envelope should be 1.0
         tone.sample_index = 500;
-        assert_eq!(tone.envelope(), 1.0);
+        assert!((tone.envelope() - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -485,6 +520,57 @@ mod tests {
             assert!(
                 matches!(note.waveform, Waveform::Triangle),
                 "Warning notes should use triangle"
+            );
+        }
+    }
+
+    /// The attention call is a deliberate two-knock-and-rise motif.
+    #[test]
+    fn attention_uses_the_approved_double_knock_motif() {
+        let seq = sound_sequence(NotificationSound::Attention);
+        assert_eq!(seq.notes.len(), 3);
+        assert_eq!(seq.gap, Duration::from_millis(50));
+        assert_eq!(
+            seq.notes
+                .iter()
+                .map(|note| note.frequency as u32)
+                .collect::<Vec<_>>(),
+            vec![392, 392, 659]
+        );
+        assert_eq!(
+            seq.notes
+                .iter()
+                .map(|note| note.duration)
+                .collect::<Vec<_>>(),
+            vec![
+                Duration::from_millis(75),
+                Duration::from_millis(75),
+                Duration::from_millis(140),
+            ]
+        );
+        for note in &seq.notes {
+            assert!(matches!(note.waveform, Waveform::Triangle));
+        }
+    }
+
+    /// The call is prominent but still below the ordinary chimes' full gain.
+    #[test]
+    fn attention_attenuates_itself_below_the_chimes() {
+        let attention = sound_sequence(NotificationSound::Attention);
+        assert!(
+            attention.gain < 1.0,
+            "attention call must stay below full gain"
+        );
+        for other in [
+            NotificationSound::Question,
+            NotificationSound::Completion,
+            NotificationSound::Error,
+            NotificationSound::Warning,
+            NotificationSound::Info,
+        ] {
+            assert!(
+                (sound_sequence(other).gain - 1.0).abs() < f32::EPSILON,
+                "{other:?} plays at the user's configured volume"
             );
         }
     }

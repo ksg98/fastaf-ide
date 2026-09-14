@@ -7,8 +7,16 @@ export interface RowSnapshot {
 /** Re-declared here instead of imported: keeps the helper self-contained and
  *  avoids pulling the full Terminal module into unit tests. Must stay in
  *  sync with the patterns used in Terminal.tsx. */
-const SUGGEST_ANCHOR_RE = /^[\s●⏺]*suggest:\s+\S/;
+export const SUGGEST_ANCHOR_RE = /^[\s●⏺]*suggest:\s+\S/;
+/** Stop condition for the continuation walk: a new `intent:` token at column 0. */
 const INTENT_RE = /^intent:\s+\S/;
+/**
+ * Which rows get the intent highlight. Deliberately looser than [`INTENT_RE`]:
+ * an agent renders its own intent line behind a bullet (`⏺ intent: …`), and that
+ * row must still be tinted. It is NOT a walk stop condition — ending a suggest
+ * block on an indented mention would swallow the block's closing bracket.
+ */
+export const INTENT_HIGHLIGHT_RE = /^[\s●⏺]*intent:\s+/;
 /** Match a NEW `suggest:` anchor for stop-detection during a continuation
  *  walk. Does NOT require `|` on the same row — the Rust parser allows the
  *  first `|` to arrive on a wrapped continuation line, so a row like
@@ -80,4 +88,48 @@ export function isSuggestBlock(
 	}
 
 	return false;
+}
+
+/** One row the overlay masks, and why. */
+export interface OverlayBlock {
+	row: number;
+	kind: "suggest" | "continuation" | "intent";
+}
+
+/**
+ * Which rows the suggest/intent overlay must mask on this screen, plus a key
+ * that changes exactly when that set does.
+ *
+ * The key is the point: the overlay rebuilds its DOM only when the plan differs
+ * from the last one, and most repaints do not move a suggest block. Deciding
+ * that from freshly built `<div>`s meant creating and dropping the whole overlay
+ * on every frame to discover it was unchanged, so the plan is computed first and
+ * the elements are built only once the key says they are needed.
+ */
+export function planSuggestOverlay(
+	totalRows: number,
+	getRow: (i: number) => RowSnapshot | null,
+): { key: string; blocks: OverlayBlock[] } {
+	const blocks: OverlayBlock[] = [];
+	const parts: string[] = [];
+	for (let row = 0; row < totalRows; row++) {
+		const snapshot = getRow(row);
+		if (!snapshot) continue;
+		const text = snapshot.text;
+
+		if (SUGGEST_ANCHOR_RE.test(text) && isSuggestBlock(row, totalRows, getRow)) {
+			blocks.push({ row, kind: "suggest" });
+			parts.push(`s${row}`);
+			const hiddenRows = continuationRowsAfterSuggest(row, totalRows, getRow);
+			for (const contRow of hiddenRows) {
+				blocks.push({ row: contRow, kind: "continuation" });
+				parts.push(`c${contRow}`);
+			}
+			if (hiddenRows.length > 0) row = hiddenRows[hiddenRows.length - 1];
+		} else if (INTENT_HIGHLIGHT_RE.test(text)) {
+			blocks.push({ row, kind: "intent" });
+			parts.push(`i${row}`);
+		}
+	}
+	return { key: parts.join(","), blocks };
 }

@@ -148,8 +148,11 @@ async fn bridge_chat(socket: WebSocket, chat_id: String) {
     let reg = chat_registry();
     let (result, mut rx) = reg.subscribe_ws(&chat_id).await;
 
-    // First frame: the state snapshot (carries `kind: "snapshot"` so the client's
-    // applyRegistryEvent handles it like any other event).
+    // First frame: the state snapshot (carries `kind: "snapshot"` so a client can
+    // handle it like any other event). There is no client: the registry has no
+    // producer, so this snapshot is always the empty default and no event ever
+    // follows it — the frontend consumer was removed in story `600-d664` because
+    // applying it wiped the history loaded from disk.
     if !send_json(&mut sink, &ChatEvent::Snapshot(result.snapshot)).await {
         reg.unsubscribe(&chat_id, result.subscription_id).await;
         return;

@@ -12,6 +12,9 @@ export interface ExtraToggle {
 
 export interface SearchBarProps {
 	visible: boolean;
+	/** Bumped on every re-open request. Re-focuses the input even when the bar is
+	 * already visible — see `createSearchVisibility`. */
+	focusToken?: number;
 	/** Called when search term or options change */
 	onSearch: (term: string, opts: SearchOptions) => void;
 	onNext: () => void;
@@ -93,6 +96,29 @@ const ReplaceAllIcon = () => (
 	</svg>
 );
 
+/** Visibility state for a <SearchBar>, plus the re-focus signal it needs.
+ *
+ * Pressing the find shortcut while the bar is ALREADY open is a focus request,
+ * not a state change: after clicking into the content the input has lost focus,
+ * but `visible` is still true. A plain boolean signal cannot express it — Solid
+ * skips notification when the value is unchanged, so the auto-focus effect never
+ * re-runs. `open()` therefore bumps a monotonic token the effect also tracks.
+ */
+export function createSearchVisibility() {
+	const [visible, setVisible] = createSignal(false);
+	const [focusToken, setFocusToken] = createSignal(0);
+	return {
+		visible,
+		focusToken,
+		/** Show the bar and (re-)focus its input, open or not. */
+		open: () => {
+			setVisible(true);
+			setFocusToken((n) => n + 1);
+		},
+		close: () => setVisible(false),
+	};
+}
+
 export const SearchBar: Component<SearchBarProps> = (props) => {
 	const [searchTerm, setSearchTerm] = createSignal("");
 	const [replaceTerm, setReplaceTerm] = createSignal("");
@@ -112,8 +138,11 @@ export const SearchBar: Component<SearchBarProps> = (props) => {
 		wholeWord: wholeWord(),
 	});
 
-	// Auto-focus and select when becoming visible
+	// Auto-focus and select when becoming visible, and again on every focusToken
+	// bump. Tracked unconditionally so the effect re-runs even while `visible`
+	// stays true — that repeat is the whole point (see createSearchVisibility).
 	createEffect(() => {
+		void props.focusToken;
 		if (props.visible) {
 			requestAnimationFrame(() => {
 				inputRef?.focus();

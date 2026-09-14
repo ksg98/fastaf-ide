@@ -8,6 +8,8 @@ interface TranscribeResponse {
 	text: string;
 	skip_reason: string | null;
 	duration_s: number;
+	/** Seconds of speech the recording cap dropped — 0 for an ordinary recording. */
+	truncated_s: number;
 }
 
 /** Dependencies injected into useDictation */
@@ -125,15 +127,23 @@ export function useDictation(deps: DictationDeps) {
 		// Optional AI rewrite — any failure falls back to the raw transcript.
 		// focusTarget stays snapshotted across this extra await.
 		let finalText = text;
+		let rewriteFailed = false;
 		if (dictationStore.state.rewriteEnabled) {
 			deps.setStatusInfo("Dictation: rewriting with AI…");
 			const rewritten = await dictationStore.rewriteText(text);
 			if (rewritten?.trim()) {
 				finalText = rewritten.trim();
 			} else {
-				deps.setStatusInfo("Dictation: AI rewrite failed — inserted raw transcript");
+				rewriteFailed = true;
 			}
 		}
+		// A recording past the cap lost its beginning. Report it wherever the text
+		// lands — otherwise a truncated transcription reads as a complete one.
+		const doneMessage = rewriteFailed
+			? "Dictation: AI rewrite failed — inserted raw transcript"
+			: response.truncated_s > 0
+				? `Dictation: recording too long — the first ${Math.round(response.truncated_s)}s were not transcribed`
+				: "Ready";
 
 		// Use the focus target captured at key-press time
 		const el = focusTarget;
@@ -157,12 +167,12 @@ export function useDictation(deps: DictationDeps) {
 			el.value = before + finalText + after;
 			el.selectionStart = el.selectionEnd = start + finalText.length;
 			el.dispatchEvent(new Event("input", { bubbles: true }));
-			deps.setStatusInfo("Ready");
+			deps.setStatusInfo(doneMessage);
 			return;
 		}
 		if (el && el.getAttribute("contenteditable") === "true") {
 			document.execCommand("insertText", false, finalText);
-			deps.setStatusInfo("Ready");
+			deps.setStatusInfo(doneMessage);
 			return;
 		}
 
@@ -177,7 +187,7 @@ export function useDictation(deps: DictationDeps) {
 				} else {
 					await writeFn(finalText);
 				}
-				deps.setStatusInfo("Ready");
+				deps.setStatusInfo(doneMessage);
 				requestAnimationFrame(() => active.ref?.focus());
 			} catch (err) {
 				appLogger.error("dictation", "Failed to write to terminal", err);

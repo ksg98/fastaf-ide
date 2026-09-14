@@ -289,8 +289,11 @@ Progress on 2026-07-21:
   system lifecycles, plugin runtime ownership, quick-switcher visibility,
   shortcut registration, dictation hotkeys, shell-exit handling, and
   application shortcut actions into focused hooks.
-- Moved dialog, modal, and overlay rendering into `ApplicationOverlays` while
-  retaining composition and layout ownership in `App.tsx`.
+- `ApplicationOverlays` now accepts eight domain contracts instead of a
+  43-property relocation boundary. Git dialogs, confirmation/folder-drop
+  dialogs, and post-merge cleanup own focused render groups; none receives an
+  entire hook return object. `App.tsx` retains composition and layout ownership,
+  and the existing Settings/Help lazy boundaries remain unchanged.
 - Added 67 focused characterization tests across 14 files. They cover lifecycle
   registration and cleanup, activation ordering, timer cancellation, native
   event routing, action construction, dialog state, plugin registration, and
@@ -425,6 +428,10 @@ Result on 2026-07-21:
 Each extraction requires focused unit tests plus terminal-specific regression tests. Visual changes are not expected; if canvas output changes, it requires explicit visual verification rather than relying on HTTP inspection.
 
 ### Work unit 7: Remove runtime dependency cycles
+
+The production runtime graph is enforced by `pnpm architecture:cycles`, which
+is part of the standard `make check` path. `pnpm architecture:cycles:test`
+exercises the checker itself against temporary acyclic and cyclic graphs.
 
 Cycle removal can be interleaved only where a preceding work unit creates the required seam:
 

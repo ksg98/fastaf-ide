@@ -12,7 +12,8 @@ import { ContextMenu, type createContextMenu } from "../ContextMenu";
 import { CreateBranchDialog } from "../CreateBranchDialog";
 import { CreateWorktreeDialog } from "../CreateWorktreeDialog";
 import { GeneratorsModal } from "../GeneratorsModal";
-import { ImportDialog } from "../ImportDialog";
+import { type DiscoveredProject, ImportDialog } from "../ImportDialog";
+import { McpConfirmHost } from "../McpConfirmHost/McpConfirmHost";
 import {
 	type CleanupStep,
 	PostMergeCleanupDialog,
@@ -33,56 +34,100 @@ import { WhatsNewDialog } from "../WhatsNewDialog/WhatsNewDialog";
 const SettingsPanel = lazy(() => import("../SettingsPanel").then((module) => ({ default: module.SettingsPanel })));
 const HelpPanel = lazy(() => import("../HelpPanel").then((module) => ({ default: module.HelpPanel })));
 
-interface ApplicationOverlaysProps {
-	settingsPanelVisible: Accessor<boolean>;
-	setSettingsPanelVisible: Setter<boolean>;
+type GitOperations = ReturnType<typeof useGitOperations>;
+type ConfirmDialogs = ReturnType<typeof useConfirmDialog>;
+
+interface PanelOverlaysContract {
+	settingsVisible: Accessor<boolean>;
+	closeSettings: () => void;
 	settingsInitialTab: Accessor<string | undefined>;
+	settingsInitialSection: Accessor<string | undefined>;
 	settingsContext: Accessor<SettingsContext>;
 	taskQueueVisible: Accessor<boolean>;
-	setTaskQueueVisible: Setter<boolean>;
-	contextMenu: ReturnType<typeof createContextMenu>;
-	getContextMenuItems: () => Parameters<typeof ContextMenu>[0]["items"];
-	renameBranchDialogVisible: Accessor<boolean>;
-	setRenameBranchDialogVisible: Setter<boolean>;
-	createBranchDialogVisible: Accessor<boolean>;
-	setCreateBranchDialogVisible: Setter<boolean>;
-	cloneDialogVisible: Accessor<boolean>;
-	setCloneDialogVisible: Setter<boolean>;
-	importDialogVisible: Accessor<boolean>;
-	setImportDialogVisible: Setter<boolean>;
-	runCommandDialogVisible: Accessor<boolean>;
-	setRunCommandDialogVisible: Setter<boolean>;
-	termRenamePromptVisible: Accessor<boolean>;
-	setTermRenamePromptVisible: Setter<boolean>;
-	termRenameDefault: Accessor<string>;
-	openPathPromptVisible: Accessor<boolean>;
-	resolveOpenPathPrompt: (value: string | null) => void;
-	repoPathPromptVisible: Accessor<boolean>;
-	resolveRepoPathPrompt: (value: string | null) => void;
-	dialogs: ReturnType<typeof useConfirmDialog>;
+	closeTaskQueue: () => void;
+	helpVisible: Accessor<boolean>;
+	closeHelp: () => void;
+}
+
+interface GitOverlaysContract {
+	renameVisible: Accessor<boolean>;
+	closeRename: () => void;
+	branchToRename: GitOperations["branchToRename"];
+	onRename: GitOperations["handleRenameBranch"];
+	createVisible: Accessor<boolean>;
+	closeCreate: () => void;
+	branchToCreate: GitOperations["branchToCreate"];
+	onCreate: GitOperations["handleCreateBranch"];
+	worktreeState: GitOperations["worktreeDialogState"];
+	closeWorktree: () => void;
+	onGenerateWorktreeName: GitOperations["generateWorktreeName"];
+	onCreateWorktree: GitOperations["confirmCreateWorktree"];
+	runVisible: Accessor<boolean>;
+	closeRun: () => void;
+	activeRunCommand: GitOperations["activeRunCommand"];
+	onRun: GitOperations["executeRunCommand"];
+	// FastAF: clone-from-GitHub and import-from-other-tools dialogs.
+	cloneVisible: Accessor<boolean>;
+	closeClone: () => void;
+	onCloned: (path: string) => void;
+	importVisible: Accessor<boolean>;
+	closeImport: () => void;
+	onImport: (selected: DiscoveredProject[], includeChats: boolean) => Promise<void>;
+}
+
+interface PromptOverlaysContract {
+	terminalRenameVisible: Accessor<boolean>;
+	closeTerminalRename: () => void;
+	terminalRenameDefault: Accessor<string>;
+	openPathVisible: Accessor<boolean>;
+	resolveOpenPath: (value: string | null) => void;
+	repoPathVisible: Accessor<boolean>;
+	resolveRepoPath: (value: string | null) => void;
+}
+
+interface ConfirmationOverlaysContract {
+	dialogState: ConfirmDialogs["dialogState"];
+	onClose: ConfirmDialogs["handleClose"];
+	onConfirm: ConfirmDialogs["handleConfirm"];
+	onDiscard: ConfirmDialogs["handleDiscard"];
 	pendingFolderDrop: Accessor<FolderDropRequest | null>;
 	setPendingFolderDrop: Setter<FolderDropRequest | null>;
-	showProcessManager: Accessor<boolean>;
-	setShowProcessManager: Setter<boolean>;
-	showGenerators: Accessor<boolean>;
-	setShowGenerators: Setter<boolean>;
-	showRemoteQr: Accessor<boolean>;
-	setShowRemoteQr: Setter<boolean>;
+}
+
+interface UtilityOverlaysContract {
+	processManagerVisible: Accessor<boolean>;
+	closeProcessManager: () => void;
+	generatorsVisible: Accessor<boolean>;
+	closeGenerators: () => void;
+	remoteQrVisible: Accessor<boolean>;
+	closeRemoteQr: () => void;
 	whatsNewVersion: Accessor<string | null>;
 	setWhatsNewVersion: Setter<string | null>;
-	gitOps: ReturnType<typeof useGitOperations>;
-	worktreeCleanupAction: Accessor<"archive" | "delete">;
-	setWorktreeCleanupAction: Setter<"archive" | "delete">;
-	worktreeCleanupExecuting: Accessor<boolean>;
-	worktreeCleanupStepStatuses: Accessor<Partial<Record<StepId, StepStatus>>>;
-	worktreeCleanupStepErrors: Accessor<Partial<Record<StepId, string>>>;
-	worktreeCleanupStepNotes: Accessor<Partial<Record<StepId, string>>>;
-	onWorktreeCleanupExecute: (steps: CleanupStep[], options?: { unstash?: boolean }) => Promise<void>;
-	onWorktreeCleanupSkip: () => void;
-	helpPanelVisible: Accessor<boolean>;
-	setHelpPanelVisible: Setter<boolean>;
-	quitDialogVisible: Accessor<boolean>;
-	setQuitDialogVisible: Setter<boolean>;
+}
+
+interface CleanupOverlayContract {
+	context: GitOperations["mergePendingCtx"];
+	action: Accessor<"archive" | "delete">;
+	setAction: Setter<"archive" | "delete">;
+	executing: Accessor<boolean>;
+	stepStatuses: Accessor<Partial<Record<StepId, StepStatus>>>;
+	stepErrors: Accessor<Partial<Record<StepId, string>>>;
+	stepNotes: Accessor<Partial<Record<StepId, string>>>;
+	onExecute: (steps: CleanupStep[], options?: { unstash?: boolean }) => Promise<void>;
+	onSkip: () => void;
+}
+
+interface ApplicationOverlaysProps {
+	panels: PanelOverlaysContract;
+	contextMenu: ReturnType<typeof createContextMenu>;
+	getContextMenuItems: () => Parameters<typeof ContextMenu>[0]["items"];
+	git: GitOverlaysContract;
+	prompts: PromptOverlaysContract;
+	confirmations: ConfirmationOverlaysContract;
+	utilities: UtilityOverlaysContract;
+	cleanup: CleanupOverlayContract;
+	quitVisible: Accessor<boolean>;
+	setQuitVisible: Setter<boolean>;
 	forceQuit: () => void | Promise<void>;
 }
 
@@ -108,12 +153,122 @@ export function useQuitDialogKeyCapture(visible: Accessor<boolean>, setVisible: 
 	});
 }
 
+function GitDialogOverlays(props: { contract: GitOverlaysContract }) {
+	const git = props.contract;
+	return (
+		<>
+			<RenameBranchDialog
+				visible={git.renameVisible()}
+				currentName={git.branchToRename()?.branchName || ""}
+				onClose={git.closeRename}
+				onRename={git.onRename}
+			/>
+			<CreateBranchDialog
+				visible={git.createVisible()}
+				startPoint={git.branchToCreate()?.startPoint}
+				onClose={git.closeCreate}
+				onCreate={git.onCreate}
+			/>
+			<CreateWorktreeDialog
+				visible={git.worktreeState() !== null}
+				suggestedName={git.worktreeState()?.suggestedName ?? ""}
+				existingBranches={git.worktreeState()?.existingBranches ?? []}
+				worktreeBranches={git.worktreeState()?.worktreeBranches ?? []}
+				worktreesDir={git.worktreeState()?.worktreesDir ?? ""}
+				baseRefs={git.worktreeState()?.baseRefs}
+				onGenerateName={git.onGenerateWorktreeName}
+				onClose={git.closeWorktree}
+				onCreate={git.onCreateWorktree}
+			/>
+			<RunCommandDialog
+				visible={git.runVisible()}
+				savedCommand={git.activeRunCommand() || ""}
+				onClose={git.closeRun}
+				onSaveAndRun={(command) => {
+					git.closeRun();
+					git.onRun(command);
+				}}
+			/>
+			<CloneRepoDialog visible={git.cloneVisible()} onClose={git.closeClone} onCloned={git.onCloned} />
+			<ImportDialog visible={git.importVisible()} onClose={git.closeImport} onImport={git.onImport} />
+		</>
+	);
+}
+
+function ConfirmationOverlays(props: { contract: ConfirmationOverlaysContract }) {
+	const confirmations = props.contract;
+	return (
+		<>
+			<ConfirmDialog
+				visible={confirmations.dialogState() !== null}
+				title={confirmations.dialogState()?.title ?? ""}
+				message={confirmations.dialogState()?.message ?? ""}
+				confirmLabel={confirmations.dialogState()?.confirmLabel}
+				cancelLabel={confirmations.dialogState()?.cancelLabel}
+				discardLabel={confirmations.dialogState()?.discardLabel}
+				kind={confirmations.dialogState()?.kind}
+				defaultButton={confirmations.dialogState()?.defaultButton}
+				autoCancelMs={confirmations.dialogState()?.autoCancelMs}
+				onClose={confirmations.onClose}
+				onConfirm={confirmations.onConfirm}
+				onDiscard={confirmations.onDiscard}
+			/>
+			<ConfirmDialog
+				visible={confirmations.pendingFolderDrop() !== null}
+				title={confirmations.pendingFolderDrop()?.mode === "copy" ? "Copy folder(s)?" : "Move folder(s)?"}
+				message={folderDropMessage(confirmations.pendingFolderDrop())}
+				confirmLabel={confirmations.pendingFolderDrop()?.mode === "copy" ? "Copy" : "Move"}
+				onClose={() => confirmations.setPendingFolderDrop(null)}
+				onConfirm={async () => {
+					const request = confirmations.pendingFolderDrop();
+					confirmations.setPendingFolderDrop(null);
+					if (!request) return;
+					const { confirmFolderDrop } = await import("../../hooks/useFileDrop");
+					await confirmFolderDrop(request);
+				}}
+			/>
+		</>
+	);
+}
+
+function CleanupOverlay(props: { contract: CleanupOverlayContract }) {
+	return (
+		<Show when={props.contract.context() !== null}>
+			{(() => {
+				const context = props.contract.context()!;
+				const repo = repositoriesStore.get(context.repoPath);
+				const branch = repo?.branches[context.branchName];
+				return (
+					<PostMergeCleanupDialog
+						branchName={context.branchName}
+						baseBranch={context.baseBranch}
+						repoPath={context.repoPath}
+						isOnBaseBranch={(repo?.activeBranch ?? "") === context.baseBranch}
+						isDefaultBranch={branch?.isMain ?? false}
+						hasTerminals={(branch?.terminals.length ?? 0) > 0}
+						hasDirtyFiles={context.hasDirtyFiles}
+						worktreeDirty={context.worktreeDirty}
+						worktreeAction={props.contract.action()}
+						onWorktreeActionChange={props.contract.setAction}
+						executing={props.contract.executing()}
+						stepStatuses={props.contract.stepStatuses()}
+						stepErrors={props.contract.stepErrors()}
+						stepNotes={props.contract.stepNotes()}
+						onExecute={props.contract.onExecute}
+						onSkip={props.contract.onSkip}
+					/>
+				);
+			})()}
+		</Show>
+	);
+}
+
 /** Renders application dialogs and owns overlay-only keyboard behavior. */
 export function ApplicationOverlays(props: ApplicationOverlaysProps) {
-	useQuitDialogKeyCapture(props.quitDialogVisible, props.setQuitDialogVisible);
+	useQuitDialogKeyCapture(props.quitVisible, props.setQuitVisible);
 
 	const whatsNewEntry = () => {
-		const version = props.whatsNewVersion();
+		const version = props.utilities.whatsNewVersion();
 		if (!version) return null;
 		return (
 			(releaseNotes as Record<string, { highlights: string[]; contributions?: { text: string; author: string }[] }>)[
@@ -126,13 +281,14 @@ export function ApplicationOverlays(props: ApplicationOverlaysProps) {
 		<>
 			<Suspense>
 				<SettingsPanel
-					visible={props.settingsPanelVisible()}
-					onClose={() => props.setSettingsPanelVisible(false)}
-					initialTab={props.settingsInitialTab()}
-					context={props.settingsContext()}
+					visible={props.panels.settingsVisible()}
+					onClose={props.panels.closeSettings}
+					initialTab={props.panels.settingsInitialTab()}
+					initialSection={props.panels.settingsInitialSection()}
+					context={props.panels.settingsContext()}
 				/>
 			</Suspense>
-			<TaskQueuePanel visible={props.taskQueueVisible()} onClose={() => props.setTaskQueueVisible(false)} />
+			<TaskQueuePanel visible={props.panels.taskQueueVisible()} onClose={props.panels.closeTaskQueue} />
 			<ContextMenu
 				items={props.getContextMenuItems()}
 				x={props.contextMenu.position().x}
@@ -140,167 +296,66 @@ export function ApplicationOverlays(props: ApplicationOverlaysProps) {
 				visible={props.contextMenu.visible()}
 				onClose={props.contextMenu.close}
 			/>
-			<RenameBranchDialog
-				visible={props.renameBranchDialogVisible()}
-				currentName={props.gitOps.branchToRename()?.branchName || ""}
-				onClose={() => {
-					props.setRenameBranchDialogVisible(false);
-					props.gitOps.setBranchToRename(null);
-				}}
-				onRename={props.gitOps.handleRenameBranch}
-			/>
-			<CloneRepoDialog
-				visible={props.cloneDialogVisible()}
-				onClose={() => props.setCloneDialogVisible(false)}
-				onCloned={(path) => void props.gitOps.addRepoFromPath(path)}
-			/>
-			<CreateBranchDialog
-				visible={props.createBranchDialogVisible()}
-				startPoint={props.gitOps.branchToCreate()?.startPoint}
-				onClose={() => {
-					props.setCreateBranchDialogVisible(false);
-					props.gitOps.setBranchToCreate(null);
-				}}
-				onCreate={props.gitOps.handleCreateBranch}
-			/>
-			<CreateWorktreeDialog
-				visible={props.gitOps.worktreeDialogState() !== null}
-				suggestedName={props.gitOps.worktreeDialogState()?.suggestedName ?? ""}
-				existingBranches={props.gitOps.worktreeDialogState()?.existingBranches ?? []}
-				worktreeBranches={props.gitOps.worktreeDialogState()?.worktreeBranches ?? []}
-				worktreesDir={props.gitOps.worktreeDialogState()?.worktreesDir ?? ""}
-				baseRefs={props.gitOps.worktreeDialogState()?.baseRefs}
-				onGenerateName={props.gitOps.generateWorktreeName}
-				onClose={() => props.gitOps.setWorktreeDialogState(null)}
-				onCreate={props.gitOps.confirmCreateWorktree}
-			/>
-			<ImportDialog
-				visible={props.importDialogVisible()}
-				onClose={() => props.setImportDialogVisible(false)}
-				onImport={async (selected, includeChats) => {
-					await props.gitOps.handleImportProjects(selected, includeChats);
-					props.setImportDialogVisible(false);
-				}}
-			/>
-			<RunCommandDialog
-				visible={props.runCommandDialogVisible()}
-				savedCommand={props.gitOps.activeRunCommand() || ""}
-				onClose={() => props.setRunCommandDialogVisible(false)}
-				onSaveAndRun={(command) => {
-					props.setRunCommandDialogVisible(false);
-					props.gitOps.executeRunCommand(command);
-				}}
-			/>
+			<GitDialogOverlays contract={props.git} />
+			<McpConfirmHost />
 			<PromptDialog
-				visible={props.termRenamePromptVisible()}
+				visible={props.prompts.terminalRenameVisible()}
 				title="Terminal Title"
 				placeholder="Enter title"
-				defaultValue={props.termRenameDefault()}
+				defaultValue={props.prompts.terminalRenameDefault()}
 				confirmLabel="Rename"
-				onClose={() => props.setTermRenamePromptVisible(false)}
+				onClose={props.prompts.closeTerminalRename}
 				onConfirm={(newName) => {
 					const activeId = terminalsStore.state.activeId;
-					if (activeId && newName !== props.termRenameDefault()) {
+					if (activeId && newName !== props.prompts.terminalRenameDefault()) {
 						terminalsStore.update(activeId, { name: newName, nameIsCustom: true });
 					}
 				}}
 			/>
 			<PromptDialog
-				visible={props.openPathPromptVisible()}
+				visible={props.prompts.openPathVisible()}
 				title="Open Path"
 				placeholder="Absolute path to file or folder"
 				confirmLabel="Open"
-				onClose={() => props.resolveOpenPathPrompt(null)}
-				onConfirm={props.resolveOpenPathPrompt}
+				onClose={() => props.prompts.resolveOpenPath(null)}
+				onConfirm={props.prompts.resolveOpenPath}
 			/>
 			<PromptDialog
-				visible={props.repoPathPromptVisible()}
+				visible={props.prompts.repoPathVisible()}
 				title="Add Repository"
 				placeholder="Enter absolute path to repository"
 				confirmLabel="Add"
-				onClose={() => props.resolveRepoPathPrompt(null)}
-				onConfirm={props.resolveRepoPathPrompt}
+				onClose={() => props.prompts.resolveRepoPath(null)}
+				onConfirm={props.prompts.resolveRepoPath}
 			/>
-			<ConfirmDialog
-				visible={props.dialogs.dialogState() !== null}
-				title={props.dialogs.dialogState()?.title ?? ""}
-				message={props.dialogs.dialogState()?.message ?? ""}
-				confirmLabel={props.dialogs.dialogState()?.confirmLabel}
-				cancelLabel={props.dialogs.dialogState()?.cancelLabel}
-				discardLabel={props.dialogs.dialogState()?.discardLabel}
-				kind={props.dialogs.dialogState()?.kind}
-				defaultButton={props.dialogs.dialogState()?.defaultButton}
-				autoCancelMs={props.dialogs.dialogState()?.autoCancelMs}
-				onClose={props.dialogs.handleClose}
-				onConfirm={props.dialogs.handleConfirm}
-				onDiscard={props.dialogs.handleDiscard}
-			/>
-			<ConfirmDialog
-				visible={props.pendingFolderDrop() !== null}
-				title={props.pendingFolderDrop()?.mode === "copy" ? "Copy folder(s)?" : "Move folder(s)?"}
-				message={folderDropMessage(props.pendingFolderDrop())}
-				confirmLabel={props.pendingFolderDrop()?.mode === "copy" ? "Copy" : "Move"}
-				onClose={() => props.setPendingFolderDrop(null)}
-				onConfirm={async () => {
-					const request = props.pendingFolderDrop();
-					props.setPendingFolderDrop(null);
-					if (!request) return;
-					const { confirmFolderDrop } = await import("../../hooks/useFileDrop");
-					await confirmFolderDrop(request);
-				}}
-			/>
-			<Show when={props.showProcessManager()}>
-				<ProcessManagerModal onClose={() => props.setShowProcessManager(false)} />
+			<ConfirmationOverlays contract={props.confirmations} />
+			<Show when={props.utilities.processManagerVisible()}>
+				<ProcessManagerModal onClose={props.utilities.closeProcessManager} />
 			</Show>
-			<Show when={props.showGenerators()}>
-				<GeneratorsModal onClose={() => props.setShowGenerators(false)} />
+			<Show when={props.utilities.generatorsVisible()}>
+				<GeneratorsModal onClose={props.utilities.closeGenerators} />
 			</Show>
-			<Show when={props.showRemoteQr()}>
-				<RemoteQrDialog onClose={() => props.setShowRemoteQr(false)} />
+			<Show when={props.utilities.remoteQrVisible()}>
+				<RemoteQrDialog onClose={props.utilities.closeRemoteQr} />
 			</Show>
 			<WhatsNewDialog
-				visible={props.whatsNewVersion() !== null && (whatsNewEntry()?.highlights.length ?? 0) > 0}
-				version={props.whatsNewVersion() ?? ""}
+				visible={props.utilities.whatsNewVersion() !== null && (whatsNewEntry()?.highlights.length ?? 0) > 0}
+				version={props.utilities.whatsNewVersion() ?? ""}
 				highlights={whatsNewEntry()?.highlights ?? []}
 				contributions={whatsNewEntry()?.contributions ?? []}
 				onClose={() => {
-					const version = props.whatsNewVersion();
+					const version = props.utilities.whatsNewVersion();
 					if (version) invoke("set_last_seen_version", { version }).catch(() => {});
-					props.setWhatsNewVersion(null);
+					props.utilities.setWhatsNewVersion(null);
 				}}
 			/>
 			<UpdateProgressDialog />
-			<Show when={props.gitOps.mergePendingCtx() !== null}>
-				{(() => {
-					const context = props.gitOps.mergePendingCtx()!;
-					const repo = repositoriesStore.get(context.repoPath);
-					const branch = repo?.branches[context.branchName];
-					return (
-						<PostMergeCleanupDialog
-							branchName={context.branchName}
-							baseBranch={context.baseBranch}
-							repoPath={context.repoPath}
-							isOnBaseBranch={(repo?.activeBranch ?? "") === context.baseBranch}
-							isDefaultBranch={branch?.isMain ?? false}
-							hasTerminals={(branch?.terminals.length ?? 0) > 0}
-							hasDirtyFiles={context.hasDirtyFiles}
-							worktreeAction={props.worktreeCleanupAction()}
-							onWorktreeActionChange={props.setWorktreeCleanupAction}
-							executing={props.worktreeCleanupExecuting()}
-							stepStatuses={props.worktreeCleanupStepStatuses()}
-							stepErrors={props.worktreeCleanupStepErrors()}
-							stepNotes={props.worktreeCleanupStepNotes()}
-							onExecute={props.onWorktreeCleanupExecute}
-							onSkip={props.onWorktreeCleanupSkip}
-						/>
-					);
-				})()}
-			</Show>
+			<CleanupOverlay contract={props.cleanup} />
 			<Suspense>
-				<HelpPanel visible={props.helpPanelVisible()} onClose={() => props.setHelpPanelVisible(false)} />
+				<HelpPanel visible={props.panels.helpVisible()} onClose={props.panels.closeHelp} />
 			</Suspense>
-			<Show when={props.quitDialogVisible()}>
-				<div class={qd.overlay} onClick={() => props.setQuitDialogVisible(false)}>
+			<Show when={props.quitVisible()}>
+				<div class={qd.overlay} onClick={() => props.setQuitVisible(false)}>
 					<div class={qd.dialog} onClick={(event) => event.stopPropagation()}>
 						<h3>Quit FastAF?</h3>
 						<p>
@@ -308,7 +363,7 @@ export function ApplicationOverlays(props: ApplicationOverlaysProps) {
 							terminal session(s). Quitting will close all sessions.
 						</p>
 						<div class={qd.actions}>
-							<button class={qd.cancel} onClick={() => props.setQuitDialogVisible(false)}>
+							<button class={qd.cancel} onClick={() => props.setQuitVisible(false)}>
 								Cancel
 							</button>
 							<button class={qd.quit} onClick={() => void props.forceQuit()}>

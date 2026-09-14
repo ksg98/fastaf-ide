@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use parking_lot::Mutex;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, PtySize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,8 +18,7 @@ use super::guards::{Authenticated, require_local_or_auth};
 use super::types::*;
 
 pub(super) async fn detect_agents() -> impl IntoResponse {
-    let known_agents = ["claude", "codex", "aider", "goose"];
-    let results: Vec<serde_json::Value> = known_agents
+    let results: Vec<serde_json::Value> = crate::agent::KNOWN_AGENT_BINARIES
         .iter()
         .map(|name| {
             let detection = crate::agent::detect_agent_binary(name.to_string());
@@ -34,8 +33,7 @@ pub(super) async fn detect_agents() -> impl IntoResponse {
 }
 
 pub(super) async fn detect_agent_binary_http(Query(q): Query<DetectBinaryQuery>) -> Response {
-    const KNOWN_AGENTS: &[&str] = &["claude", "codex", "aider", "goose"];
-    if !KNOWN_AGENTS.contains(&q.binary.as_str()) {
+    if !crate::agent::KNOWN_AGENT_BINARIES.contains(&q.binary.as_str()) {
         return Json(serde_json::json!({"error": "Unknown agent"})).into_response();
     }
     let detection = crate::agent::detect_agent_binary(q.binary);
@@ -317,56 +315,57 @@ pub(super) async fn spawn_agent_session(
             .into_response();
     }
     let session_id = Uuid::new_v4().to_string();
-    let pty_system = native_pty_system();
 
-    let pair = match pty_system.openpty(PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    }) {
-        Ok(p) => p,
+    let spawn_binary_path = binary_path.clone();
+    let spawn_args = body.args.clone();
+    let spawn_prompt = body.prompt.clone();
+    let spawn_model = body.model.clone();
+    let spawn_output_format = body.output_format.clone();
+    let spawn_print_mode = body.print_mode;
+    let spawn_cwd = body.cwd.clone();
+    let (pair, child) = match crate::pty::spawn_pty_pair_with_retry_async(
+        PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+        move || {
+            let mut cmd = CommandBuilder::new(&spawn_binary_path);
+            crate::pty::sanitize_pty_parent_env(&mut cmd);
+
+            if let Some(ref args) = spawn_args {
+                for arg in args {
+                    cmd.arg(arg);
+                }
+            } else {
+                if spawn_print_mode.unwrap_or(false) {
+                    cmd.arg("--print");
+                }
+                if let Some(ref format) = spawn_output_format {
+                    cmd.arg("--output-format");
+                    cmd.arg(format);
+                }
+                if let Some(ref model) = spawn_model {
+                    cmd.arg("--model");
+                    cmd.arg(model);
+                }
+                cmd.arg(&spawn_prompt);
+            }
+
+            if let Some(ref cwd) = spawn_cwd {
+                cmd.cwd(crate::cli::expand_tilde(cwd));
+            }
+            cmd
+        },
+    )
+    .await
+    {
+        Ok(pair_and_child) => pair_and_child,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to open PTY: {}", e)})),
-            )
-                .into_response();
-        }
-    };
-
-    let mut cmd = CommandBuilder::new(&binary_path);
-    crate::pty::sanitize_pty_parent_env(&mut cmd);
-
-    if let Some(ref args) = body.args {
-        for arg in args {
-            cmd.arg(arg);
-        }
-    } else {
-        if body.print_mode.unwrap_or(false) {
-            cmd.arg("--print");
-        }
-        if let Some(ref format) = body.output_format {
-            cmd.arg("--output-format");
-            cmd.arg(format);
-        }
-        if let Some(ref model) = body.model {
-            cmd.arg("--model");
-            cmd.arg(model);
-        }
-        cmd.arg(&body.prompt);
-    }
-
-    if let Some(ref cwd) = body.cwd {
-        cmd.cwd(crate::cli::expand_tilde(cwd));
-    }
-
-    let child = match pair.slave.spawn_command(cmd) {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to spawn agent: {}", e)})),
+                Json(serde_json::json!({"error": e})),
             )
                 .into_response();
         }
@@ -398,13 +397,15 @@ pub(super) async fn spawn_agent_session(
     state.sessions.insert(
         session_id.clone(),
         Mutex::new(PtySession {
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             master: pair.master,
             _child: child,
             paused: paused.clone(),
             worktree: None,
             cwd: body.cwd.clone(),
             display_name: None,
+            display_name_is_custom: false,
+            is_remote: true,
             shell: binary_path.clone(),
         }),
     );
@@ -444,18 +445,16 @@ pub(super) async fn spawn_agent_session(
     // Register the grid_watch channel so `GET /sessions/{id}/stream?format=grid`
     // works for agent sessions — without it handle_ws_grid_session finds no entry
     // and silently closes the socket. Mirrors session.rs spawn_pty_session.
-    let (grid_watch_tx, _) = tokio::sync::watch::channel(Vec::new());
+    let grid_watch_tx = crate::grid_gate::new_grid_watch();
     state.grid_watch.insert(session_id.clone(), grid_watch_tx);
 
     // Broadcast to SSE/WebSocket consumers (before state is moved to reader thread)
-    let _ = state
-        .event_bus
-        .send(crate::state::AppEvent::SessionCreated {
-            session_id: session_id.clone(),
-            cwd: body.cwd.clone(),
-            agent_type: body.agent_type.clone(),
-            display_name: None,
-        });
+    state.emit_pty_event(crate::state::AppEvent::SessionCreated {
+        session_id: session_id.clone(),
+        cwd: body.cwd.clone(),
+        agent_type: body.agent_type.clone(),
+        display_name: None,
+    });
 
     #[cfg(feature = "desktop")]
     let state_ref = state.clone();
@@ -483,6 +482,33 @@ pub(super) async fn spawn_agent_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawn_request() -> SpawnAgentRequest {
+        SpawnAgentRequest {
+            rows: Some(24),
+            cols: Some(80),
+            cwd: None,
+            prompt: "test prompt".into(),
+            model: None,
+            print_mode: None,
+            output_format: None,
+            agent_type: None,
+            binary_path: Some(
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            args: Some(vec!["--help".into()]),
+        }
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
 
     fn loopback() -> SocketAddr {
         "127.0.0.1:1".parse().unwrap()
@@ -554,5 +580,97 @@ mod tests {
             execute_api_prompt_http(ConnectInfo(lan()), authed(), Json(serde_json::json!({})))
                 .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_rejects_unauthenticated_remote_before_validation() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let response = spawn_agent_session(
+            State(state),
+            ConnectInfo(lan()),
+            None,
+            Json(spawn_request()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_rejects_relative_and_missing_binary_paths() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut relative = spawn_request();
+        relative.binary_path = Some("bin/agent".into());
+        let response = spawn_agent_session(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            None,
+            Json(relative),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(response).await["error"],
+            "binary_path must be an absolute path"
+        );
+
+        let mut missing = spawn_request();
+        missing.binary_path = Some(
+            std::env::temp_dir()
+                .join("definitely-not-a-tuic-agent")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let response =
+            spawn_agent_session(State(state), ConnectInfo(loopback()), None, Json(missing)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(response).await["error"],
+            "binary_path does not point to an existing file"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_rejects_non_claude_bare_prompt_before_pty_creation() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut request = spawn_request();
+        request.agent_type = Some("codex".into());
+        request.args = None;
+
+        let response = spawn_agent_session(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            None,
+            Json(request),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response_json(response).await["error"]
+                .as_str()
+                .unwrap()
+                .contains("bare prompt")
+        );
+        assert!(state.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_rejects_invalid_terminal_dimensions_before_pty_creation() {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let mut request = spawn_request();
+        request.rows = Some(0);
+
+        let response = spawn_agent_session(
+            State(state.clone()),
+            ConnectInfo(loopback()),
+            None,
+            Json(request),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response_json(response).await["error"].is_string());
+        assert!(state.sessions.is_empty());
     }
 }

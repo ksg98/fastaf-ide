@@ -69,7 +69,7 @@ Each branch row can show:
 | Indicator | Meaning |
 |-----------|---------|
 | **CI ring** | Proportional arc segments — green (passed), red (failed), yellow (pending) |
-| **PR badge** | Colored by state — green (open), purple (merged), red (closed), gray (draft). Click for detail popover. |
+| **PR badge** | Always shows the PR number plus its highest-priority state when applicable, such as Draft, Conflicts, or CI Failed. Click for detail popover. |
 | **Diff stats** | `+N / -N` additions and deletions |
 | **Merged badge** | Branches merged into main show a "Merged" badge |
 | **Question icon** | An agent in this branch's terminal is asking a question |

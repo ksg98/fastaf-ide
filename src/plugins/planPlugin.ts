@@ -1,6 +1,7 @@
 import { invoke, listen } from "../invoke";
 import { appLogger } from "../stores/appLogger";
 import { mdTabsStore } from "../stores/mdTabs";
+import { resolveRepoPathFor } from "../stores/repositories";
 import type { DirEntry } from "../types/fs";
 import { extractPlanMetadata } from "../utils/frontmatter";
 import { isAbsolutePath, joinPath, pathBasename, pathStartsWith, pathStripPrefix } from "../utils/pathUtils";
@@ -71,7 +72,12 @@ class PlanPlugin implements TuiPlugin {
 			const cwd = host.getSessionCwd(sessionId);
 			const absolutePath = isAbsolutePath(rawPath) ? rawPath : cwd ? joinPath(cwd, rawPath) : rawPath;
 
-			const ownerRepo = host.getActiveRepoPath();
+			// The plan belongs to the repo the PLAN FILE lives in — falling back to the
+			// session's cwd when the file sits outside every registered repo. It used to
+			// be `host.getActiveRepoPath()`: the session's cwd was resolved and then
+			// thrown away for whichever repo happened to be on screen, so a plan opened
+			// as a tab owned by a repo it had nothing to do with.
+			const ownerRepo = resolveRepoPathFor(absolutePath) ?? resolveRepoPathFor(cwd);
 
 			appLogger.info(
 				"plugin",
@@ -84,20 +90,27 @@ class PlanPlugin implements TuiPlugin {
 				return;
 			}
 
-			// If an active repo is set, only accept plans from sessions within that repo
-			if (ownerRepo && cwd && !pathStartsWith(cwd, ownerRepo)) {
-				appLogger.info("plugin", `[plan] SKIPPED: session cwd "${cwd}" outside active repo "${ownerRepo}"`);
-				return;
-			}
-
 			const isNew = !this.plans.has(absolutePath);
+			// Tracking is unconditional: a plan event is data about a session, and the
+			// old code dropped it whenever the user happened to be looking elsewhere.
 			this.addPlan(absolutePath);
 			appLogger.info("plugin", `[plan] isNew=${isNew} plans.size=${this.plans.size}`);
 
-			if (isNew) {
-				const tabId = openPlanTab(absolutePath, ownerRepo ?? undefined);
-				appLogger.info("plugin", `[plan] openPlanTab result: tabId=${tabId}`);
+			if (!isNew) return;
+
+			// Opening a tab IS conditional — but on ownership, not on focus. A tab we
+			// cannot scope to a repo is visible in every repo, which is the same
+			// cross-repo bleed seen from the other direction.
+			if (!ownerRepo) {
+				appLogger.info(
+					"plugin",
+					`[plan] tracked but not opened: no registered repo owns "${absolutePath}" (cwd=${cwd})`,
+				);
+				return;
 			}
+
+			const tabId = openPlanTab(absolutePath, ownerRepo);
+			appLogger.info("plugin", `[plan] openPlanTab result: tabId=${tabId}`);
 		});
 
 		const activeRepo = host.getActiveRepoPath();

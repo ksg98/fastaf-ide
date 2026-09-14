@@ -89,7 +89,7 @@ pub struct CommandOutcome {
     pub id: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionKnowledge {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -105,11 +105,32 @@ pub struct SessionKnowledge {
     pub next_outcome_id: u64,
 }
 
+/// Delegates to `new()`. A derived `Default` would stamp `schema_version: 0`,
+/// which the loader then reads as an old file and migrates on every start.
+impl Default for SessionKnowledge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn default_schema_version() -> u32 {
     // Legacy files on disk predate the schema_version field; treat them as
     // v1. Fresh sessions created via `SessionKnowledge::new()` stamp the
     // current `KNOWLEDGE_SCHEMA_VERSION`.
     1
+}
+
+/// An outcome the heuristic path inferred without ever seeing a command.
+///
+/// `pty::record_inferred_outcome_if_no_osc133` fires on every busy→idle
+/// transition of a shell without OSC 133 shell integration, with
+/// `command: String::new()` and a screen tail as the snippet. Those entries are
+/// indistinguishable from each other, so they are noise in command history:
+/// they evict real commands at the `MAX_COMMANDS` cap and their `[cmd: ]`
+/// blocks crowd real commands out of the LLM context budget in
+/// `ai_chat::assemble_block_context`. (#612-9a22)
+fn is_commandless_noise(outcome: &CommandOutcome) -> bool {
+    matches!(outcome.classification, OutcomeClass::Inferred) && outcome.command.trim().is_empty()
 }
 
 impl SessionKnowledge {
@@ -129,7 +150,9 @@ impl SessionKnowledge {
     /// auto-correlates an error→fix pair when this success follows a
     /// recent failure within `FIX_CORRELATION_WINDOW` commands.
     ///
-    /// Returns the monotonic id assigned to the stored outcome.
+    /// Returns the monotonic id assigned to the stored outcome. An `Inferred`
+    /// outcome with no command is side-effect-only (see `is_commandless_noise`)
+    /// and returns the id it would have taken.
     pub fn record(&mut self, mut outcome: CommandOutcome) -> u64 {
         // CWD history: dedup adjacent entries.
         if self
@@ -169,6 +192,14 @@ impl SessionKnowledge {
                     .or_default()
                     .push(outcome.command.clone());
             }
+        }
+
+        // Commandless inferred outcomes carry no history value — drop them
+        // after the cwd/TUI side effects above so they stop evicting real
+        // commands at the MAX_COMMANDS cap and stop filling the LLM's
+        // recent-commands slot with empty `[cmd: ]` blocks.
+        if is_commandless_noise(&outcome) {
+            return self.next_outcome_id;
         }
 
         outcome.output_snippet = sanitize_snippet(&outcome.output_snippet);
@@ -483,11 +514,61 @@ pub fn load(session_id: &str) -> Option<SessionKnowledge> {
     Some(k)
 }
 
+/// Load a session's knowledge, or start a fresh record after moving aside a file
+/// that exists but could not be read.
+///
+/// `load` returns `None` both for "no such file" and for "the file is there but
+/// unreadable or unparseable". Treating the second as the first means the fresh
+/// record we start is written over the file on the next flush, and whatever it
+/// held — possibly recoverable, possibly just evidence of what went wrong — is
+/// gone with nothing said. Renaming it to `<id>.json.corrupt` first keeps the
+/// bytes and lets the session carry on.
+pub fn load_or_start_fresh(session_id: &str) -> SessionKnowledge {
+    if let Some(k) = load(session_id) {
+        return k;
+    }
+    let Ok(dir) = sessions_dir() else {
+        return SessionKnowledge::new();
+    };
+    let path = dir.join(format!("{session_id}.json"));
+    if path.exists() {
+        let aside = path.with_extension("json.corrupt");
+        match std::fs::rename(&path, &aside) {
+            Ok(()) => tracing::warn!(
+                session_id,
+                "knowledge file could not be read; moved aside as .json.corrupt and starting fresh"
+            ),
+            Err(e) => tracing::error!(
+                session_id,
+                error = %e,
+                "knowledge file could not be read or moved aside; the fresh record will overwrite it"
+            ),
+        }
+    }
+    SessionKnowledge::new()
+}
+
 const RETENTION_DAYS: u64 = 30;
 
-/// Load every persisted session file into `state.session_knowledge`. Called
-/// once at startup so agent context injection has access to historical
-/// sessions. Prunes files older than 30 days.
+/// How many session files the startup load may bring into memory.
+///
+/// Nothing evicts `session_knowledge` once populated, and a single session can
+/// hold `MAX_COMMANDS` (2000) outcomes with `SNIPPET_MAX_LEN` (2000) char
+/// snippets — several MB. Loading every file inside the 30-day retention window
+/// therefore grew resident memory with calendar time, not with what the user is
+/// actually doing. The only reader of non-live sessions is
+/// `summarize_for_repo`, which caps its own output at `CROSS_SESSION_MAX_CHARS`
+/// and takes at most 10 recent errors, so older sessions contribute nothing the
+/// newest ones don't. Retention (file lifetime) stays at 30 days. (#612-9a22)
+const MAX_RESIDENT_SESSIONS: usize = 40;
+
+/// Load persisted session files into `state.session_knowledge`. Called once at
+/// startup so agent context injection has access to historical sessions.
+///
+/// Prunes files older than `RETENTION_DAYS`, then loads only the
+/// `MAX_RESIDENT_SESSIONS` most recently modified survivors. Files beyond that
+/// bound are left on disk untouched — they are still within retention and a
+/// later startup may load them.
 pub fn load_all(state: &crate::state::AppState) {
     let Ok(dir) = sessions_dir() else {
         return;
@@ -497,26 +578,58 @@ pub fn load_all(state: &crate::state::AppState) {
     };
     let cutoff =
         std::time::SystemTime::now() - std::time::Duration::from_secs(RETENTION_DAYS * 86400);
+
+    // Pass 1: prune expired files and collect (mtime, session_id) candidates.
+    // Only metadata is read here — no JSON is parsed for a file we may skip.
+    let mut candidates: Vec<(std::time::SystemTime, String)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Ok(meta) = path.metadata()
-            && let Ok(modified) = meta.modified()
-            && modified < cutoff
-        {
+        let modified = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if modified < cutoff {
             let _ = std::fs::remove_file(&path);
             continue;
         }
         let Some(sid) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if let Some(k) = load(sid) {
+        candidates.push((modified, sid.to_string()));
+    }
+
+    // Pass 2: newest first, load up to the residency cap.
+    // Descending by mtime — `Reverse` keeps newest-first; a bare
+    // `sort_unstable_by_key(|c| c.0)` would invert it and load the OLDEST 40.
+    candidates.sort_unstable_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+    let skipped = candidates.len().saturating_sub(MAX_RESIDENT_SESSIONS);
+    for (_, sid) in candidates.into_iter().take(MAX_RESIDENT_SESSIONS) {
+        // Never replace a session already in memory. This load is spawned
+        // asynchronously at startup, so a command can be recorded for a session
+        // before this loop reaches it — `knowledge_entry` already read the file
+        // and appended to it. Inserting the file's state over that would drop the
+        // outcome, and the next flush would write the truncated record to disk.
+        if state.session_knowledge.contains_key(&sid) {
+            continue;
+        }
+        if let Some(k) = load(&sid) {
+            // `entry` rather than `insert`: the check above can go stale between
+            // the read of the file and the write into the map.
             state
                 .session_knowledge
-                .insert(sid.to_string(), parking_lot::Mutex::new(k));
+                .entry(sid)
+                .or_insert_with(|| parking_lot::Mutex::new(k));
         }
+    }
+    if skipped > 0 {
+        tracing::info!(
+            skipped,
+            cap = MAX_RESIDENT_SESSIONS,
+            "knowledge: startup load capped, older sessions left on disk"
+        );
     }
 }
 
@@ -569,11 +682,19 @@ pub fn spawn_persist_task(state: std::sync::Arc<crate::state::AppState>) {
 /// Drain `knowledge_dirty` and persist each flagged session. Runs on a
 /// blocking-safe path (small JSON writes); keeps the tokio worker brief.
 ///
-/// Race-safety (#1374-b298): the dirty flag is cleared *before* snapshotting.
-/// If `record_outcome` runs concurrently, it re-inserts the flag and the new
-/// state is picked up by the next flush. If persist fails, the flag is
-/// re-inserted so we retry. Without this ordering, a write landing between
-/// snapshot-clone and remove was silently dropped (lost on shutdown/crash).
+/// Race-safety (#1374-b298): the dirty flag is cleared *before* reading the
+/// session. If `record_outcome` runs concurrently, it re-inserts the flag and the
+/// new state is picked up by the next flush. If persist fails, the flag is
+/// re-inserted so we retry. Without this ordering, a write landing between the
+/// read and the remove was silently dropped (lost on shutdown/crash).
+///
+/// Two flushes can run at once — the periodic ticker and the desktop Exit flush —
+/// so the write happens while the session lock is held rather than from an
+/// earlier snapshot. Taking a snapshot first and writing after lets the flush
+/// holding the *older* state write last: disk ends up with the older record while
+/// the dirty flag has already been cleared by the other flush, so nothing retries
+/// and the newer outcome is gone. Holding the lock across the write also spares a
+/// clone of a record that can reach several MB.
 pub fn flush_dirty(state: &crate::state::AppState) {
     let dirty: Vec<String> = state
         .knowledge_dirty
@@ -581,18 +702,32 @@ pub fn flush_dirty(state: &crate::state::AppState) {
         .map(|e| e.key().clone())
         .collect();
     for sid in dirty {
-        // Clear the flag FIRST. A concurrent record_outcome between this
-        // line and the snapshot below will re-insert the flag and be picked
-        // up by the next tick (or by the failure path below).
-        state.knowledge_dirty.remove(&sid);
-        let Some(entry) = state.session_knowledge.get(&sid) else {
-            continue;
-        };
-        let snapshot = entry.lock().clone();
-        if let Err(e) = persist(&sid, &snapshot) {
-            tracing::warn!(session_id = %sid, error = %e, "knowledge persist failed, will retry");
-            state.knowledge_dirty.insert(sid, ());
-        }
+        flush_session(state, &sid);
+    }
+}
+
+/// Persist one session if it is still flagged dirty. Whoever takes the flag owns
+/// the write, so a flush that finds it already taken returns without duplicating
+/// the work — see [`flush_dirty`] for the ordering this preserves.
+///
+/// Session teardown calls this before dropping `session_knowledge`: the periodic
+/// flush skips a session whose entry is already gone, so reaping first loses
+/// whatever was recorded inside the 2s window.
+pub fn flush_session(state: &crate::state::AppState, session_id: &str) {
+    // Clear the flag FIRST. A concurrent record_outcome between this line and
+    // the read below will re-insert the flag and be picked up by the next tick
+    // (or by the failure path below).
+    if state.knowledge_dirty.remove(session_id).is_none() {
+        return;
+    }
+    let Some(entry) = state.session_knowledge.get(session_id) else {
+        return;
+    };
+    let knowledge = entry.lock();
+    if let Err(e) = persist(session_id, &knowledge) {
+        tracing::warn!(session_id, error = %e, "knowledge persist failed, will retry");
+        drop(knowledge);
+        state.knowledge_dirty.insert(session_id.to_string(), ());
     }
 }
 
@@ -605,6 +740,14 @@ mod persist_tests {
     /// per-test tempdirs don't leak into each other under cargo's default
     /// parallel test executor.
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Stamp an explicit mtime so residency-order assertions don't depend on
+    /// filesystem timestamp resolution between two back-to-back writes.
+    fn set_mtime(path: &std::path::Path, mtime: std::time::SystemTime) {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
+    }
 
     fn sample_outcome() -> CommandOutcome {
         CommandOutcome {
@@ -629,6 +772,30 @@ mod persist_tests {
         assert!(state.knowledge_dirty.contains_key("s1"));
         let k = state.session_knowledge.get("s1").unwrap();
         assert_eq!(k.lock().commands.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_session_keeps_its_knowledge_resident_for_the_next_one() {
+        // Cross-session memory reads the live map, never the files: summarize_for_repo
+        // and the agent prompt builder both iterate session_knowledge. Reaping a
+        // closed session there would delete exactly what the next session in that
+        // repo is meant to inherit.
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let state = make_test_app_state();
+        state.record_outcome("s1", sample_outcome());
+
+        crate::pty::cleanup_session("s1", &state);
+
+        assert!(
+            state.session_knowledge.contains_key("s1"),
+            "a closed session's knowledge must stay readable to the next session"
+        );
+        assert!(
+            state.knowledge_dirty.contains_key("s1"),
+            "the pending flush must survive the close, or the outcome never lands"
+        );
     }
 
     #[test]
@@ -704,6 +871,163 @@ mod persist_tests {
         );
     }
 
+    /// Two flushes run concurrently in production: the 2 s ticker and the desktop
+    /// Exit flush. Reading a session into a snapshot and writing it afterwards
+    /// lets the flush holding the *older* state write last — disk keeps the older
+    /// record while the other flush has already cleared the dirty flag, so nothing
+    /// retries and the newer outcome is gone.
+    ///
+    /// What removes that class is writing while the session lock is held: no
+    /// outcome can be recorded into a state a flush is already writing from, so
+    /// there is no such thing as a flush carrying a stale snapshot. That is what
+    /// this asserts — a `record_outcome` issued mid-write cannot return before the
+    /// write finishes. The record is at `MAX_COMMANDS` with full snippets so the
+    /// write takes tens of milliseconds, far more than the delay before the record.
+    #[test]
+    fn an_outcome_cannot_be_recorded_into_a_session_a_flush_is_writing() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let state = std::sync::Arc::new(make_test_app_state());
+
+        for n in 0..MAX_COMMANDS as u64 {
+            let mut o = sample_outcome();
+            o.timestamp = 1000 + n;
+            o.output_snippet = "x".repeat(SNIPPET_MAX_LEN - 1);
+            state.record_outcome("s-slow", o);
+        }
+
+        let flush_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first = {
+            let s = state.clone();
+            let done = flush_done.clone();
+            std::thread::spawn(move || {
+                flush_dirty(&s);
+                done.store(true, std::sync::atomic::Ordering::Release);
+            })
+        };
+
+        // Land inside the write, then record.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut newer = sample_outcome();
+        newer.timestamp = 99_999;
+        newer.command = "the outcome that must survive".into();
+        state.record_outcome("s-slow", newer);
+        let flush_had_finished = flush_done.load(std::sync::atomic::Ordering::Acquire);
+
+        first.join().unwrap();
+        assert!(
+            flush_had_finished,
+            "record_outcome returned while a flush was still writing that session, \
+             so the flush is writing from a snapshot that can go stale"
+        );
+
+        // And the outcome recorded after that write still reaches disk.
+        flush_dirty(&state);
+        let on_disk = load("s-slow").expect("load from disk");
+        assert_eq!(on_disk.commands.len(), MAX_COMMANDS);
+        assert!(
+            on_disk
+                .commands
+                .iter()
+                .any(|c| c.command == "the outcome that must survive")
+        );
+        assert!(!state.knowledge_dirty.contains_key("s-slow"));
+    }
+
+    /// The startup load is spawned asynchronously, so a command can be recorded
+    /// for a session before the loop reaches its id. `knowledge_entry` has already
+    /// read that file and appended to it; inserting the file's state over it drops
+    /// the outcome, and the next flush writes the truncated record back to disk.
+    #[test]
+    fn load_all_does_not_overwrite_a_session_already_in_memory() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        // A file on disk holding one outcome.
+        let mut on_disk = SessionKnowledge::new();
+        on_disk.record(sample_outcome());
+        persist("s-live", &on_disk).unwrap();
+
+        // A live session that read that file and appended a second outcome.
+        let state = make_test_app_state();
+        let mut newer = sample_outcome();
+        newer.timestamp = 9999;
+        state.record_outcome("s-live", newer);
+        assert_eq!(
+            state
+                .session_knowledge
+                .get("s-live")
+                .unwrap()
+                .lock()
+                .commands
+                .len(),
+            2
+        );
+
+        load_all(&state);
+
+        assert_eq!(
+            state
+                .session_knowledge
+                .get("s-live")
+                .unwrap()
+                .lock()
+                .commands
+                .len(),
+            2,
+            "the startup load must not replace a session that is already live"
+        );
+    }
+
+    /// `load` says `None` both for "no file" and for "a file I could not read".
+    /// Starting fresh on the second overwrites it on the next flush, silently.
+    #[test]
+    fn an_unreadable_knowledge_file_is_kept_rather_than_overwritten() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let sessions = dir.path().join(SESSIONS_DIR);
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("s-corrupt.json");
+        std::fs::write(&path, "{ this is not json").unwrap();
+
+        let fresh = load_or_start_fresh("s-corrupt");
+        assert!(fresh.commands.is_empty(), "an unreadable file starts fresh");
+        assert_eq!(
+            fresh.schema_version, KNOWLEDGE_SCHEMA_VERSION,
+            "and starts at the current schema, not a derived zero"
+        );
+
+        assert!(
+            !path.exists(),
+            "the unreadable file must not be left where the next flush overwrites it"
+        );
+        let aside = sessions.join("s-corrupt.json.corrupt");
+        assert_eq!(
+            std::fs::read_to_string(&aside).unwrap(),
+            "{ this is not json",
+            "its bytes must be kept"
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_file_at_all_starts_fresh_without_a_corrupt_copy() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        let fresh = load_or_start_fresh("s-brand-new");
+        assert!(fresh.commands.is_empty());
+        assert!(
+            !dir.path()
+                .join(SESSIONS_DIR)
+                .join("s-brand-new.json.corrupt")
+                .exists()
+        );
+    }
+
     /// #1379-01bd: a panic inside spawn_blocking must not silently stop
     /// background persistence. The helper returns None and the caller can
     /// keep looping; tracing::error! is emitted for observability.
@@ -762,6 +1086,112 @@ mod persist_tests {
         load_all(&state);
         let restored = state.session_knowledge.get("s-restored").unwrap();
         assert_eq!(restored.lock().commands.len(), 1);
+    }
+
+    /// The startup load is capped, so a session inside the retention window may
+    /// have a file on disk and no record in memory. Recording an outcome for it
+    /// used to start a blank record, and the next flush wrote that blank over
+    /// the file — resuming an older session deleted its own history.
+    #[test]
+    fn an_outcome_for_a_non_resident_session_keeps_its_history() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        let mut on_disk = SessionKnowledge::new();
+        on_disk.record(sample_outcome());
+        on_disk.record(sample_outcome());
+        persist("s-nonresident", &on_disk).unwrap();
+
+        // A fresh process that never loaded this file — exactly what the cap
+        // leaves behind for everything past the 40 newest sessions.
+        let state = make_test_app_state();
+        assert!(!state.session_knowledge.contains_key("s-nonresident"));
+
+        state.record_outcome("s-nonresident", sample_outcome());
+        flush_dirty(&state);
+
+        let reloaded = load("s-nonresident").expect("the file must still be there");
+        assert_eq!(
+            reloaded.commands.len(),
+            3,
+            "the resumed session must keep what it had recorded before"
+        );
+    }
+
+    /// `load_all` used to pull EVERY session file younger than 30 days into
+    /// `session_knowledge`, where nothing ever evicts them. Each session holds
+    /// up to `MAX_COMMANDS` outcomes with 2000-char snippets, so a month of
+    /// daily work made startup residency grow without bound. The load is now
+    /// capped at the `MAX_RESIDENT_SESSIONS` most recently modified files.
+    /// (#612-9a22)
+    #[test]
+    fn load_all_is_bounded_to_most_recent_sessions() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        // One more session than the cap, each stamped a minute apart so
+        // "most recent" is unambiguous. `s{i}` with a higher i is newer.
+        let total = MAX_RESIDENT_SESSIONS + 5;
+        let base = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60 * 24);
+        for i in 0..total {
+            let mut k = SessionKnowledge::new();
+            k.record(sample_outcome());
+            persist(&format!("s{i}"), &k).unwrap();
+            let path = sessions_dir().unwrap().join(format!("s{i}.json"));
+            let mtime = base + std::time::Duration::from_secs(60 * i as u64);
+            set_mtime(&path, mtime);
+        }
+
+        let state = make_test_app_state();
+        load_all(&state);
+
+        assert_eq!(
+            state.session_knowledge.len(),
+            MAX_RESIDENT_SESSIONS,
+            "startup load must be capped"
+        );
+        // The newest file must be resident, the oldest must not.
+        assert!(
+            state
+                .session_knowledge
+                .contains_key(&format!("s{}", total - 1)),
+            "newest session must be loaded"
+        );
+        assert!(
+            !state.session_knowledge.contains_key("s0"),
+            "oldest session must be skipped, not loaded"
+        );
+    }
+
+    /// Skipping a session over the cap must not delete it — a 20-day-old file
+    /// beyond the residency window is still inside the retention window and
+    /// must survive for the next startup.
+    #[test]
+    fn load_all_does_not_delete_sessions_it_skips() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let _g = crate::config::set_config_dir_override(dir.path().to_path_buf());
+
+        let total = MAX_RESIDENT_SESSIONS + 3;
+        let base = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60 * 24);
+        for i in 0..total {
+            let mut k = SessionKnowledge::new();
+            k.record(sample_outcome());
+            persist(&format!("s{i}"), &k).unwrap();
+            let path = sessions_dir().unwrap().join(format!("s{i}.json"));
+            let mtime = base + std::time::Duration::from_secs(60 * i as u64);
+            set_mtime(&path, mtime);
+        }
+
+        let state = make_test_app_state();
+        load_all(&state);
+
+        assert!(
+            sessions_dir().unwrap().join("s0.json").exists(),
+            "a skipped-but-in-retention session file must not be pruned"
+        );
     }
 
     #[test]
@@ -925,6 +1355,65 @@ mod tests {
             k.commands.back().unwrap().command,
             format!("cmd{}", MAX_COMMANDS + 49)
         );
+    }
+
+    /// `record_inferred_outcome_if_no_osc133` (pty.rs) fires on every busy→idle
+    /// transition of a shell without OSC 133 and stores an outcome whose command
+    /// is unknown (empty) and whose snippet is just the last 500 chars of the
+    /// screen. Those entries used to be pushed into `commands`, where they
+    /// evicted real command history at the `MAX_COMMANDS` cap and crowded the
+    /// LLM's "Recent Commands" slot (`ai_chat::assemble_block_context`) with
+    /// `[cmd: ]` blocks carrying no command at all. (#612-9a22)
+    #[test]
+    fn record_skips_inferred_outcome_with_empty_command() {
+        let mut k = SessionKnowledge::new();
+        k.record(outcome("cargo build", 1, OutcomeClass::Success));
+        k.record(outcome("", 2, OutcomeClass::Inferred));
+        k.record(outcome("   \n ", 3, OutcomeClass::Inferred));
+
+        assert_eq!(
+            k.commands.len(),
+            1,
+            "commandless inferred outcomes must not enter command history: {:?}",
+            k.commands.iter().map(|c| &c.command).collect::<Vec<_>>()
+        );
+        assert_eq!(k.commands.front().unwrap().command, "cargo build");
+    }
+
+    /// The inferred path is the only cwd signal for non-OSC-133 shells, so
+    /// dropping the history entry must NOT drop the cwd trail.
+    #[test]
+    fn record_keeps_cwd_from_skipped_inferred_outcome() {
+        let mut k = SessionKnowledge::new();
+        let mut o = outcome("", 1, OutcomeClass::Inferred);
+        o.cwd = "/repo/sub".into();
+        k.record(o);
+
+        assert!(k.commands.is_empty());
+        assert_eq!(
+            k.cwd_history.front().map(|(p, _)| p.as_str()),
+            Some("/repo/sub"),
+            "cwd trail must survive the filtered outcome"
+        );
+    }
+
+    /// An inferred outcome that *does* carry a command (heuristic capture that
+    /// succeeded) is real history and must be kept.
+    #[test]
+    fn record_keeps_inferred_outcome_with_command() {
+        let mut k = SessionKnowledge::new();
+        k.record(outcome("make check", 1, OutcomeClass::Inferred));
+        assert_eq!(k.commands.len(), 1);
+        assert_eq!(k.commands.front().unwrap().command, "make check");
+    }
+
+    /// A commandless outcome from the OSC 133 path is not the inferred-noise
+    /// case and keeps its existing behaviour (a bare Enter is real history).
+    #[test]
+    fn record_keeps_empty_command_when_not_inferred() {
+        let mut k = SessionKnowledge::new();
+        k.record(outcome("", 1, OutcomeClass::Success));
+        assert_eq!(k.commands.len(), 1);
     }
 
     #[test]

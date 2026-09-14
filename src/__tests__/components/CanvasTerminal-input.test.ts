@@ -4,9 +4,35 @@ import {
 	cmdSequenceForKey,
 	createCompositionState,
 	DUP_KEYDOWN_WINDOW_MS,
+	isPointerInsideRect,
 	isSystemReservedKey,
 	keyToSequence,
+	shouldReportMouseUp,
 } from "../../components/Terminal/terminalInput";
+
+describe("shouldReportMouseUp", () => {
+	it("reports a release for a press this canvas sent, even outside its box", () => {
+		// The press goes out from a canvas mousedown; the release comes from a
+		// document mouseup that bounds-tests the canvas. Press inside, drag out,
+		// release outside: bounds-testing alone swallows the release and a TUI in
+		// normal mouse mode gets no later report, so it stays logically held.
+		expect(shouldReportMouseUp(new Set([0]), 0, false)).toBe(true);
+	});
+
+	it("still reports an ordinary release inside the box", () => {
+		expect(shouldReportMouseUp(new Set(), 0, true)).toBe(true);
+	});
+
+	it("stays silent for a release of a button pressed over another terminal", () => {
+		// This is the whole point of the bounds test: every terminal's document
+		// handler sees this event, and only the one that sent the press may answer.
+		expect(shouldReportMouseUp(new Set(), 0, false)).toBe(false);
+	});
+
+	it("does not answer for a different button than the one pressed", () => {
+		expect(shouldReportMouseUp(new Set([0]), 2, false)).toBe(false);
+	});
+});
 
 describe("keyToSequence", () => {
 	const evt = (key: string, opts: Partial<KeyboardEvent> = {}): KeyboardEvent =>
@@ -523,5 +549,34 @@ describe("navigation keys carry their modifiers", () => {
 	it("still emits the bare sequence with no modifiers", () => {
 		expect(keyToSequence(evt("Home"))).toBe("\x1b[H");
 		expect(keyToSequence(evt("PageDown"))).toBe("\x1b[6~");
+	});
+});
+
+describe("isPointerInsideRect", () => {
+	const rect = { left: 100, top: 50, width: 800, height: 400 };
+	const at = (clientX: number, clientY: number) => ({ clientX, clientY });
+
+	it("accepts a pointer inside the box", () => {
+		expect(isPointerInsideRect(at(500, 250), rect)).toBe(true);
+	});
+
+	it("rejects a pointer outside the box on every side", () => {
+		expect(isPointerInsideRect(at(99, 250), rect)).toBe(false);
+		expect(isPointerInsideRect(at(901, 250), rect)).toBe(false);
+		expect(isPointerInsideRect(at(500, 49), rect)).toBe(false);
+		expect(isPointerInsideRect(at(500, 451), rect)).toBe(false);
+	});
+
+	it("treats an unlaid-out box as containing nothing", () => {
+		// A terminal that has never been measured reports a 0x0 rect. Without the
+		// strict upper bound below, `clientX >= left` alone would accept the whole
+		// half-plane and report cells into a PTY the pointer never touched.
+		expect(isPointerInsideRect(at(0, 0), { left: 0, top: 0, width: 0, height: 0 })).toBe(false);
+		expect(isPointerInsideRect(at(400, 300), { left: 0, top: 0, width: 0, height: 0 })).toBe(false);
+	});
+
+	it("accepts the top-left corner and rejects the bottom-right edge", () => {
+		expect(isPointerInsideRect(at(100, 50), rect)).toBe(true);
+		expect(isPointerInsideRect(at(900, 450), rect)).toBe(false);
 	});
 });

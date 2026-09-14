@@ -2,11 +2,11 @@
 
 ## Command Palette
 
-Open with `Cmd+P` (macOS) / `Ctrl+P` (Windows/Linux). The command palette gives you fast keyboard access to every registered action in the app.
+In the desktop app, open the palette with `Cmd+P` (macOS) / `Ctrl+P` (Windows/Linux). In browser mode, use the magnifying-glass button at the right of the toolbar; this remains reliable when the browser reserves or swallows the shortcut. The command palette gives you fast access to the actions available in the current client mode.
 
 ### How It Works
 
-1. Press `Cmd+P` — the palette opens with a search input focused
+1. Press `Cmd/Ctrl+P` in the desktop app, or click the browser toolbar button — the palette opens with a search input focused
 2. Type to filter actions by name or category (substring match, case-insensitive)
 3. Navigate with `↑` / `↓` arrow keys
 4. Press `Enter` to execute the selected action
@@ -34,7 +34,7 @@ Hovering over a row highlights it (same as keyboard selection). Clicking a row e
 
 ### Powered by the Action Registry
 
-The palette is auto-populated from `actionRegistry.ts`. Every action registered there — with its label, category, and keybinding — appears in the palette automatically. No manual configuration is needed, and plugin-contributed actions appear alongside built-in ones.
+The palette is auto-populated from `actionRegistry.ts`. The desktop app exposes the complete registered action set. Browser mode uses an explicit allowlist and omits actions that require native dialogs, detached OS windows, the native updater, desktop-only MCP configuration, or user-plugin management. This fail-closed policy prevents a newly added desktop action from appearing in the browser before it has a working web or HTTP implementation. Browser-capable plugin actions appear alongside built-in ones.
 
 ### Search Modes
 
@@ -55,6 +55,7 @@ The command palette supports three search prefixes:
 - Delete the prefix to return to command mode
 - Search runs with a 300ms debounce
 - Footer shows `!`, `?`, and `~` hints when in command mode
+- In browser mode, filename and content searches use the same backend over HTTP. Each content search carries a random correlation ID local to the requesting page, so another window or panel cannot inject results into the palette
 
 If no repository is selected, file/content modes show "No repository selected".
 If no terminals are open, terminal mode shows "No terminals open".

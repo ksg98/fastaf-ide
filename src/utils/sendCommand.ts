@@ -10,6 +10,21 @@ export type ShellFamily = "posix" | "windows-native" | "unknown";
  *  use and reused afterwards — the shell doesn't change mid-session. */
 const shellFamilyCache = new Map<string, ShellFamily>();
 
+/** Real-time gap between the payload write and the Enter write when an agent
+ *  is attached. Mirrors `INJECT_ENTER_GAP` in `pty.rs`, which documented the
+ *  same 50ms as "verified live against Codex: back-to-back hangs, CR after a
+ *  gap submits".
+ *
+ *  That constant's comment used to claim the frontend "gets this gap for free —
+ *  its two `writeFn` calls are separate IPC round-trips". It does not: a Tauri
+ *  IPC round-trip completes far inside the child's read-scheduling latency, so
+ *  both writes routinely land in one `read()` and the agent renders a newline
+ *  instead of submitting. Separate flushes never guaranteed separate reads —
+ *  only elapsed time does. */
+export const AGENT_ENTER_GAP_MS = 50;
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Fetch (and cache) the shell family for a PTY session. Returns "unknown"
  *  if the backend can't tell us — `sendCommand` then falls back to the
  *  platform heuristic. */
@@ -58,8 +73,9 @@ export function clearShellFamilyCache(sessionId: string): void {
  *  @param shellFamily  Classification of the session's underlying shell.
  *  @param submit       When false, the text is typed but the trailing Enter is
  *                      withheld so the user reviews and executes it manually.
- *                      Used for suggestion chips carrying shell metacharacters
- *                      (spoofable via OSC 7770 from untrusted output). Default true.
+ *                      Used by reviewable Smart Prompts and by suggestion chips
+ *                      carrying shell metacharacters (spoofable via OSC 7770
+ *                      from untrusted output). Default true.
  */
 export async function sendCommand(
 	writeFn: (data: string) => Promise<void>,
@@ -72,7 +88,14 @@ export async function sendCommand(
 	const prefix = skipPrefix ? "" : "\x15";
 	const payload = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
 	await writeFn(prefix + payload);
-	if (submit) await writeFn("\r");
+	if (!submit) return;
+	// Two writes are not two reads. An Ink/raw-mode agent only treats the CR as
+	// submit when it arrives in a SEPARATE read() from the text; back-to-back
+	// writes — even flushed individually — are coalesced by the PTY into one
+	// read and the CR is swallowed into the composer as a newline, leaving the
+	// command typed but unsent. A plain shell is line-buffered and does not care.
+	if (agentType) await delay(AGENT_ENTER_GAP_MS);
+	await writeFn("\r");
 }
 
 /** Shell metacharacters that enable command chaining, substitution, redirection,

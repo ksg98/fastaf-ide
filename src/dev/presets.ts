@@ -32,6 +32,7 @@ const basePr: BranchPrStatus = {
 	author: "sim-user",
 	commits: 3,
 	mergeable: "MERGEABLE",
+	conflict_state: "clear" as const,
 	merge_state_status: "CLEAN",
 	review_decision: "APPROVED",
 	viewer_did_approve: false,
@@ -115,6 +116,7 @@ export const PRESETS: Record<string, Preset> = {
 		pr: {
 			state: "OPEN",
 			mergeable: "MERGEABLE",
+			conflict_state: "clear" as const,
 			merge_state_status: "CLEAN",
 			review_decision: "APPROVED",
 			checks: { passed: 5, failed: 0, pending: 0, total: 5 },
@@ -126,6 +128,7 @@ export const PRESETS: Record<string, Preset> = {
 		pr: {
 			state: "OPEN",
 			mergeable: "CONFLICTING",
+			conflict_state: "conflicting" as const,
 			merge_state_status: "DIRTY",
 			review_decision: "CHANGES_REQUESTED",
 			checks: { passed: 3, failed: 1, pending: 0, total: 4 },
@@ -144,6 +147,7 @@ export const PRESETS: Record<string, Preset> = {
 			state: "OPEN",
 			is_draft: true,
 			mergeable: "UNKNOWN",
+			conflict_state: "clear" as const,
 			merge_state_status: "DRAFT",
 			review_decision: "REVIEW_REQUIRED",
 			checks: { passed: 1, failed: 2, pending: 1, total: 4 },
@@ -161,6 +165,7 @@ export const PRESETS: Record<string, Preset> = {
 		pr: {
 			state: "OPEN",
 			mergeable: "MERGEABLE",
+			conflict_state: "clear" as const,
 			merge_state_status: "BEHIND",
 			review_decision: "APPROVED",
 			checks: { passed: 5, failed: 0, pending: 0, total: 5 },
@@ -172,6 +177,7 @@ export const PRESETS: Record<string, Preset> = {
 		pr: {
 			state: "OPEN",
 			mergeable: "UNKNOWN",
+			conflict_state: "clear" as const,
 			merge_state_status: "BLOCKED",
 			review_decision: "REVIEW_REQUIRED",
 			checks: { passed: 2, failed: 0, pending: 3, total: 5 },

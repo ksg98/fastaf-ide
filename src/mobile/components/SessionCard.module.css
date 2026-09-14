@@ -36,12 +36,6 @@
   background: var(--bg-tertiary);
 }
 
-.termIcon {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 700;
-}
-
 .body {
   flex: 1;
   min-width: 0;

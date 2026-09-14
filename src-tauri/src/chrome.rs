@@ -42,6 +42,25 @@ pub fn is_prompt_line(text: &str) -> bool {
     t.starts_with('❯') || t.starts_with('›') || t == ">" || t.starts_with("> ")
 }
 
+/// Returns true if `text` is an agent's *empty* interactive prompt row.
+///
+/// Stricter than [`is_prompt_line`] on both counts, because what it anchors is
+/// deleted from history rather than from a screen that repaints next frame:
+///
+/// - The prompt glyph must carry **no text**. Agents echo the user's submitted
+///   message back into the transcript on a prompt row (`❯ rename is broken`,
+///   `› riprendiamo`) — that is the conversation, not chrome. The prompt box
+///   that scrolls off is empty: the input cleared on submit.
+/// - `> text` is a markdown blockquote, so only a bare `>` qualifies.
+pub fn is_agent_prompt_row(text: &str) -> bool {
+    let t = text.trim();
+    let rest = match t.strip_prefix(['❯', '›', '>']) {
+        Some(rest) => rest,
+        None => return false,
+    };
+    rest.trim().is_empty()
+}
+
 /// Returns true if a terminal row contains agent UI chrome (mode-line,
 /// status-line, spinner) rather than real agent output.
 ///
@@ -117,6 +136,13 @@ pub fn is_spinner_row(text: &str) -> bool {
         Some(c) => c,
         None => return false,
     };
+    // A lone block glyph is a scrollbar thumb, not a spinner: grok paints one per row down
+    // the right edge as soon as its output outgrows the viewport, so every otherwise-blank
+    // row trimmed down to a single `█` and the session never left BUSY. Aider's Knight Rider
+    // bar always carries more cells plus its status text, so it is unaffected.
+    if matches!(lead, '\u{2588}' | '\u{2591}') && text.trim().chars().count() == 1 {
+        return false;
+    }
     matches!(lead,
         '\u{00B7}'        // · — Claude Code middle-dot spinner prefix
         | '\u{2591}'      // ░ — Aider Knight Rider spinner (light shade)
@@ -163,17 +189,15 @@ fn is_codex_chrome_bullet(text: &str) -> bool {
 /// PRESENCE-driven signal: while this line sits in the content zone the agent
 /// is alive, regardless of whether it changed this tick.
 ///
-/// Keyed on the "esc to interrupt" hint (shown only while working) so it never
-/// matches plain `• …` output bullets or the `• Boot` startup line.
+/// The verb is NOT part of the signature: Codex renders
+/// `<Verb…> (<elapsed> • esc to interrupt)` and swaps the verb per phase
+/// (`Working`, `Waiting for background terminal`, …). Keying on the verb made
+/// every background-terminal phase read as idle. The invariant is the
+/// interrupt hint — Codex only offers `esc` while a turn is running — anchored
+/// on its closing paren so prose that merely mentions pressing esc (or a plain
+/// `• …` output bullet / the `• Boot` startup line) never matches.
 pub fn is_working_status_row(text: &str) -> bool {
-    let t = text.trim_start();
-    // Optional Codex blink bullet (• / ◦) then the working status text.
-    let t = t
-        .strip_prefix('\u{2022}')
-        .or_else(|| t.strip_prefix('\u{25E6}'))
-        .unwrap_or(t)
-        .trim_start();
-    t.starts_with("Working") && t.contains("esc to interrupt")
+    text.contains("esc to interrupt)")
 }
 
 /// junie (JetBrains) renders a persistent idle status bar whose "effort"
@@ -249,12 +273,127 @@ pub fn find_chrome_cutoff(rows: &[&str]) -> Option<usize> {
         (Some(s), None) => Some(s),
         (None, Some(p)) => Some(p),
         (None, None) => None,
-    };
+    }
+    // Nothing in the scan window: the bottom zone is taller than
+    // [`CHROME_SCAN_ROWS`], which happens as soon as the user's status line is.
+    // Its height is not ours to predict — it is a `statusLine` command, a HUD
+    // plugin, a shell theme; it may be twenty rows or absent. Falling through
+    // here returns None, and None means NO trim, so every status-line row would
+    // then reach every parser. Failing open is the one outcome this guard must
+    // never have, so search the whole screen for the input box itself.
+    .or_else(|| lowest_input_box_row(rows, content_end))
+    .or_else(|| lowest_structured_input_box(rows, content_end).map(|(separator, _)| separator));
+    // DEFERRED (2026-08-22) — the fallbacks above still leave this returning None
+    // often. Measured with `detection_over_capture_corpus` (see docs/backend/pty.md)
+    // over a live corpus: 81% and 71% of content ticks found no anchor on two
+    // agent captures that do emit status-line events, against 8% on a third.
+    // A shell session legitimately has no chrome, so a high rate is not proof of
+    // harm — it is unknown whether the untrimmed rows on those ticks carry
+    // anything a parser then misreads. Needs the changed rows sampled at the
+    // no-anchor ticks before anything here is widened; widening blind is how the
+    // loose `is_prompt_line` search starts matching markdown blockquotes.
 
-    let mut cutoff = anchor?;
-    // Extend cutoff up past separators, empty lines, and task list rows (⎿ ◻ ✔)
-    // above the anchor. Note: is_chrome_row is NOT included here — spinners above
-    // the separator are agent output indicators (e.g. Gemini braille), not footer chrome.
+    Some(extend_cutoff_upward(rows, anchor?))
+}
+
+/// Lowest row that can only be an agent's *empty* input box, searched without a
+/// window.
+///
+/// Anchors on [`is_agent_prompt_row`] rather than [`is_prompt_line`]: unwindowed,
+/// the loose form would match a markdown blockquote or an echoed user message
+/// somewhere up in the conversation and cut the screen in half. An empty prompt
+/// glyph carrying no text exists only in the input box.
+fn lowest_input_box_row(rows: &[&str], content_end: usize) -> Option<usize> {
+    (0..content_end)
+        .rev()
+        .find(|&i| is_agent_prompt_row(rows[i]))
+}
+
+/// Lowest separator that is followed immediately by an agent prompt.
+///
+/// This is the unwindowed fallback for a non-empty input box hidden above a
+/// tall user-configured HUD. A separator alone is too common in transcript
+/// content, and an unwindowed loose prompt would match markdown quotes; their
+/// bounded structural pairing is the input-box invariant.
+fn lowest_structured_input_box(rows: &[&str], content_end: usize) -> Option<(usize, usize)> {
+    (0..content_end).rev().find_map(|separator| {
+        if !is_separator_line(rows[separator].trim()) {
+            return None;
+        }
+        rows.iter()
+            .take(content_end)
+            .enumerate()
+            .skip(separator + 1)
+            .take(4)
+            .find(|(_, row)| is_prompt_line(row))
+            .map(|(prompt, _)| (separator, prompt))
+    })
+}
+
+/// Locate the live prompt using only unwindowed input-box invariants.
+///
+/// Unlike [`find_chrome_cutoff`], this never accepts a loose prompt merely
+/// because it is near the viewport bottom: that shape can be transcript prose.
+/// It is safe for readiness classifiers that must not treat historical input as
+/// the current composer.
+pub fn find_input_box_prompt_row(rows: &[&str]) -> Option<usize> {
+    let content_end = rows
+        .iter()
+        .rposition(|row| !row.trim().is_empty())
+        .map_or(0, |index| index + 1);
+    let empty_prompt = lowest_input_box_row(rows, content_end);
+    let structured_prompt =
+        lowest_structured_input_box(rows, content_end).map(|(_, prompt)| prompt);
+    match (empty_prompt, structured_prompt) {
+        (Some(empty), Some(structured)) => Some(empty.max(structured)),
+        (Some(prompt), None) | (None, Some(prompt)) => Some(prompt),
+        (None, None) => None,
+    }
+}
+
+/// Find the row index where agent chrome starts in a batch of lines that
+/// scrolled off into **history**.
+///
+/// Same contract as [`find_chrome_cutoff`] but deliberately conservative,
+/// because what it cuts is gone from the user's scrollback for good:
+///
+/// - A separator alone is **not** an anchor. Tool output, tables, progress bars
+///   and Codex's `└ ────` dividers all carry box-drawing runs; anchoring on them
+///   truncated real prose mid-sentence (issue: mobile log showed paragraphs
+///   starting on their second line).
+/// - The prompt must be a real agent prompt row ([`is_agent_prompt_row`]), not
+///   any line opening with `> `.
+///
+/// Separators, blank rows and task-list rows still extend the cut upward once a
+/// genuine prompt anchors it — that is the prompt box, not content.
+pub fn find_scrollback_chrome_cutoff(rows: &[&str]) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+
+    let content_end = rows
+        .iter()
+        .rposition(|r| !r.is_empty())
+        .map_or(0, |i| i + 1);
+    if content_end == 0 {
+        return None;
+    }
+
+    let scan_start = content_end.saturating_sub(CHROME_SCAN_ROWS);
+    let anchor = (scan_start..content_end)
+        .rev()
+        .find(|&i| is_agent_prompt_row(rows[i]))?;
+
+    Some(extend_cutoff_upward(rows, anchor))
+}
+
+/// Extend a chrome cutoff up past separators, empty lines, and task list rows
+/// (⎿ ◻ ✔) sitting above the anchor.
+///
+/// `is_chrome_row` is deliberately NOT included: spinners above the separator
+/// are agent output indicators (e.g. Gemini braille), not footer chrome.
+fn extend_cutoff_upward(rows: &[&str], anchor: usize) -> usize {
+    let mut cutoff = anchor;
     while cutoff > 0 {
         let above = rows[cutoff - 1].trim();
         if above.is_empty() || is_separator_line(above) || is_task_list_row(above) {
@@ -263,13 +402,127 @@ pub fn find_chrome_cutoff(rows: &[&str]) -> Option<usize> {
             break;
         }
     }
-
-    Some(cutoff)
+    cutoff
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Bottom zone: the input area and everything under it ---
+    //
+    // Below the agent's input box sits a status line the USER configures — a
+    // Claude Code `statusLine` command, a wiz HUD, a shell prompt theme. Its
+    // height, glyphs and text are arbitrary and differ per install; it may not
+    // be there at all. It is never agent output, and nothing in it may be
+    // parsed: a path in it would read as a plan file, a `?` as a question, a
+    // number as a token count. The cutoff is what enforces that, so it has to
+    // hold for a status line of ANY height.
+
+    /// Boss's real screen: input box, then a four-line custom HUD.
+    fn screen_with_status_line(hud_lines: usize) -> Vec<String> {
+        let mut rows = vec![
+            "  Here is some real agent output.".to_string(),
+            "  A second line of it.".to_string(),
+            String::new(),
+            "✻ Simmering… (5m 48s · ↓ 20.7k tokens)".to_string(),
+            String::new(),
+            "─".repeat(120),
+            "❯ ".to_string(),
+            "─".repeat(120),
+        ];
+        for i in 0..hud_lines {
+            rows.push(format!(
+                "  [Opus 5 (1M) | Team] ██░░ 22% | 📚 8 | line {i} | plans/notes.md | ready?"
+            ));
+        }
+        rows.push("  ⏵⏵ bypass permissions on (shift+tab to cycle)".to_string());
+        rows
+    }
+
+    fn cutoff_of(rows: &[String]) -> Option<usize> {
+        let refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+        find_chrome_cutoff(&refs)
+    }
+
+    /// A status line taller than the scan window used to leave the cutoff
+    /// unfound, and an unfound cutoff means NO trimming at all — every HUD row
+    /// then reaches every parser. The failure is silent and total, which is the
+    /// worst shape a guard can fail in.
+    #[test]
+    fn cutoff_survives_a_status_line_of_any_height() {
+        for hud_lines in [0, 3, 4, 12, 30] {
+            let rows = screen_with_status_line(hud_lines);
+            let cutoff = cutoff_of(&rows)
+                .unwrap_or_else(|| panic!("no cutoff found with {hud_lines} HUD lines"));
+
+            // 4, not 5: the blank row above the separator is padding of the
+            // input box, eaten by `extend_cutoff_upward`.
+            assert_eq!(
+                cutoff, 4,
+                "cutoff must land on the input box with {hud_lines} HUD lines"
+            );
+            assert!(
+                rows[..cutoff]
+                    .iter()
+                    .any(|r| r.contains("real agent output")),
+                "content above the input box must survive the trim"
+            );
+            assert!(
+                rows[..cutoff].iter().any(|r| r.contains("Simmering")),
+                "the agent's own spinner sits ABOVE the input box and must survive — \
+                 it is the busy signal"
+            );
+            assert!(
+                !rows[..cutoff].iter().any(|r| r.contains("plans/notes.md")),
+                "no HUD row may reach a parser"
+            );
+        }
+    }
+
+    #[test]
+    fn cutoff_survives_tall_hud_while_prompt_contains_draft_text() {
+        let mut rows = vec![
+            "  Agent output that must remain visible.".to_string(),
+            String::new(),
+            "─".repeat(100),
+            "› Run /review on my current changes".to_string(),
+            "─".repeat(100),
+        ];
+        rows.extend((0..30).map(|i| format!("custom HUD row {i}: ready?")));
+
+        assert_eq!(cutoff_of(&rows), Some(1));
+    }
+
+    /// The extended search anchors on an EMPTY prompt row only. A markdown
+    /// blockquote or an echoed prompt carrying text is conversation, and
+    /// anchoring on it would cut real output out of the screen.
+    #[test]
+    fn extended_search_does_not_anchor_on_quoted_prose() {
+        let mut rows: Vec<String> = vec!["> a quoted line from the user".to_string()];
+        rows.extend((0..40).map(|i| format!("  output line {i}")));
+        assert_eq!(
+            cutoff_of(&rows),
+            None,
+            "prose alone must not produce a cutoff"
+        );
+        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+        assert_eq!(find_input_box_prompt_row(&refs), None);
+    }
+
+    #[test]
+    fn structured_input_box_returns_its_prompt_row_above_tall_hud() {
+        let mut rows = vec![
+            "agent output".to_string(),
+            "─".repeat(80),
+            "› draft request".to_string(),
+            "─".repeat(80),
+        ];
+        rows.extend((0..30).map(|i| format!("HUD row {i}")));
+        let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+
+        assert_eq!(find_input_box_prompt_row(&refs), Some(2));
+    }
 
     // --- is_working_status_row (presence-driven busy keepalive) ---
 
@@ -291,6 +544,31 @@ mod tests {
     fn codex_working_indented_is_working_status() {
         assert!(is_working_status_row(
             "   • Working (1m 3s • esc to interrupt)"
+        ));
+    }
+
+    #[test]
+    fn codex_background_terminal_wait_is_working_status() {
+        // Codex swaps the verb while a background terminal runs; the turn is
+        // still interruptible, so the session must stay busy. Keying on
+        // "Working" made every `rtk cargo …` background phase read as idle.
+        assert!(is_working_status_row(
+            "• Waiting for background terminal (41s • esc to interrupt) · 1 background terminal running · /ps to view · …"
+        ));
+    }
+
+    #[test]
+    fn codex_working_line_with_background_suffix_is_working_status() {
+        assert!(is_working_status_row(
+            "• Working (1m 39s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close"
+        ));
+    }
+
+    #[test]
+    fn codex_completed_background_wait_is_not_working_status() {
+        // Past tense, no interrupt hint — the wait is over, this is transcript.
+        assert!(!is_working_status_row(
+            "• Waited for background terminal · rtk cargo fmt --all"
         ));
     }
 
@@ -958,6 +1236,21 @@ mod tests {
     }
 
     #[test]
+    fn not_spinner_lone_scrollbar_thumb() {
+        // grok paints a scrollbar column down the right edge once its output outgrows the
+        // viewport; the otherwise-blank rows trim to a single block glyph. Reading those as
+        // Aider's spinner pinned the session BUSY for the rest of the process.
+        assert!(!is_spinner_row(
+            "                                                            █"
+        ));
+        assert!(!is_spinner_row("█"));
+        assert!(!is_spinner_row("░"));
+        // Aider's Knight Rider bar carries more cells and its status text — still a spinner.
+        assert!(is_spinner_row("█░  Waiting for model"));
+        assert!(is_spinner_row("░░█░"));
+    }
+
+    #[test]
     fn not_spinner_junie_status_bar() {
         // junie's idle effort icon (◐◑◒◓) is static chrome, not a live spinner.
         assert!(!is_spinner_row(
@@ -1047,5 +1340,99 @@ mod tests {
             "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
         ];
         assert_eq!(find_chrome_cutoff(&rows), Some(1));
+    }
+
+    // --- is_agent_prompt_row ---
+
+    #[test]
+    fn agent_prompt_row_accepts_bare_prompt_glyphs() {
+        assert!(is_agent_prompt_row("❯"));
+        assert!(is_agent_prompt_row("› "));
+        assert!(is_agent_prompt_row("  ❯  "));
+        assert!(is_agent_prompt_row(">"));
+        assert!(is_agent_prompt_row("> "), "bare prompt, nothing typed");
+    }
+
+    /// The transcript echo of a submitted user message sits on a prompt row.
+    /// Anchoring there deleted the conversation from the mobile log.
+    #[test]
+    fn agent_prompt_row_rejects_echoed_user_message() {
+        assert!(!is_agent_prompt_row(
+            "❯ rename non funziona nel filebrowser"
+        ));
+        assert!(!is_agent_prompt_row("› riprendiamo"));
+    }
+
+    #[test]
+    fn agent_prompt_row_rejects_markdown_quote() {
+        assert!(!is_agent_prompt_row("> quoted guidance from the manual"));
+        assert!(!is_agent_prompt_row("  > indented blockquote"));
+    }
+
+    // --- find_scrollback_chrome_cutoff ---
+
+    #[test]
+    fn scrollback_cutoff_marks_prompt_box() {
+        let rows: Vec<&str> = vec![
+            "Here is the answer to your question.",
+            "",
+            "────────────────────────────────────────────",
+            "❯",
+            "────────────────────────────────────────────",
+            "  [Opus 4.6 | Team] tuicommander git:(main*)",
+        ];
+        assert_eq!(find_scrollback_chrome_cutoff(&rows), Some(1));
+    }
+
+    #[test]
+    fn scrollback_cutoff_ignores_markdown_quote() {
+        let rows: Vec<&str> = vec![
+            "Here is what the docs say:",
+            "> quoted guidance from the manual",
+            "verificabile; non è un force-push e non sovrascrive alcun branch",
+        ];
+        assert_eq!(
+            find_scrollback_chrome_cutoff(&rows),
+            None,
+            "prose after a blockquote must survive in history"
+        );
+    }
+
+    #[test]
+    fn scrollback_cutoff_ignores_standalone_separator() {
+        let rows: Vec<&str> = vec![
+            "• Ran cargo nextest run",
+            "  └ ──────────────────────",
+            "    Summary [ 12.4s ] 91 tests run",
+        ];
+        assert_eq!(
+            find_scrollback_chrome_cutoff(&rows),
+            None,
+            "a divider is not a prompt — screen trim may cut here, history may not"
+        );
+    }
+
+    #[test]
+    fn scrollback_cutoff_still_extends_past_separator_above_prompt() {
+        let rows: Vec<&str> = vec![
+            "real output",
+            "────────────────────",
+            "❯ ",
+            "  Context ███░░░",
+        ];
+        assert_eq!(find_scrollback_chrome_cutoff(&rows), Some(1));
+    }
+
+    #[test]
+    fn scrollback_cutoff_empty_and_blank_batches() {
+        assert_eq!(find_scrollback_chrome_cutoff(&[]), None);
+        assert_eq!(find_scrollback_chrome_cutoff(&["", "", ""]), None);
+    }
+
+    #[test]
+    fn scrollback_cutoff_prompt_outside_scan_window_is_ignored() {
+        let mut rows: Vec<&str> = vec!["❯"];
+        rows.extend(std::iter::repeat_n("content", CHROME_SCAN_ROWS + 2));
+        assert_eq!(find_scrollback_chrome_cutoff(&rows), None);
     }
 }

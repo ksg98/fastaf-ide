@@ -94,36 +94,19 @@ pub(crate) async fn discover_protected_resource(
 /// Discover Authorization Server Metadata (RFC 8414 with OIDC fallback).
 ///
 /// Tries candidates in order until one returns 200:
-/// 1. `{issuer_url}/.well-known/oauth-authorization-server` (simple append)
-/// 2. `{origin}/.well-known/oauth-authorization-server{path}` (RFC 8414 §3.1 insertion form,
+/// 1. `{origin}/.well-known/oauth-authorization-server{path}` (RFC 8414 §3.1 insertion form,
 ///    only when issuer has a non-trivial path — e.g. `https://access.stripe.com/mcp`)
-/// 3. `{issuer_url}/.well-known/openid-configuration` (OIDC fallback)
-/// 4. `{origin}/.well-known/openid-configuration{path}` (OIDC insertion form)
+/// 2. `{issuer_url}/.well-known/oauth-authorization-server` (simple append)
+/// 3. `{origin}/.well-known/openid-configuration{path}` (OIDC insertion form)
+/// 4. `{issuer_url}/.well-known/openid-configuration` (OIDC fallback)
 ///
 /// After a successful fetch:
-/// - Validates that `issuer` in the response matches `issuer_url` (mix-up attack prevention)
+/// - Logs a warning when `issuer` differs from `issuer_url` (RFC 8414 §3.3), but
+///   does **not** fail — see the note at the check site
 /// - Validates that authorization and token endpoints use HTTPS (localhost exempt)
 pub(crate) async fn discover_auth_server(
     client: &reqwest::Client,
     issuer_url: &str,
-) -> Result<AuthServerMetadata> {
-    discover_auth_server_inner(client, issuer_url, true).await
-}
-
-/// Variant that skips the issuer-match check — used when discovering the AS
-/// from the resource server's origin as a fallback (the AS may live on a
-/// different subdomain, e.g. `cf.mcp.atlassian.com` vs `mcp.atlassian.com`).
-pub(crate) async fn discover_auth_server_relaxed(
-    client: &reqwest::Client,
-    base_url: &str,
-) -> Result<AuthServerMetadata> {
-    discover_auth_server_inner(client, base_url, false).await
-}
-
-async fn discover_auth_server_inner(
-    client: &reqwest::Client,
-    issuer_url: &str,
-    strict_issuer: bool,
 ) -> Result<AuthServerMetadata> {
     // Reject non-HTTPS issuers before any network I/O. A compromised resource
     // server could otherwise point `authorization_servers` at an attacker-
@@ -141,11 +124,19 @@ async fn discover_auth_server_inner(
     // and the path, not appending it at the end. Build the insertion-form
     // candidates when the issuer has a non-trivial path.
     //
+    // The insertion form is tried FIRST for path-bearing issuers: it is the
+    // normative RFC 8414 URL, and when both forms answer 200 they can describe
+    // *different* authorization servers. Observed on mcp-s.com, where issuer
+    // `https://<tenant>.mcp-s.com/mcp` serves the tenant's own AS under the
+    // insertion form but the upstream vendor's AS (with a broken
+    // registration_endpoint) under the simple-append form. Preferring the
+    // non-normative form there sent DCR to the wrong host and failed with 500.
+    //
     // Candidate order (tried in sequence until one succeeds):
-    //   1. {issuer}/.well-known/oauth-authorization-server  (simple append, most servers)
-    //   2. {origin}/.well-known/oauth-authorization-server{path}  (RFC 8414 insertion form)
-    //   3. {issuer}/.well-known/openid-configuration  (OIDC simple append)
-    //   4. {origin}/.well-known/openid-configuration{path}  (OIDC RFC 8414 insertion form)
+    //   1. {origin}/.well-known/oauth-authorization-server{path}  (RFC 8414 insertion form)
+    //   2. {issuer}/.well-known/oauth-authorization-server  (simple append, most servers)
+    //   3. {origin}/.well-known/openid-configuration{path}  (OIDC RFC 8414 insertion form)
+    //   4. {issuer}/.well-known/openid-configuration  (OIDC simple append)
     let parsed = url::Url::parse(issuer_url)
         .with_context(|| format!("Invalid issuer URL '{issuer_url}'"))?;
     let path = parsed.path();
@@ -153,16 +144,16 @@ async fn discover_auth_server_inner(
     let origin = parsed.origin().unicode_serialization();
 
     let mut candidates: Vec<String> = Vec::with_capacity(4);
-    candidates.push(format!("{base}/.well-known/oauth-authorization-server"));
     if has_path {
         candidates.push(format!(
             "{origin}/.well-known/oauth-authorization-server{path}"
         ));
     }
-    candidates.push(format!("{base}/.well-known/openid-configuration"));
+    candidates.push(format!("{base}/.well-known/oauth-authorization-server"));
     if has_path {
         candidates.push(format!("{origin}/.well-known/openid-configuration{path}"));
     }
+    candidates.push(format!("{base}/.well-known/openid-configuration"));
 
     let mut last_status = String::new();
     for url in &candidates {
@@ -172,15 +163,12 @@ async fn discover_auth_server_inner(
             .await
             .with_context(|| format!("Failed to fetch AS metadata from {url}"))?;
 
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            last_status = "HTTP 404 Not Found".to_string();
-            continue;
-        }
+        // Any non-2xx moves on to the next candidate. A gateway that answers
+        // 404 on one well-known form and 403/500 on another must not abort the
+        // whole chain — only exhausting every candidate is a real failure.
         if !resp.status().is_success() {
-            bail!(
-                "AS metadata endpoint returned HTTP {} for {url}",
-                resp.status()
-            );
+            last_status = format!("HTTP {} from {url}", resp.status());
+            continue;
         }
 
         let meta = resp
@@ -188,16 +176,22 @@ async fn discover_auth_server_inner(
             .await
             .with_context(|| format!("Failed to parse AS metadata JSON from {url}"))?;
 
-        // Issuer validation (prevents mix-up attack)
-        if strict_issuer {
-            let expected_issuer = base.to_string();
-            if meta.issuer != expected_issuer {
-                bail!(
-                    "Issuer mismatch: expected \"{expected_issuer}\", got \"{}\". \
-                     This may indicate an authorization server mix-up attack.",
-                    meta.issuer
-                );
-            }
+        // RFC 8414 §3.3 wants `issuer` to equal the URL we fetched from. Real
+        // deployments routinely violate this: MCP gateways (mcp-s.com, corporate
+        // proxies, Cloudflare AI Gateway) serve the *upstream* AS metadata
+        // verbatim under their own path, so the issuer names the real AS
+        // (`https://auth.example-idp.com/`) while we fetched from the gateway.
+        // That is a legitimate topology the user explicitly configured, so we
+        // warn instead of blocking — the consent dialog shows the AS origin
+        // before the browser opens, which is where the user decides.
+        if meta.issuer.trim_end_matches('/') != base {
+            tracing::warn!(
+                source = "mcp_oauth",
+                fetched_from = %base,
+                issuer = %meta.issuer,
+                "AS metadata issuer differs from the discovery URL (RFC 8414 §3.3) — \
+                 typical for MCP gateways; proceeding, the user confirms the AS origin"
+            );
         }
 
         // HTTPS enforcement for endpoints (localhost exempt for dev)
@@ -210,7 +204,10 @@ async fn discover_auth_server_inner(
         return Ok(meta);
     }
 
-    bail!("Both RFC 8414 (404) and OIDC discovery ({last_status}) failed for {base}");
+    bail!(
+        "No AS metadata found for {base} — tried {} candidate URL(s), last: {last_status}",
+        candidates.len()
+    );
 }
 
 /// Validate that an endpoint URL uses HTTPS.
@@ -457,8 +454,12 @@ mod tests {
         assert_eq!(meta.token_endpoint, "https://oidc.example.com/token");
     }
 
+    /// MCP gateways (mcp-s.com et al.) proxy the upstream AS metadata verbatim,
+    /// so `issuer` names the real AS rather than the URL we fetched from. This
+    /// MUST NOT block the flow — the user confirms the AS origin in the consent
+    /// dialog instead.
     #[tokio::test]
-    async fn discover_auth_server_issuer_mismatch() {
+    async fn discover_auth_server_accepts_gateway_proxied_issuer() {
         let mut server = mockito::Server::new_async().await;
         let issuer = server.url();
         server
@@ -467,9 +468,10 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 serde_json::json!({
-                    "issuer": "https://evil.example.com",
-                    "authorization_endpoint": "https://evil.example.com/authorize",
-                    "token_endpoint": "https://evil.example.com/token"
+                    "issuer": "https://auth.example-idp.com/",
+                    "authorization_endpoint": "https://auth.example-idp.com/authorize",
+                    "token_endpoint": "https://auth.example-idp.com/token",
+                    "registration_endpoint": "https://auth.example-idp.com/register"
                 })
                 .to_string(),
             )
@@ -477,16 +479,39 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = discover_auth_server(&client, &issuer).await.unwrap_err();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
 
-        assert!(
-            err.to_string().contains("Issuer mismatch"),
-            "expected issuer mismatch error, got: {err}"
+        assert_eq!(meta.issuer, "https://auth.example-idp.com/");
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://auth.example-idp.com/authorize"
         );
-        assert!(
-            err.to_string().contains("mix-up attack"),
-            "should mention mix-up attack, got: {err}"
-        );
+    }
+
+    /// A trailing slash on the issuer is a formatting difference, not a
+    /// mismatch — it must not even produce a warning-worthy divergence.
+    #[tokio::test]
+    async fn discover_auth_server_tolerates_trailing_slash_issuer() {
+        let mut server = mockito::Server::new_async().await;
+        let issuer = server.url();
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": format!("{issuer}/"),
+                    "authorization_endpoint": "https://auth.example.com/authorize",
+                    "token_endpoint": "https://auth.example.com/token"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+        assert_eq!(meta.issuer, format!("{issuer}/"));
     }
 
     #[tokio::test]
@@ -573,16 +598,101 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        // Use relaxed variant since mockito runs on http://127.0.0.1 (localhost exempt)
-        let meta = discover_auth_server_relaxed(&client, &issuer)
-            .await
-            .unwrap();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
 
         assert_eq!(meta.issuer, issuer);
         assert_eq!(
             meta.authorization_endpoint,
             "https://access.stripe.com/mcp/oauth2/authorize"
         );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_prefers_insertion_form_when_both_answer_200() {
+        // Regression: mcp-s.com serves *different* authorization servers on the
+        // two well-known forms for issuer `https://<tenant>.mcp-s.com/mcp`.
+        // The simple-append form returns the upstream vendor's AS, whose
+        // registration_endpoint answers 500 to DCR. The normative RFC 8414 §3.1
+        // insertion form returns the tenant's own, working AS. Preferring the
+        // simple-append form broke `Authorize` for outlook-calendar.
+        let mut server = mockito::Server::new_async().await;
+        let origin = server.url();
+        let issuer = format!("{origin}/mcp");
+
+        // Simple-append form → 200, but describes the WRONG (vendor) AS.
+        server
+            .mock("GET", "/mcp/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": "https://auth.vendor.example/",
+                    "authorization_endpoint": "https://auth.vendor.example/authorize",
+                    "token_endpoint": "https://auth.vendor.example/token",
+                    "registration_endpoint": "https://auth.vendor.example/register"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // RFC 8414 insertion form → 200, the tenant's own AS.
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server/mcp")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &origin,
+                    "authorization_endpoint": format!("{origin}/authorize"),
+                    "token_endpoint": format!("{origin}/token"),
+                    "registration_endpoint": format!("{origin}/register")
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+
+        assert_eq!(
+            meta.registration_endpoint,
+            Some(format!("{origin}/register")),
+            "insertion form must win — DCR went to the vendor AS and got a 500"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_skips_candidate_on_5xx() {
+        // A non-404 error on one candidate must not abort the chain.
+        let mut server = mockito::Server::new_async().await;
+        let origin = server.url();
+        let issuer = format!("{origin}/mcp");
+
+        server
+            .mock("GET", "/.well-known/oauth-authorization-server/mcp")
+            .with_status(500)
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/mcp/.well-known/oauth-authorization-server")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "issuer": &issuer,
+                    "authorization_endpoint": format!("{origin}/authorize"),
+                    "token_endpoint": format!("{origin}/token")
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let meta = discover_auth_server(&client, &issuer).await.unwrap();
+        assert_eq!(meta.issuer, issuer);
     }
 
     #[tokio::test]
@@ -614,13 +724,15 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let err = discover_auth_server_relaxed(&client, &issuer)
-            .await
-            .unwrap_err();
+        let err = discover_auth_server(&client, &issuer).await.unwrap_err();
 
         assert!(
-            err.to_string().contains("RFC 8414") && err.to_string().contains("OIDC"),
-            "should mention both RFC 8414 and OIDC in final error, got: {err}"
+            err.to_string().contains("4 candidate URL(s)"),
+            "final error must say every candidate was tried, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("404"),
+            "final error must carry the last status, got: {err}"
         );
     }
 

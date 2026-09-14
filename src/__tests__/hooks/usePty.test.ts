@@ -137,6 +137,53 @@ describe("usePty", () => {
 		});
 	});
 
+	describe("sendCommand()", () => {
+		it("uses the central command helper to insert reviewable text without Enter", async () => {
+			mockInvoke.mockImplementation(async (command: string) => {
+				if (command === "get_session_shell_family") return "posix";
+				return undefined;
+			});
+
+			await pty.sendCommand("sess-review", "review this prompt", "codex", false);
+
+			expect(mockInvoke).toHaveBeenCalledWith("get_session_shell_family", { sessionId: "sess-review" });
+			expect(mockInvoke).toHaveBeenCalledWith("write_pty", {
+				sessionId: "sess-review",
+				data: "\x15review this prompt",
+			});
+			expect(mockInvoke).not.toHaveBeenCalledWith("write_pty", {
+				sessionId: "sess-review",
+				data: "\r",
+			});
+		});
+	});
+
+	describe("enqueueCommand()", () => {
+		it("routes the text through the backend idle gate and reports the queue depth", async () => {
+			mockInvoke.mockResolvedValueOnce({ typed: false, queued: 2 });
+			const outcome = await pty.enqueueCommand("sess-1", "run the tests");
+			expect(outcome).toEqual({ typed: false, queued: 2 });
+			expect(mockInvoke).toHaveBeenCalledWith("enqueue_agent_command", {
+				sessionId: "sess-1",
+				text: "run the tests",
+			});
+		});
+
+		it("propagates a rejection so the caller can surface it", async () => {
+			mockInvoke.mockRejectedValueOnce(new Error("Session is not running an agent"));
+			await expect(pty.enqueueCommand("sess-1", "ls")).rejects.toThrow("Session is not running an agent");
+		});
+	});
+
+	describe("clearQueuedCommands()", () => {
+		it("calls invoke with sessionId and returns how many were dropped", async () => {
+			mockInvoke.mockResolvedValueOnce(3);
+			const cleared = await pty.clearQueuedCommands("sess-1");
+			expect(cleared).toBe(3);
+			expect(mockInvoke).toHaveBeenCalledWith("clear_queued_agent_commands", { sessionId: "sess-1" });
+		});
+	});
+
 	describe("resize()", () => {
 		it("calls invoke with sessionId, rows, and cols", async () => {
 			mockInvoke.mockResolvedValueOnce(undefined);

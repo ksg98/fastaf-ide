@@ -175,6 +175,16 @@ fn persist(vault: &Vault) -> Result<(), String> {
 }
 
 fn load(guard: &mut VaultGuard<'_>) -> Result<(), String> {
+    // Read-fault injection means "the vault is unreachable", so a cache some
+    // other test happened to populate first must not answer in its place —
+    // otherwise the fault never reaches the mock and the assertion becomes
+    // order-dependent. Dropping it under the same guard leaves no window for a
+    // concurrent test to repopulate before the forced failure is observed.
+    #[cfg(test)]
+    if MOCK_FAIL_READS.load(std::sync::atomic::Ordering::SeqCst) {
+        guard.take();
+    }
+
     if guard.is_some() {
         return Ok(());
     }
@@ -264,18 +274,22 @@ pub(crate) fn set(cred: Credential<'_>, value: &str) -> Result<(), String> {
     let trimmed = value.trim().to_string();
     let mut guard = lock();
     load(&mut guard)?;
-    let vault = guard.as_mut().unwrap();
-    vault.insert(key, trimmed);
-    persist(vault)
+    let mut next = guard.as_ref().unwrap().clone();
+    next.insert(key, trimmed);
+    persist(&next)?;
+    *guard = Some(next);
+    Ok(())
 }
 
 pub(crate) fn delete(cred: Credential<'_>) -> Result<(), String> {
     let key = cred.vault_key();
     let mut guard = lock();
     load(&mut guard)?;
-    let vault = guard.as_mut().unwrap();
-    vault.remove(&key);
-    persist(vault)
+    let mut next = guard.as_ref().unwrap().clone();
+    next.remove(&key);
+    persist(&next)?;
+    *guard = Some(next);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -406,7 +420,26 @@ mod dev_store {
 /// prove the legacy sweep never deletes a legacy entry before the merged vault
 /// is durably persisted (#116-1cb4).
 #[cfg(test)]
-static MOCK_FAIL_WRITES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static MOCK_FAIL_WRITES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test-only fault injection for READS: the mock rejects `get_password` with a real
+/// error rather than `NoEntry`. That distinction is the whole point — a vault that
+/// cannot be consulted must never be mistaken for a vault holding nothing, or the
+/// config layer deletes a perfectly good secret (#488-5576).
+#[cfg(test)]
+pub(crate) static MOCK_FAIL_READS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn reset_test_faults() {
+    use std::sync::atomic::Ordering;
+    MOCK_FAIL_READS.store(false, Ordering::SeqCst);
+    MOCK_FAIL_WRITES.store(false, Ordering::SeqCst);
+    let mut cb = CIRCUIT.lock().unwrap_or_else(|e| e.into_inner());
+    cb.failures = 0;
+    cb.last_failure = None;
+}
 
 #[cfg(test)]
 fn ensure_mock_keyring() {
@@ -446,6 +479,11 @@ fn ensure_mock_keyring() {
             self.set_password(s)
         }
         fn get_password(&self) -> keyring::Result<String> {
+            if MOCK_FAIL_READS.load(std::sync::atomic::Ordering::SeqCst) {
+                // NOT NoEntry: this is "the vault is unreachable", which callers must
+                // treat differently from "the secret is not there".
+                return Err(Error::Invalid("mock".into(), "forced read failure".into()));
+            }
             store()
                 .lock()
                 .unwrap()
@@ -612,6 +650,42 @@ mod tests {
         set(Credential::AiChatApiKey, "sk-test-123").unwrap();
         let result = get(Credential::AiChatApiKey).unwrap();
         assert_eq!(result, Some("sk-test-123".to_string()));
+    }
+
+    #[test]
+    fn failed_set_does_not_mutate_the_cached_vault() {
+        use std::sync::atomic::Ordering;
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_vault();
+        reset_test_faults();
+        set(Credential::AiChatApiKey, "old").unwrap();
+        MOCK_FAIL_WRITES.store(true, Ordering::SeqCst);
+        assert!(set(Credential::AiChatApiKey, "new").is_err());
+        MOCK_FAIL_WRITES.store(false, Ordering::SeqCst);
+        assert_eq!(
+            get(Credential::AiChatApiKey).unwrap(),
+            Some("old".to_string())
+        );
+        reset_test_faults();
+    }
+
+    #[test]
+    fn failed_delete_does_not_mutate_the_cached_vault() {
+        use std::sync::atomic::Ordering;
+
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_vault();
+        reset_test_faults();
+        set(Credential::AiChatApiKey, "keep").unwrap();
+        MOCK_FAIL_WRITES.store(true, Ordering::SeqCst);
+        assert!(delete(Credential::AiChatApiKey).is_err());
+        MOCK_FAIL_WRITES.store(false, Ordering::SeqCst);
+        assert_eq!(
+            get(Credential::AiChatApiKey).unwrap(),
+            Some("keep".to_string())
+        );
+        reset_test_faults();
     }
 
     #[test]

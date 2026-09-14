@@ -74,6 +74,7 @@ function createMcpPopupStore() {
 		const idx = state.servers.findIndex((s) => s.name === name);
 		if (idx === -1) return;
 
+		const base = { servers: [...state.servers] };
 		const updated = state.servers.map((s) => (s.name === name ? { ...s, enabled: !s.enabled } : s));
 
 		// Optimistic UI update
@@ -81,7 +82,7 @@ function createMcpPopupStore() {
 		setState("saving", true);
 
 		try {
-			await invoke("save_mcp_upstreams", { config: { servers: updated } });
+			await invoke("save_mcp_upstreams", { base, config: { servers: updated } });
 			// TUIC advertises tools.listChanged and the bridge forwards the standard
 			// notification. MCP does not expose whether a particular client version
 			// actually applies it, so report what TUIC knows without falsely requiring

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { aiWsUrl, openChatStream, openConversationStream } from "../utils/aiStream";
+import { aiWsUrl, openConversationStream } from "../utils/aiStream";
 
 class MockWebSocket {
 	static instances: MockWebSocket[] = [];
@@ -115,26 +115,6 @@ describe("aiStream", () => {
 			dispose();
 			MockWebSocket.instances[0].triggerClose(1006);
 			expect(onClose).not.toHaveBeenCalled();
-		});
-	});
-
-	describe("openChatStream()", () => {
-		it("opens the chat WS, dispatches snapshot + deltas, disposer closes", () => {
-			vi.stubGlobal("window", { location: { protocol: "http:", host: "h" } });
-			const events: unknown[] = [];
-			const dispose = openChatStream("chat-1", (e) => events.push(e));
-			const ws = MockWebSocket.instances[0];
-			expect(ws.url).toBe("ws://h/ai/chat/chat-1/stream");
-
-			ws.triggerMessage({ kind: "snapshot", messages: [] });
-			ws.triggerMessage({ kind: "chunk", delta: "a" });
-			expect(events).toEqual([
-				{ kind: "snapshot", messages: [] },
-				{ kind: "chunk", delta: "a" },
-			]);
-
-			dispose();
-			expect(ws.closed).toBe(true);
 		});
 	});
 });

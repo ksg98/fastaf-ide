@@ -243,6 +243,13 @@
   margin-bottom: 0;
 }
 
+/* A streaming answer is rendered as one wrapper per committed segment, so the
+   rule above would match the last paragraph of EVERY segment and delete the gap
+   between them. Only the final wrapper holds the answer's real last paragraph. */
+.assistantMsg :global(#markdown-content > .md-segment:not(:last-child) p:last-child) {
+  margin-bottom: 8px;
+}
+
 .streamingMsg {
   align-self: flex-start;
   width: 100%;

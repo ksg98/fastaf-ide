@@ -217,6 +217,22 @@ async function loadPlugin(manifest: PluginManifest): Promise<void> {
 		loaded: false,
 	});
 
+	// A bare dynamic import: the plugin runs in the SAME JavaScript realm as the
+	// host, with the host's module graph in reach. Capabilities gate what a plugin
+	// DECLARES, not what it can IMPERSONATE — a plugin can import `invoke` itself
+	// and pass another plugin's id to inherit that plugin's grants, because
+	// `plugin_id` is caller-supplied and is the only key the Rust checks consult
+	// (see the capability-enforcement note in `src-tauri/src/plugins.rs`). Treat
+	// every installed plugin as trusted with the union of all installed
+	// capabilities; they are isolated from the host's declared surface, not from
+	// each other.
+	//
+	// DEFERRED (2026-07-28) — real isolation means loading each plugin off-realm
+	// (Worker or sandboxed iframe) with a host-created MessagePort as its only
+	// channel, so identity is the port it was handed rather than a string it
+	// supplies. A per-plugin token was considered and rejected: same-realm JS can
+	// read, proxy or monkey-patch it, so it would be a boundary in name only.
+	//
 	// `?t=` cache-busts for hot reload.
 	const url = `${pluginModuleBaseUrl(manifest.id, manifest.main, isWindows())}?t=${Date.now()}`;
 	let mod: unknown;
@@ -337,14 +353,13 @@ function replayActiveAgents(store: typeof terminalsStore): void {
  * Discover and load all user plugins from the plugins directory.
  * Call once at app startup after built-in plugins are registered.
  */
-export async function loadUserPlugins(): Promise<void> {
+export async function loadUserPlugins(syncDisabled = true): Promise<void> {
 	if (!isTauri()) {
 		appLogger.debug("plugin", "User plugin loading skipped in browser mode");
 		return;
 	}
 
-	// Sync disabled list from config
-	await syncDisabledList();
+	if (syncDisabled) await syncDisabledList();
 
 	// Set up hot reload listener
 	try {
@@ -362,25 +377,33 @@ export async function loadUserPlugins(): Promise<void> {
 		return;
 	}
 
-	// Load each valid plugin (register disabled ones in store but don't load)
-	for (const manifest of manifests) {
-		const error = validateManifest(manifest);
-		if (error) {
-			appLogger.error("plugin", `Skipping plugin: ${error}`);
-			continue;
-		}
+	await loadPluginsConcurrently(manifests);
+}
 
-		if (disabledPluginIds.has(manifest.id)) {
-			pluginStore.registerPlugin(manifest.id, {
-				manifest,
-				builtIn: false,
-				enabled: false,
-				loaded: false,
-			});
-			appLogger.info("plugin", `Plugin "${manifest.id}" is disabled, skipping`);
-			continue;
-		}
+export async function loadPluginsConcurrently(
+	manifests: PluginManifest[],
+	loader: (manifest: PluginManifest) => Promise<void> = loadPlugin,
+): Promise<void> {
+	await Promise.all(
+		manifests.map(async (manifest) => {
+			const error = validateManifest(manifest);
+			if (error) {
+				appLogger.error("plugin", `Skipping plugin: ${error}`);
+				return;
+			}
 
-		await loadPlugin(manifest);
-	}
+			if (disabledPluginIds.has(manifest.id)) {
+				pluginStore.registerPlugin(manifest.id, {
+					manifest,
+					builtIn: false,
+					enabled: false,
+					loaded: false,
+				});
+				appLogger.info("plugin", `Plugin "${manifest.id}" is disabled, skipping`);
+				return;
+			}
+
+			await loader(manifest);
+		}),
+	);
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::config::{load_json_config, save_json_config};
+use crate::config::{ConfigFile, load_json_config};
 
 const CONFIG_FILE: &str = "providers.json";
 const SCHEMA_VERSION: u32 = 3;
@@ -422,7 +422,7 @@ fn migrate_from_legacy() -> ProviderRegistry {
 }
 
 pub(crate) fn save_registry(registry: &ProviderRegistry) -> Result<(), String> {
-    save_json_config(CONFIG_FILE, registry)
+    ConfigFile::<ProviderRegistry>::new(CONFIG_FILE).save(registry)
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,7 +1075,7 @@ mod tests {
         map.insert(SlotName::Triage, "m2".to_string());
         assert_eq!(map.get(&SlotName::Main), Some(&"m1".to_string()));
         assert_eq!(map.get(&SlotName::Triage), Some(&"m2".to_string()));
-        assert!(map.get(&SlotName::Headless).is_none());
+        assert!(!map.contains_key(&SlotName::Headless));
     }
 
     #[test]
@@ -1228,7 +1228,7 @@ mod tests {
             reg.phase_overrides.get(&ToolPhase::Write),
             Some(&"gpt4o".to_string())
         );
-        assert!(reg.phase_overrides.get(&ToolPhase::Plan).is_none());
+        assert!(!reg.phase_overrides.contains_key(&ToolPhase::Plan));
     }
 
     #[test]
@@ -1378,7 +1378,7 @@ mod tests {
             reg.phase_overrides.get(&ToolPhase::Write),
             Some(&"sonnet".to_string())
         );
-        assert!(reg.slots.get(&SlotName::Headless).is_none());
+        assert!(!reg.slots.contains_key(&SlotName::Headless));
     }
 
     #[test]

@@ -1,5 +1,179 @@
-/* Solid white background so content scrolls behind the menu bar */
+/* Solid background so content scrolls behind the menu bar (theme-aware: the old
+   hardcoded white broke the coal/navy/ayu themes). */
 #mdbook-menu-bar {
-    background-color: white;
+    background-color: var(--bg);
     z-index: 200;
+    /* the search results drawer hangs below the bar */
+    overflow: visible;
+}
+
+/* ---------------------------------------------------------------------------
+   Menu-bar search: magnifier button that drops a Pagefind box (theme/search.js).
+   Sits where mdBook's own search toggle used to be.
+   --------------------------------------------------------------------------- */
+
+.tuic-search {
+    display: inline-flex;
+}
+
+.tuic-search__panel {
+    position: absolute;
+    top: 100%;
+    left: 0.5rem;
+    z-index: 300;
+    width: min(34rem, calc(100vw - 2rem));
+    padding: 0.75rem 0.9rem;
+    background-color: var(--bg);
+    border: 1px solid var(--searchbar-border-color, var(--table-border-color));
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+    text-align: left;
+
+    --pagefind-ui-scale: 0.8;
+    --pagefind-ui-font: inherit;
+    --pagefind-ui-text: var(--fg);
+    --pagefind-ui-background: var(--bg);
+    --pagefind-ui-primary: var(--links);
+    --pagefind-ui-border: var(--searchbar-border-color, var(--table-border-color));
+    --pagefind-ui-tag: var(--quote-bg);
+    --pagefind-ui-border-width: 1px;
+    --pagefind-ui-border-radius: 6px;
+}
+
+.tuic-search .pagefind-ui__form::before {
+    /* Pagefind's magnifier glyph is sized for a full-width page search */
+    opacity: 0.55;
+}
+
+.tuic-search .pagefind-ui__search-input {
+    background-color: var(--searchbar-bg, var(--bg));
+    color: var(--searchbar-fg, var(--fg));
+    font-size: 0.95rem;
+    padding-top: 0.35rem;
+    padding-bottom: 0.35rem;
+}
+
+.tuic-search .pagefind-ui__search-input:focus {
+    outline: 2px solid var(--links);
+    outline-offset: -1px;
+}
+
+.tuic-search .pagefind-ui__search-clear {
+    background-color: transparent;
+    color: var(--fg);
+}
+
+/* Results scroll inside the dropped panel. Visibility is left to Pagefind
+   (.pagefind-ui__hidden) — we only size the drawer. */
+.tuic-search .pagefind-ui__drawer {
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.tuic-search .pagefind-ui__result-title,
+.tuic-search .pagefind-ui__result-excerpt {
+    font-size: 0.9rem;
+}
+
+mark {
+    background-color: var(--search-mark-bg, rgba(255, 200, 0, 0.35));
+    color: inherit;
+}
+
+/* ---------------------------------------------------------------------------
+   Landing page: hero search + popular articles (markup lives in index.md)
+   --------------------------------------------------------------------------- */
+
+.docs-hero {
+    margin: 0 0 2.5rem;
+    padding: 2.5rem 1.5rem 2.25rem;
+    text-align: center;
+    background-color: var(--quote-bg);
+    border: 1px solid var(--quote-border, transparent);
+    border-radius: 12px;
+}
+
+.docs-hero__title {
+    margin: 0 0 0.6rem;
+    font-size: 2.1rem;
+    line-height: 1.2;
+}
+
+.docs-hero__tagline {
+    max-width: 42rem;
+    margin: 0 auto 1.6rem;
+    opacity: 0.8;
+}
+
+.docs-hero__search {
+    width: 100%;
+    margin: 0 auto;
+    text-align: left;
+
+    --pagefind-ui-scale: 1;
+    --pagefind-ui-font: inherit;
+    --pagefind-ui-text: var(--fg);
+    --pagefind-ui-background: var(--bg);
+    --pagefind-ui-primary: var(--links);
+    --pagefind-ui-border: var(--searchbar-border-color, var(--table-border-color));
+    --pagefind-ui-tag: var(--quote-bg);
+    --pagefind-ui-border-width: 1px;
+    --pagefind-ui-border-radius: 8px;
+}
+
+.docs-hero__search .pagefind-ui,
+.docs-hero__search .pagefind-ui__form {
+    width: 100%;
+}
+
+.docs-hero__search .pagefind-ui__search-input {
+    width: 100%;
+    box-sizing: border-box;
+    background-color: var(--bg);
+    font-size: 1.1rem;
+    padding-top: 0.7rem;
+    padding-bottom: 0.7rem;
+}
+
+.docs-hero__search .pagefind-ui__drawer {
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.docs-section-title {
+    margin-top: 0;
+}
+
+.docs-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+    gap: 0.15rem 1.5rem;
+    margin: 1rem 0 2.5rem;
+}
+
+.docs-card {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.5rem 0.6rem;
+    border-radius: 8px;
+    text-decoration: none;
+}
+
+.docs-card:hover {
+    background-color: var(--quote-bg);
+}
+
+.docs-card svg {
+    flex: none;
+    width: 0.95rem;
+    height: 0.95rem;
+    opacity: 0.5;
+}
+
+@media print {
+    .tuic-search,
+    .docs-hero__search {
+        display: none;
+    }
 }

@@ -272,3 +272,46 @@ describe("reconcileActivityOrder", () => {
 		expect(spine).toEqual(["a", "c"]);
 	});
 });
+
+describe("displayTask", () => {
+	let displayTask: typeof import("../../utils/activitySnapshot").displayTask;
+
+	beforeEach(async () => {
+		vi.resetModules();
+		displayTask = (await import("../../utils/activitySnapshot")).displayTask;
+	});
+
+	it("drops a task that only restates the status badge next to it", () => {
+		// "Working / Working" costs a line and carries nothing.
+		expect(displayTask("Working", "codex")).toBeNull();
+		expect(displayTask("working", "codex")).toBeNull();
+		expect(displayTask("  Idle  ", "codex")).toBeNull();
+		expect(displayTask("Waiting for input", "codex")).toBeNull();
+		expect(displayTask("Rate limited", "codex")).toBeNull();
+	});
+
+	it("drops every Claude verb, matching the badge wording or not", () => {
+		// Claude cycles decorative spinner words that mean "working" without
+		// saying it, so no exact match can catch them.
+		expect(displayTask("Undulating", "claude")).toBeNull();
+		expect(displayTask("Crunching", "claude")).toBeNull();
+		expect(displayTask("Reading files", "claude")).toBeNull();
+	});
+
+	it("keeps a real task that merely starts like a status word", () => {
+		// The match is exact: this one says something the badge does not.
+		expect(displayTask("Waiting for background terminal", "codex")).toBe("Waiting for background terminal");
+		expect(displayTask("Working on the parser", "codex")).toBe("Working on the parser");
+	});
+
+	it("has nothing to show when the agent reported no task", () => {
+		expect(displayTask(null, "codex")).toBeNull();
+		expect(displayTask(undefined, "codex")).toBeNull();
+		expect(displayTask("", "codex")).toBeNull();
+	});
+
+	it("applies the same rule to a session with no known agent", () => {
+		expect(displayTask("Working", null)).toBeNull();
+		expect(displayTask("Waiting for background terminal", null)).toBe("Waiting for background terminal");
+	});
+});

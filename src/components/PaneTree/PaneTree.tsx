@@ -376,6 +376,7 @@ const PaneGroupView: Component<{
 							<div class="pane-tab-content" classList={{ "pane-tab-content-active": tab.id === group()?.activeTabId }}>
 								<PaneTabContent
 									tab={tab}
+									visible={() => tab.id === group()?.activeTabId}
 									onCloseTab={props.onCloseTab}
 									onOpenFilePath={props.onOpenFilePath}
 									onTerminalFocus={props.onTerminalFocus}
@@ -410,6 +411,8 @@ const PanePlaceholder: Component<{ onNewTerminal?: () => void }> = (props) => (
 
 const PaneTabContent: Component<{
 	tab: PaneTab;
+	/** Whether this tab is the one its pane is showing. */
+	visible: () => boolean;
 	onCloseTab: (id: string) => void;
 	onOpenFilePath: (path: string, line?: number, col?: number) => void;
 	onTerminalFocus: (id: string) => void;
@@ -426,7 +429,7 @@ const PaneTabContent: Component<{
 				/>
 			</Match>
 			<Match when={props.tab.type === "markdown"}>
-				<MarkdownPane tabId={props.tab.id} onClose={props.onCloseTab} />
+				<MarkdownPane tabId={props.tab.id} onClose={props.onCloseTab} visible={props.visible} />
 			</Match>
 			<Match when={props.tab.type === "diff"}>
 				<DiffPane tabId={props.tab.id} onClose={props.onCloseTab} />
@@ -450,7 +453,7 @@ const TerminalPane: Component<{
 	const metaHotkeys = createMemo(() => {
 		const path = repositoriesStore.getRepoPathForTerminal(props.tabId);
 		if (!path) return undefined;
-		return repoSettingsStore.getEffective(path)?.terminalMetaHotkeys;
+		return repoSettingsStore.getEffectiveField(path, "terminalMetaHotkeys");
 	});
 
 	return (
@@ -469,11 +472,11 @@ const TerminalPane: Component<{
 	);
 };
 
-const MarkdownPane: Component<{ tabId: string; onClose: (id: string) => void }> = (props) => {
+const MarkdownPane: Component<{ tabId: string; onClose: (id: string) => void; visible: () => boolean }> = (props) => {
 	const mdTab = () => mdTabsStore.get(props.tabId);
 	return (
 		<Show when={mdTab()} keyed>
-			{(tab) => <MdTabContent tab={tab} onClose={() => props.onClose(props.tabId)} />}
+			{(tab) => <MdTabContent tab={tab} onClose={() => props.onClose(props.tabId)} visible={props.visible} />}
 		</Show>
 	);
 };

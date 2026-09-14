@@ -12,6 +12,13 @@ export interface PanelAdapter {
 	toggle?: () => void;
 	detachParams?: () => Record<string, string>;
 	onDetach?: () => void;
+	/**
+	 * Called in the MAIN window when the panel comes home — on reattach and on
+	 * the detached window being closed. A panel whose detached copy owns state
+	 * the main window also caches (an AI conversation, say) has to re-read it
+	 * here, or the main window keeps showing what it had before it detached.
+	 */
+	onReattach?: () => void;
 	/** For projection panels: serializer for cross-window sync snapshots. */
 	serialize?: () => unknown;
 	/** Sync push interval in ms (default: no sync). Must be set alongside serialize. */

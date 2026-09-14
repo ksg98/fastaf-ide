@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 const mockGetEffective = vi.fn<(path: string) => unknown>(() => undefined);
 const mockGetOrderedRepos = vi.fn<() => unknown[]>(() => []);
 const mockBumpRevision = vi.fn();
+const mockBumpGitRevision = vi.fn();
 
 vi.mock("../../stores/repoSettings", () => ({
 	repoSettingsStore: {
@@ -20,6 +21,7 @@ vi.mock("../../stores/repositories", () => ({
 	repositoriesStore: {
 		getOrderedRepos: mockGetOrderedRepos,
 		bumpRevision: mockBumpRevision,
+		bumpGitRevision: mockBumpGitRevision,
 	},
 }));
 
@@ -43,6 +45,7 @@ describe("useAutoFetch", () => {
 		mockGetEffective.mockReset().mockReturnValue(undefined);
 		mockGetOrderedRepos.mockReset().mockReturnValue([]);
 		mockBumpRevision.mockReset();
+		mockBumpGitRevision.mockReset();
 
 		vi.doMock("@tauri-apps/api/core", () => ({ invoke: mockInvoke }));
 		vi.doMock("../../stores/repoSettings", () => ({
@@ -52,6 +55,7 @@ describe("useAutoFetch", () => {
 			repositoriesStore: {
 				getOrderedRepos: mockGetOrderedRepos,
 				bumpRevision: mockBumpRevision,
+				bumpGitRevision: mockBumpGitRevision,
 			},
 		}));
 		vi.doMock("../../stores/appLogger", () => ({
@@ -93,14 +97,19 @@ describe("useAutoFetch", () => {
 		});
 	});
 
-	it("bumps revision after successful fetch", async () => {
+	// A fetch moves remote-tracking refs, so it is a GIT-STATE change. It must
+	// use the bump that reaches the committed-history panels too — those observe
+	// only `gitRevisions`, and the watcher may not see a fetch at all (refs
+	// written into a packed-refs file, or the repo simply not being watched).
+	it("bumps the git revision after a successful fetch", async () => {
 		mockGetOrderedRepos.mockReturnValue([{ path: "/repo1" }]);
 		mockGetEffective.mockReturnValue({ autoFetchIntervalMinutes: 5 });
 
 		startAutoFetch();
 		await vi.advanceTimersByTimeAsync(60 * 1000);
 
-		expect(mockBumpRevision).toHaveBeenCalledWith("/repo1");
+		expect(mockBumpGitRevision).toHaveBeenCalledWith("/repo1");
+		expect(mockBumpRevision).not.toHaveBeenCalled();
 	});
 
 	it("does not bump revision on failed fetch", async () => {
@@ -112,6 +121,7 @@ describe("useAutoFetch", () => {
 		await vi.advanceTimersByTimeAsync(60 * 1000);
 
 		expect(mockBumpRevision).not.toHaveBeenCalled();
+		expect(mockBumpGitRevision).not.toHaveBeenCalled();
 	});
 
 	it("does not re-fetch before interval elapses", async () => {

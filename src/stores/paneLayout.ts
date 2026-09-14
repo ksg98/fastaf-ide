@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile } from "solid-js/store";
 import { invoke } from "../invoke";
 import { appLogger } from "./appLogger";
 
@@ -297,26 +297,32 @@ function createPaneLayoutStore() {
 
 	// Debounced persistence — serializes tree+groups directly (no `this` needed)
 	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function writeLayout(): void {
+		const groups: Record<string, PaneGroup> = {};
+		for (const key of Object.keys(state.groups)) {
+			const g = state.groups[key];
+			groups[key] = {
+				id: g.id,
+				tabs: g.tabs.map((t) => ({ id: t.id, type: t.type })),
+				activeTabId: g.activeTabId,
+			};
+		}
+		const snapshot: PaneLayoutState = {
+			root: tree ? structuredClone(tree) : null,
+			groups,
+			activeGroupId: state.activeGroupId,
+		};
+		invoke("save_pane_layout", { layout: snapshot }).catch((err: unknown) =>
+			appLogger.warn("app", "Failed to save pane layout", err),
+		);
+	}
+
 	function scheduleSave(): void {
 		if (saveTimer) clearTimeout(saveTimer);
 		saveTimer = setTimeout(() => {
-			const groups: Record<string, PaneGroup> = {};
-			for (const key of Object.keys(state.groups)) {
-				const g = state.groups[key];
-				groups[key] = {
-					id: g.id,
-					tabs: g.tabs.map((t) => ({ id: t.id, type: t.type })),
-					activeTabId: g.activeTabId,
-				};
-			}
-			const snapshot: PaneLayoutState = {
-				root: tree ? structuredClone(tree) : null,
-				groups,
-				activeGroupId: state.activeGroupId,
-			};
-			invoke("save_pane_layout", { layout: snapshot }).catch((err: unknown) =>
-				appLogger.warn("app", "Failed to save pane layout", err),
-			);
+			saveTimer = null;
+			writeLayout();
 		}, 500);
 	}
 
@@ -417,18 +423,22 @@ function createPaneLayoutStore() {
 			scheduleSave();
 		},
 
-		/** Add a tab to a group */
-		addTab(groupId: string, tab: PaneTab): void {
+		/** Add a tab to a group. `activate=false` docks the tab in the group's tab
+		 *  strip without switching the pane to it — used by background spawns that
+		 *  must not take over what the user is looking at. */
+		addTab(groupId: string, tab: PaneTab, activate = true): void {
 			const group = state.groups[groupId];
 			if (!group) return;
 			if (group.tabs.some((t) => t.id === tab.id && t.type === tab.type)) {
-				setState("groups", groupId, "activeTabId", tab.id);
+				if (activate) setState("groups", groupId, "activeTabId", tab.id);
 				return;
 			}
 			setState(
 				produce((s) => {
 					s.groups[groupId].tabs.push(tab);
-					s.groups[groupId].activeTabId = tab.id;
+					if (activate || s.groups[groupId].activeTabId === null) {
+						s.groups[groupId].activeTabId = tab.id;
+					}
 				}),
 			);
 			scheduleSave();
@@ -567,10 +577,15 @@ function createPaneLayoutStore() {
 
 			tree = saved.root;
 			bumpTree();
-			setState({
-				groups: saved.groups,
-				activeGroupId: saved.activeGroupId,
-			});
+			// reconcile, not a wholesale node replace: `saved.groups` is always a
+			// fresh object, so a plain setState would hand every group and every
+			// PaneTab a new proxy and remount every CanvasTerminal in the layout.
+			setState(
+				reconcile({
+					groups: saved.groups,
+					activeGroupId: saved.activeGroupId,
+				}),
+			);
 		},
 
 		/** Remap terminal IDs in all groups (used after lazy restore creates new terminal IDs) */
@@ -593,6 +608,14 @@ function createPaneLayoutStore() {
 
 		/** Reset to single pane (no split) */
 		reset(): void {
+			// Every branch select calls this, almost always on an already-empty
+			// layout. Writing a fresh `{}` would replace the `groups` node, bump
+			// treeRevision for every isSplit() subscriber and rewrite
+			// pane-layout.json with identical bytes — all for no change.
+			if (tree === null && state.activeGroupId === null && Object.keys(state.groups).length === 0) {
+				restoredFromDisk = false;
+				return;
+			}
 			tree = null;
 			restoredFromDisk = false;
 			bumpTree();
@@ -635,6 +658,13 @@ function createPaneLayoutStore() {
 
 	return {
 		...result,
+		/** Write a pending debounced save now — the app is going away. */
+		flushSave(): void {
+			if (!saveTimer) return;
+			clearTimeout(saveTimer);
+			saveTimer = null;
+			writeLayout();
+		},
 		_testCancelPendingSave(): void {
 			if (saveTimer) {
 				clearTimeout(saveTimer);

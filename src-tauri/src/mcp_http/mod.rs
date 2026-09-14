@@ -14,7 +14,7 @@ pub(crate) mod mcp_transport;
 mod plugin_docs;
 mod plugin_routes;
 mod session;
-mod sse_routes;
+pub(crate) mod sse_routes;
 mod static_files;
 mod types;
 mod watcher_routes;
@@ -260,29 +260,23 @@ async fn load_mcp_upstreams_http() -> impl IntoResponse {
     Json(crate::mcp_upstream_config::load_mcp_upstreams())
 }
 
-/// PUT /mcp/upstreams — save upstream MCP server config (validates, hot-reloads).
+/// PUT /mcp/upstreams — apply a base-to-desired upstream delta (validates, hot-reloads).
 async fn save_mcp_upstreams_http(
     State(state): State<Arc<AppState>>,
-    Json(config): Json<crate::mcp_upstream_config::UpstreamMcpConfig>,
+    Json(request): Json<crate::mcp_upstream_config::UpstreamMcpSaveRequest>,
 ) -> Response {
-    let self_port = state.config.read().services.server.port;
-    let errors = crate::mcp_upstream_config::validate_upstream_config(&config, self_port);
-    if !errors.is_empty() {
-        let msgs: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        return (StatusCode::BAD_REQUEST, msgs.join("; ")).into_response();
-    }
-    let old_config: crate::mcp_upstream_config::UpstreamMcpConfig =
-        crate::config::load_json_config(crate::mcp_upstream_config::UPSTREAMS_FILE);
-    if let Err(e) =
-        crate::config::save_json_config(crate::mcp_upstream_config::UPSTREAMS_FILE, &config)
+    match crate::mcp_upstream_config::save_mcp_upstreams_inner(request.base, request.config, &state)
+        .await
     {
-        return err_500(&e);
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e)
+            if e.starts_with("Invalid upstream config")
+                || e.starts_with("Duplicate upstream id") =>
+        {
+            (StatusCode::BAD_REQUEST, e).into_response()
+        }
+        Err(e) => err_500(&e),
     }
-    state
-        .mcp_upstream_registry
-        .apply_config_diff(&old_config, &config, self_port)
-        .await;
-    StatusCode::OK.into_response()
 }
 
 /// POST /mcp/upstreams/reconnect — reconnect a single upstream by name.
@@ -419,20 +413,27 @@ async fn push_subscribe(
         return (StatusCode::BAD_REQUEST, e).into_response();
     }
     state.push_store.upsert(sub);
-    // Auto-enable push on first subscription — mutate + drop lock before disk I/O
-    let needs_save = {
-        let mut config = state.config.write();
-        if !config.services.push.enabled {
-            config.services.push.enabled = true;
-            true
-        } else {
-            false
-        }
-    };
-    if needs_save {
-        let snapshot = state.config.read().clone();
-        if let Err(e) = crate::config::save_app_config(snapshot) {
-            tracing::error!(source = "push", "Failed to persist push_enabled=true: {e}");
+    // Auto-enable push on first subscription. Through the shared config lock: the old
+    // mutate-then-snapshot-then-save left a window where another writer's save carried
+    // this flag, or this save carried the other writer's half-applied change. Blocking
+    // pool because the critical section writes to disk.
+    let already_enabled = state.config.read().services.push.enabled;
+    if !already_enabled {
+        let state = state.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            crate::config::commit_config_change(&state, |current| {
+                let mut next = current.clone();
+                next.services.push.enabled = true;
+                Ok(next)
+            })
+        })
+        .await;
+        match saved {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::error!(source = "push", "Failed to persist push_enabled=true: {e}")
+            }
+            Err(e) => tracing::error!(source = "push", "push_enabled save task failed: {e}"),
         }
     }
     StatusCode::CREATED.into_response()
@@ -540,6 +541,23 @@ fn shared_routes() -> Router<Arc<AppState>> {
             get(session::list_sessions).post(session::create_session),
         )
         .route("/sessions/{id}/write", post(session::write_to_session))
+        // The N-ary sibling: one round trip, but the per-input bookkeeping still
+        // runs once per part. Concatenating into `/write` is NOT equivalent —
+        // `apply_input_bookkeeping` reads the whole payload as one keystroke.
+        .route(
+            "/sessions/{id}/write-parts",
+            post(session::write_parts_to_session),
+        )
+        .route(
+            "/sessions/{id}/queue",
+            get(session::list_queued_commands)
+                .post(session::enqueue_command)
+                .delete(session::clear_queued_commands),
+        )
+        .route(
+            "/sessions/{id}/queue/{command_id}",
+            delete(session::remove_queued_command),
+        )
         .route("/sessions/{id}/name", put(session::set_session_name))
         .route("/sessions/{id}/resize", post(session::resize_session))
         .route("/sessions/{id}/output", get(session::get_output))
@@ -681,6 +699,14 @@ fn shared_routes() -> Router<Arc<AppState>> {
             "/diagnostics",
             get(log_routes::diagnostics_get).post(log_routes::diagnostics_set),
         )
+        .route(
+            "/diagnostics/markers",
+            get(log_routes::marker_compliance_get),
+        )
+        .route(
+            "/diagnostics/capture",
+            get(log_routes::capture_get).post(log_routes::capture_set),
+        )
         // Worktrees
         .route(
             "/worktrees",
@@ -770,6 +796,10 @@ fn shared_routes() -> Router<Arc<AppState>> {
         .route(
             "/fs/resolve-terminal-path",
             get(fs_routes::resolve_terminal_path_http),
+        )
+        .route(
+            "/fs/resolve-terminal-paths",
+            post(fs_routes::resolve_terminal_paths_http),
         )
         .route("/fs/stat", get(fs_routes::stat_path_http))
         .route("/fs/warm-index", post(fs_routes::warm_content_index_http))
@@ -868,6 +898,51 @@ fn shared_routes() -> Router<Arc<AppState>> {
         .route("/system/local-ip", get(git_routes::get_local_ip_http))
         // Server-Sent Events
         .route("/events", get(sse_routes::sse_events))
+        .route("/events/types", post(sse_routes::sse_update_types))
+        // Answer a pending MCP confirmation (the browser/PWA half of the desktop
+        // `mcp_confirm_response` command).
+        .route("/mcp/confirm-response", post(mcp_confirm_response_http))
+}
+
+/// Body of `POST /mcp/confirm-response`.
+#[derive(serde::Deserialize)]
+struct McpConfirmResponseBody {
+    request_id: String,
+    confirmed: bool,
+}
+
+async fn mcp_confirm_response_http(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<McpConfirmResponseBody>,
+) -> Json<serde_json::Value> {
+    resolve_mcp_confirm(&state, &body.request_id, body.confirmed);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Resolve a pending MCP confirmation and tell every client to dismiss it.
+///
+/// Shared by the Tauri command and the HTTP route so the two transports cannot
+/// drift. Unknown or already-answered ids are ignored: every client races to
+/// answer the same request, and only one of them can win.
+pub(crate) fn resolve_mcp_confirm(state: &Arc<AppState>, request_id: &str, confirmed: bool) {
+    let Some((_, sender)) = state.confirm_responses.remove(request_id) else {
+        return;
+    };
+    let _ = sender.send(confirmed);
+    let _ = state
+        .event_bus
+        .send(crate::state::AppEvent::McpConfirmResolved {
+            request_id: request_id.to_string(),
+            confirmed,
+        });
+    #[cfg(feature = "desktop")]
+    if let Some(ref app) = *state.app_handle.read() {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "mcp-confirm-resolved",
+            serde_json::json!({ "request_id": request_id, "confirmed": confirmed }),
+        );
+    }
 }
 
 pub fn build_router(state: Arc<AppState>, remote_auth: bool, mcp_enabled: bool) -> Router {
@@ -1308,6 +1383,10 @@ pub fn build_router(state: Arc<AppState>, remote_auth: bool, mcp_enabled: bool) 
             get(plugin_routes::plugin_fs_read),
         )
         .route(
+            "/api/plugins/{plugin_id}/fs/read-batch",
+            post(plugin_routes::plugin_fs_read_batch),
+        )
+        .route(
             "/api/plugins/{plugin_id}/fs/read-base64",
             get(plugin_routes::plugin_fs_read_base64),
         )
@@ -1336,6 +1415,10 @@ pub fn build_router(state: Arc<AppState>, remote_auth: bool, mcp_enabled: bool) 
             post(plugin_routes::plugin_delete_build_artifact),
         )
         .route(
+            "/api/plugins/{plugin_id}/build-artifacts/trim",
+            post(plugin_routes::plugin_trim_build_artifact),
+        )
+        .route(
             "/api/plugins/{plugin_id}/exec",
             post(plugin_routes::plugin_exec),
         )
@@ -1354,6 +1437,10 @@ pub fn build_router(state: Arc<AppState>, remote_auth: bool, mcp_enabled: bool) 
         .route(
             "/api/plugins/{plugin_id}/unregister",
             post(plugin_routes::plugin_unregister),
+        )
+        .route(
+            "/api/plugins/output-watchers",
+            post(plugin_routes::plugin_set_output_watchers),
         )
         .route(
             "/api/plugins/{plugin_id}/readme",
@@ -1502,6 +1589,20 @@ pub fn build_remote_router(state: Arc<AppState>) -> Router {
     public_routes.merge(authed)
 }
 
+/// Rebind the TCP listener after a config write changed remote-access settings.
+///
+/// The IPC `save_config` has always done this; the HTTP and MCP config writers
+/// did not, so a save over those transports left the running process serving a
+/// state the disk no longer agreed with. Routed through one helper so the
+/// transports cannot drift again. No-op in the headless binary, which has no
+/// desktop restart plumbing.
+pub(crate) fn restart_after_server_settings_change(state: &Arc<AppState>, reason: &'static str) {
+    #[cfg(feature = "desktop")]
+    crate::restart_server(state, reason);
+    #[cfg(not(feature = "desktop"))]
+    let _ = (state, reason);
+}
+
 /// Start the HTTP API server.
 ///
 /// **Unix socket** (macOS/Linux): always starts at `<config_dir>/mcp.sock`.
@@ -1512,6 +1613,37 @@ pub fn build_remote_router(state: Arc<AppState>) -> Router {
 ///
 /// Both listeners share a single shutdown signal so `save_config` can restart
 /// the server cleanly.
+/// Drop the peer identities that a reaped MCP protocol session was carrying,
+/// and report `(removed, retained)`.
+///
+/// Split out of the reaper loop so the eviction rule can be tested without a
+/// one-hour timer. The rule itself is
+/// [`AppState::peer_identity_is_reapable`](crate::state::AppState::peer_identity_is_reapable):
+/// the transport is gone, but an identity someone can still reach — or still
+/// name as a parent — must outlive it.
+fn evict_peers_for_reaped_mcp_session(
+    state: &AppState,
+    mcp_sid: &str,
+) -> (Vec<String>, Vec<String>) {
+    let (removed, retained): (Vec<String>, Vec<String>) = state
+        .peer_agents
+        .iter()
+        .filter(|entry| entry.value().mcp_session_id == *mcp_sid)
+        .map(|entry| entry.key().clone())
+        .partition(|tuic| state.peer_identity_is_reapable(tuic));
+    for tuic in &removed {
+        state.peer_agents.remove(tuic);
+        state.orchestrator_peers.remove(tuic);
+        state.active_agent_waiters.remove(tuic);
+        let _ = state
+            .event_bus
+            .send(crate::state::AppEvent::PeerUnregistered {
+                tuic_session: tuic.clone(),
+            });
+    }
+    (removed, retained)
+}
+
 /// Start IPC + TCP listeners. Returns `true` if TCP bound successfully (or
 /// wasn't requested). Returns `false` only when `remote_enabled` is true and
 /// TCP bind failed on all port attempts.
@@ -1566,21 +1698,17 @@ pub async fn start_server(
                 for sid in &reaped {
                     tracing::warn!("MCP session reaped (idle ≥1h): {sid}");
                     reaper_state.mcp_sessions.remove(sid);
-                    // Clean up peer agents whose MCP session was reaped — emit events
-                    let removed: Vec<String> = reaper_state
-                        .peer_agents
-                        .iter()
-                        .filter(|e| e.value().mcp_session_id == *sid)
-                        .map(|e| e.key().clone())
-                        .collect();
-                    for tuic in &removed {
-                        reaper_state.peer_agents.remove(tuic);
-                        let _ =
-                            reaper_state
-                                .event_bus
-                                .send(crate::state::AppEvent::PeerUnregistered {
-                                    tuic_session: tuic.clone(),
-                                });
+                    // Clean up peer agents whose MCP session was reaped. An
+                    // identity that is still addressable outlives the transport
+                    // that carried it.
+                    let (_removed, retained) =
+                        evict_peers_for_reaped_mcp_session(&reaper_state, sid);
+                    if !retained.is_empty() {
+                        tracing::info!(
+                            "MCP session {sid} reaped, {} peer identity/identities kept addressable: {}",
+                            retained.len(),
+                            retained.join(", ")
+                        );
                     }
                 }
                 // Evict orphaned inboxes for peers that no longer exist
@@ -1612,6 +1740,18 @@ pub async fn start_server(
                         source = "auth",
                         evicted,
                         "Swept expired auth rate-limit entries"
+                    );
+                }
+
+                // Drop tasks past their TTL on the same pass — a task handle
+                // outlives its protocol session, so it needs its own sweep, but
+                // not its own timer.
+                let reaped_tasks = reaper_state.tasks.reap_expired();
+                if reaped_tasks > 0 {
+                    tracing::debug!(
+                        source = "tasks",
+                        reaped = reaped_tasks,
+                        "Reaped expired tasks"
                     );
                 }
             }
@@ -1900,7 +2040,7 @@ mod tests {
     use axum::body::Body;
     use axum::extract::connect_info::ConnectInfo;
     use axum::http::{Request, StatusCode};
-    use dashmap::DashMap;
+    use dashmap::{DashMap, DashSet};
     use tower::ServiceExt;
 
     /// Build a POST request with ConnectInfo from the given address.
@@ -1984,11 +2124,12 @@ mod tests {
             #[cfg(feature = "desktop")]
             grid_channels: DashMap::new(),
             grid_watch: DashMap::new(),
-            grid_frame_in_flight: DashMap::new(),
+            grid_gates: DashMap::new(),
             pending_scroll: DashMap::new(),
             kitty_states: DashMap::new(),
             input_buffers: DashMap::new(),
             last_prompts: DashMap::new(),
+            pty_descriptions: DashMap::new(),
             silence_states: DashMap::new(),
             claude_usage_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
             log_buffer: std::sync::Arc::new(parking_lot::Mutex::new(
@@ -1996,7 +2137,9 @@ mod tests {
             )),
             event_bus: tokio::sync::broadcast::channel(256).0,
             event_counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sse_filters: Default::default(),
             session_states: dashmap::DashMap::new(),
+            session_state_events: crate::state::SessionStateEventQueue::new(),
             mcp_upstream_registry: std::sync::Arc::new(
                 crate::mcp_proxy::registry::UpstreamRegistry::new(),
             ),
@@ -2024,16 +2167,21 @@ mod tests {
             exit_codes: DashMap::new(),
             shell_state_since_ms: DashMap::new(),
             loaded_plugins: DashMap::new(),
+            plugin_output_watchers: parking_lot::RwLock::new(Default::default()),
             relay: crate::state::RelayState::new(),
             peer_agents: DashMap::new(),
             agent_inbox: DashMap::new(),
             agent_inbox_evictions: DashMap::new(),
+            agent_read_cursor: DashMap::new(),
+            marker_stats: DashMap::new(),
             pending_injections: DashMap::new(),
             pending_initial_prompts: DashMap::new(),
             active_agent_waiters: DashMap::new(),
+            orchestrator_peers: DashSet::new(),
             session_html_tabs: DashMap::new(),
             mcp_to_session: DashMap::new(),
             session_to_mcp: DashMap::new(),
+            live_pty_by_tuic_session: DashMap::new(),
             session_parent: DashMap::new(),
             messaging_channels: DashMap::new(),
             pty_event_channels: DashMap::new(),
@@ -2057,6 +2205,7 @@ mod tests {
             trigger_classifier: crate::ai_agent::triggers::TriggerClassifier::new(),
             ai_suggestions_enabled: dashmap::DashMap::new(),
             grid_frame_dirty: dashmap::DashMap::new(),
+            sync_update_active: dashmap::DashMap::new(),
             tunnel_manager: {
                 let audit = std::sync::Arc::new(parking_lot::Mutex::new(
                     crate::tunnels::audit::AuditLog::open(
@@ -2072,8 +2221,10 @@ mod tests {
                 )
                 .unwrap(),
             )),
+            tasks: std::sync::Arc::new(crate::tasks::TaskRegistry::new()),
             connections_lock: tokio::sync::Mutex::new(()),
             screenshot_responses: DashMap::new(),
+            confirm_responses: DashMap::new(),
             standby_sessions: DashMap::new(),
             process_snapshot_cache: crate::pty::ProcessSnapshotCache::default(),
             hot_repo_paths: parking_lot::RwLock::new(std::collections::HashSet::new()),
@@ -2289,6 +2440,68 @@ mod tests {
         let config: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // Should have default font_family
         assert!(config["font_family"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn upstream_save_reports_same_id_concurrent_add_without_mutating_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        let current = crate::mcp_upstream_config::UpstreamMcpConfig {
+            servers: vec![crate::mcp_upstream_config::UpstreamMcpServer {
+                id: "shared-id".to_string(),
+                name: "existing".to_string(),
+                transport: crate::mcp_upstream_config::UpstreamTransport::Http {
+                    url: "https://existing.example.com/mcp".to_string(),
+                },
+                enabled: false,
+                timeout_secs: 30,
+                tool_filter: None,
+                auth: None,
+            }],
+        };
+        crate::config::ConfigFile::<crate::mcp_upstream_config::UpstreamMcpConfig>::new(
+            crate::mcp_upstream_config::UPSTREAMS_FILE,
+        )
+        .save(&current)
+        .unwrap();
+
+        let body = serde_json::json!({
+            "base": { "servers": [] },
+            "config": {
+                "servers": [{
+                    "id": "shared-id",
+                    "name": "requested",
+                    "transport": {
+                        "type": "http",
+                        "url": "https://requested.example.com/mcp"
+                    },
+                    "enabled": false,
+                    "timeout_secs": 30
+                }]
+            }
+        });
+        let app = build_router(test_state(), false, true);
+        let response = app
+            .oneshot(put_from(
+                "/mcp/upstreams",
+                &body,
+                std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            error["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("was added concurrently"))
+        );
+        assert_eq!(crate::mcp_upstream_config::load_mcp_upstreams(), current);
     }
 
     #[tokio::test]
@@ -2576,9 +2789,11 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let agents = json.as_array().unwrap();
-        assert_eq!(agents.len(), 4);
         let names: Vec<&str> = agents.iter().map(|a| a["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"claude"));
+        // The route must report every agent TUIC can launch — an omission makes an installed
+        // agent invisible to an orchestrator, which is how grok and gemini went missing.
+        assert_eq!(names, crate::agent::KNOWN_AGENT_BINARIES.to_vec());
+        assert!(names.contains(&"grok"));
     }
 
     #[tokio::test]
@@ -2654,8 +2869,45 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["jsonrpc"], "2.0");
         assert_eq!(json["id"], 1);
-        assert_eq!(json["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(json["result"]["protocolVersion"], "2025-11-25");
         assert!(json["result"]["serverInfo"]["name"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_initialize_accepts_missing_and_present_protocol_header() {
+        let cases = [(None, "2025-03-26"), (Some("2025-11-25"), "2025-11-25")];
+        for (header_value, offered_version) in cases {
+            let state = test_state();
+            let app = build_router(state, false, true);
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": offered_version,
+                    "capabilities": {},
+                    "clientInfo": { "name": "probe-client", "version": "1.0.0" }
+                }
+            });
+            let mut request = mcp_post("/mcp", &body);
+            if let Some(value) = header_value {
+                request.headers_mut().insert(
+                    "MCP-Protocol-Version",
+                    value.parse().expect("valid protocol header"),
+                );
+            }
+
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "header={header_value:?}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                json["result"]["protocolVersion"], "2025-11-25",
+                "header={header_value:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2711,6 +2963,69 @@ mod tests {
             .get(&sid)
             .expect("session should be stored");
         assert!(!meta.is_claude_code, "Non-CC client should not be flagged");
+    }
+
+    #[tokio::test]
+    async fn test_grok_initialize_gets_session_local_meta_tool_surface() {
+        let state = test_state();
+        assert!(!state.config.read().collapse_tools);
+        let app = build_router(state.clone(), false, true);
+        let init_body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26", "capabilities": {},
+                "clientInfo": {
+                    "name": "grok-shell-tuicommander",
+                    "version": "1.0"
+                }
+            }
+        });
+        let init_response = app.oneshot(mcp_post("/mcp", &init_body)).await.unwrap();
+        assert_eq!(init_response.status(), StatusCode::OK);
+        let sid = init_response
+            .headers()
+            .get("mcp-session-id")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let init_bytes = axum::body::to_bytes(init_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let init_json: serde_json::Value = serde_json::from_slice(&init_bytes).unwrap();
+        assert!(
+            init_json["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("search_tools")
+        );
+        assert!(
+            state
+                .mcp_sessions
+                .get(&sid)
+                .is_some_and(|meta| meta.requires_meta_tools)
+        );
+
+        let list_body = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+        });
+        let list_response = build_router(state.clone(), false, true)
+            .oneshot(mcp_post_with_session("/mcp", &list_body, &sid))
+            .await
+            .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_bytes = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let list_json: serde_json::Value = serde_json::from_slice(&list_bytes).unwrap();
+        let names: Vec<&str> = list_json["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["search_tools", "get_tool_schema", "call_tool"]);
+        assert!(!state.config.read().collapse_tools);
     }
 
     #[tokio::test]
@@ -2973,7 +3288,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: now,
                 is_claude_code: false,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -3032,7 +3349,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: std::time::Instant::now() - std::time::Duration::from_secs(60),
                 is_claude_code: true,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -3494,9 +3813,38 @@ mod tests {
         let state = test_state();
         let result = call_mcp_tool(&state, "agent", serde_json::json!({"action": "detect"})).await;
         let agents = result.as_array().unwrap();
-        assert_eq!(agents.len(), 4, "Should detect 4 known agents");
-        let names: Vec<&str> = agents.iter().map(|a| a["name"].as_str().unwrap()).collect();
-        assert!(names.contains(&"claude"));
+
+        // The set is KNOWN_AGENT_BINARIES, never a hand-written subset: this
+        // test used to assert a hardcoded 4, which is exactly what let the
+        // handler drift and hide gemini, grok, opencode, amp, cursor and pi
+        // from every orchestrator.
+        for agent in agents {
+            let name = agent["name"].as_str().unwrap();
+            assert!(
+                crate::agent::KNOWN_AGENT_BINARIES.contains(&name),
+                "{name} is not a known agent binary"
+            );
+            // Only installed agents — a null path is a row an orchestrator
+            // cannot act on.
+            assert!(
+                agent["path"].as_str().is_some_and(|p| !p.is_empty()),
+                "{name} reported without a path"
+            );
+        }
+
+        // Whatever is installed on this machine must be reported; the reverse
+        // (asserting a fixed list) would fail on a machine without them.
+        for binary in crate::agent::KNOWN_AGENT_BINARIES {
+            if crate::agent::detect_agent_binary(binary.to_string())
+                .path
+                .is_some()
+            {
+                assert!(
+                    agents.iter().any(|a| a["name"].as_str() == Some(binary)),
+                    "{binary} is installed but detect did not report it"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -3907,8 +4255,12 @@ mod tests {
         );
     }
 
+    /// Was `test_tools_call_requires_session`, which pinned the blanket -32600 on a
+    /// missing `mcp-session-id`. That rejection was the single blocker to stateless
+    /// operation and is gone (#0f44); identity is now resolved per call. The test is
+    /// inverted rather than dropped, so the route stays covered end-to-end.
     #[tokio::test]
-    async fn test_tools_call_requires_session() {
+    async fn test_tools_call_no_longer_requires_a_session_header() {
         let state = test_state();
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -3920,22 +4272,20 @@ mod tests {
             }
         });
         let app = build_router(state, false, true);
-        // Send without mcp-session-id header — should be rejected
+        // No mcp-session-id header — `session action=list` needs no identity.
         let resp = app.oneshot(mcp_post("/mcp", &body)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let resp_body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-        assert_eq!(
-            json["error"]["code"], -32600,
-            "Missing session should return -32600"
+        assert!(
+            json.get("error").is_none(),
+            "a headerless call must not be refused: {json}"
         );
         assert!(
-            json["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("mcp-session-id")
+            json["result"]["content"][0]["text"].is_string(),
+            "the tool must actually have run: {json}"
         );
     }
 
@@ -4058,6 +4408,10 @@ mod tests {
         );
     }
 
+    // The embedded dist only exists in the desktop build; without this gate
+    // `cargo check --no-default-features --tests` cannot compile at all, which
+    // hides every other cfg regression in test code.
+    #[cfg(feature = "desktop")]
     #[tokio::test]
     async fn test_serve_static_js() {
         // Find an actual JS file in the embedded dist
@@ -4087,6 +4441,10 @@ mod tests {
         }
     }
 
+    // The embedded dist only exists in the desktop build; without this gate
+    // `cargo check --no-default-features --tests` cannot compile at all, which
+    // hides every other cfg regression in test code.
+    #[cfg(feature = "desktop")]
     #[tokio::test]
     async fn test_serve_static_font() {
         let font_file = static_files::FRONTEND_DIST
@@ -4242,8 +4600,8 @@ mod tests {
     fn test_ws_clients_cleanup() {
         // Verify the ws_clients DashMap operations work correctly
         let state = test_state();
-        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx1, _rx1) = crate::state::new_ws_client_channel();
+        let (tx2, _rx2) = crate::state::new_ws_client_channel();
 
         // Add clients
         state
@@ -4267,8 +4625,8 @@ mod tests {
     fn test_ws_clients_retain_disconnected() {
         // Verify that retain removes closed channels
         let state = test_state();
-        let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let (tx2, rx2) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx1, _rx1) = crate::state::new_ws_client_channel();
+        let (tx2, rx2) = crate::state::new_ws_client_channel();
 
         state
             .ws_clients
@@ -4284,10 +4642,9 @@ mod tests {
         // Drop rx2 so tx2 is closed
         drop(rx2);
 
-        // Retain should remove the closed channel
-        if let Some(mut clients) = state.ws_clients.get_mut("sess") {
-            clients.retain(|tx| tx.send("test".to_string()).is_ok());
-        }
+        // Through the production fan-out, not a hand-rolled copy of it: the
+        // retain lives in one place now and this is what exercises it.
+        crate::state::broadcast_to_ws_clients(&state.ws_clients, "sess", "test");
 
         // Only tx1 should remain (its rx1 is still alive)
         assert_eq!(state.ws_clients.get("sess").unwrap().len(), 1);
@@ -4303,7 +4660,7 @@ mod tests {
 
         // Simulate 10 connect/disconnect cycles (mobile reconnects)
         for _ in 0..10 {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let (tx, rx) = crate::state::new_ws_client_channel();
             state
                 .ws_clients
                 .entry(session_id.clone())
@@ -4336,8 +4693,8 @@ mod tests {
         let state = test_state();
         let session_id = "mixed-session".to_string();
 
-        let (tx_live, _rx_live) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let (tx_dead, rx_dead) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx_live, _rx_live) = crate::state::new_ws_client_channel();
+        let (tx_dead, rx_dead) = crate::state::new_ws_client_channel();
 
         state
             .ws_clients
@@ -4356,6 +4713,133 @@ mod tests {
         crate::state::purge_dead_ws_clients(&state.ws_clients, &session_id);
 
         // Only the live sender should remain
+        assert_eq!(state.ws_clients.get(&session_id).unwrap().len(), 1);
+    }
+
+    // --- WS client fan-out (604-cb45 F13) ---
+    //
+    // A browser that connects once leaves a Vec behind. While that Vec exists
+    // the PTY reader copies every chunk into it before discovering there is
+    // nobody to hand the copy to, for the whole life of the session.
+
+    #[test]
+    fn test_ws_clients_purge_drops_the_empty_entry() {
+        let state = test_state();
+        let session_id = "gone-session".to_string();
+
+        let (tx, rx) = crate::state::new_ws_client_channel();
+        state
+            .ws_clients
+            .entry(session_id.clone())
+            .or_default()
+            .push(tx);
+        drop(rx);
+
+        crate::state::purge_dead_ws_clients(&state.ws_clients, &session_id);
+
+        assert!(
+            state.ws_clients.get(&session_id).is_none(),
+            "the last client leaving must take the map entry with it, so the \
+             reader's lookup misses instead of finding an empty Vec"
+        );
+    }
+
+    #[test]
+    fn test_ws_broadcast_reaps_the_entry_when_every_client_is_gone() {
+        let state = test_state();
+        let session_id = "dead-session".to_string();
+
+        let (tx, rx) = crate::state::new_ws_client_channel();
+        state
+            .ws_clients
+            .entry(session_id.clone())
+            .or_default()
+            .push(tx);
+        drop(rx);
+
+        crate::state::broadcast_to_ws_clients(&state.ws_clients, &session_id, "output");
+
+        assert!(
+            state.ws_clients.get(&session_id).is_none(),
+            "a send that finds every client dead must reap the entry, not leave \
+             an empty Vec for the next chunk to copy into"
+        );
+    }
+
+    #[test]
+    fn test_ws_broadcast_delivers_to_a_live_client() {
+        let state = test_state();
+        let session_id = "live-session".to_string();
+
+        let (tx, mut rx) = crate::state::new_ws_client_channel();
+        state
+            .ws_clients
+            .entry(session_id.clone())
+            .or_default()
+            .push(tx);
+
+        crate::state::broadcast_to_ws_clients(&state.ws_clients, &session_id, "hello");
+
+        assert_eq!(rx.try_recv().ok(), Some("hello".to_string()));
+        assert_eq!(state.ws_clients.get(&session_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_ws_broadcast_is_a_no_op_without_clients() {
+        let state = test_state();
+
+        crate::state::broadcast_to_ws_clients(&state.ws_clients, "never-connected", "output");
+
+        assert!(state.ws_clients.get("never-connected").is_none());
+    }
+
+    // --- Raw-output WS backpressure (604-cb45 F15) ---
+
+    #[test]
+    fn test_ws_broadcast_drops_a_client_that_stopped_draining() {
+        // An unbounded queue makes a stalled browser a memory leak on the PTY
+        // reader: the producer cannot block (it holds the ring lock), so the
+        // only honest options are drop-the-client or grow forever.
+        let state = test_state();
+        let session_id = "stalled-session".to_string();
+
+        let (tx, _rx) = crate::state::new_ws_client_channel();
+        state
+            .ws_clients
+            .entry(session_id.clone())
+            .or_default()
+            .push(tx);
+
+        for _ in 0..(crate::state::WS_CLIENT_QUEUE_CAPACITY + 8) {
+            crate::state::broadcast_to_ws_clients(&state.ws_clients, &session_id, "chunk");
+        }
+
+        assert!(
+            state.ws_clients.get(&session_id).is_none(),
+            "a client that never drains must be dropped, not queued without limit"
+        );
+    }
+
+    #[test]
+    fn test_ws_broadcast_keeps_a_client_that_drains() {
+        let state = test_state();
+        let session_id = "healthy-session".to_string();
+
+        let (tx, mut rx) = crate::state::new_ws_client_channel();
+        state
+            .ws_clients
+            .entry(session_id.clone())
+            .or_default()
+            .push(tx);
+
+        for _ in 0..(crate::state::WS_CLIENT_QUEUE_CAPACITY * 3) {
+            crate::state::broadcast_to_ws_clients(&state.ws_clients, &session_id, "chunk");
+            assert!(
+                rx.try_recv().is_ok(),
+                "the drained client must keep receiving"
+            );
+        }
+
         assert_eq!(state.ws_clients.get(&session_id).unwrap().len(), 1);
     }
 
@@ -4406,7 +4890,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: now,
                 is_claude_code: false,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -4443,7 +4929,9 @@ mod tests {
             crate::state::McpSessionMeta {
                 last_activity: now,
                 is_claude_code: false,
+                requires_meta_tools: false,
                 has_sse_stream: false,
+                sse_generation: 0,
                 repo_path: None,
             },
         );
@@ -4841,14 +5329,13 @@ mod tests {
             let Some(name_str) = name.to_str() else {
                 continue;
             };
-            if let Some(rest) = name_str.strip_prefix("mcp-") {
-                if let Some(pid_str) = rest.strip_suffix(".sock") {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        let alive_check = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-                        if !alive_check {
-                            let _ = std::fs::remove_file(entry.path());
-                        }
-                    }
+            if let Some(rest) = name_str.strip_prefix("mcp-")
+                && let Some(pid_str) = rest.strip_suffix(".sock")
+                && let Ok(pid) = pid_str.parse::<u32>()
+            {
+                let alive_check = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+                if !alive_check {
+                    let _ = std::fs::remove_file(entry.path());
                 }
             }
         }
@@ -4955,6 +5442,49 @@ mod tests {
         let lines = json["lines"].as_array().expect("lines should be an array");
         assert_eq!(lines.len(), 3, "limit=3 should return 3 lines");
         assert_eq!(json["total_lines"].as_u64().unwrap(), total as u64);
+    }
+
+    #[tokio::test]
+    async fn test_get_output_format_text_does_not_duplicate_rows_after_growing_viewport() {
+        use crate::state::{VT_LOG_BUFFER_CAPACITY, VtLogBuffer};
+
+        let state = test_state();
+        let sid = "test-text-resize-growth";
+        let mut vt_log = VtLogBuffer::new(12, 80, VT_LOG_BUFFER_CAPACITY);
+        for i in 0..50 {
+            vt_log.process(format!("resize-line-{i:02}\r\n").as_bytes());
+        }
+        vt_log.resize(33, 80);
+        let canonical_total = vt_log.grid_total_lines();
+        state
+            .vt_log_buffers
+            .insert(sid.to_string(), parking_lot::Mutex::new(vt_log));
+
+        let app = build_router(state, false, true);
+        let resp = app
+            .oneshot(
+                Request::get(format!("/sessions/{sid}/output?format=text&limit=1000"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let text = json["data"].as_str().expect("data should be text");
+
+        for i in 0..50 {
+            let marker = format!("resize-line-{i:02}");
+            assert_eq!(
+                text.lines().filter(|line| *line == marker).count(),
+                1,
+                "canonical text snapshot must contain {marker} exactly once"
+            );
+        }
+        assert_eq!(json["total_written"], canonical_total);
     }
 
     #[tokio::test]
@@ -5122,5 +5652,82 @@ mod tests {
         assert_eq!(json["ok"], true);
 
         server.abort();
+    }
+
+    fn register_reaper_peer(state: &AppState, tuic: &str, mcp_sid: &str) {
+        state.peer_agents.insert(
+            tuic.to_string(),
+            crate::state::PeerAgent {
+                tuic_session: tuic.to_string(),
+                mcp_session_id: mcp_sid.to_string(),
+                name: "peer".to_string(),
+                project: None,
+                registered_at: 0,
+            },
+        );
+    }
+
+    /// An agent thinking for over an hour makes no MCP request, so its protocol
+    /// session is reaped while its PTY is still running. Deleting the identity
+    /// there is what made a child's `agent action=send` report the parent as no
+    /// longer registered — observed live on 2026-08-24.
+    #[cfg(unix)]
+    #[test]
+    fn reaped_mcp_session_keeps_an_identity_that_still_owns_a_pty() {
+        let state = crate::state::tests_support::make_test_app_state();
+        crate::state::tests_support::insert_dummy_session(&state, "pty-owner");
+        register_reaper_peer(&state, "pty-owner", "mcp-1");
+
+        let (removed, retained) = evict_peers_for_reaped_mcp_session(&state, "mcp-1");
+        assert!(removed.is_empty(), "a live PTY is still addressable");
+        assert_eq!(retained, vec!["pty-owner".to_string()]);
+        assert!(state.peer_agents.contains_key("pty-owner"));
+    }
+
+    /// The unrecoverable case. A headerless orchestrator owns no PTY, so nothing
+    /// re-creates its UUID: re-registering mints a fresh one and no child is told.
+    /// Dropping it strands every handoff aimed at it, permanently.
+    #[test]
+    fn reaped_mcp_session_keeps_an_identity_a_live_child_calls_parent() {
+        let state = crate::state::tests_support::make_test_app_state();
+        register_reaper_peer(&state, "orchestrator", "mcp-2");
+        state
+            .session_parent
+            .insert("child-session".to_string(), "orchestrator".to_string());
+
+        let (removed, retained) = evict_peers_for_reaped_mcp_session(&state, "mcp-2");
+        assert!(removed.is_empty(), "a named parent is still addressable");
+        assert_eq!(retained, vec!["orchestrator".to_string()]);
+    }
+
+    /// The retention is bounded: with no terminal and no child naming it, the
+    /// identity is genuinely unreachable and the reaper must still free it.
+    #[test]
+    fn reaped_mcp_session_drops_an_unreachable_identity() {
+        let state = crate::state::tests_support::make_test_app_state();
+        register_reaper_peer(&state, "ghost", "mcp-3");
+        state.orchestrator_peers.insert("ghost".to_string());
+        // A different session's parent must not keep this one alive.
+        state
+            .session_parent
+            .insert("child-session".to_string(), "somebody-else".to_string());
+
+        let (removed, retained) = evict_peers_for_reaped_mcp_session(&state, "mcp-3");
+        assert_eq!(removed, vec!["ghost".to_string()]);
+        assert!(retained.is_empty());
+        assert!(!state.peer_agents.contains_key("ghost"));
+        assert!(!state.orchestrator_peers.contains("ghost"));
+    }
+
+    /// Only the reaped session's peers are considered.
+    #[test]
+    fn reaping_one_mcp_session_leaves_another_session_peers_alone() {
+        let state = crate::state::tests_support::make_test_app_state();
+        register_reaper_peer(&state, "ghost", "mcp-4");
+        register_reaper_peer(&state, "bystander", "mcp-5");
+
+        let (removed, _) = evict_peers_for_reaped_mcp_session(&state, "mcp-4");
+        assert_eq!(removed, vec!["ghost".to_string()]);
+        assert!(state.peer_agents.contains_key("bystander"));
     }
 }

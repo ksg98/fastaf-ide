@@ -185,6 +185,13 @@ export const ChangesTab: Component<ChangesTabProps> = (props) => {
 		// Subscribe to revision changes
 		void repositoriesStore.getRevision(storeKey() || repoPath);
 
+		// Plain directories have no git index — asking would fail on every revision bump.
+		if (!repositoriesStore.isGitRepo(storeKey() || repoPath)) {
+			setStaged([]);
+			setUnstaged([]);
+			return;
+		}
+
 		let cancelled = false;
 		onCleanup(() => {
 			cancelled = true;

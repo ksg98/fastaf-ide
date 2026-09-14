@@ -4,7 +4,7 @@ FastAF includes local voice-to-text using Whisper AI. All processing happens on 
 
 ## Setup
 
-1. Open **Settings → Services → Voice Dictation**
+1. Open **Settings → Dictation**
 2. Enable dictation
 3. Download a Whisper model (recommended: `large-v3-turbo`, ~1.6 GB)
 4. Wait for download to complete (progress shown in UI)
@@ -47,7 +47,7 @@ Configure word replacements applied after transcription:
 | "tab" | `\t` |
 | "period" | `.` |
 
-Add custom corrections in Settings → Services → Dictation → Corrections.
+Add custom corrections in Settings → Dictation → Corrections.
 
 ## Audio Device
 
@@ -72,10 +72,10 @@ Select which microphone to use from the dropdown in dictation settings. Lists al
 
 ## Hotkey Configuration
 
-Change the push-to-talk hotkey in Settings → Services → Dictation. The hotkey is registered globally via Tauri's global-shortcut plugin.
+Change the push-to-talk hotkey in Settings → Dictation. The hotkey is registered globally via Tauri's global-shortcut plugin.
 
 Default: `F5`
 
 ### Auto-Send
 
-Enable 'Auto-send' in Settings > Services > Dictation to automatically press Enter after the transcribed text is inserted into the terminal. Useful when dictating commands.
+Enable 'Auto-send' in Settings > Dictation to automatically press Enter after the transcribed text is inserted into the terminal. Useful when dictating commands.

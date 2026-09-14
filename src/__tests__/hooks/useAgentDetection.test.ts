@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import "../mocks/tauri";
+import { AGENT_TYPES } from "../../agents";
 import { useAgentDetection } from "../../hooks/useAgentDetection";
 import { testInScope, testInScopeAsync } from "../helpers/store";
 import { mockInvoke } from "../mocks/tauri";
@@ -11,7 +12,20 @@ describe("useAgentDetection", () => {
 
 	/** Helper: build a batch detection response */
 	function batchResponse(available: Record<string, string | null> = {}) {
-		const allBinaries = ["claude", "gemini", "opencode", "aider", "codex", "amp", "cursor-agent", "oz", "droid", "git"];
+		const allBinaries = [
+			"claude",
+			"gemini",
+			"opencode",
+			"aider",
+			"codex",
+			"amp",
+			"cursor-agent",
+			"oz",
+			"droid",
+			"git",
+			"grok",
+			"pi",
+		];
 		const result: Record<string, { path: string | null; version: string | null }> = {};
 		for (const bin of allBinaries) {
 			result[bin] = { path: available[bin] ?? null, version: null };
@@ -35,12 +49,30 @@ describe("useAgentDetection", () => {
 				});
 
 				const map = detections();
-				expect(map.size).toBe(12);
+				// Every registered agent type must get a detection entry — derived from the
+				// registry so adding an agent doesn't silently leave one undetected.
+				expect(map.size).toBe(AGENT_TYPES.length);
 				expect(map.get("claude")?.available).toBe(true);
 				expect(map.get("gemini")?.available).toBe(false);
 				expect(map.get("opencode")?.available).toBe(true);
 				expect(map.get("aider")?.available).toBe(false);
 				expect(map.get("codex")?.available).toBe(true);
+				expect(map.get("grok")?.available).toBe(false);
+				expect(map.get("pi")?.available).toBe(false);
+			});
+		});
+
+		it("does not send the API agent's empty binary name to detection", async () => {
+			await testInScopeAsync(async () => {
+				mockInvoke.mockResolvedValueOnce(batchResponse());
+				const { detectAll, getDetection } = useAgentDetection();
+
+				await detectAll();
+
+				expect(mockInvoke).toHaveBeenCalledWith("detect_all_agent_binaries", {
+					binaries: expect.not.arrayContaining([""]),
+				});
+				expect(getDetection("api")?.available).toBe(false);
 			});
 		});
 	});

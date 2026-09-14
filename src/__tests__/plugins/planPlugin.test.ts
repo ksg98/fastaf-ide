@@ -235,12 +235,23 @@ describe("plan auto-open", () => {
 		spy.mockRestore();
 	});
 
-	it("does NOT auto-open when plan is for a different repo", async () => {
+	it("does NOT auto-open a plan no registered repo owns (an unscoped tab shows in every repo)", async () => {
 		addTerminalWithSession("sess-other", "/other-repo");
 		const spy = vi.spyOn(mdTabsStore, "addFileBackground");
 		pluginRegistry.dispatchStructuredEvent("plan-file", { path: "/other-repo/plans/x.md" }, "sess-other");
 		await flushMicrotasks();
 		expect(spy).not.toHaveBeenCalled();
+		spy.mockRestore();
+	});
+
+	it("opens under the repo that owns the plan file, not the repo in focus", async () => {
+		repositoriesStore.add({ path: "/second", displayName: "second" });
+		// The user is looking at /repo; the plan comes from a session in /second.
+		addTerminalWithSession("sess-second", "/second/sub");
+		const spy = vi.spyOn(mdTabsStore, "addFileBackground");
+		pluginRegistry.dispatchStructuredEvent("plan-file", { path: "/second/plans/y.md" }, "sess-second");
+		await flushMicrotasks();
+		expect(spy).toHaveBeenCalledWith("/second", "plans/y.md");
 		spy.mockRestore();
 	});
 });
@@ -272,14 +283,18 @@ describe("plan-file session filtering", () => {
 		repositoriesStore.remove("/my/repo");
 	});
 
-	it("rejects plan when session cwd does not belong to active repo", async () => {
+	it("still tracks a plan from a session outside the focused repo", async () => {
+		// This used to be dropped outright, so every plan from a background session in
+		// another repo vanished — the "[plan] SKIPPED: outside active repo" case.
 		repositoriesStore.add({ path: "/my/repo", displayName: "repo" });
+		repositoriesStore.add({ path: "/other/project", displayName: "other" });
 		repositoriesStore.setActive("/my/repo");
 		addTerminalWithSession("s-other", "/other/project");
 		pluginRegistry.dispatchStructuredEvent("plan-file", { path: "/other/project/plan.md" }, "s-other");
 		await flushMicrotasks();
-		expect(getPlans().size).toBe(0);
+		expect(getPlans().has("/other/project/plan.md")).toBe(true);
 		repositoriesStore.setActive(null);
 		repositoriesStore.remove("/my/repo");
+		repositoriesStore.remove("/other/project");
 	});
 });

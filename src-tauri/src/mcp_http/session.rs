@@ -8,8 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use futures_util::stream::StreamExt;
 use parking_lot::Mutex;
-use portable_pty::{PtySize, native_pty_system};
-use std::io::Write;
+use portable_pty::PtySize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "desktop")]
@@ -65,7 +64,7 @@ pub(super) async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Ve
             let session = entry.value().lock();
             let session_state = state.session_state_with_shell(&session_id);
             SessionInfo {
-                session_id,
+                session_id: session_id.clone(),
                 cwd: session.cwd.clone(),
                 worktree_path: session
                     .worktree
@@ -73,6 +72,12 @@ pub(super) async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Ve
                     .map(|w| w.path.to_string_lossy().to_string()),
                 worktree_branch: session.worktree.as_ref().and_then(|w| w.branch.clone()),
                 display_name: session.display_name.clone(),
+                display_name_is_custom: session.display_name_is_custom,
+                is_remote: session.is_remote,
+                pty_description: state
+                    .pty_descriptions
+                    .get(&session_id)
+                    .map(|value| value.value().clone()),
                 state: session_state,
             }
         })
@@ -98,28 +103,93 @@ pub(super) async fn write_to_session(
     (StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 
+pub(super) async fn write_parts_to_session(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<WritePartsRequest>,
+) -> impl IntoResponse {
+    let parts: Vec<&str> = body.parts.iter().map(String::as_str).collect();
+    if let Err(e) = write_pty_input_parts(&state, &session_id, &parts) {
+        if e == "Session not found" {
+            return session_not_found();
+        }
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        );
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+}
+
+/// Browser/PWA counterpart of the `enqueue_agent_command` Tauri command.
+pub(super) async fn enqueue_command(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(body): Json<EnqueueCommandRequest>,
+) -> impl IntoResponse {
+    match crate::pty::enqueue_user_command(&state, &session_id, &body.text) {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"typed": outcome.typed, "queued": outcome.queued})),
+        ),
+        Err(e) if e == "Session not found" => session_not_found(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// Browser/PWA counterpart of the `clear_queued_agent_commands` Tauri command.
+pub(super) async fn clear_queued_commands(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let cleared = crate::pty::clear_queued_commands(&state, &session_id);
+    (StatusCode::OK, Json(serde_json::json!(cleared)))
+}
+
+/// Browser/PWA counterpart of the `list_queued_agent_commands` Tauri command.
+pub(super) async fn list_queued_commands(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let queued = crate::pty::list_queued_commands(&state, &session_id);
+    (StatusCode::OK, Json(serde_json::json!(queued)))
+}
+
+/// Browser/PWA counterpart of the `remove_queued_agent_command` Tauri command.
+pub(super) async fn remove_queued_command(
+    State(state): State<Arc<AppState>>,
+    Path((session_id, command_id)): Path<(String, u64)>,
+) -> impl IntoResponse {
+    let removed = crate::pty::remove_queued_command(&state, &session_id, command_id);
+    (StatusCode::OK, Json(serde_json::json!(removed)))
+}
+
 pub(crate) fn write_pty_input(
     state: &Arc<AppState>,
     session_id: &str,
     data: &str,
 ) -> Result<(), String> {
-    let entry = state
-        .sessions
-        .get(session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
-    {
-        let mut session = entry.lock();
-        session
-            .writer
-            .write_all(data.as_bytes())
-            .map_err(|e| format!("Write failed: {e}"))?;
-        if let Err(e) = session.writer.flush() {
-            tracing::warn!(session_id = %session_id, "PTY flush failed: {e}");
-        }
-    }
-    drop(entry);
+    write_pty_input_parts(state, session_id, &[data])
+}
 
-    apply_input_bookkeeping(state, session_id, data);
+/// Write all input parts to the PTY under one writer lock, then apply capture
+/// and input bookkeeping once per original request, in order.
+pub(crate) fn write_pty_input_parts(
+    state: &Arc<AppState>,
+    session_id: &str,
+    parts: &[&str],
+) -> Result<(), String> {
+    let byte_parts: Vec<&[u8]> = parts.iter().map(|part| part.as_bytes()).collect();
+    state.write_pty_parts(session_id, &byte_parts)?;
+
+    for part in parts {
+        crate::pty_capture::record_input(session_id, part.as_bytes());
+        apply_input_bookkeeping(state, session_id, part);
+    }
 
     Ok(())
 }
@@ -137,36 +207,26 @@ pub(crate) fn write_pty_input_pair(
     text: &str,
     key: &str,
 ) -> Result<(), String> {
-    let entry = state
-        .sessions
-        .get(session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
-    {
-        let mut session = entry.lock();
-        session
-            .writer
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("Write failed: {e}"))?;
-        session
-            .writer
-            .write_all(key.as_bytes())
-            .map_err(|e| format!("Write failed: {e}"))?;
-        if let Err(e) = session.writer.flush() {
-            tracing::warn!(session_id = %session_id, "PTY flush failed: {e}");
-        }
+    write_pty_input_parts(state, session_id, &[text, key])
+}
+
+fn write_pty_input_bytes(
+    state: &Arc<AppState>,
+    session_id: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    state.write_pty_parts(session_id, &[data])?;
+    crate::pty_capture::record_input(session_id, data);
+    if let Ok(text) = std::str::from_utf8(data) {
+        apply_input_bookkeeping(state, session_id, text);
     }
-    drop(entry);
-
-    apply_input_bookkeeping(state, session_id, text);
-    apply_input_bookkeeping(state, session_id, key);
-
     Ok(())
 }
 
-/// Post-write bookkeeping shared by `write_pty_input` and
-/// `write_pty_input_pair`: stamps last-input time and feeds the
+/// Post-write bookkeeping shared by all UTF-8 PTY input helpers: stamps
+/// last-input time and feeds the
 /// InputLineBuffer FSM to track slash_mode accurately. Runs once per input
-/// part, after the PTY lock for that part's write has already been released.
+/// part, after the single PTY lock for the complete write has been released.
 pub(crate) fn apply_input_bookkeeping(state: &Arc<AppState>, session_id: &str, data: &str) {
     // Stamp last-input time (same as desktop write_pty) so the grid ticker
     // throttles frames for remote/PWA typing under CPU saturation too.
@@ -201,15 +261,16 @@ pub(crate) fn apply_input_bookkeeping(state: &Arc<AppState>, session_id: &str, d
                 | crate::input_line_buffer::InputAction::Interrupt
         )
     });
-    let nonempty_line_submitted = actions.iter().any(|a| {
-        matches!(a, crate::input_line_buffer::InputAction::Line(content) if !content.is_empty())
-    });
     if interrupted || data == "\x1b" {
         if let Some(sl) = state.silence_states.get(session_id) {
             sl.lock().note_interrupt_requested();
         }
-    } else if nonempty_line_submitted {
-        crate::pty::note_submitted_input(state, session_id);
+    } else {
+        for action in &actions {
+            if let crate::input_line_buffer::InputAction::Line(content) = action {
+                crate::pty::record_submitted_line(state, session_id, content.clone(), -1);
+            }
+        }
     }
     // Determine slash mode. The InputLineBuffer may accumulate junk from
     // terminal responses (e.g. DA reply "1;2c"), so buf.content() alone is
@@ -256,7 +317,9 @@ pub(super) async fn set_session_name(
         Some(e) => e,
         None => return session_not_found(),
     };
-    entry.lock().display_name = body.name;
+    let mut session = entry.lock();
+    session.display_name = body.name;
+    session.display_name_is_custom = body.is_custom.unwrap_or(true);
     (StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 
@@ -271,8 +334,11 @@ pub(super) async fn resize_session(
             Json(serde_json::json!({"error": msg})),
         );
     }
-    // Shared core: grid-before-SIGWINCH ordering + same-dims no-op (056-7545).
-    match crate::pty::resize_session_core(&state, &session_id, body.rows, body.cols) {
+    // Shared core: grid-before-SIGWINCH ordering + same-dims no-op (056-7545),
+    // on the blocking pool — a whole-ring rewrap must not sit on a tokio worker.
+    match crate::pty::resize_session_off_thread(&state, session_id.clone(), body.rows, body.cols)
+        .await
+    {
         Ok(Some(frame)) => {
             crate::pty::send_grid_frame(&state, &session_id, frame);
             (StatusCode::OK, Json(serde_json::json!({"ok": true})))
@@ -331,7 +397,12 @@ pub(super) async fn get_output(
             None => total.saturating_sub(limit),
         };
         let (lines, _) = buf.lines_since_owned(offset, limit);
-        let trim = trim_screen_chrome(buf.screen_rows());
+        // Absolute offset of the first line actually returned. `lines.len()` cannot
+        // stand in for it: chrome lines occupy offset slots without being returned,
+        // so a client subtracting the length would land inside the window it already
+        // holds and replay those lines when scrolling up.
+        let window_start = offset.max(buf.oldest_offset()).min(total);
+        let trim = screen_chrome_cutoff(&buf);
         // Get styled screen rows, trimmed to same cutoff
         let styled = buf.screen_log_lines();
         let screen: Vec<_> = styled.into_iter().take(trim.cutoff).collect();
@@ -339,6 +410,7 @@ pub(super) async fn get_output(
         let mut resp = serde_json::json!({
             "lines": lines,
             "total_lines": total,
+            "offset": window_start,
             "screen": screen,
         });
         if let Some(il) = &input_line {
@@ -347,26 +419,25 @@ pub(super) async fn get_output(
         return (StatusCode::OK, Json(resp));
     }
 
-    // format=text: serve clean rows from VtLogBuffer (no strip_ansi needed)
+    // format=text: serve one canonical terminal snapshot. Do not concatenate
+    // VtLogBuffer's finalized-log cursor with its current screen: after a row
+    // resize grows the viewport, rows can move from history back onto the
+    // screen while still being retained in the cursor log, producing duplicate
+    // text even though the canonical terminal grid is correct.
     if format == "text" {
         let vt_log = match state.vt_log_buffers.get(&session_id) {
             Some(b) => b,
             None => return session_not_found(),
         };
         let buf = vt_log.lock();
+        let total = buf.grid_total_lines();
         let limit = query.limit.unwrap_or(usize::MAX);
-        let total = buf.total_lines();
-        let offset = total.saturating_sub(limit);
-        let (log_lines, _) = buf.lines_since_owned(offset, limit);
-        // Append current visible screen rows (non-empty) after the log
-        let screen: Vec<String> = buf
-            .screen_rows()
-            .into_iter()
-            .filter(|r| !r.is_empty())
-            .collect();
-        let mut all_lines: Vec<String> = log_lines.iter().map(|ll| ll.text()).collect();
-        all_lines.extend(screen);
-        let data = all_lines.join("\n");
+        let start = query
+            .offset
+            .unwrap_or_else(|| total.saturating_sub(limit))
+            .min(total);
+        let end = start.saturating_add(limit).min(total);
+        let data = buf.grid_get_lines(start, end).join("\n");
         return (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -401,11 +472,7 @@ pub(super) async fn close_session(
 ) -> impl IntoResponse {
     if state.sessions.contains_key(&session_id) {
         // Send Ctrl+C then cleanup
-        if let Some(entry) = state.sessions.get(&session_id) {
-            let mut session = entry.lock();
-            let _ = session.writer.write_all(&[0x03]);
-            let _ = session.writer.flush();
-        }
+        let _ = write_pty_input_bytes(&state, &session_id, &[0x03]);
         // Broadcast to SSE/WebSocket consumers BEFORE cleanup: cleanup_session reaps
         // this session's per-session PTY channel, so the closed frame must be emitted
         // while the channel still exists. broadcast keeps the buffered frame available
@@ -454,32 +521,32 @@ pub(super) fn spawn_pty_session(
         Some(id) if !id.is_empty() && !state.sessions.contains_key(&id) => id,
         _ => Uuid::new_v4().to_string(),
     };
-    let pty_system = native_pty_system();
-
-    let pair = pty_system
-        .openpty(PtySize {
+    let (pair, child) = crate::pty::spawn_pty_pair_with_retry(
+        PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
-        })
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to open PTY: {}", e)})),
-            )
-        })?;
-
-    let mut cmd = build_shell_command(&shell);
-    if let Some(ref dir) = cwd {
-        let dir = crate::cli::expand_tilde(dir);
-        cmd.cwd(dir);
-    }
-
-    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+        },
+        || {
+            let mut cmd = build_shell_command(&shell);
+            if let Some(ref dir) = cwd {
+                let dir = crate::cli::expand_tilde(dir);
+                cmd.cwd(dir);
+            }
+            // This path used to inject neither shell integration nor an identity, so
+            // every browser/remote/MCP-created session ran without OSC 133 markers and
+            // without a `$TUIC_SESSION` to announce. Bring it in line with the desktop
+            // path: no caller identity exists here, so the PTY key serves as both.
+            crate::shell_integration::inject(&state.data_dir, &shell, &mut cmd);
+            crate::pty::bind_pty_identity(&state, &mut cmd, &session_id, None);
+            cmd
+        },
+    )
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to spawn shell: {}", e)})),
+            Json(serde_json::json!({"error": e})),
         )
     })?;
 
@@ -501,13 +568,15 @@ pub(super) fn spawn_pty_session(
     state.sessions.insert(
         session_id.clone(),
         Mutex::new(PtySession {
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             master: pair.master,
             _child: child,
             paused: paused.clone(),
             worktree,
             cwd: cwd.clone(),
             display_name: None,
+            display_name_is_custom: false,
+            is_remote: true,
             shell: shell.clone(),
         }),
     );
@@ -533,18 +602,16 @@ pub(super) fn spawn_pty_session(
     state
         .last_output_ms
         .insert(session_id.clone(), std::sync::atomic::AtomicU64::new(0));
-    let (grid_watch_tx, _) = tokio::sync::watch::channel(Vec::new());
+    let grid_watch_tx = crate::grid_gate::new_grid_watch();
     state.grid_watch.insert(session_id.clone(), grid_watch_tx);
 
     // Broadcast to SSE/WebSocket consumers (before state is moved to reader thread)
-    let _ = state
-        .event_bus
-        .send(crate::state::AppEvent::SessionCreated {
-            session_id: session_id.clone(),
-            cwd: cwd.clone(),
-            agent_type: None,
-            display_name: None,
-        });
+    state.emit_pty_event(crate::state::AppEvent::SessionCreated {
+        session_id: session_id.clone(),
+        cwd: cwd.clone(),
+        agent_type: None,
+        display_name: None,
+    });
 
     #[cfg(feature = "desktop")]
     let state_ref = state.clone();
@@ -586,7 +653,17 @@ pub(super) async fn create_session(
     }
     let shell = resolve_shell(body.shell);
 
-    match spawn_pty_session(state, shell, body.cwd, rows, cols, None, body.session_id) {
+    let spawn = tokio::task::spawn_blocking(move || {
+        spawn_pty_session(state, shell, body.cwd, rows, cols, None, body.session_id)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("PTY spawn task panicked: {error}")})),
+        ))
+    });
+    match spawn {
         Ok(session_id) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"session_id": session_id})),
@@ -671,10 +748,9 @@ pub(super) async fn get_shell_state(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let value = state
-        .shell_states
-        .get(&session_id)
-        .map(|atom| crate::pty::shell_state_str(atom.load(Ordering::Relaxed)).to_string());
+    let value = state.shell_states.get(&session_id).and_then(|atom| {
+        crate::pty::shell_state_wire(atom.load(Ordering::Relaxed)).map(str::to_string)
+    });
     Json(serde_json::json!({ "state": value }))
 }
 
@@ -878,15 +954,26 @@ pub(super) async fn create_session_with_worktree(
     }
     let shell = resolve_shell(body.config.shell);
 
-    match spawn_pty_session(
-        state,
-        shell,
-        Some(worktree_path_str.clone()),
-        rows,
-        cols,
-        Some(worktree),
-        body.config.session_id,
-    ) {
+    let spawn_cwd = worktree_path_str.clone();
+    let spawn = tokio::task::spawn_blocking(move || {
+        spawn_pty_session(
+            state,
+            shell,
+            Some(spawn_cwd),
+            rows,
+            cols,
+            Some(worktree),
+            body.config.session_id,
+        )
+    })
+    .await
+    .unwrap_or_else(|error| {
+        Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("PTY spawn task panicked: {error}")})),
+        ))
+    });
+    match spawn {
         Ok(session_id) => {
             let mut response = serde_json::json!({
                 "session_id": session_id,
@@ -993,7 +1080,7 @@ async fn handle_ws_session(
     // lock when appending + broadcasting to ws_clients, so serializing the
     // two sides guarantees every byte is delivered either via catch-up or
     // via the live channel — never both (duplicate) nor neither (gap).
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = crate::state::new_ws_client_channel();
     let snapshot = state.output_buffers.get(&session_id).map(|ring| {
         let r = ring.lock();
         let snap = if let Some(off) = initial_offset {
@@ -1027,7 +1114,11 @@ async fn handle_ws_session(
                 .await
                 .is_err()
                 {
-                    return; // Client disconnected during catch-up
+                    // Client disconnected during catch-up. It was already
+                    // registered above, so reap it here — this path never
+                    // reaches the purge at the end of the read loop.
+                    crate::state::purge_dead_ws_clients(&state.ws_clients, &session_id);
+                    return;
                 }
             }
         }
@@ -1062,8 +1153,25 @@ async fn handle_ws_session(
                                 crate::state::AppEvent::PtyExit { session_id: sid } => {
                                     serde_json::json!({"type": "exit", "session_id": sid})
                                 }
+                                // The browser counterpart of the desktop
+                                // `pty-activity-{id}` Tauri event. Both ride the
+                                // subscription `subscribePty` owns, so the two
+                                // transports carry the same signal by construction
+                                // rather than by coincidence. The grid WS below
+                                // deliberately does NOT forward this — CanvasTerminal
+                                // has no activity consumer, and a pulse nobody reads
+                                // is a wake-up nobody needs.
+                                crate::state::AppEvent::PtyActivity { session_id: sid } => {
+                                    serde_json::json!({"type": "activity", "session_id": sid})
+                                }
+                                crate::state::AppEvent::PluginWatcherLines { session_id: sid, lines } => {
+                                    serde_json::json!({"type": "watcher-lines", "session_id": sid, "lines": lines})
+                                }
                                 crate::state::AppEvent::SessionClosed { session_id: sid, reason } => {
                                     serde_json::json!({"type": "closed", "session_id": sid, "reason": reason})
+                                }
+                                crate::state::AppEvent::PtyDescriptionChanged { session_id: sid, description } => {
+                                    serde_json::json!({"type": "pty-description", "session_id": sid, "description": description})
                                 }
                                 _ => continue,
                             };
@@ -1090,27 +1198,15 @@ async fn handle_ws_session(
     while let Some(Ok(msg)) = ws_receiver.next().await {
         match msg {
             Message::Text(text) => {
-                if let Some(session) = state_clone.sessions.get(&sid) {
-                    let mut s = session.lock();
-                    if let Err(e) = s.writer.write_all(text.as_bytes()) {
-                        tracing::error!(session_id = %sid, "PTY write failed: {e}");
-                        break;
-                    }
-                    if let Err(e) = s.writer.flush() {
-                        tracing::warn!(session_id = %sid, "PTY flush failed: {e}");
-                    }
+                if let Err(error) = write_pty_input(&state_clone, &sid, &text) {
+                    tracing::error!(session_id = %sid, %error, "PTY write failed");
+                    break;
                 }
             }
             Message::Binary(data) => {
-                if let Some(session) = state_clone.sessions.get(&sid) {
-                    let mut s = session.lock();
-                    if let Err(e) = s.writer.write_all(&data) {
-                        tracing::error!(session_id = %sid, "PTY write failed: {e}");
-                        break;
-                    }
-                    if let Err(e) = s.writer.flush() {
-                        tracing::warn!(session_id = %sid, "PTY flush failed: {e}");
-                    }
+                if let Err(error) = write_pty_input_bytes(&state_clone, &sid, &data) {
+                    tracing::error!(session_id = %sid, %error, "PTY write failed");
+                    break;
                 }
             }
             Message::Close(_) => break,
@@ -1257,26 +1353,19 @@ async fn handle_ws_log_session(
                 let Some(vt_log) = state_poll.vt_log_buffers.get(&sid_poll) else {
                     break;
                 };
-                let (lines, new_offset, screen_lines, input_line) = {
+                let (lines, new_offset, polled) = {
                     let buf = vt_log.lock();
                     let (l, o) = buf.lines_since_owned(offset, usize::MAX);
-                    let trim = trim_screen_chrome(buf.screen_rows());
-                    let styled = buf.screen_log_lines();
-                    let trimmed_styled: Vec<_> = styled.into_iter().take(trim.cutoff).collect();
-                    let il = buf.prompt_input_text();
-                    (l, o, trimmed_styled, il)
+                    (l, o, poll_screen(&buf, prev_screen_hash))
                 }; // lock released
-                // Hash screen rows to detect changes (use plain text for hashing)
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                for sl in &screen_lines {
-                    for span in &sl.spans {
-                        span.text.hash(&mut hasher);
-                    }
-                }
-                input_line.hash(&mut hasher);
-                let screen_hash = hasher.finish();
-                let screen_changed = screen_hash != prev_screen_hash && !screen_lines.is_empty();
+                let input_line = polled.input_line;
+                let screen_lines = polled.screen;
+                let screen_changed = screen_lines.is_some();
+                // Store the signature for every poll, not only the ones that
+                // produce a frame: a screen of nothing but blanks styles to
+                // nothing, and leaving the old hash in place made the next tick
+                // rebuild it to reach the same conclusion.
+                prev_screen_hash = polled.hash;
                 // Send frame if there are new log lines OR screen content changed
                 if !lines.is_empty() || screen_changed {
                     // total_lines = post-read monotonic cursor (== offset when no new
@@ -1285,12 +1374,11 @@ async fn handle_ws_log_session(
                     if !lines.is_empty() {
                         frame["lines"] = serde_json::json!(lines);
                     }
-                    if screen_changed {
-                        frame["screen"] = serde_json::json!(screen_lines);
+                    if let Some(ref screen) = screen_lines {
+                        frame["screen"] = serde_json::json!(screen);
                         if let Some(ref il) = input_line {
                             frame["input_line"] = serde_json::json!(il);
                         }
-                        prev_screen_hash = screen_hash;
                     }
                     if futures_util::SinkExt::send(
                         &mut ws_sender,
@@ -1313,29 +1401,15 @@ async fn handle_ws_log_session(
     while let Some(Ok(msg)) = ws_receiver.next().await {
         match msg {
             Message::Text(text) => {
-                if let Some(session) = state.sessions.get(&session_id) {
-                    let mut s = session.lock();
-                    if let Err(e) = s.writer.write_all(text.as_bytes()) {
-                        tracing::error!(session_id = %session_id, "PTY write failed: {e}");
-                        break;
-                    }
-                    if let Err(e) = s.writer.flush() {
-                        tracing::error!("PTY flush failed: {e}");
-                        break;
-                    }
+                if let Err(error) = write_pty_input(&state, &session_id, &text) {
+                    tracing::error!(session_id = %session_id, %error, "PTY write failed");
+                    break;
                 }
             }
             Message::Binary(data) => {
-                if let Some(session) = state.sessions.get(&session_id) {
-                    let mut s = session.lock();
-                    if let Err(e) = s.writer.write_all(&data) {
-                        tracing::error!(session_id = %session_id, "PTY write failed: {e}");
-                        break;
-                    }
-                    if let Err(e) = s.writer.flush() {
-                        tracing::error!("PTY flush failed: {e}");
-                        break;
-                    }
+                if let Err(error) = write_pty_input_bytes(&state, &session_id, &data) {
+                    tracing::error!(session_id = %session_id, %error, "PTY write failed");
+                    break;
                 }
             }
             Message::Close(_) => break,
@@ -1346,11 +1420,72 @@ async fn handle_ws_log_session(
     send_task.abort();
 }
 
+/// Build the JSON text frame the grid WebSocket sends for one bus event, or
+/// `None` for events this socket does not carry.
+///
+/// A function rather than an inline `match` so a test can assert the shape that
+/// actually goes on the wire. A test that rebuilds the frame by hand proves only
+/// that the test agrees with itself: it stays green while the wire carries
+/// something the client cannot read.
+///
+/// SHAPE CONTRACT: `WsTransport` destructures each frame as
+/// `const { type, ...payload } = event` and hands `payload` to the same handler
+/// the desktop `listen()` feeds. So every frame here must be its Tauri event
+/// payload plus a `type` discriminator — no renamed fields, no extra nesting —
+/// or `CanvasTerminal` needs a per-transport branch.
+fn grid_ws_frame(event: &crate::state::AppEvent) -> Option<serde_json::Value> {
+    // Per-session channel — every event belongs to this session.
+    Some(match event {
+        crate::state::AppEvent::PtyParsed { parsed, .. } => {
+            serde_json::json!({"type": "parsed", "event": parsed})
+        }
+        crate::state::AppEvent::PtyExit { session_id: sid } => {
+            serde_json::json!({"type": "exit", "session_id": sid})
+        }
+        crate::state::AppEvent::PluginWatcherLines {
+            session_id: sid,
+            lines,
+        } => {
+            serde_json::json!({"type": "watcher-lines", "session_id": sid, "lines": lines})
+        }
+        crate::state::AppEvent::SessionClosed {
+            session_id: sid,
+            reason,
+        } => {
+            serde_json::json!({"type": "closed", "session_id": sid, "reason": reason})
+        }
+        crate::state::AppEvent::PtyDescriptionChanged {
+            session_id: sid,
+            description,
+        } => {
+            serde_json::json!({"type": "pty-description", "session_id": sid, "description": description})
+        }
+        // Mirrors the desktop `Osc133Event` field for field — see the shape
+        // contract above. Without this a browser/PWA client had no command
+        // blocks, no gutter marks and no Cmd+Up/Down navigation.
+        crate::state::AppEvent::PtyOsc133 {
+            marker,
+            line,
+            exit_code,
+            ..
+        } => {
+            serde_json::json!({"type": "osc133", "marker": marker, "line": line, "exit_code": exit_code})
+        }
+        crate::state::AppEvent::PtyCwd { cwd, .. } => {
+            serde_json::json!({"type": "cwd", "cwd": cwd})
+        }
+        _ => return None,
+    })
+}
+
 /// Handle a WebSocket connection in grid mode (`?format=grid`).
 ///
 /// Streams binary grid frames (same format as Tauri Channel) using the
-/// `grid_watch` channel. Uses latest-frame-wins semantics: slow clients
-/// automatically skip intermediate frames via `tokio::sync::watch`.
+/// `grid_watch` channel. The channel keeps only the newest frame, so a client
+/// that cannot keep up skips intermediate ones — and those frames are DELTAS, so
+/// a skip strands the rows it carried. Each frame therefore rides with a sequence
+/// number (Rust-side only, the wire format is untouched) and a gap is repaired
+/// with a fresh full frame instead of being rendered as a hole.
 ///
 /// On connect, sends a full frame (all rows marked dirty). Subsequent frames
 /// are delta-based (only changed rows). Client sends text messages for
@@ -1358,7 +1493,7 @@ async fn handle_ws_log_session(
 async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Arc<AppState>) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Subscribe to the grid watch channel (latest-frame-wins for slow clients).
+    // Subscribe to the grid watch channel (newest-frame-wins for slow clients).
     let mut frame_rx = match state.grid_watch.get(&session_id) {
         Some(tx) => tx.subscribe(),
         None => {
@@ -1366,15 +1501,15 @@ async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Ar
             return;
         }
     };
+    // Whatever has been published so far is superseded by the full frame below,
+    // so start from the current sequence rather than zero — otherwise the first
+    // delta of a long-running session would always look like a gap.
+    let mut last_seq = frame_rx.borrow_and_update().seq;
 
-    // Send initial full frame so the client can render immediately.
-    // Scope the MutexGuard so it's dropped before the .await.
-    let initial_frame = state.vt_log_buffers.get(&session_id).and_then(|vt| {
-        let mut vt = vt.lock();
-        vt.grid_force_full_damage();
-        let frame = vt.serialize_dirty_rows();
-        if frame.is_empty() { None } else { Some(frame) }
-    });
+    // Send initial full frame so the client can render immediately. The helper
+    // scopes the MutexGuard (dropped before the .await) and gives the damage back
+    // so this connect does not cost the desktop channel its next frame.
+    let initial_frame = full_frame_for_single_client(&state, &session_id);
     if let Some(frame) = initial_frame
         && futures_util::SinkExt::send(&mut ws_sender, Message::Binary(frame.into()))
             .await
@@ -1386,13 +1521,42 @@ async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Ar
     // Subscribe to this session's per-session PTY event channel (exit, closed, parsed).
     let mut event_rx = state.subscribe_pty_events(&session_id);
     let sid_for_events = session_id.clone();
+    let resync_state = state.clone();
+    let resync_sid = session_id.clone();
 
     let send_task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 result = frame_rx.changed() => {
                     if result.is_err() { break; } // sender dropped
-                    let frame = frame_rx.borrow_and_update().clone();
+                    let (seq, frame) = {
+                        let slot = frame_rx.borrow_and_update();
+                        (slot.seq, slot.frame.clone())
+                    };
+                    // Frames the channel dropped carried dirty rows that exist
+                    // nowhere else. Sending this delta on top of a row map missing
+                    // them would leave stale content on screen with no error, so
+                    // re-serialize the whole grid instead — through the helper that
+                    // hands the damage back to the other transports.
+                    //
+                    // DEFERRED (2026-08-18) — a bell flag carried by a skipped frame
+                    // is lost: the resync reports the grid's current state, and the
+                    // bell is an event, not state. Fixing it means latching bells per
+                    // subscriber, which is a second piece of per-client state on a
+                    // path that only skips frames when the client is already too slow
+                    // to keep up. Revisit if a missed bell is ever reported.
+                    let frame = if crate::grid_gate::watch_dropped_frames(last_seq, seq) {
+                        tracing::debug!(
+                            session_id = %resync_sid,
+                            last_seq,
+                            seq,
+                            "grid watch dropped frames, resyncing with a full frame"
+                        );
+                        full_frame_for_single_client(&resync_state, &resync_sid).unwrap_or(frame)
+                    } else {
+                        frame
+                    };
+                    last_seq = seq;
                     if !frame.is_empty()
                         && futures_util::SinkExt::send(
                             &mut ws_sender,
@@ -1407,19 +1571,7 @@ async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Ar
                 result = event_rx.recv() => {
                     match result {
                         Ok(event) => {
-                            // Per-session channel — every event belongs to this session.
-                            let payload = match &event {
-                                crate::state::AppEvent::PtyParsed { parsed, .. } => {
-                                    serde_json::json!({"type": "parsed", "event": parsed})
-                                }
-                                crate::state::AppEvent::PtyExit { session_id: sid } => {
-                                    serde_json::json!({"type": "exit", "session_id": sid})
-                                }
-                                crate::state::AppEvent::SessionClosed { session_id: sid, reason } => {
-                                    serde_json::json!({"type": "closed", "session_id": sid, "reason": reason})
-                                }
-                                _ => continue,
-                            };
+                            let Some(payload) = grid_ws_frame(&event) else { continue };
                             if futures_util::SinkExt::send(
                                 &mut ws_sender,
                                 Message::Text(payload.to_string().into()),
@@ -1447,16 +1599,9 @@ async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Ar
                 // No ACK needed — watch channel handles backpressure naturally.
             }
             Message::Binary(data) => {
-                if let Some(session) = state_clone.sessions.get(&sid) {
-                    let mut s = session.lock();
-                    if let Err(e) = s.writer.write_all(&data) {
-                        tracing::error!(session_id = %sid, "PTY write failed: {e}");
-                        break;
-                    }
-                    if let Err(e) = s.writer.flush() {
-                        tracing::error!("PTY flush failed: {e}");
-                        break;
-                    }
+                if let Err(error) = write_pty_input_bytes(&state_clone, &sid, &data) {
+                    tracing::error!(session_id = %sid, %error, "PTY write failed");
+                    break;
                 }
             }
             Message::Close(_) => break,
@@ -1465,6 +1610,15 @@ async fn handle_ws_grid_session(socket: WebSocket, session_id: String, state: Ar
     }
 
     send_task.abort();
+
+    // The send task held the only other receiver, and aborting it drops it. If
+    // that was the last one, nobody will ever read the frame still sitting in
+    // the watch slot — free it instead of pinning it for the session's life.
+    if let Some(watch_tx) = state.grid_watch.get(&session_id)
+        && watch_tx.receiver_count() == 0
+    {
+        crate::grid_gate::release_grid_frame(&watch_tx);
+    }
 }
 
 /// Remove agent TUI chrome from screen rows (status bars, prompt lines,
@@ -1484,14 +1638,101 @@ struct TrimResult {
 
 use crate::chrome::find_chrome_cutoff;
 
-fn trim_screen_chrome(rows: Vec<String>) -> TrimResult {
+/// Borrows: it reports a cutoff and reads nothing else, so taking the rows by
+/// value only forced every caller to clone a screen it already had in hand.
+fn trim_screen_chrome(rows: &[String]) -> TrimResult {
     let refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
     let cutoff = find_chrome_cutoff(&refs).unwrap_or(rows.len());
     TrimResult { cutoff }
 }
 
+/// Chrome cutoff for the buffer's current screen, borrowing the grid's cached
+/// rows. The owned fallback is only for a buffer whose `process()` has never
+/// run, which has no snapshot to lend.
+fn screen_chrome_cutoff(buf: &crate::state::VtLogBuffer) -> TrimResult {
+    match buf.screen_rows_ref() {
+        Some(rows) => trim_screen_chrome(rows),
+        None => trim_screen_chrome(&buf.screen_rows()),
+    }
+}
+
+/// What one log-WS poll found on the screen.
+struct ScreenPoll {
+    /// The styled rows, present ONLY when the screen changed since `prev_hash`.
+    screen: Option<Vec<crate::state::LogLine>>,
+    input_line: Option<String>,
+    /// Signature to pass back as `prev_hash` on the next poll.
+    hash: u64,
+}
+
+/// Decide whether the screen changed, and build the styled rows only if it did.
+///
+/// The signature is the plain text of the visible rows plus the input line —
+/// exactly what the old check reduced to, since it hashed `span.text` and
+/// nothing else. Building the styled `Vec<LogLine>` first and hashing it
+/// afterwards made an idle session materialize a full screen five times a
+/// second, under the buffer's mutex, only to discard it.
+///
+/// The styled build stays inside the caller's lock because it reads the grid;
+/// what changed is how often it runs, not where.
+fn poll_screen(buf: &crate::state::VtLogBuffer, prev_hash: u64) -> ScreenPoll {
+    use std::hash::{Hash, Hasher};
+
+    let trim = screen_chrome_cutoff(buf);
+    let input_line = buf.prompt_input_text();
+
+    let owned;
+    let rows: &[String] = match buf.screen_rows_ref() {
+        Some(rows) => rows,
+        None => {
+            owned = buf.screen_rows();
+            &owned
+        }
+    };
+    let visible = &rows[..trim.cutoff.min(rows.len())];
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for row in visible {
+        row.hash(&mut hasher);
+    }
+    input_line.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    if hash == prev_hash {
+        return ScreenPoll {
+            screen: None,
+            input_line,
+            hash,
+        };
+    }
+
+    let styled: Vec<_> = buf
+        .screen_log_lines()
+        .into_iter()
+        .take(trim.cutoff)
+        .collect();
+    // screen_log_lines drops trailing blank rows, so a screen of nothing but
+    // blanks styles to nothing. The old path sent no frame for it either.
+    let screen = if styled.is_empty() {
+        None
+    } else {
+        Some(styled)
+    };
+    ScreenPoll {
+        screen,
+        input_line,
+        hash,
+    }
+}
+
 // --- Terminal grid HTTP endpoints ---
-// These delegate to the same VtLogBuffer/TerminalGrid logic as the Tauri commands in pty.rs.
+//
+// The grid reads take the vt mutex, which the PTY reader holds through a whole
+// `serialize_dirty_rows`, so they go to the blocking pool through the same
+// `pty::vt_try_read` the desktop commands use. Sharing the helper rather than
+// the command is forced: the commands are `#[cfg(feature = "desktop")]` and
+// these routes also compile into the headless `tuic-remote` binary. See
+// `docs/backend/command-threading.md`.
 
 pub(super) async fn terminal_scroll(
     State(state): State<Arc<AppState>>,
@@ -1551,20 +1792,38 @@ pub(super) async fn terminal_scroll_info(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response();
-    };
-    let vt = vt.lock();
-    let info = serde_json::json!({
-        "display_offset": vt.grid_display_offset(),
-        "total_lines": vt.grid_total_lines(),
-        "screen_lines": vt.grid_screen_lines(),
-    });
-    Json(info).into_response()
+    match crate::pty::vt_try_read(&state, session_id, |vt| {
+        serde_json::json!({
+            "display_offset": vt.grid_display_offset(),
+            "total_lines": vt.grid_total_lines(),
+            "screen_lines": vt.grid_screen_lines(),
+        })
+    })
+    .await
+    {
+        Ok(Some(info)) => Json(info).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
+}
+
+/// A grid read whose session went away between the request and the pool hop.
+fn not_found_response() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "Session not found"})),
+    )
+        .into_response()
+}
+
+/// The blocking-pool task itself failed — a panic in the read, or a runtime
+/// shutting down. Distinct from a missing session, which is routine.
+fn read_failed_response(error: &str) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": error})),
+    )
+        .into_response()
 }
 
 pub(super) async fn terminal_search(
@@ -1572,15 +1831,11 @@ pub(super) async fn terminal_search(
     Path(session_id): Path<String>,
     Json(body): Json<super::types::TerminalSearchRequest>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response();
-    };
-    let matches = vt.lock().grid_search(&body.query);
-    Json(serde_json::json!({"matches": matches})).into_response()
+    match crate::pty::vt_try_read(&state, session_id, move |vt| vt.grid_search(&body.query)).await {
+        Ok(Some(matches)) => Json(serde_json::json!({"matches": matches})).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 pub(super) async fn terminal_search_buffer(
@@ -1588,15 +1843,15 @@ pub(super) async fn terminal_search_buffer(
     Path(session_id): Path<String>,
     Json(body): Json<super::types::TerminalSearchRequest>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response();
-    };
-    let matches = vt.lock().grid_search_buffer(&body.query);
-    Json(serde_json::json!({"matches": matches})).into_response()
+    match crate::pty::vt_try_read(&state, session_id, move |vt| {
+        vt.grid_search_buffer(&body.query)
+    })
+    .await
+    {
+        Ok(Some(matches)) => Json(serde_json::json!({"matches": matches})).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 pub(super) async fn terminal_get_row_text(
@@ -1604,15 +1859,15 @@ pub(super) async fn terminal_get_row_text(
     Path(session_id): Path<String>,
     Query(query): Query<super::types::TerminalRowQuery>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response();
-    };
-    let text = vt.lock().grid_get_row_text(query.row);
-    Json(serde_json::json!({"text": text})).into_response()
+    match crate::pty::vt_try_read(&state, session_id, move |vt| {
+        vt.grid_get_row_text(query.row)
+    })
+    .await
+    {
+        Ok(Some(text)) => Json(serde_json::json!({"text": text})).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 /// Extract the text of a selection span (start/end row/col) from the grid.
@@ -1621,13 +1876,15 @@ pub(super) async fn terminal_get_selection_text(
     Path(session_id): Path<String>,
     Query(q): Query<super::types::TerminalSelectionQuery>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return session_not_found().into_response();
-    };
-    let text = vt
-        .lock()
-        .grid_get_selection_text(q.start_row, q.start_col, q.end_row, q.end_col);
-    Json(serde_json::json!({"text": text})).into_response()
+    match crate::pty::vt_try_read(&state, session_id, move |vt| {
+        vt.grid_get_selection_text(q.start_row, q.start_col, q.end_row, q.end_col)
+    })
+    .await
+    {
+        Ok(Some(text)) => Json(serde_json::json!({"text": text})).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 /// Unwrap a soft-wrapped logical line at `row` → `[logicalStartRow, text]`.
@@ -1636,11 +1893,15 @@ pub(super) async fn terminal_get_logical_line(
     Path(session_id): Path<String>,
     Query(q): Query<super::types::TerminalRowQuery>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return session_not_found().into_response();
-    };
-    let (idx, text) = vt.lock().grid_get_logical_line(q.row);
-    Json(serde_json::json!([idx, text])).into_response()
+    match crate::pty::vt_try_read(&state, session_id, move |vt| {
+        vt.grid_get_logical_line(q.row)
+    })
+    .await
+    {
+        Ok(Some((idx, text))) => Json(serde_json::json!([idx, text])).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 /// Hyperlink span at a cell → `[startCol, endCol, url]` or null (OSC 8).
@@ -1649,11 +1910,16 @@ pub(super) async fn terminal_hyperlink_span(
     Path(session_id): Path<String>,
     Query(q): Query<super::types::TerminalCellQuery>,
 ) -> impl IntoResponse {
-    let span = state
-        .vt_log_buffers
-        .get(&session_id)
-        .and_then(|vt| vt.lock().grid_hyperlink_span(q.row, q.col));
-    Json(serde_json::json!(span))
+    // Answers null for a gone session rather than 404: a hover can outlive the
+    // tab it started on, and the frontend reads "no link here" either way.
+    let span = crate::pty::vt_read(&state, session_id, move |vt| {
+        vt.grid_hyperlink_span(q.row, q.col)
+    })
+    .await;
+    match span {
+        Ok(span) => Json(serde_json::json!(span)).into_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 pub(super) async fn terminal_get_lines(
@@ -1661,51 +1927,83 @@ pub(super) async fn terminal_get_lines(
     Path(session_id): Path<String>,
     Query(query): Query<super::types::TerminalLinesQuery>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response();
+    match crate::pty::vt_try_read(&state, session_id, move |vt| {
+        vt.grid_get_lines(query.start, query.end)
+    })
+    .await
+    {
+        Ok(Some(lines)) => Json(serde_json::json!({"lines": lines})).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
+}
+
+/// Serialize the whole grid for ONE client, without taking the rows the other
+/// clients have not received yet.
+///
+/// Damage is tracked per session and `serialize_dirty_rows` consumes it, so a
+/// frame built for a single WS socket would otherwise leave the desktop ticker
+/// with nothing to send — the desktop would never learn about rows that changed
+/// just before the WS client connected or resynced, and nothing would report it.
+/// Marking the grid damaged again and waking the ticker costs one extra full
+/// frame to the other clients and keeps every transport whole.
+fn full_frame_for_single_client(state: &Arc<AppState>, session_id: &str) -> Option<Vec<u8>> {
+    let frame = {
+        let vt = state.vt_log_buffers.get(session_id)?;
+        let mut vt = vt.lock();
+        vt.grid_force_full_damage();
+        let frame = vt.serialize_dirty_rows();
+        vt.grid_force_full_damage();
+        frame
     };
-    let lines = vt.lock().grid_get_lines(query.start, query.end);
-    Json(serde_json::json!({"lines": lines})).into_response()
+    if let Some(dirty) = state.grid_frame_dirty.get(session_id) {
+        dirty.store(true, Ordering::Relaxed);
+    }
+    if frame.is_empty() { None } else { Some(frame) }
+}
+
+/// Wrap packed row bytes as a binary body.
+///
+/// Deliberately not `Json(bytes)`: that spells a 141 KB chunk as ~350 KB of
+/// decimal numbers for the client to parse back into the bytes it started as.
+/// The desktop command hands the same payload over raw, and `rpcImpl` decides
+/// between `arrayBuffer()` and `json()` on this header alone.
+fn styled_rows_response(bytes: Vec<u8>) -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes,
+    )
 }
 
 /// Styled row range as packed bytes (same encoding as the desktop
 /// `terminal_styled_rows` command). Fills the CanvasTerminal client-side row
 /// cache so scrolled-back history renders during smooth scroll in browser mode
-/// instead of showing blank rows. Returns an empty array when the session or
+/// instead of showing blank rows. Returns an empty body when the session or
 /// range is gone — the frontend treats that as "nothing to cache".
 pub(super) async fn terminal_styled_rows(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
     Query(query): Query<super::types::TerminalStyledRowsQuery>,
-) -> impl IntoResponse {
-    let bytes = state
-        .vt_log_buffers
-        .get(&session_id)
-        .map(|vt| {
-            vt.lock()
-                .grid_serialize_styled_range(query.start, query.count)
-        })
-        .unwrap_or_default();
-    Json(bytes)
+) -> axum::response::Response {
+    match crate::pty::vt_read(&state, session_id, move |vt| {
+        vt.grid_serialize_styled_range(query.start, query.count)
+    })
+    .await
+    {
+        Ok(bytes) => styled_rows_response(bytes).into_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 pub(super) async fn terminal_get_cursor_line(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response();
-    };
-    let text = vt.lock().grid_get_cursor_line();
-    Json(serde_json::json!({"text": text})).into_response()
+    match crate::pty::vt_try_read(&state, session_id, |vt| vt.grid_get_cursor_line()).await {
+        Ok(Some(text)) => Json(serde_json::json!({"text": text})).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 pub(super) async fn terminal_hyperlink_at(
@@ -1713,15 +2011,15 @@ pub(super) async fn terminal_hyperlink_at(
     Path(session_id): Path<String>,
     Query(query): Query<super::types::TerminalCellQuery>,
 ) -> impl IntoResponse {
-    let Some(vt) = state.vt_log_buffers.get(&session_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        )
-            .into_response();
-    };
-    let url = vt.lock().grid_hyperlink_at(query.row, query.col);
-    Json(serde_json::json!({"url": url})).into_response()
+    match crate::pty::vt_try_read(&state, session_id, move |vt| {
+        vt.grid_hyperlink_at(query.row, query.col)
+    })
+    .await
+    {
+        Ok(Some(url)) => Json(serde_json::json!({"url": url})).into_response(),
+        Ok(None) => not_found_response(),
+        Err(e) => read_failed_response(&e),
+    }
 }
 
 pub(super) async fn terminal_request_frame(
@@ -1744,6 +2042,148 @@ pub(super) async fn terminal_request_frame(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    struct WriteProbe {
+        writes: Arc<parking_lot::Mutex<Vec<Vec<u8>>>>,
+        flushes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl std::io::Write for WriteProbe {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.lock().push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_escape_then_slash_opens_slash_mode_but_concatenated_input_does_not() {
+        let state = super::super::tests::test_state();
+        let split_session_id = "split-escape-slash";
+        crate::state::tests_support::insert_dummy_session(&state, split_session_id);
+
+        write_pty_input_parts(&state, split_session_id, &["\x1b", "/"])
+            .expect("split input writes to the PTY");
+
+        let split_slash_mode = state
+            .slash_mode
+            .get(split_session_id)
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            split_slash_mode,
+            "Escape and slash delivered as separate parts must open slash mode"
+        );
+
+        let concatenated_session_id = "concatenated-escape-slash";
+        crate::state::tests_support::insert_dummy_session(&state, concatenated_session_id);
+        write_pty_input(&state, concatenated_session_id, "\x1b/")
+            .expect("concatenated input writes to the PTY");
+
+        let concatenated_slash_mode = state
+            .slash_mode
+            .get(concatenated_session_id)
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            !concatenated_slash_mode,
+            "the concatenated Escape/slash request must remain distinguishable from two parts"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_choice_key_clears_the_prompt_but_concatenated_input_does_not() {
+        fn choice_state() -> crate::state::SessionState {
+            crate::state::SessionState {
+                awaiting_input: true,
+                choice_prompt: Some(crate::output_parser::ChoicePromptPayload {
+                    title: "Choose an option".to_string(),
+                    options: vec![crate::output_parser::ChoiceOption {
+                        key: "1".to_string(),
+                        label: "Proceed".to_string(),
+                        highlighted: true,
+                        destructive: false,
+                        hint: None,
+                    }],
+                    dismiss_key: None,
+                    amend_key: None,
+                }),
+                ..Default::default()
+            }
+        }
+
+        let state = super::super::tests::test_state();
+        let concatenated_session_id = "concatenated-choice-key";
+        crate::state::tests_support::insert_dummy_session(&state, concatenated_session_id);
+        state
+            .session_states
+            .insert(concatenated_session_id.to_string(), choice_state());
+        write_pty_input(&state, concatenated_session_id, "1x")
+            .expect("concatenated input writes to the PTY");
+        assert!(
+            state
+                .session_states
+                .get(concatenated_session_id)
+                .unwrap()
+                .choice_prompt
+                .is_some(),
+            "a concatenated option key must not resolve an exact-key choice prompt"
+        );
+
+        let split_session_id = "split-choice-key";
+        crate::state::tests_support::insert_dummy_session(&state, split_session_id);
+        state
+            .session_states
+            .insert(split_session_id.to_string(), choice_state());
+        write_pty_input_parts(&state, split_session_id, &["1", "x"])
+            .expect("split input writes to the PTY");
+        assert!(
+            state
+                .session_states
+                .get(split_session_id)
+                .unwrap()
+                .choice_prompt
+                .is_none(),
+            "an exact option key delivered as its own part must resolve the choice prompt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n_input_parts_share_one_writer_flush_and_preserve_write_boundaries() {
+        let state = super::super::tests::test_state();
+        let session_id = "n-part-single-lock";
+        crate::state::tests_support::insert_dummy_session(&state, session_id);
+        let writes = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let flushes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writer: crate::state::SharedPtyWriter =
+            Arc::new(parking_lot::Mutex::new(Box::new(WriteProbe {
+                writes: Arc::clone(&writes),
+                flushes: Arc::clone(&flushes),
+            })));
+        state.sessions.get(session_id).unwrap().lock().writer = writer;
+
+        write_pty_input_parts(&state, session_id, &["first", "second", "third"])
+            .expect("all parts write to the PTY");
+
+        assert_eq!(
+            flushes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "N parts must use one write_pty_parts call, which flushes once"
+        );
+        assert_eq!(
+            *writes.lock(),
+            vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()],
+            "the single locked write must still deliver every input as its own part"
+        );
+    }
+
     #[test]
     fn mcp_regression_input_bookkeeping_releases_guard_before_pending_delivery() {
         let state = super::super::tests::test_state();
@@ -1759,7 +2199,9 @@ mod tests {
             .pending_injections
             .entry(session_id.to_string())
             .or_default()
-            .push_back("queued message".to_string());
+            .push_back(crate::state::PendingInjection::peer_message(
+                "queued message",
+            ));
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1770,6 +2212,33 @@ mod tests {
         done_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("input bookkeeping must not self-deadlock while checking pending delivery");
+    }
+
+    #[test]
+    fn bare_enter_uses_the_same_submission_bookkeeping_as_desktop_input() {
+        let state = super::super::tests::test_state();
+        let session_id = "http-bare-enter";
+        state.session_states.insert(
+            session_id.to_string(),
+            crate::state::SessionState {
+                agent_type: Some("codex".to_string()),
+                awaiting_input: true,
+                question_text: Some("Apply these edits?".to_string()),
+                question_confident: true,
+                ..Default::default()
+            },
+        );
+        let mut events = state.event_bus.subscribe();
+
+        apply_input_bookkeeping(&state, session_id, "\r");
+
+        assert_eq!(state.session_states.get(session_id).unwrap().turn_epoch, 1);
+        let event = events.try_recv().expect("bare Enter emits UserInput");
+        let crate::state::AppEvent::PtyParsed { parsed, .. } = event else {
+            panic!("expected parsed input event");
+        };
+        assert_eq!(parsed["type"], "user-input");
+        assert_eq!(parsed["content"], "");
     }
 
     // is_separator_line tests live in chrome.rs (canonical location)
@@ -1787,7 +2256,7 @@ mod tests {
             "  [Opus 4.6 | Max] tuicommander git:(main)".into(),
             "  ⏵⏵ bypass permissions on".into(),
         ];
-        let result = trim_screen_chrome(rows);
+        let result = trim_screen_chrome(&rows);
         assert_eq!(result.cutoff, 2);
     }
 
@@ -1800,21 +2269,106 @@ mod tests {
             "──────────────────────────────── pwa ──".into(),
             "  status bar".into(),
         ];
-        let result = trim_screen_chrome(rows);
+        let result = trim_screen_chrome(&rows);
         assert_eq!(result.cutoff, 1);
     }
 
     #[test]
     fn trim_no_chrome_keeps_all() {
         let rows: Vec<String> = vec!["line 1".into(), "line 2".into(), "line 3".into()];
-        let result = trim_screen_chrome(rows.clone());
+        let result = trim_screen_chrome(&rows);
         assert_eq!(result.cutoff, 3);
+        // The caller keeps its rows: the trim only reports a cutoff.
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]
     fn trim_empty_input() {
-        let result = trim_screen_chrome(vec![]);
+        let result = trim_screen_chrome(&[]);
         assert_eq!(result.cutoff, 0);
+    }
+
+    // --- Log-WS screen polling (604-cb45 F14) ---
+    //
+    // The poll runs 5x/s per connected log client. Building the styled screen
+    // before asking whether it changed made an idle session pay for a full
+    // Vec<LogLine> — under the VtLogBuffer mutex — and throw it away.
+
+    fn vt_log_with(output: &str) -> crate::state::VtLogBuffer {
+        let mut buf = crate::state::VtLogBuffer::new(24, 80, 1000);
+        buf.process(output.as_bytes());
+        buf
+    }
+
+    #[test]
+    fn screen_poll_materializes_only_on_a_change() {
+        let buf = vt_log_with("hello world\r\n");
+
+        let first = poll_screen(&buf, 0);
+        assert!(
+            first.screen.is_some(),
+            "the first poll has nothing to compare against"
+        );
+
+        // Same buffer, same hash: nothing to send, so nothing to build.
+        let second = poll_screen(&buf, first.hash);
+        assert!(
+            second.screen.is_none(),
+            "an unchanged screen must not be materialized"
+        );
+        assert_eq!(
+            second.hash, first.hash,
+            "the signature must be stable across polls"
+        );
+    }
+
+    #[test]
+    fn screen_poll_reports_a_change_after_new_output() {
+        let mut buf = vt_log_with("first\r\n");
+        let first = poll_screen(&buf, 0);
+
+        buf.process(b"second\r\n");
+        let second = poll_screen(&buf, first.hash);
+
+        assert!(second.screen.is_some(), "new output must reach the client");
+        assert_ne!(second.hash, first.hash);
+    }
+
+    #[test]
+    fn screen_poll_returns_the_same_rows_the_old_path_built() {
+        let buf = vt_log_with("alpha\r\nbeta\r\n");
+
+        let polled = poll_screen(&buf, 0)
+            .screen
+            .expect("a fresh screen is a change");
+        let expected: Vec<_> = buf
+            .screen_log_lines()
+            .into_iter()
+            .take(screen_chrome_cutoff(&buf).cutoff)
+            .collect();
+
+        assert_eq!(polled.len(), expected.len());
+        for (got, want) in polled.iter().zip(expected.iter()) {
+            assert_eq!(
+                got.spans
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>(),
+                want.spans
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn screen_poll_treats_a_blank_screen_as_no_change() {
+        // A buffer that has run but shows nothing: the old code sent no frame
+        // because the styled screen came back empty after trailing-blank
+        // trimming, and the cheap hash must not start sending one.
+        let buf = vt_log_with("");
+        assert!(poll_screen(&buf, 0).screen.is_none());
     }
 
     // --- WebSocket catch-up/subscribe race ---
@@ -1919,8 +2473,10 @@ mod tests {
         // is exactly CHUNK_SIZE bytes = one u64 BE index.
         let extract_indices = |bytes: &[u8]| -> Vec<u64> {
             bytes
-                .chunks_exact(CHUNK_SIZE)
-                .map(|c| u64::from_be_bytes(c.try_into().unwrap()))
+                .as_chunks::<CHUNK_SIZE>()
+                .0
+                .iter()
+                .map(|c| u64::from_be_bytes(*c))
                 .collect()
         };
 
@@ -1970,6 +2526,259 @@ mod tests {
         //    bytes the writer had committed at snapshot time.
         assert!(snapshot_total <= CHUNK_COUNT * CHUNK_SIZE as u64);
         assert!(snapshot_total >= snapshot_indices.len() as u64 * CHUNK_SIZE as u64);
+    }
+
+    // --- Single-client full frames (story 601-82ef) ---
+    //
+    // Damage is tracked once per session, not per subscriber, and
+    // `serialize_dirty_rows` CONSUMES it. So a full frame built for one WS client
+    // silently takes the rows every other client was about to receive: the desktop
+    // ticker's next serialize returns nothing and the desktop never learns those
+    // rows changed. That is invisible row-map corruption on the other transport,
+    // which is why this path has to hand the damage back.
+
+    /// Feed enough output to dirty the grid, then drain the frame the ticker would
+    /// have sent, leaving the buffer in the state a live session is in.
+    fn dirty_session(state: &Arc<AppState>, session_id: &str, text: &str) {
+        state.vt_log_buffers.insert(
+            session_id.to_string(),
+            parking_lot::Mutex::new(crate::state::VtLogBuffer::new(24, 80, 1000)),
+        );
+        state.grid_frame_dirty.insert(
+            session_id.to_string(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let vt = state.vt_log_buffers.get(session_id).expect("just inserted");
+        let mut vt = vt.lock();
+        vt.process(text.as_bytes());
+    }
+
+    #[test]
+    fn a_full_frame_for_one_client_does_not_consume_the_others_rows() {
+        let state = super::super::tests::test_state();
+        dirty_session(&state, "shared-damage", "hello from the pty\r\n");
+
+        let frame = full_frame_for_single_client(&state, "shared-damage")
+            .expect("a dirty session must produce a frame");
+        assert!(!frame.is_empty());
+
+        // What the desktop ticker does on its next tick.
+        let ticker_frame = {
+            let vt = state
+                .vt_log_buffers
+                .get("shared-damage")
+                .expect("session exists");
+            let mut vt = vt.lock();
+            vt.serialize_dirty_rows()
+        };
+        assert!(
+            !ticker_frame.is_empty(),
+            "the WS resync ate the rows the desktop channel was about to be sent"
+        );
+    }
+
+    /// The ticker only serializes when the session is marked dirty, so handing the
+    /// damage back is worthless unless it also wakes the ticker up.
+    #[test]
+    fn a_full_frame_for_one_client_wakes_the_ticker() {
+        let state = super::super::tests::test_state();
+        dirty_session(&state, "wake-ticker", "hello\r\n");
+        state
+            .grid_frame_dirty
+            .get("wake-ticker")
+            .expect("flag exists")
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        full_frame_for_single_client(&state, "wake-ticker").expect("frame");
+
+        assert!(
+            state
+                .grid_frame_dirty
+                .get("wake-ticker")
+                .expect("flag exists")
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "restored damage that no tick will ever pick up is still a lost frame"
+        );
+    }
+
+    #[test]
+    fn a_full_frame_for_a_session_that_is_gone_is_none() {
+        let state = super::super::tests::test_state();
+        assert!(full_frame_for_single_client(&state, "no-such-session").is_none());
+    }
+
+    // --- Styled rows over HTTP (story 601-82ef) ---
+    //
+    // The desktop command hands these bytes over raw (`tauri::ipc::Response`), so
+    // the browser transport must get them raw too, or the same `fetchChunk` code
+    // has to branch per transport. `rpcImpl` picks `resp.arrayBuffer()` off the
+    // content-type alone — the header IS the contract.
+
+    #[tokio::test]
+    async fn styled_rows_travel_as_binary_not_as_a_json_number_array() {
+        use axum::body::to_bytes;
+
+        let bytes = vec![26u8, 0, 255, 7];
+        let response = styled_rows_response(bytes.clone()).into_response();
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/octet-stream"),
+            "rpcImpl branches on this header to call arrayBuffer()"
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        assert_eq!(body.as_ref(), bytes.as_slice(), "bytes must survive intact");
+    }
+
+    /// A closed session or an out-of-range request serializes to nothing. That is
+    /// a valid empty chunk, not an error — and it must still be typed binary so
+    /// the client decodes it the same way as any other chunk.
+    #[tokio::test]
+    async fn an_empty_styled_row_range_is_still_a_binary_body() {
+        use axum::body::to_bytes;
+
+        let response = styled_rows_response(Vec::new()).into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/octet-stream")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        assert!(body.is_empty());
+    }
+
+    // --- Grid WS frame shapes (story 623-d369) ---
+    //
+    // The client destructures every frame as `const { type, ...payload } = event`
+    // and hands `payload` to the same handler the desktop `listen()` feeds. So a
+    // frame is correct only if it equals its Tauri payload plus a `type` key.
+    //
+    // These drive the real `grid_ws_frame` and compare against the serialized
+    // Rust struct the desktop side emits — NOT against a hand-built object. A
+    // test that rebuilds the expected shape by hand agrees only with itself and
+    // stays green while the wire carries something the client cannot read.
+
+    /// Strip the discriminator: what is left must be the Tauri event payload.
+    fn frame_payload(frame: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = frame.as_object().expect("frame must be an object").clone();
+        assert!(map.remove("type").is_some(), "frame must carry a type");
+        map
+    }
+
+    #[test]
+    fn grid_ws_osc133_frame_matches_the_desktop_event_payload() {
+        for (marker, exit_code) in [("A", None), ("D", Some(0)), ("D", Some(130))] {
+            let frame = grid_ws_frame(&crate::state::AppEvent::PtyOsc133 {
+                session_id: "s1".to_string(),
+                marker: marker.to_string(),
+                line: 42,
+                exit_code,
+            })
+            .expect("osc133 must be carried by the grid WS");
+
+            assert_eq!(frame["type"], "osc133");
+
+            // The exact payload the desktop AppHandle emits for the same marker.
+            let desktop = serde_json::to_value(crate::terminal_grid::Osc133Event {
+                marker: marker.to_string(),
+                line: 42,
+                exit_code,
+            })
+            .expect("Osc133Event must serialize");
+
+            assert_eq!(
+                serde_json::Value::Object(frame_payload(&frame)),
+                desktop,
+                "grid WS payload drifted from the desktop Osc133Event ({marker})"
+            );
+        }
+    }
+
+    /// `exit_code: None` must survive as an explicit `null`, not vanish. The
+    /// client reads `exit_code ?? undefined`, so a missing key and a null key
+    /// happen to behave alike today — but a dropped key is one `skip_serializing_if`
+    /// away from meaning "field removed" to any other consumer.
+    #[test]
+    fn grid_ws_osc133_frame_keeps_a_null_exit_code() {
+        let frame = grid_ws_frame(&crate::state::AppEvent::PtyOsc133 {
+            session_id: "s1".to_string(),
+            marker: "A".to_string(),
+            line: 0,
+            exit_code: None,
+        })
+        .expect("osc133 must be carried by the grid WS");
+
+        assert!(frame.get("exit_code").is_some(), "exit_code key must exist");
+        assert!(frame["exit_code"].is_null());
+    }
+
+    /// The cwd payload is `{ cwd }` on BOTH transports. It cannot be a bare
+    /// string on the wire — a frame needs its `type` discriminator — so the
+    /// desktop emit was changed to match rather than the client made to branch.
+    #[test]
+    fn grid_ws_cwd_frame_carries_the_same_object_as_the_desktop_event() {
+        let frame = grid_ws_frame(&crate::state::AppEvent::PtyCwd {
+            session_id: "s1".to_string(),
+            cwd: "/tmp/project".to_string(),
+        })
+        .expect("cwd must be carried by the grid WS");
+
+        assert_eq!(frame["type"], "cwd");
+        assert_eq!(
+            serde_json::Value::Object(frame_payload(&frame)),
+            serde_json::json!({ "cwd": "/tmp/project" })
+        );
+    }
+
+    /// The regression this story fixes: both events used to reach the desktop
+    /// AppHandle alone, so a browser/PWA client got no command blocks, no gutter
+    /// marks, no Cmd+Up/Down navigation and no cwd tracking.
+    #[test]
+    fn grid_ws_carries_osc133_and_cwd_at_all() {
+        assert!(
+            grid_ws_frame(&crate::state::AppEvent::PtyOsc133 {
+                session_id: "s1".to_string(),
+                marker: "A".to_string(),
+                line: 1,
+                exit_code: None,
+            })
+            .is_some(),
+            "OSC 133 must reach browser clients"
+        );
+        assert!(
+            grid_ws_frame(&crate::state::AppEvent::PtyCwd {
+                session_id: "s1".to_string(),
+                cwd: "/tmp".to_string(),
+            })
+            .is_some(),
+            "OSC 7 cwd must reach browser clients"
+        );
+    }
+
+    /// Not every bus event belongs on this socket. The activity pulse
+    /// (story 625-56b0) rides the subscribePty stream and has no consumer here,
+    /// and waking every grid client for it would be pure cost.
+    #[test]
+    fn grid_ws_drops_events_it_has_no_consumer_for() {
+        assert!(
+            grid_ws_frame(&crate::state::AppEvent::PtyActivity {
+                session_id: "s1".to_string(),
+            })
+            .is_none(),
+            "the activity pulse must not be forwarded on the grid WS"
+        );
     }
 
     // --- Grid watch channel (format=grid WS endpoint) ---
@@ -2039,12 +2848,16 @@ mod tests {
             "spawn_pty_session must register a grid_watch channel"
         );
 
-        // Verify the channel is functional
+        // Verify the channel is functional, and that a published frame carries
+        // the sequence number the WS reader needs to spot a dropped delta.
         let tx = state.grid_watch.get(&session_id).unwrap();
         let mut rx = tx.subscribe();
-        tx.send(vec![1, 2, 3]).unwrap();
+        let first_seq = rx.borrow_and_update().seq;
+        crate::grid_gate::publish_grid_frame(&tx, vec![1, 2, 3]);
         rx.changed().await.unwrap();
-        assert_eq!(*rx.borrow_and_update(), vec![1, 2, 3]);
+        let slot = rx.borrow_and_update();
+        assert_eq!(slot.frame, vec![1, 2, 3]);
+        assert_eq!(slot.seq, first_seq + 1);
     }
 
     /// A client-provided session id is honored (browser duplicate-tab fix): the
@@ -2062,12 +2875,12 @@ mod tests {
             None,
             Some("client-provided-id".to_string()),
         );
-        match result {
-            Ok(id) => assert_eq!(
+        // PTY unavailable in CI — skip gracefully
+        if let Ok(id) = result {
+            assert_eq!(
                 id, "client-provided-id",
                 "must honor the client-provided id"
-            ),
-            Err(_) => {} // PTY unavailable in CI — skip gracefully
+            );
         }
     }
 

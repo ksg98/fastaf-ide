@@ -458,7 +458,24 @@ pub fn tool_definitions() -> Value {
 /// redacted when preceded by a secret-context word (`token=`, `secret:`,
 /// `password=`, etc.), so `git log/show/diff`, `Cargo.lock`, and
 /// `package-lock.json` round-trip verbatim. (#1369-f051)
+///
 pub fn redact_secrets(text: &str) -> String {
+    redact_secrets_cow(text).into_owned()
+}
+
+/// Implementation of [`redact_secrets`], borrowing when nothing matched.
+///
+/// Chaining `replace_all(..).to_string()` per pattern used to copy the whole
+/// input once per pattern — 20 copies even when no pattern matched. Each pattern
+/// is now `is_match`-gated so only matching ones allocate.
+///
+/// This stays private and `redact_secrets` returns an owned `String`: measured on
+/// this machine, the copy a borrowing return would save is 476ns of a 214µs call
+/// for a 31KB screen scrape, and 110µs of a 35.6ms call for 5MB of command
+/// output — 0.2-0.3%, not worth changing the ownership contract of a function
+/// with 17 call sites. The variant exists so the no-copy invariant stays
+/// unit-testable. (#612-9a22)
+fn redact_secrets_cow(text: &str) -> std::borrow::Cow<'_, str> {
     use regex::Regex;
     use std::sync::LazyLock;
 
@@ -537,11 +554,21 @@ pub fn redact_secrets(text: &str) -> String {
         ]
     });
 
-    let mut result = text.to_owned();
+    // Only the patterns that actually match allocate. `is_match` first keeps
+    // the non-matching majority allocation-free.
+    let mut owned: Option<String> = None;
     for (pattern, replacement) in PATTERNS.iter() {
-        result = pattern.replace_all(&result, *replacement).to_string();
+        let haystack: &str = owned.as_deref().unwrap_or(text);
+        if !pattern.is_match(haystack) {
+            continue;
+        }
+        let replaced = pattern.replace_all(haystack, *replacement).into_owned();
+        owned = Some(replaced);
     }
-    result
+    match owned {
+        Some(s) => std::borrow::Cow::Owned(s),
+        None => std::borrow::Cow::Borrowed(text),
+    }
 }
 
 // ── Key mapping ───────────────────────────────────────────────
@@ -569,30 +596,25 @@ fn map_key(name: &str) -> Result<(String, Option<SafeKey>), String> {
 /// Write to a PTY session — replicates sendCommand semantics from TypeScript.
 /// Ctrl-U prefix clears existing input, then text, then \r on separate write.
 fn safe_pty_write(state: &AppState, session_id: &str, command: &str) -> Result<(), String> {
-    let entry = state
-        .sessions
-        .get(session_id)
+    let writer = state
+        .pty_writer(session_id)
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    let mut session = entry.lock();
+    let mut writer = writer.lock();
 
     // Write 1: Ctrl-U + command text
     let payload = format!("\x15{command}");
-    session
-        .writer
+    writer
         .write_all(payload.as_bytes())
         .map_err(|e| format!("PTY write failed: {e}"))?;
-    session
-        .writer
+    writer
         .flush()
         .map_err(|e| format!("PTY flush failed: {e}"))?;
 
     // Write 2: Enter (separate write for Ink agent compat)
-    session
-        .writer
+    writer
         .write_all(b"\r")
         .map_err(|e| format!("PTY write \\r failed: {e}"))?;
-    session
-        .writer
+    writer
         .flush()
         .map_err(|e| format!("PTY flush failed: {e}"))?;
 
@@ -601,17 +623,14 @@ fn safe_pty_write(state: &AppState, session_id: &str, command: &str) -> Result<(
 
 /// Write raw bytes to a PTY (for send_key).
 fn raw_pty_write(state: &AppState, session_id: &str, data: &[u8]) -> Result<(), String> {
-    let entry = state
-        .sessions
-        .get(session_id)
+    let writer = state
+        .pty_writer(session_id)
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    let mut session = entry.lock();
-    session
-        .writer
+    let mut writer = writer.lock();
+    writer
         .write_all(data)
         .map_err(|e| format!("PTY write failed: {e}"))?;
-    session
-        .writer
+    writer
         .flush()
         .map_err(|e| format!("PTY flush failed: {e}"))?;
     Ok(())
@@ -911,10 +930,11 @@ fn exec_get_context(state: &AppState, args: &Value) -> ToolResult {
     let shell_state = state
         .shell_states
         .get(session_id)
-        .map(|atom| {
-            crate::pty::shell_state_str(atom.load(std::sync::atomic::Ordering::Relaxed)).to_string()
+        .and_then(|atom| {
+            crate::pty::shell_state_wire(atom.load(std::sync::atomic::Ordering::Relaxed))
+                .map(str::to_string)
         })
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| "starting".to_string());
 
     let ss = state.session_states.get(session_id);
     let agent_type = ss
@@ -1108,14 +1128,9 @@ async fn exec_drive_agent(state: &Arc<AppState>, args: &Value, skip_safety: bool
         }
 
         // Check shell_state for idle (most reliable signal)
-        let is_idle = state
-            .shell_states
-            .get(&session_id)
-            .map(|atom| {
-                let s = atom.load(std::sync::atomic::Ordering::Relaxed);
-                crate::pty::shell_state_str(s) == "idle"
-            })
-            .unwrap_or(false);
+        let is_idle = state.shell_states.get(&session_id).is_some_and(|atom| {
+            atom.load(std::sync::atomic::Ordering::Relaxed) == crate::pty::SHELL_IDLE
+        });
 
         let current = {
             let vt_log = match state.vt_log_buffers.get(&session_id) {
@@ -1177,10 +1192,11 @@ async fn exec_drive_agent(state: &Arc<AppState>, args: &Value, skip_safety: bool
     let shell_state = state
         .shell_states
         .get(&session_id)
-        .map(|atom| {
-            crate::pty::shell_state_str(atom.load(std::sync::atomic::Ordering::Relaxed)).to_string()
+        .and_then(|atom| {
+            crate::pty::shell_state_wire(atom.load(std::sync::atomic::Ordering::Relaxed))
+                .map(str::to_string)
         })
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| "starting".to_string());
 
     let result = json!({
         "screen": redact_secrets(&screen_text),
@@ -1755,9 +1771,6 @@ fn exec_search_files(state: &AppState, session_id: &str, args: &Value) -> ToolRe
         if !canon.starts_with(&root) {
             continue;
         }
-        if FileSandbox::is_binary(&canon) {
-            continue;
-        }
         let meta = match std::fs::metadata(&canon) {
             Ok(m) => m,
             Err(_) => continue,
@@ -1765,8 +1778,19 @@ fn exec_search_files(state: &AppState, session_id: &str, args: &Value) -> ToolRe
         if meta.len() > MAX_FILE_BYTES {
             continue;
         }
-        let content = match std::fs::read_to_string(&canon) {
-            Ok(c) => c,
+        // One open per candidate. The previous form sniffed the first 8 KB with
+        // `FileSandbox::is_binary` and then opened the file again to read it —
+        // two opens and two reads of the same head bytes for every file in the
+        // walk. Decoding the bytes we already have answers the same question:
+        // non-UTF-8 is exactly what the sniff called binary, and it now covers
+        // the whole file instead of its first 8 KB.
+        // The size check moved above the read, so an oversized file is no
+        // longer opened at all.
+        let content = match std::fs::read(&canon) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => continue, // binary
+            },
             Err(_) => continue,
         };
         let lines: Vec<&str> = content.lines().collect();
@@ -1855,26 +1879,51 @@ fn exec_search_code(state: &Arc<AppState>, session_id: &str, args: &Value) -> To
         idx.search(query, limit)
     };
 
-    let query_words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+    // One case-insensitive automaton for all result files, compiled once per
+    // search. The previous per-line `line.to_lowercase()` allocated a copy of
+    // every line of every result file. (#612-9a22)
+    let word_matcher = build_query_matcher(query);
 
-    let out: Vec<Value> = results
-        .into_iter()
-        .map(|ranked| {
-            let abs = index_arc.read().absolute_path(&ranked.rel_path);
-            let snippet = extract_bm25_snippet(&abs, &query_words);
-            json!({
-                "path": ranked.rel_path,
-                "score": ranked.score,
-                "snippet": snippet,
+    // Resolve `repo_root` once: `absolute_path` is a plain `join`, so taking the
+    // index read lock inside the per-result loop was pure lock churn — up to
+    // SEARCH_CODE_MAX_RESULTS acquisitions for no added information. (#612-9a22)
+    let out: Vec<Value> = {
+        let idx = index_arc.read();
+        results
+            .into_iter()
+            .map(|ranked| {
+                let abs = idx.absolute_path(&ranked.rel_path);
+                let snippet = extract_bm25_snippet(&abs, word_matcher.as_ref());
+                json!({
+                    "path": ranked.rel_path,
+                    "score": ranked.score,
+                    "snippet": snippet,
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
 
     ToolResult::ok(json!({ "results": out }).to_string())
 }
 
-/// Read `path` and return a 3-line window around the line with the most query-word hits.
-fn extract_bm25_snippet(path: &std::path::Path, query_words: &[String]) -> String {
+/// Case-insensitive literal matcher for the whitespace-separated words of
+/// `query`. `None` when the query has no words to match.
+fn build_query_matcher(query: &str) -> Option<regex::RegexSet> {
+    let patterns: Vec<String> = query
+        .split_whitespace()
+        .map(|w| format!("(?i){}", regex::escape(w)))
+        .collect();
+    if patterns.is_empty() {
+        return None;
+    }
+    // Patterns are `regex::escape`d literals, so construction cannot fail on
+    // user input; a size-limit failure just means no snippet highlighting.
+    regex::RegexSet::new(&patterns).ok()
+}
+
+/// Read `path` and return a 3-line window around the line matching the most
+/// query words.
+fn extract_bm25_snippet(path: &std::path::Path, words: Option<&regex::RegexSet>) -> String {
     let Ok(content) = std::fs::read_to_string(path) else {
         return String::new();
     };
@@ -1882,20 +1931,15 @@ fn extract_bm25_snippet(path: &std::path::Path, query_words: &[String]) -> Strin
     if lines.is_empty() {
         return String::new();
     }
-    let best = lines
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let lower = line.to_lowercase();
-            let hits = query_words
-                .iter()
-                .filter(|w| lower.contains(w.as_str()))
-                .count();
-            (i, hits)
-        })
-        .max_by_key(|(_, hits)| *hits)
-        .map(|(i, _)| i)
-        .unwrap_or(0);
+    let best = match words {
+        Some(set) => lines
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, line)| set.matches(line).iter().count())
+            .map(|(i, _)| i)
+            .unwrap_or(0),
+        None => 0,
+    };
     let start = best.saturating_sub(1);
     let end = (best + 2).min(lines.len());
     lines[start..end].join("\n")
@@ -2413,6 +2457,27 @@ pub async fn dispatch(
     dispatch_inner(state, session_id, fn_name, args, false).await
 }
 
+/// A tool that does blocking filesystem work, in the one shape the dispatcher
+/// needs. `skip_safety` is passed to every one of them so the table can hold a
+/// single function-pointer type; the read-only tools ignore it.
+type BlockingFsTool = fn(&Arc<AppState>, &str, &Value, bool) -> ToolResult;
+
+/// The filesystem tools, which must run on the blocking pool rather than on a
+/// Tokio worker. Returns `None` for everything else — terminal and session
+/// tools read in-memory state, and a pool hop would cost a thread handoff for
+/// nothing (story 607-f483).
+fn blocking_fs_tool(name: &str) -> Option<BlockingFsTool> {
+    match name {
+        "read_file" => Some(|s, sid, a, _| exec_read_file(s, sid, a)),
+        "write_file" => Some(|s, sid, a, skip| exec_write_file_inner(s, sid, a, skip)),
+        "edit_file" => Some(|s, sid, a, skip| exec_edit_file_inner(s, sid, a, skip)),
+        "list_files" => Some(|s, sid, a, _| exec_list_files(s, sid, a)),
+        "search_files" => Some(|s, sid, a, _| exec_search_files(s, sid, a)),
+        "search_code" => Some(|s, sid, a, _| exec_search_code(s, sid, a)),
+        _ => None,
+    }
+}
+
 /// Re-dispatch a tool call after the user approved it — skips safety checks.
 pub async fn dispatch_approved(
     state: &Arc<AppState>,
@@ -2457,6 +2522,18 @@ async fn dispatch_inner(
             "Permission denied: agent bound to session {session_id} cannot write to {target}. Enable unrestricted mode for cross-session control."
         ));
     }
+    // Filesystem tools are synchronous `std::fs` work — directory walks and
+    // whole-file reads. Running them inline here parks a Tokio worker for the
+    // entire traversal; on a large repo `search_files` holds one for seconds.
+    if let Some(exec) = blocking_fs_tool(fn_name) {
+        let state = Arc::clone(state);
+        let session_id = session_id.to_string();
+        let args = args.clone();
+        return tokio::task::spawn_blocking(move || exec(&state, &session_id, &args, skip_safety))
+            .await
+            .unwrap_or_else(|e| ToolResult::err(format!("tool task failed: {e}")));
+    }
+
     match fn_name {
         "read_screen" => exec_read_screen(state, args),
         "search_scrollback" => exec_search_scrollback(state, args),
@@ -2621,6 +2698,82 @@ mod tests {
     }
 
     // ── redact_secrets ─────────────────────────────────────────
+
+    /// `exec_run_command_inner` redacts BEFORE `truncate_output`, and it must
+    /// keep doing so. Swapping the order (proposed under #612-9a22 F111 as a way
+    /// to avoid scanning bytes that get discarded) breaks the PEM rule: the
+    /// multi-line `BEGIN…END` pattern needs both delimiters, so once the cut
+    /// drops the `END` line the head keeps raw private-key body bytes and only
+    /// the header is redacted by the bare-header fallback.
+    ///
+    /// This test asserts the leak the swap would introduce, so the ordering is
+    /// not "optimised" later. The wasted scan is addressed instead by making
+    /// `redact_secrets` allocation-free on non-matching input.
+    #[test]
+    fn redacting_after_truncation_would_leak_private_key_body() {
+        const MARKER: &str = "MIIEpAIBAAKCAQEA";
+        let half = RUN_COMMAND_OUTPUT_CAP / 2;
+        // A PEM block positioned so the head/tail cut falls inside its body,
+        // with enough trailing output that the `END` line is discarded.
+        let body = format!("{MARKER}\n").repeat(200);
+        let pem = format!("-----BEGIN RSA PRIVATE KEY-----\n{body}-----END RSA PRIVATE KEY-----\n");
+        let lead = "compiling crate\n".repeat((half - 1000) / 16);
+        let trail = "linking\n".repeat((half + 5000) / 8);
+        let raw = format!("{lead}{pem}{trail}");
+        assert!(raw.len() > RUN_COMMAND_OUTPUT_CAP);
+        assert!(
+            lead.len() < half && lead.len() + pem.len() > half,
+            "fixture must straddle the cut: lead={} pem={} half={half}",
+            lead.len(),
+            pem.len()
+        );
+
+        // Current order — redact, then truncate. Nothing survives.
+        let (safe, truncated) = truncate_output(&redact_secrets(&raw));
+        assert!(truncated);
+        assert!(
+            !safe.contains(MARKER),
+            "redact-then-truncate must not leak key body"
+        );
+
+        // Proposed order — truncate, then redact. Key body survives in the head.
+        let (cut, _) = truncate_output(&raw);
+        let leaked = redact_secrets(&cut);
+        assert!(
+            leaked.contains(MARKER),
+            "truncate-then-redact leaks key body — this is why the order stands"
+        );
+    }
+
+    /// Secret-free text is the overwhelmingly common case (every screen scrape,
+    /// every grep line). It must reach the end of the pattern loop without a
+    /// single copy — the old implementation did `replace_all(..).to_string()` per
+    /// pattern, i.e. 20 full copies of the input even when nothing matched.
+    ///
+    /// Asserted on the internal `Cow` variant because the public function returns
+    /// an owned `String` by design; this is the only way to pin the allocation
+    /// invariant rather than just the output text. (#612-9a22)
+    #[test]
+    fn redact_clean_text_reaches_the_end_without_copying() {
+        let input = "cargo test --package tuicommander -- --nocapture\nok, 42 passed";
+        assert!(
+            matches!(redact_secrets_cow(input), std::borrow::Cow::Borrowed(_)),
+            "clean input must not be copied by any of the 20 patterns"
+        );
+    }
+
+    /// A single matching pattern must produce exactly one owned buffer; the
+    /// remaining patterns must not each re-copy it.
+    #[test]
+    fn redact_dirty_text_owns_once() {
+        let input = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+        let out = redact_secrets_cow(input);
+        assert!(
+            matches!(out, std::borrow::Cow::Owned(_)),
+            "input with a secret must be returned owned"
+        );
+        assert!(out.contains("[REDACTED]"));
+    }
 
     #[test]
     fn redact_sk_key() {
@@ -3641,7 +3794,13 @@ mod tests {
         assert!(!r.output.contains("truncated"));
     }
 
+    // These three mutate the process-wide TUIC_WARN_SECRET_READS. Serialized like
+    // every other env-mutating test in this codebase: nextest's process-per-test
+    // makes it moot today, but `cargo test` (and the doctest runner) share one
+    // process, and an unserialized env write is a race waiting for the day
+    // somebody runs the suite that way.
     #[test]
+    #[serial_test::serial]
     fn warn_secret_reads_off_by_default() {
         // Default (env unset) must be off — reads stay unrestricted with no warn.
         unsafe { std::env::remove_var("TUIC_WARN_SECRET_READS") };
@@ -3649,6 +3808,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn warn_secret_reads_honors_env() {
         unsafe { std::env::set_var("TUIC_WARN_SECRET_READS", "1") };
         assert!(warn_secret_reads_enabled());
@@ -3681,6 +3841,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn read_secret_file_with_warn_on_still_unrestricted() {
         // AC2: with the opt-in warn enabled, the read still succeeds unrestricted
         // (warn is a log side-effect only, never a gate).
@@ -3705,7 +3866,11 @@ mod tests {
     #[tokio::test]
     async fn read_file_respects_offset_and_limit() {
         let (dir, state) = fs_test_state("s1");
-        let body: String = (1..=10).map(|i| format!("line{i}\n")).collect();
+        use std::fmt::Write as _;
+        let body: String = (1..=10).fold(String::new(), |mut acc, i| {
+            let _ = writeln!(acc, "line{i}");
+            acc
+        });
         std::fs::write(dir.path().join("a.txt"), body).unwrap();
         let r = dispatch(
             &state,
@@ -4209,6 +4374,124 @@ mod tests {
         );
     }
 
+    // `search_files` used to open every candidate twice: once for an 8 KB
+    // binary sniff, then again to read the whole file. It now reads the bytes
+    // once and lets the UTF-8 decode answer both questions. These pin the
+    // decisions that sniff used to make, so the single read cannot change them.
+
+    #[tokio::test]
+    async fn search_files_skips_a_file_that_is_not_utf8() {
+        let (dir, state) = fs_test_state("s1");
+        // "needle" in bytes, preceded by an invalid UTF-8 sequence: the regex
+        // would match the text, but a binary file must never be searched.
+        let mut body = vec![0xff, 0xfe, 0x00];
+        body.extend_from_slice(b"needle\n");
+        std::fs::write(dir.path().join("blob.bin"), body).unwrap();
+        std::fs::write(dir.path().join("plain.txt"), "needle\n").unwrap();
+
+        let r = dispatch(
+            &state,
+            "s1",
+            "search_files",
+            &json!({ "pattern": "needle" }),
+        )
+        .await;
+
+        assert!(r.success, "{}", r.output);
+        let parsed: Value = serde_json::from_str(&r.output).unwrap();
+        let files = parsed["files_with_matches"].as_array().unwrap();
+        assert!(
+            files
+                .iter()
+                .any(|f| f.as_str().unwrap().ends_with("plain.txt"))
+        );
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.as_str().unwrap().ends_with("blob.bin"))
+        );
+    }
+
+    #[tokio::test]
+    async fn search_files_skips_a_file_that_turns_binary_after_the_first_8kb() {
+        let (dir, state) = fs_test_state("s1");
+        // The old sniff only read 8 KB, so this file passed it and then failed
+        // `read_to_string`. Either way it is skipped — assert the outcome, not
+        // which of the two reads rejected it.
+        let mut body = vec![b'a'; 9000];
+        body.extend_from_slice(b"\nneedle\n");
+        body.extend_from_slice(&[0xff, 0xfe]);
+        std::fs::write(dir.path().join("late.bin"), body).unwrap();
+
+        let r = dispatch(
+            &state,
+            "s1",
+            "search_files",
+            &json!({ "pattern": "needle" }),
+        )
+        .await;
+
+        assert!(r.success, "{}", r.output);
+        let parsed: Value = serde_json::from_str(&r.output).unwrap();
+        assert_eq!(parsed["total_matches"], 0);
+    }
+
+    #[tokio::test]
+    async fn search_files_skips_a_file_over_the_size_cap() {
+        let (dir, state) = fs_test_state("s1");
+        let mut body = vec![b'a'; MAX_FILE_BYTES as usize + 1];
+        body.extend_from_slice(b"\nneedle\n");
+        std::fs::write(dir.path().join("huge.txt"), body).unwrap();
+
+        let r = dispatch(
+            &state,
+            "s1",
+            "search_files",
+            &json!({ "pattern": "needle" }),
+        )
+        .await;
+
+        assert!(r.success, "{}", r.output);
+        let parsed: Value = serde_json::from_str(&r.output).unwrap();
+        assert_eq!(parsed["total_matches"], 0);
+    }
+
+    // ── blocking dispatch ──────────────────────────────────────
+    //
+    // The filesystem tools are synchronous `std::fs` work — directory walks and
+    // whole-file reads — called from an async dispatcher. Left inline they park
+    // a Tokio worker for the whole traversal, so the router sends them to the
+    // blocking pool instead. This table is that decision, made testable.
+
+    #[test]
+    fn every_filesystem_tool_is_routed_to_the_blocking_pool() {
+        for name in [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_files",
+            "search_files",
+            "search_code",
+        ] {
+            assert!(
+                blocking_fs_tool(name).is_some(),
+                "{name} does blocking fs work and must not run on a Tokio worker"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_that_does_no_disk_work_stays_on_the_executor() {
+        // These read in-memory state; a pool hop would cost a thread handoff
+        // for nothing, and `run_command` already manages its own process.
+        for name in ["read_screen", "get_state", "list_sessions", "run_command"] {
+            assert!(
+                blocking_fs_tool(name).is_none(),
+                "{name} should not be sent to the blocking pool"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn search_files_glob_filter() {
         let (dir, state) = fs_test_state("s1");
@@ -4564,6 +4847,62 @@ mod tests {
         );
         assert!(results[0]["score"].as_f64().unwrap() > 0.0);
         assert!(!results[0]["snippet"].as_str().unwrap().is_empty());
+    }
+
+    /// Equivalence guard for the #612-9a22 refactor of `exec_search_code`:
+    /// the index read lock is now taken once for the whole result set instead of
+    /// once per result, and `extract_bm25_snippet` matches query words with a
+    /// prebuilt case-insensitive `RegexSet` instead of allocating a lowercased
+    /// copy of every line of every result file.
+    ///
+    /// Both changes must be invisible from the outside: multi-result responses
+    /// keep one snippet per result, and snippet selection stays case-insensitive
+    /// including non-ASCII case folding.
+    #[tokio::test]
+    async fn search_code_snippets_survive_single_lock_refactor() {
+        let (dir, state) = fs_test_state("s1");
+        let repo_root = dir.path().to_path_buf();
+        // Several matching files so the per-result path runs more than once.
+        // The match line is deliberately NOT the first line, and its case
+        // differs from the query, so snippet selection has to fold case.
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            std::fs::write(
+                repo_root.join(name),
+                "// header\n// filler\nlet RÉSUMÉ_TOKEN = AUTHENTICATION;\n// trailer\n",
+            )
+            .unwrap();
+        }
+
+        let canonical_root = repo_root.canonicalize().unwrap();
+        let index = crate::content_index::ContentIndex::build(
+            canonical_root.clone(),
+            None,
+            std::collections::HashMap::new(),
+        );
+        let index_arc = Arc::new(parking_lot::RwLock::new(index));
+        state
+            .content_indices
+            .insert(canonical_root.to_string_lossy().to_string(), index_arc);
+
+        let r = dispatch(
+            &state,
+            "s1",
+            "search_code",
+            &json!({ "query": "authentication résumé", "limit": 3 }),
+        )
+        .await;
+        assert!(r.success, "{}", r.output);
+        let parsed: Value = serde_json::from_str(&r.output).unwrap();
+        let results = parsed["results"].as_array().unwrap();
+        assert!(!results.is_empty(), "expected results: {}", r.output);
+
+        for res in results {
+            let snippet = res["snippet"].as_str().unwrap();
+            assert!(
+                snippet.contains("RÉSUMÉ_TOKEN"),
+                "snippet must centre on the case-folded match line, got: {snippet:?}"
+            );
+        }
     }
 
     #[tokio::test]

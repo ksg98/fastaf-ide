@@ -75,6 +75,10 @@ pub(crate) struct StartFlowOutcome {
     /// Upstream name (echoed for convenience).
     #[allow(dead_code)]
     pub(crate) upstream_name: String,
+    /// `true` when the discovered authorization server lives on a different
+    /// registrable domain than the MCP resource. Not an error — gateways make
+    /// this normal — but the consent dialog calls it out explicitly.
+    pub(crate) cross_domain_as: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -173,9 +177,10 @@ impl OAuthFlowManager {
             .map_err(|e| anyhow!("OAuth semaphore closed: {e}"))?;
 
         // Resolve endpoints (and scopes when not pre-configured).
-        let (authorization_endpoint, token_endpoint, discovered_scopes) =
+        let (authorization_endpoint, token_endpoint, discovered_scopes, cross_domain_as) =
             match (authz_override.clone(), token_override.clone()) {
-                (Some(a), Some(t)) => (a, t, vec![]),
+                // Explicit overrides bypass discovery — the user vetted these.
+                (Some(a), Some(t)) => (a, t, vec![], false),
                 _ => self.resolve_discovery(server_url).await?,
             };
 
@@ -226,6 +231,7 @@ impl OAuthFlowManager {
             authorization_url,
             state,
             upstream_name: upstream_name.to_string(),
+            cross_domain_as,
         })
     }
 
@@ -331,22 +337,27 @@ impl OAuthFlowManager {
     }
 
     /// Resolve authorization endpoint, token endpoint, and scopes via RFC 9728 + 8414 discovery.
-    /// Returns `(authorization_endpoint, token_endpoint, scopes)`.
-    async fn resolve_discovery(&self, server_url: &str) -> Result<(String, String, Vec<String>)> {
+    /// Returns `(authorization_endpoint, token_endpoint, scopes, cross_domain_as)`.
+    async fn resolve_discovery(
+        &self,
+        server_url: &str,
+    ) -> Result<(String, String, Vec<String>, bool)> {
         let pr_meta = discover_protected_resource(&self.http_client, server_url).await?;
         let issuer = pr_meta
             .authorization_servers
             .first()
             .ok_or_else(|| anyhow!("Protected resource returned no authorization servers"))?;
-        // AS mix-up defence: refuse to follow an issuer whose registrable
-        // domain differs from the resource's (unless both are loopback).
-        check_issuer_matches_resource(server_url, issuer)?;
         let as_meta = discover_auth_server(&self.http_client, issuer).await?;
+        // The AS may legitimately live off-domain (gateways, IdP tenants). Flag
+        // it for the consent dialog instead of refusing to continue; judge the
+        // endpoint we will actually send the user to, not the advertised issuer.
+        let cross_domain_as = is_cross_domain_as(server_url, &as_meta.authorization_endpoint);
         let scopes = resolve_scopes(&pr_meta, &as_meta);
         Ok((
             as_meta.authorization_endpoint,
             as_meta.token_endpoint,
             scopes,
+            cross_domain_as,
         ))
     }
 }
@@ -400,43 +411,39 @@ fn build_authorization_url(
     url.to_string()
 }
 
-/// AS mix-up defence (RFC 9700 §4.6): reject a discovered authorization
-/// server whose registrable domain differs from the protected resource's.
+/// Report whether the authorization server we are about to send the user to
+/// sits on a different registrable domain than the MCP resource.
 ///
-/// A compromised or hostile resource server can put any HTTPS URL in the
-/// `authorization_servers` array of its RFC 9728 metadata. Following that URL
-/// blindly lets the attacker route the user to their own consent page.
-/// Explicit overrides in `UpstreamAuth::OAuth2 { authorization_endpoint, ... }`
-/// bypass discovery entirely, so this check only applies to the discovery
-/// path — the user has already vetted the hard-coded endpoints in that case.
+/// This used to be a hard block (RFC 9700 §4.6 mix-up defence). It isn't one
+/// any more: routing OAuth through a different domain is the *normal* topology
+/// for MCP gateways (`mcp-s.com`), corporate proxies, and hosted IdP tenants
+/// (`*.auth0.com`, `*.okta.com`) — blocking it made perfectly legitimate
+/// servers unusable with no way through. The mix-up threat is instead handled
+/// where the user can act on it: the consent dialog names the AS origin, and
+/// this flag makes it say so loudly when the domain differs.
 ///
-/// The error message includes both hostnames so the frontend surfaces them
-/// in the consent UI (criterion #3). Loopback addresses are intentionally
-/// treated as an automatic match — dev environments frequently put the AS
-/// and resource on different localhost ports.
-fn check_issuer_matches_resource(server_url: &str, issuer_url: &str) -> Result<()> {
-    let server_domain = registrable_domain(server_url)
-        .ok_or_else(|| anyhow!("MCP server_url \"{server_url}\" is not a valid URL"))?;
-    let issuer_domain = registrable_domain(issuer_url).ok_or_else(|| {
-        anyhow!("Authorization server issuer \"{issuer_url}\" is not a valid URL")
-    })?;
-
-    // Loopback — always allow (dev environments).
-    if matches!(server_domain.as_str(), "localhost" | "127.0.0.1")
-        || matches!(issuer_domain.as_str(), "localhost" | "127.0.0.1")
-    {
-        return Ok(());
+/// Only `authorization_endpoint` is compared — that is the URL the browser
+/// actually opens, so it is the one the user can recognise or reject. The
+/// advertised `issuer` is deliberately ignored: gateways name the upstream IdP
+/// there as a matter of course, and warning on it fires on the common case
+/// without telling the user anything they can act on. Loopback is exempt — dev
+/// setups routinely split AS and resource across localhost ports.
+fn is_cross_domain_as(server_url: &str, authorization_endpoint: &str) -> bool {
+    let Some(server_domain) = registrable_domain(server_url) else {
+        // Can't prove same-origin — err toward warning the user.
+        return true;
+    };
+    if is_loopback_domain(&server_domain) {
+        return false;
     }
-
-    if server_domain != issuer_domain {
-        bail!(
-            "Authorization server mix-up: MCP resource \"{server_url}\" advertises \
-             issuer \"{issuer_url}\" whose registrable domain \"{issuer_domain}\" does \
-             not match the resource's \"{server_domain}\". Configure an explicit \
-             authorization_endpoint in the MCP auth config if this is intentional."
-        );
+    match registrable_domain(authorization_endpoint) {
+        Some(as_domain) => !is_loopback_domain(&as_domain) && as_domain != server_domain,
+        None => true,
     }
-    Ok(())
+}
+
+fn is_loopback_domain(domain: &str) -> bool {
+    matches!(domain, "localhost" | "127.0.0.1")
 }
 
 /// Resolve OAuth scopes from discovery metadata.
@@ -557,53 +564,67 @@ mod tests {
         assert!(url.contains("redirect_uri=http"));
     }
 
-    // -- AS mix-up defence (#1268-40e8) --
+    // -- cross-domain AS flag (advisory, never blocking) --
 
     #[test]
-    fn check_issuer_allows_same_registrable_domain() {
-        assert!(
-            check_issuer_matches_resource(
-                "https://api.example.com/mcp",
-                "https://auth.example.com",
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn check_issuer_allows_exact_host_match() {
-        assert!(
-            check_issuer_matches_resource("https://example.com/mcp", "https://example.com",)
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn check_issuer_rejects_cross_domain_attacker() {
-        let err = check_issuer_matches_resource(
+    fn cross_domain_false_for_sibling_subdomain() {
+        assert!(!is_cross_domain_as(
             "https://api.example.com/mcp",
-            "https://attacker.example.org",
-        )
-        .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("mix-up"), "msg: {msg}");
-        assert!(msg.contains("api.example.com"), "msg: {msg}");
-        assert!(msg.contains("attacker.example.org"), "msg: {msg}");
+            "https://auth.example.com/authorize",
+        ));
     }
 
     #[test]
-    fn check_issuer_allows_loopback_dev() {
-        assert!(
-            check_issuer_matches_resource("http://127.0.0.1:8080/mcp", "http://localhost:9090",)
-                .is_ok()
-        );
+    fn cross_domain_false_for_exact_host_match() {
+        assert!(!is_cross_domain_as(
+            "https://example.com/mcp",
+            "https://example.com/authorize",
+        ));
     }
 
     #[test]
-    fn check_issuer_rejects_malformed_server_url() {
-        let err =
-            check_issuer_matches_resource("not a url", "https://auth.example.com").unwrap_err();
-        assert!(err.to_string().contains("server_url"));
+    fn cross_domain_true_for_unrelated_domain() {
+        assert!(is_cross_domain_as(
+            "https://api.example.com/mcp",
+            "https://attacker.example.org/authorize",
+        ));
+    }
+
+    /// Gateway shape: the resource proxies AS metadata pointing at the upstream
+    /// IdP, so the browser lands off-domain. Flagged, never blocked.
+    #[test]
+    fn cross_domain_true_when_gateway_sends_user_to_upstream_idp() {
+        assert!(is_cross_domain_as(
+            "https://tenant.gateway.example/mcp/mcp/calendar",
+            "https://auth.example-idp.com/authorize",
+        ));
+    }
+
+    /// A gateway that also proxies the authorize endpoint keeps the browser on
+    /// its own domain — no notice, even though its metadata advertises the
+    /// upstream IdP as `issuer`. The issuer deliberately has no say here.
+    #[test]
+    fn cross_domain_false_when_gateway_proxies_the_authorize_endpoint() {
+        assert!(!is_cross_domain_as(
+            "https://tenant.gateway.example/mcp/mcp/calendar",
+            "https://tenant.gateway.example/oauth/authorize",
+        ));
+    }
+
+    #[test]
+    fn cross_domain_false_for_loopback_dev() {
+        assert!(!is_cross_domain_as(
+            "http://127.0.0.1:8080/mcp",
+            "http://localhost:9090/authorize",
+        ));
+    }
+
+    #[test]
+    fn cross_domain_true_for_malformed_server_url() {
+        assert!(is_cross_domain_as(
+            "not a url",
+            "https://auth.example.com/authorize",
+        ));
     }
 
     // -- resolve_scopes --

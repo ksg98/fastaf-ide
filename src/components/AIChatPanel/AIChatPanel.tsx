@@ -21,6 +21,7 @@ import { voiceStore } from "../../stores/voice";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
+import { createThrottled } from "../../utils/createThrottled";
 import { getShellFamily, sendCommand } from "../../utils/sendCommand";
 import { MicMeter } from "../DictationToast/MicMeter";
 import p from "../shared/panel.module.css";
@@ -34,30 +35,53 @@ const ContentRenderer = lazy(() =>
 	import("../ui/ContentRenderer").then((module) => ({ default: module.ContentRenderer })),
 );
 
-const MarkdownContent: Component<{ content: string }> = (props) => (
+/** `streaming` marks an append-only accumulator, which ContentRenderer may then
+ *  render as a committed prefix plus a live tail. Settled messages are static
+ *  and must not claim it — the split is only sound for text that only grows. */
+const MarkdownContent: Component<{ content: string; streaming?: boolean }> = (props) => (
 	<Suspense>
-		<ContentRenderer content={props.content} />
+		<ContentRenderer content={props.content} incremental={props.streaming} />
 	</Suspense>
 );
 
+/** How often a growing stream is re-rendered as markdown.
+ *  The accumulators below render incrementally — only the block still being
+ *  written is re-parsed — so an answer's cost is linear in its length rather
+ *  than quadratic. This throttle remains because the token batcher's 50 ms is
+ *  right for data and wrong for layout; settled messages are never throttled. */
+const STREAM_RENDER_MS = 200;
+
 const isPanelMode = () => new URLSearchParams(window.location.search).get("mode") === "panel";
 
-// DEFERRED (2026-04-25) — In detached panel mode, terminalsStore/conversationStore are empty
-// (separate window = separate JS stores). Chat streaming works (Rust Channel), but sending
-// messages and agent controls are broken. Fix: sync active session ID via panel-action or
-// pass it as a URL param + listen for changes via emitTo.
+/** The terminal an AI Chat talks to. Everything that needs a session — sending,
+ *  agent controls, the knowledge footer — reads it from here and nowhere else. */
+export interface AIChatTerminalBinding {
+	/** PTY session of that terminal, null while it has none yet. */
+	sessionId: string | null;
+	/** Display name for the header. */
+	name: string | null;
+	/** False when no terminal is focused at all: the chat is read-only. */
+	attached: boolean;
+}
 
-/** Session ID of the currently active terminal tab (null when no terminal is focused). */
-function useActiveSessionId() {
-	return createMemo(() => {
-		const id = terminalsStore.state.activeId;
-		return id ? (terminalsStore.get(id)?.sessionId ?? null) : null;
-	});
+/** Binding of the currently focused terminal tab, for the main window. */
+function activeTerminalBinding(): AIChatTerminalBinding {
+	const id = terminalsStore.state.activeId;
+	const terminal = id ? terminalsStore.get(id) : undefined;
+	return { sessionId: terminal?.sessionId ?? null, name: terminal?.name ?? null, attached: !!id };
 }
 
 export interface AIChatPanelProps {
 	visible: boolean;
 	onClose: () => void;
+	/**
+	 * Detached-window only. That window is a separate WebView where
+	 * `terminalsStore` is never hydrated — App returns at `renderPanelMode()`
+	 * before any main-window effect — so deriving the terminal from the store
+	 * yields nothing and the chat can only ever be read-only. The window is
+	 * handed its binding instead, from the params it was opened with.
+	 */
+	terminal?: () => AIChatTerminalBinding;
 }
 
 /** Copy text to clipboard, return true on success */
@@ -309,13 +333,12 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	const [showUnrestrictedConfirm, setShowUnrestrictedConfirm] = createSignal(false);
 	const [historyList, setHistoryList] = createSignal<ConversationMeta[]>([]);
 
-	// Active terminal derived from terminalsStore (null when non-terminal tab focused)
-	const activeSessionId = useActiveSessionId();
-	const isFrozen = createMemo(() => !terminalsStore.state.activeId);
-	const activeTerminalName = createMemo(() => {
-		const id = terminalsStore.state.activeId;
-		return id ? (terminalsStore.get(id)?.name ?? null) : null;
-	});
+	// The handed-over binding wins where there is one (detached window); the main
+	// window has none and follows the focused terminal tab.
+	const terminal = createMemo(() => props.terminal?.() ?? activeTerminalBinding());
+	const activeSessionId = createMemo(() => terminal().sessionId);
+	const isFrozen = createMemo(() => !terminal().attached);
+	const activeTerminalName = createMemo(() => terminal().name);
 
 	const openHistory = () => {
 		void conversationStore.listAllConversations().then(setHistoryList);
@@ -373,19 +396,34 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 		setShowHistory(false);
 	};
 
-	// ── Registry subscription lifecycle ─────────────────────────────────────
-	createEffect(() => {
-		const id = conversationStore.chatId();
-		void conversationStore.subscribeToRegistry(id);
-	});
-	onCleanup(() => {
-		void conversationStore.unsubscribeFromRegistry();
-	});
+	// No registry subscription here. The Rust `ChatRegistry` has no producer —
+	// nothing calls `fan_out` or any `ConversationState` setter — so every
+	// `chat_subscribe` was a round-trip that answered with an empty default
+	// snapshot and then went silent. Worse, applying that snapshot ran
+	// `setMessages([])`: the effect re-fired on each `chatId` change, so one IPC
+	// hop after `loadConversation` the empty snapshot wiped the history it had
+	// just read from disk. Restore the subscription only together with a
+	// producer.
+
+	// ── Rendered view of the live accumulators ─────────────────────────────
+	// The stores update ~20×/s; these mirror them at STREAM_RENDER_MS so the
+	// markdown pipeline and the DOM only see a fraction of those ticks. `chatId`
+	// is the stream identity: it differs per terminal and changes on a new or
+	// loaded conversation, which is what tells a switch apart from growth when the
+	// two answers happen to start with the same words.
+	const generation = () => conversationStore.chatId();
+	const streamingRender = createThrottled(() => conversationStore.streamingText(), STREAM_RENDER_MS, generation);
+	const reasoningRender = createThrottled(() => conversationStore.reasoningChunks(), STREAM_RENDER_MS, generation);
+	const textChunksRender = createThrottled(() => conversationStore.textChunks() ?? "", STREAM_RENDER_MS, generation);
 
 	// ── Auto-scroll on new messages / streaming chunks ──────────────────────
 	createEffect(() => {
-		// Subscribe to reactive dependencies
-		conversationStore.streamingText();
+		// Subscribe to what actually changes the DOM. Reading scrollHeight forces a
+		// synchronous layout, so tracking the raw accumulators would pay that cost
+		// on the ticks that render nothing.
+		streamingRender();
+		reasoningRender();
+		textChunksRender();
 		conversationStore.messages().length;
 		if (messageListRef) {
 			messageListRef.scrollTop = messageListRef.scrollHeight;
@@ -545,6 +583,10 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 	};
 
 	// ── Run code in active terminal ────────────────────────────────────────
+	// DEFERRED (2026-08-18) — no-op in a detached window. Unlike sending, this
+	// needs the terminal's live xterm `ref`, a JS object that cannot cross a
+	// WebView boundary; it would have to go back to the main window as a
+	// panel-action. Logs "terminal ref not found" until then.
 	const runCodeInTerminal = async (code: string) => {
 		const sessionId = activeSessionId();
 		if (!sessionId) {
@@ -797,16 +839,16 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 						<details class={s.reasoningDisclosure} open={conversationStore.isThinking()}>
 							<summary class={s.reasoningSummary}>Thinking</summary>
 							<div class={s.reasoningBody}>
-								<MarkdownContent content={conversationStore.reasoningChunks()} />
+								<MarkdownContent content={reasoningRender()} streaming />
 							</div>
 						</details>
 					</Show>
 
 					{/* Streaming text: render as markdown so formatting is progressive */}
-					<Show when={conversationStore.isStreaming() && conversationStore.streamingText()}>
+					<Show when={conversationStore.isStreaming() && streamingRender()}>
 						{(text) => (
 							<div class={s.assistantMsg}>
-								<MarkdownContent content={text()} />
+								<MarkdownContent content={text()} streaming />
 							</div>
 						)}
 					</Show>
@@ -821,7 +863,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 					{/* Agent text output */}
 					<Show when={conversationStore.textChunks()}>
 						<div class={s.assistantMsg}>
-							<MarkdownContent content={conversationStore.textChunks()!} />
+							<MarkdownContent content={textChunksRender()} streaming />
 						</div>
 					</Show>
 				</Show>

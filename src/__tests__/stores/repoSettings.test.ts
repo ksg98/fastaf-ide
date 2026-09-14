@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createEffect, createRoot } from "solid-js";
+import { createStore } from "solid-js/store";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testInScope, testInScopeAsync } from "../helpers/store";
 
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
@@ -7,19 +9,30 @@ vi.mock("@tauri-apps/api/core", () => ({
 	invoke: mockInvoke,
 }));
 
-// Mock repoDefaultsStore so getEffective tests are deterministic
-const mockDefaults = {
+// Mock repoDefaultsStore so getEffective tests are deterministic. It is a real
+// Solid store, not a plain object, so tests can observe which reads actually
+// subscribe to it.
+const [mockDefaults, setMockDefaults] = createStore({
 	baseBranch: "automatic",
 	copyIgnoredFiles: false,
 	copyUntrackedFiles: false,
 	setupScript: "",
 	runScript: "",
 	archiveScript: "",
-};
+});
 
 vi.mock("../../stores/repoDefaults", () => ({
 	repoDefaultsStore: { state: mockDefaults },
 }));
+
+/** The entry for `path` in the most recent `save_repo_settings` call. */
+function lastSavedEntry(path: string): Record<string, unknown> {
+	const calls = mockInvoke.mock.calls.filter(([name]) => name === "save_repo_settings");
+	const call = calls[calls.length - 1];
+	if (!call) throw new Error("save_repo_settings was never called");
+	const repos = (call[1] as { config: { repos: Record<string, Record<string, unknown>> } }).config.repos;
+	return repos[path];
+}
 
 describe("repoSettingsStore", () => {
 	let store: typeof import("../../stores/repoSettings").repoSettingsStore;
@@ -30,7 +43,7 @@ describe("repoSettingsStore", () => {
 		localStorage.clear();
 
 		// Reset mock defaults to known state
-		Object.assign(mockDefaults, {
+		setMockDefaults({
 			baseBranch: "automatic",
 			copyIgnoredFiles: false,
 			copyUntrackedFiles: false,
@@ -143,7 +156,7 @@ describe("repoSettingsStore", () => {
 				store.getOrCreate("/repo", "my-repo");
 				store.update("/repo", { baseBranch: "main", copyIgnoredFiles: true });
 
-				mockDefaults.baseBranch = "develop"; // global default is different
+				setMockDefaults("baseBranch", "develop"); // global default is different
 				const effective = store.getEffective("/repo");
 				expect(effective).toBeDefined();
 				expect(effective!.baseBranch).toBe("main"); // repo override wins
@@ -155,7 +168,7 @@ describe("repoSettingsStore", () => {
 			testInScope(() => {
 				store.getOrCreate("/repo", "my-repo");
 				// baseBranch is null (inherit) but global says "develop"
-				mockDefaults.baseBranch = "develop";
+				setMockDefaults("baseBranch", "develop");
 				const effective = store.getEffective("/repo");
 				expect(effective).toBeDefined();
 				expect(effective!.baseBranch).toBe("develop");
@@ -183,7 +196,7 @@ describe("repoSettingsStore", () => {
 		it("returns archiveScript from global default when not overridden", () => {
 			testInScope(() => {
 				store.getOrCreate("/repo", "my-repo");
-				mockDefaults.archiveScript = "cleanup.sh";
+				setMockDefaults("archiveScript", "cleanup.sh");
 				const effective = store.getEffective("/repo");
 				expect(effective!.archiveScript).toBe("cleanup.sh");
 			});
@@ -193,7 +206,7 @@ describe("repoSettingsStore", () => {
 			testInScope(() => {
 				store.getOrCreate("/repo", "my-repo");
 				store.update("/repo", { archiveScript: "my-cleanup.sh" });
-				mockDefaults.archiveScript = "global-cleanup.sh";
+				setMockDefaults("archiveScript", "global-cleanup.sh");
 				const effective = store.getEffective("/repo");
 				expect(effective!.archiveScript).toBe("my-cleanup.sh");
 			});
@@ -364,26 +377,81 @@ describe("repoSettingsStore", () => {
 		});
 	});
 
-	describe("hydrate()", () => {
+	// `RepoSettingsEntry` in config.rs is snake_case with `#[serde(default)]` on
+	// every field, so a camelCase key is not rejected — it is dropped, and the
+	// override reads as unset. These tests pin the wire shape on both directions;
+	// getting it wrong loses every per-repo override on restart, silently.
+	describe("wire format (snake_case)", () => {
 		it("loads settings from Rust backend", async () => {
 			mockInvoke.mockResolvedValueOnce({
 				repos: {
 					"/repo": {
 						path: "/repo",
-						displayName: "my-repo",
-						baseBranch: "main",
-						copyIgnoredFiles: null,
-						copyUntrackedFiles: null,
-						setupScript: null,
-						runScript: null,
+						display_name: "my-repo",
+						base_branch: "main",
+						prompt_on_create: false,
+						auto_fetch_interval_minutes: 15,
+						copy_ignored_files: null,
+						branch_labels: { my_feature: "My Feature" },
 					},
 				},
 			});
 
 			await testInScopeAsync(async () => {
 				await store.hydrate();
+				expect(store.get("/repo")?.displayName).toBe("my-repo");
 				expect(store.get("/repo")?.baseBranch).toBe("main");
+				expect(store.get("/repo")?.promptOnCreate).toBe(false);
+				expect(store.get("/repo")?.autoFetchIntervalMinutes).toBe(15);
+				expect(store.get("/repo")?.copyIgnoredFiles).toBeNull();
+				// The map is keyed by branch name — those keys are user data.
+				expect(store.get("/repo")?.branchLabels).toEqual({ my_feature: "My Feature" });
 				expect(mockInvoke).toHaveBeenCalledWith("load_repo_settings");
+			});
+		});
+
+		it("fills a key the backend omitted", async () => {
+			// `branch_labels` and `mcp_upstreams` are skipped when empty.
+			mockInvoke.mockResolvedValueOnce({ repos: { "/repo": { path: "/repo", color: "" } } });
+
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.get("/repo")?.branchLabels).toEqual({});
+				expect(store.get("/repo")?.mcpUpstreams).toBeNull();
+			});
+		});
+
+		it("saves every override under the name the backend reads", () => {
+			testInScope(() => {
+				store.getOrCreate("/repo", "my-repo");
+				mockInvoke.mockClear();
+				store.update("/repo", { promptOnCreate: false, deleteBranchOnRemove: true, autoFetchIntervalMinutes: 5 });
+
+				const entry = lastSavedEntry("/repo");
+				expect(entry).toMatchObject({
+					path: "/repo",
+					display_name: "my-repo",
+					prompt_on_create: false,
+					delete_branch_on_remove: true,
+					auto_fetch_interval_minutes: 5,
+				});
+				// No camelCase key may survive: serde would drop it without a word.
+				expect(Object.keys(entry).filter((k) => /[A-Z]/.test(k))).toEqual([]);
+			});
+		});
+
+		it("round-trips an override through the wire shape", async () => {
+			testInScope(() => {
+				store.getOrCreate("/repo", "my-repo");
+				mockInvoke.mockClear();
+				store.update("/repo", { promptOnCreate: false });
+			});
+			const saved = lastSavedEntry("/repo");
+
+			mockInvoke.mockResolvedValueOnce({ repos: { "/repo": saved } });
+			await testInScopeAsync(async () => {
+				await store.hydrate();
+				expect(store.get("/repo")?.promptOnCreate).toBe(false);
 			});
 		});
 
@@ -400,6 +468,114 @@ describe("repoSettingsStore", () => {
 			await testInScopeAsync(async () => {
 				await store.hydrate();
 				expect(localStorage.getItem("tui-commander-repo-settings")).toBeNull();
+				// The migration writes the wire shape too, or it hands the backend an
+				// entry it reads as empty and the old settings are gone for good.
+				expect(mockInvoke).toHaveBeenCalledWith("save_repo_settings", {
+					config: { repos: { "/repo": { path: "/repo", display_name: "my-repo", base_branch: "main" } } },
+				});
+			});
+		});
+	});
+	// ---- Per-field access (F73) ----
+	//
+	// getEffective() reads ~50 signals across four stores and allocates a
+	// 24-field object. Call sites that want one field (a branch label, a
+	// terminalMetaHotkeys flag) must not wake on every one of those.
+
+	describe("per-field effective access", () => {
+		let dispose: (() => void) | undefined;
+
+		afterEach(() => {
+			dispose?.();
+			dispose = undefined;
+		});
+
+		const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+
+		it("reading one field does not subscribe to unrelated global defaults", async () => {
+			store.getOrCreate("/repo", "my-repo");
+			let runs = 0;
+
+			createRoot((d) => {
+				dispose = d;
+				createEffect(() => {
+					// terminalMetaHotkeys resolves from the repo field alone.
+					void store.getEffectiveField("/repo", "terminalMetaHotkeys");
+					runs++;
+				});
+			});
+			await flush();
+			runs = 0;
+
+			// A default this field never consults.
+			setMockDefaults("baseBranch", "develop");
+			await flush();
+
+			expect(runs).toBe(0);
+		});
+
+		// The contrast that motivates getEffectiveField: the same one-field read
+		// through getEffective wakes on a default the field never consults,
+		// because getEffective touches all 53 properties on every call.
+		it("getEffective wakes a one-field reader on an unrelated default", async () => {
+			store.getOrCreate("/repo", "my-repo");
+			let runs = 0;
+
+			createRoot((d) => {
+				dispose = d;
+				createEffect(() => {
+					void store.getEffective("/repo")?.terminalMetaHotkeys;
+					runs++;
+				});
+			});
+			await flush();
+			runs = 0;
+
+			setMockDefaults("baseBranch", "develop");
+			await flush();
+
+			expect(runs).toBe(1);
+		});
+
+		it("still wakes when the field's own inheritance chain changes", async () => {
+			store.getOrCreate("/repo", "my-repo");
+			let seen: string | undefined;
+			let runs = 0;
+
+			createRoot((d) => {
+				dispose = d;
+				createEffect(() => {
+					seen = store.getEffectiveField("/repo", "baseBranch");
+					runs++;
+				});
+			});
+			await flush();
+			expect(seen).toBe("automatic");
+			runs = 0;
+
+			setMockDefaults("baseBranch", "develop");
+			await flush();
+
+			expect(runs).toBe(1);
+			expect(seen).toBe("develop");
+		});
+
+		it("agrees with getEffective on every field", () => {
+			testInScope(() => {
+				store.getOrCreate("/repo", "my-repo");
+				store.update("/repo", { baseBranch: "main", color: "#fff", autoFetchIntervalMinutes: 7 });
+				setMockDefaults("archiveScript", "cleanup.sh");
+
+				const effective = store.getEffective("/repo")!;
+				for (const key of Object.keys(effective) as (keyof typeof effective)[]) {
+					expect(store.getEffectiveField("/repo", key)).toEqual(effective[key]);
+				}
+			});
+		});
+
+		it("returns undefined for an unknown repo", () => {
+			testInScope(() => {
+				expect(store.getEffectiveField("/unknown", "baseBranch")).toBeUndefined();
 			});
 		});
 	});

@@ -109,6 +109,19 @@ describe("McpPopup", () => {
 		expect(nameTexts).toContain("beta");
 	});
 
+	it("sends 'Manage in Settings' straight to the upstream MCP block", async () => {
+		const { SETTINGS_SECTION_UPSTREAM_MCP } = await import("../../components/SettingsPanel/sections");
+		const { container } = render(() => <McpPopup onOpenSettings={mockOnOpenSettings} />);
+
+		const link = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Manage in Settings");
+		expect(link).toBeDefined();
+		(link as HTMLElement).click();
+
+		// Without the section the tab opens at the top and the block is off-screen.
+		expect(mockOnOpenSettings).toHaveBeenCalledWith("services", SETTINGS_SECTION_UPSTREAM_MCP);
+		expect(mockClose).toHaveBeenCalled();
+	});
+
 	describe("per-project toggle", () => {
 		it("renders project toggle when projectAllowlist is set (active repo)", () => {
 			mockState.projectAllowlist = ["alpha"];

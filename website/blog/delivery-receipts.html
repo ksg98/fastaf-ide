@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>"ok" was a lie: shipping delivery receipts for agent messaging — FastAF Blog</title>
+  <meta name="description" content="We shipped agent-to-agent messaging. Then an orchestrator's reply vanished while both sides believed it had been delivered. What we got wrong about acknowledging a message whose recipient is an LLM in a terminal." />
+
+  <meta property="og:title" content="&quot;ok&quot; was a lie — FastAF" />
+  <meta property="og:description" content="A post-mortem on message delivery when the endpoint is an AI agent in a terminal." />
+  <meta property="og:type" content="article" />
+
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/style.css" />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PCXPSMR9JZ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-PCXPSMR9JZ');
+  </script>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container nav-inner">
+      <a href="/" class="nav-logo">
+        <img src="/logo.png" alt="FastAF" width="28" height="28" />
+        <span>FastAF</span>
+      </a>
+      <div class="nav-links">
+        <a href="/#features">Features</a>
+        <a href="/blog.html" class="nav-active">Blog</a>
+        <a href="/#faq">FAQ</a>
+        <a href="https://github.com/sstraus/tuicommander/releases/latest" class="btn btn-primary btn-sm" rel="noopener noreferrer">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <article class="blog-post">
+    <header class="blog-post-header">
+      <a href="/blog.html" class="blog-back">&larr; Blog</a>
+      <time>August 5, 2026</time>
+      <h1>"ok" was a lie</h1>
+      <p class="blog-post-summary">We shipped <a href="/blog/agent-messaging.html">agent-to-agent messaging</a> and it worked. Then an orchestrator's reply vanished while both sides believed delivery had happened. This is what we got wrong about acknowledging a message whose recipient is an LLM sitting in a terminal.</p>
+    </header>
+
+    <div class="blog-section">
+      <h2>The bug that started it</h2>
+      <p>An orchestrator sends a worker its next assignment. The API answers <code>{ ok: true, accepted: true }</code>. The worker never does the work. Nobody errors, nobody retries, nothing is logged as wrong. The orchestrator waits for a result that is never coming, and the whole run quietly stalls.</p>
+      <p>The message was in the inbox. It just wasn't going anywhere, because the recipient had no terminal behind it, no active wait, and no channel — nothing that would ever cause it to look. <code>accepted</code> was true in the only sense we had implemented: we had accepted it. The sender read it as "delivered", which is the only sense they cared about.</p>
+      <p>That's the whole post, really. Everything below is us learning it properly.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Storage acknowledgement is not delivery acknowledgement</h2>
+      <p>Our inbox is a durable FIFO queue, and writing to it always succeeds. So <code>ok</code> was structurally incapable of being false, which makes it structurally incapable of carrying information. It was a receipt for the wrong event.</p>
+      <p>The sender has exactly one question: <em>will anything cause this to be seen?</em> That's now a field of its own. <code>delivered</code> is true when a waiter consumed the message, the channel pushed it, or the terminal typed it — three different routes that all end with the recipient encountering the text. It's false in exactly one case, <code>inbox_only</code>: no waiter, no channel, no live terminal. Then it sits unread until the recipient thinks to poll.</p>
+      <p>And when it's false, the response carries a <code>warning</code> in plain language — that the recipient has no terminal and nothing will wake it, that the message stays put until it calls <code>inbox</code> or <code>wait</code>, and that you should not block on an answer. The reader of that field is a language model. Writing "inbox_only: true" and expecting the right inference is optimistic; writing the consequence and the way out is not.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>The field we deleted twice</h2>
+      <p>The original response also had <code>delivered_via_channel</code>, a boolean reporting whether the SSE push had fired. It is, narrowly, a true fact. It was also the single most misread thing we have ever shipped.</p>
+      <p>Look at when it's false. A waiter grabbed the message the instant it arrived: <code>false</code>. The terminal typed it straight into the agent: <code>false</code>. Those are the <em>best possible outcomes</em>. The flag reports one sub-route, but its name reads like a verdict, so <code>false</code> next to a perfectly successful send was pure ambiguity — and readers acted on it. We have an internal recovery note that had to be written down after an incident, and one of its rules is literally <em>never infer non-start from <code>delivered_via_channel:false</code></em>. When you need a written rule telling people how not to be misled by a field, the field is the bug.</p>
+      <p>So we removed it from the send response and replaced it with <code>delivery_path</code>, which names what actually happened — <code>waiter_and_inbox</code>, <code>sse_channel_and_inbox</code>, <code>terminal_or_queued_and_inbox</code>, <code>inbox_only</code> — and subsumes the SSE case rather than singling it out.</p>
+      <p>Then we found it was still there. It lived on the stored message too, so it kept surfacing on <code>inbox</code> and <code>wait</code> — the same trap, now aimed at the recipient, who is by definition already holding the message the flag describes. It's now <code>#[serde(skip)]</code>: still recorded server-side for forensics, present in the log line an operator reads, and gone from every response. Removing a field twice from two different responses is a good sign the original concept was wrong, not just its placement.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>"The session exists" is not a receipt either</h2>
+      <p>The same mistake was hiding one layer down. When we type a message into a recipient's terminal, that call used to report whether the session existed. Existence is not delivery: a busy agent's composer merely <em>parks</em> the text until the current turn ends.</p>
+      <p>The consequences composed badly. Every call site marked the message as terminal-dispatched, and messages owned by the terminal are hidden from waiters — so a message that had never actually been typed was simultaneously not the waiter's problem and not sent. It fell between two layers, both of which believed the other had it.</p>
+      <p>PTY delivery now reports what it did: typed, queued, or unavailable. A queued message stays deliberately pending, visible to a waiter, until it really goes in.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Who is "the recipient", exactly?</h2>
+      <p>A related failure came from one identifier doing two jobs. A peer's identity was both its mailbox address and the handle for its terminal, on the assumption that the two are equal. They never were: PTYs are keyed by a freshly minted UUID while the caller-supplied session id is exported separately.</p>
+      <p>The visible symptom was absurd — an orchestrator running inside a FastAF tab could not be woken by its own subagents. Every send came back inbox-only while still answering ok, and mail piled up unread a few centimetres from someone watching the screen.</p>
+      <p>Delivery now resolves an announced identity to whatever PTY currently backs it, <em>per call</em>. Respawn a terminal and messages follow it without re-registration. Four of the five session-creating paths were injecting no identity at all; all five bind one now. And teardown retires the registration, closing a leak where a self-registered peer outlived its terminal for the rest of the process lifetime.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>Don't interrupt the orchestrator</h2>
+      <p>The last category isn't about lost messages — it's about messages that arrive too well.</p>
+      <p>Typing into an agent's terminal is a genuinely great delivery mechanism: the agent picks the work up on its next turn without polling. It's also an interruption. Do it to a parent that is mid-thought and you've injected a child's result into the middle of its reasoning, steering it away from what it was doing.</p>
+      <p>So the rules for an orchestrator are deliberately different. An active <code>wait</code> owns delivery when there is one. Otherwise a parent that is <em>authoritatively</em> idle or completed gets a single coalesced, payload-free notice: you have mail, call <code>inbox</code>. Working, awaiting, starting, missing and unknown all fail closed to inbox-only. Failing closed matters — "unknown state" resolving to "go ahead and type into it" is how you corrupt a run you can't reproduce.</p>
+      <p>Even the retries are bounded. A payload-free wake whose terminal write was uncertain used to expire every five seconds and retry forever. Each unread group now gets its initial wake plus at most one retry; after that the mail stays in the inbox until a real read clears it. An infinite retry loop against an uncertain signal is just a slower way of interrupting someone constantly.</p>
+    </div>
+
+    <div class="blog-section">
+      <h2>What we'd do differently</h2>
+      <p>Every one of these bugs has the same shape: <strong>a field that describes what our code did, presented where the reader wanted to know what happened to the message.</strong> <code>ok</code> described a queue write. <code>delivered_via_channel</code> described a branch we took. "Session exists" described a lookup. All three were true statements, and all three were read as delivery receipts, because that's the question the caller had.</p>
+      <p>Two things we'd carry into any system like this:</p>
+      <p><strong>Name fields after the reader's question, not the implementation's answer.</strong> If the caller wants to know "will this be seen", ship <code>delivered</code>. A field whose correct interpretation needs a paragraph of documentation will be misinterpreted, and no amount of docs fixes it.</p>
+      <p><strong>Remember the client is a language model.</strong> It won't cross-reference four fields to reconstruct your intent — it reads the one whose name matches its question and acts. That makes ambiguity in an agent-facing API more dangerous than in a human-facing one: a human gets confused and asks; a model gets confident and proceeds.</p>
+    </div>
+  </article>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-links">
+        <a href="https://github.com/sstraus/tuicommander" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/sstraus/tuicommander/releases" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/FEATURES.md" rel="noopener noreferrer">Docs</a>
+        <a href="https://github.com/sstraus/tuicommander/blob/main/docs/plugins.md" rel="noopener noreferrer">Plugin API</a>
+      </div>
+      <p>Apache License 2.0 &copy; 2026 Stefano Straus</p>
+      <p class="footer-tech">Built with Rust, Tauri v2, SolidJS</p>
+    </div>
+  </footer>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

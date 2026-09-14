@@ -1,3 +1,4 @@
+import { createEffect } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../mocks/tauri";
 import { listen as tauriListen } from "@tauri-apps/api/event";
@@ -75,6 +76,7 @@ describe("githubStore", () => {
 			author: "alice",
 			commits: 3,
 			mergeable: "MERGEABLE",
+			conflict_state: "clear" as const,
 			merge_state_status: "CLEAN",
 			review_decision: "",
 			viewer_did_approve: false,
@@ -124,6 +126,55 @@ describe("githubStore", () => {
 				expect(Object.keys(store.state.repos["/repo1"].branches)).toHaveLength(2);
 				expect(store.state.repos["/repo1"].branches["feature/x"].number).toBe(42);
 				expect(store.state.repos["/repo1"].branches["fix/y"].number).toBe(43);
+			});
+		});
+
+		/**
+		 * The poller re-sends every branch on every cycle, and each PR arrives as
+		 * a fresh object from IPC deserialization. Installing it wholesale gave
+		 * every nested field a new identity, so every subscriber of every branch
+		 * woke on every poll even when nothing about that PR had changed.
+		 */
+		it("leaves an unchanged PR's identity alone across polls", () => {
+			testInScope(() => {
+				store.updateRepoData("/repo1", [makePrStatus({ branch: "feature/x", number: 42 })]);
+				const before = store.state.repos["/repo1"].branches["feature/x"];
+				const beforeChecks = before.check_details;
+
+				store.updateRepoData("/repo1", [makePrStatus({ branch: "feature/x", number: 42 })]);
+				const after = store.state.repos["/repo1"].branches["feature/x"];
+				expect(after).toBe(before);
+				expect(after.check_details).toBe(beforeChecks);
+			});
+		});
+
+		it("still applies a PR that really changed", () => {
+			testInScope(() => {
+				store.updateRepoData("/repo1", [makePrStatus({ branch: "feature/x", number: 42, title: "Old title" })]);
+				store.updateRepoData("/repo1", [makePrStatus({ branch: "feature/x", number: 42, title: "New title" })]);
+				expect(store.state.repos["/repo1"].branches["feature/x"].title).toBe("New title");
+			});
+		});
+
+		it("does not wake a branch subscriber when its PR did not change", () => {
+			testInScope(() => {
+				store.updateRepoData("/repo1", [
+					makePrStatus({ branch: "feature/x", number: 42 }),
+					makePrStatus({ branch: "fix/y", number: 43 }),
+				]);
+				let runs = 0;
+				createEffect(() => {
+					store.state.repos["/repo1"].branches["feature/x"]?.title;
+					runs++;
+				});
+				const baseline = runs;
+
+				// Only the other branch moves.
+				store.updateRepoData("/repo1", [
+					makePrStatus({ branch: "feature/x", number: 42 }),
+					makePrStatus({ branch: "fix/y", number: 43, title: "Changed" }),
+				]);
+				expect(runs).toBe(baseline);
 			});
 		});
 

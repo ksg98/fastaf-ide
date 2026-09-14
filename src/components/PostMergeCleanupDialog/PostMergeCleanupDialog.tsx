@@ -20,8 +20,10 @@ export interface PostMergeCleanupDialogProps {
 	isOnBaseBranch: boolean;
 	isDefaultBranch: boolean;
 	hasTerminals: boolean;
-	/** Working directory has uncommitted changes */
+	/** Base repo working directory has uncommitted changes — the "switch" step stashes them */
 	hasDirtyFiles?: boolean;
+	/** The branch's own worktree has uncommitted changes — archiving or deleting it destroys them */
+	worktreeDirty?: boolean;
 	onExecute: (steps: CleanupStep[], options?: { unstash?: boolean }) => void;
 	onSkip: () => void;
 	/** When true, checkboxes and buttons are disabled */
@@ -170,6 +172,13 @@ export const PostMergeCleanupDialog: Component<PostMergeCleanupDialogProps> = (p
 												</span>
 											</Show>
 										</div>
+										<Show when={step.id === "worktree" && step.checked && props.worktreeDirty}>
+											<div class={s.dirtyWarning} data-testid="worktree-dirty-warning">
+												{props.worktreeAction === "delete"
+													? `The ${props.branchName} worktree has uncommitted changes. Deleting it removes the directory — that work is lost.`
+													: `The ${props.branchName} worktree has uncommitted changes. They move to __archived/ with it.`}
+											</div>
+										</Show>
 										<Show when={step.id === "switch" && step.checked && props.hasDirtyFiles}>
 											<div class={s.dirtyWarning} data-testid="dirty-warning">
 												Uncommitted changes will be stashed before switching.

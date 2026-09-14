@@ -67,6 +67,7 @@ function makeOptions(overrides: Partial<AppBootstrapOptions> = {}): AppBootstrap
 		restoreDetachedPanels: vi.fn(),
 		setWhatsNewVersion: vi.fn(),
 		openSettings: vi.fn(),
+		openRepoPath: vi.fn().mockResolvedValue(undefined),
 		confirm: vi.fn().mockResolvedValue(false),
 		...overrides,
 	};
@@ -109,6 +110,23 @@ describe("runAppBootstrap", () => {
 		expect(mockRegistryFetch).toHaveBeenCalledOnce();
 		expect(options.setWhatsNewVersion).toHaveBeenCalledWith("2.0.0");
 		expect(mockDeepLink).toHaveBeenCalledWith(expect.objectContaining({ openSettings: options.openSettings }));
+	});
+
+	it("starts agent detection only after splash-gating hydration completes", async () => {
+		const detectAgents = vi.fn().mockResolvedValue(undefined);
+		let detectionRanDuringHydration = false;
+		mockInitApp.mockImplementationOnce(async (deps) => {
+			const hydration = deps.stores.hydrate();
+			await Promise.resolve();
+			detectionRanDuringHydration = detectAgents.mock.calls.length > 0;
+			await hydration;
+		});
+
+		await runAppBootstrap(makeOptions({ detectAgents }));
+		await flushPromises();
+
+		expect(detectionRanDuringHydration).toBe(false);
+		expect(detectAgents).toHaveBeenCalledOnce();
 	});
 
 	it("offers and installs the CLI only for a first-run native user", async () => {

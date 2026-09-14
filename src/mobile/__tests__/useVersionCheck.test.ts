@@ -193,4 +193,49 @@ describe("useVersionCheck", () => {
 			dispose();
 		});
 	});
+
+	/** Swap `document.visibilityState` and fire the matching event. */
+	function setVisibility(state: "visible" | "hidden") {
+		Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+		document.dispatchEvent(new Event("visibilitychange"));
+	}
+
+	it("stops polling /api/version while the page is hidden", async () => {
+		const useVersionCheck = await importFresh();
+
+		await createRoot(async (dispose) => {
+			useVersionCheck();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(fetch).toHaveBeenCalledTimes(1); // initial check
+
+			setVisibility("hidden");
+			await vi.advanceTimersByTimeAsync(600_000); // ten check intervals
+
+			expect(fetch).toHaveBeenCalledTimes(1);
+
+			setVisibility("visible");
+			dispose();
+		});
+	});
+
+	it("checks the version immediately when the page becomes visible again", async () => {
+		const useVersionCheck = await importFresh();
+
+		await createRoot(async (dispose) => {
+			useVersionCheck();
+			await vi.advanceTimersByTimeAsync(0);
+
+			setVisibility("hidden");
+			await vi.advanceTimersByTimeAsync(600_000);
+			expect(fetch).toHaveBeenCalledTimes(1);
+
+			// A rebuild may have landed while hidden — find out at once, so the
+			// update banner is not a minute late.
+			setVisibility("visible");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(fetch).toHaveBeenCalledTimes(2);
+
+			dispose();
+		});
+	});
 });

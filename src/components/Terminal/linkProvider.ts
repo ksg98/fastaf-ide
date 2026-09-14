@@ -20,3 +20,53 @@ export function filePathRegex(): RegExp {
 export function fileUrlRegex(): RegExp {
 	return /\bfile:\/\/(\/[^\s"'`<>()[\]{}]+)/g;
 }
+
+/** Factory — returns a fresh http/https URL regex. */
+export function webUrlRegex(): RegExp {
+	return /https?:\/\/[^\s<>"{}|\\^`[\]]+/g;
+}
+
+/** Punctuation that ends a sentence rather than a URL. A terminal prints URLs
+ *  inside prose — `see http://host:5000, then …` — and every one of these is
+ *  legal in a URL, so the greedy match swallows it and `new URL()` then rejects
+ *  the whole thing as malformed. The click silently did nothing. */
+const SENTENCE_TAIL = new Set([".", ",", ";", ":", "!", "?", "'"]);
+
+/** Drop trailing punctuation the surrounding sentence owns, not the URL.
+ *  `)` is kept when the URL opened it — wiki links carry balanced parens. */
+function trimUrlTail(url: string): string {
+	let end = url.length;
+	while (end > 0) {
+		const last = url[end - 1];
+		if (SENTENCE_TAIL.has(last)) {
+			end--;
+			continue;
+		}
+		if (last === ")") {
+			const body = url.slice(0, end);
+			const opened = body.split("(").length - 1;
+			const closed = body.split(")").length - 1;
+			if (closed > opened) {
+				end--;
+				continue;
+			}
+		}
+		break;
+	}
+	return url.slice(0, end);
+}
+
+/** Every http/https URL in `text`, with sentence punctuation trimmed off.
+ *  Single source of truth so the underlined span and the URL the click opens
+ *  can never disagree. */
+export function matchWebUrls(text: string): { text: string; index: number }[] {
+	const re = webUrlRegex();
+	const found: { text: string; index: number }[] = [];
+	let match: RegExpExecArray | null;
+	while ((match = re.exec(text)) !== null) {
+		const trimmed = trimUrlTail(match[0]);
+		// Trimming can leave a bare scheme (`http://,`) — that is not a link.
+		if (/^https?:\/\/[^/]/.test(trimmed)) found.push({ text: trimmed, index: match.index });
+	}
+	return found;
+}

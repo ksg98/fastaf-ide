@@ -1,4 +1,4 @@
-import { type Component, createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { type Component, createEffect, createSignal, onCleanup, onMount, Show, untrack } from "solid-js";
 import { invoke } from "../../invoke";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
 import { appLogger } from "../../stores/appLogger";
@@ -9,6 +9,7 @@ import { repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
 import { terminalsStore } from "../../stores/terminals";
 import { toastsStore } from "../../stores/toasts";
+import { themeGeneration } from "../../themes";
 import { writeClipboard } from "../../utils/clipboard";
 import { attachIframeKeyForwarder } from "../../utils/iframeKeyForwarder";
 import { IFRAME_SEARCH_SCRIPT } from "../../utils/iframeSearch";
@@ -21,41 +22,77 @@ import { TUIC_SDK_SCRIPT, TUIC_SDK_VERSION } from "./tuicSdk";
 export interface PluginPanelProps {
 	tab: PluginPanelTab;
 	onClose?: () => void;
+	/**
+	 * Whether this panel is the one on screen. Every plugin panel ever opened
+	 * stays mounted behind `display:none` — unmounting would throw away the
+	 * iframe's scroll, focus and JS state, which is the whole reason a panel is
+	 * worth keeping — so the host gates what it pushes at the hidden ones
+	 * instead. Absent (detached windows, previews) means always visible.
+	 */
+	visible?: () => boolean;
 }
 
+/** The `:root` custom properties a plugin iframe is allowed to see. */
+const THEME_VAR_PREFIXES = [
+	"--bg-",
+	"--fg-",
+	"--border",
+	"--accent",
+	"--error",
+	"--warning",
+	"--success",
+	"--ring-",
+	"--text-",
+	"--surface-",
+	"--highlight-",
+	"--shadow-",
+	"--radius-",
+	"--blur-",
+	"--ring-",
+	"--text-",
+];
+
+interface ThemeSnapshot {
+	generation: number;
+	/** `<style>:root{…}</style>` for srcdoc injection, "" when nothing matched. */
+	css: string;
+	/** The same values keyed as `bgPrimary` for SDK delivery. */
+	object: Record<string, string>;
+}
+
+let themeCache: ThemeSnapshot | undefined;
+
 /**
- * Extract CSS custom properties from the app's :root for injection into iframe.
- * Only vars matching the prefix allowlist below are forwarded — new token axes
- * must be added there or plugins never see them.
+ * The app's `:root` theme variables, in both shapes a plugin needs.
+ *
+ * Reading them means walking every rule of every stylesheet, and the answer
+ * only changes when applyAppTheme rewrites the root properties — so the walk
+ * happens once per theme generation and every panel shares the result. It used
+ * to run twice per update per panel, once for each shape.
+ *
+ * The generation is read untracked on purpose: this runs inside the srcdoc
+ * effect, and tracking it there would rebuild srcdoc — a full iframe reload —
+ * on every theme switch. A live panel learns about theme changes over
+ * postMessage instead.
  */
-function extractThemeVars(): string {
+function themeSnapshot(): ThemeSnapshot {
+	const generation = untrack(themeGeneration);
+	if (themeCache?.generation === generation) return themeCache;
+
 	const root = getComputedStyle(document.documentElement);
 	const vars: string[] = [];
-	const prefixes = [
-		"--bg-",
-		"--fg-",
-		"--border",
-		"--accent",
-		"--error",
-		"--warning",
-		"--success",
-		"--ring-",
-		"--text-",
-		"--surface-",
-		"--highlight-",
-		"--shadow-",
-		"--radius-",
-		"--blur-",
-	];
+	const object: Record<string, string> = {};
 	for (const sheet of document.styleSheets) {
 		try {
 			for (const rule of sheet.cssRules) {
 				if (rule instanceof CSSStyleRule && rule.selectorText === ":root") {
 					for (let i = 0; i < rule.style.length; i++) {
 						const prop = rule.style[i];
-						if (prefixes.some((p) => prop.startsWith(p))) {
-							vars.push(`${prop}:${root.getPropertyValue(prop).trim()}`);
-						}
+						if (!THEME_VAR_PREFIXES.some((p) => prop.startsWith(p))) continue;
+						const value = root.getPropertyValue(prop).trim();
+						vars.push(`${prop}:${value}`);
+						// Convert --bg-primary to bgPrimary for JS-friendly access
+						object[prop.replace(/^--/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
 					}
 				}
 			}
@@ -63,50 +100,18 @@ function extractThemeVars(): string {
 			// Cross-origin stylesheets cannot be read — skip silently
 		}
 	}
-	return vars.length > 0 ? `<style>:root{${vars.join(";")}}</style>` : "";
+
+	themeCache = {
+		generation,
+		css: vars.length > 0 ? `<style>:root{${vars.join(";")}}</style>` : "",
+		object,
+	};
+	return themeCache;
 }
 
 /** Extract theme vars as a plain object for SDK delivery */
 function extractThemeObject(): Record<string, string> {
-	const root = getComputedStyle(document.documentElement);
-	const theme: Record<string, string> = {};
-	// Keep in lockstep with extractThemeVars above — the SDK theme object and
-	// the injected CSS vars must expose the same vocabulary.
-	const prefixes = [
-		"--bg-",
-		"--fg-",
-		"--border",
-		"--accent",
-		"--error",
-		"--warning",
-		"--success",
-		"--ring-",
-		"--text-",
-		"--surface-",
-		"--highlight-",
-		"--shadow-",
-		"--radius-",
-		"--blur-",
-	];
-	for (const sheet of document.styleSheets) {
-		try {
-			for (const rule of sheet.cssRules) {
-				if (rule instanceof CSSStyleRule && rule.selectorText === ":root") {
-					for (let i = 0; i < rule.style.length; i++) {
-						const prop = rule.style[i];
-						if (prefixes.some((p) => prop.startsWith(p))) {
-							// Convert --bg-primary to bgPrimary for JS-friendly access
-							const key = prop.replace(/^--/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-							theme[key] = root.getPropertyValue(prop).trim();
-						}
-					}
-				}
-			}
-		} catch {
-			// Cross-origin stylesheets — skip
-		}
-	}
-	return theme;
+	return themeSnapshot().object;
 }
 
 /**
@@ -129,7 +134,7 @@ function extractThemeObject(): Record<string, string> {
  * define CSS vars / add behavior.
  */
 export function injectThemeVars(html: string, selfStyled: boolean): string {
-	const themeStyle = extractThemeVars();
+	const themeStyle = themeSnapshot().css;
 	const baseStyle = selfStyled ? "" : `<style id="tuic-base">${PLUGIN_BASE_CSS}</style>`;
 	const injection = baseStyle + themeStyle + TUIC_SDK_SCRIPT + IFRAME_SEARCH_SCRIPT;
 	const headClose = html.indexOf("</head>");
@@ -187,10 +192,15 @@ export const PluginPanel: Component<PluginPanelProps> = (props) => {
 		menu.openAt(pageX, pageY);
 	};
 
-	/** Resolve a path (absolute or relative) to repo + relPath */
+	/** Resolve a path (absolute or relative) to repo + relPath.
+	 *
+	 *  A relative path is resolved against THIS panel's repo when it has one;
+	 *  only an unscoped panel falls back to the active repo. Resolving against
+	 *  focus alone sent a scoped panel's own links into a foreign repo. */
 	const resolvePathForSdk = (path: string) => {
 		const repos = Object.keys(repositoriesStore.state.repositories);
-		return resolveTuicPath(path, repos, repositoriesStore.state.activeRepoPath);
+		const base = props.tab.repoPath ?? repositoriesStore.state.activeRepoPath;
+		return resolveTuicPath(path, repos, base);
 	};
 
 	/**
@@ -421,16 +431,33 @@ export const PluginPanel: Component<PluginPanelProps> = (props) => {
 		onCleanup(() => pluginRegistry.unregisterPanelSendChannel(tabId));
 	});
 
-	// Broadcast active repo changes to the iframe
+	/** Whether this panel is the one the user is looking at. */
+	const isVisible = () => props.visible?.() ?? true;
+
+	// Let the owning plugin see what the host sees, so it can skip a render that
+	// nobody would look at and catch up when the panel comes back.
+	createEffect(() => pluginRegistry.setPanelVisible(props.tab.id, isVisible()));
+
+	// Broadcast active repo changes to the iframe.
+	//
+	// Both effects below read their source BEFORE bailing out on visibility, so
+	// the bail-out tracks it too: showing the panel re-runs the effect and hands
+	// over the value current at that moment. A hidden panel therefore costs
+	// nothing and still can never be left displaying a stale repo or theme — and
+	// it is handed one value, not a replay of every change it slept through.
 	createEffect(() => {
 		const repoPath = repositoriesStore.state.activeRepoPath ?? null;
+		if (!isVisible()) return;
 		sendToIframe({ type: "tuic:repo-changed", repoPath });
 	});
 
 	// Broadcast theme changes to the iframe
 	createEffect(() => {
-		// Track theme name so the effect re-runs on theme switch
-		void settingsStore.state.theme;
+		// Track the generation, not the theme name: it moves on a hot-reload of the
+		// same theme too, and it moves *after* the new values are on the root — so
+		// the snapshot this effect reads can never be the outgoing theme's.
+		void themeGeneration();
+		if (!isVisible()) return;
 		sendToIframe({ type: "tuic:theme-changed", theme: extractThemeObject() });
 	});
 
@@ -441,6 +468,19 @@ export const PluginPanel: Component<PluginPanelProps> = (props) => {
 	// URL mode: load directly via src= so the page keeps its own CSP
 	// (srcdoc inherits the parent's Tauri CSP, which blocks external resources).
 	// file:// URLs: read via IPC and convert to srcdoc (sandbox blocks file://).
+	//
+	// Writing srcdoc NAVIGATES the iframe: new document, new JS global, and the
+	// scroll position, focus and in-page state of the old one are gone. Two
+	// equality checks keep an unchanged render from paying that — the store skips
+	// a `tabs[id].html` write to the same string, and this signal skips an
+	// identical srcdoc — and PluginPanel.test.tsx locks both in.
+	//
+	// The host deliberately does NOT try to swap the body in place instead. It
+	// cannot do that transparently: innerHTML never runs the <script> tags most
+	// dashboards ship in their body, and it destroys the elements a head script
+	// attached its listeners to. A plugin that wants an incremental update
+	// already has the channel for it — panelHandle.send() to a listener in its
+	// own page, which knows what changed and what to keep.
 	createEffect(() => {
 		const url = props.tab.url;
 		if (url?.startsWith("file://")) {

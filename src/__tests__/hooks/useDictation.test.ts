@@ -11,13 +11,13 @@ function resetStores() {
 }
 
 /** Helper to create a successful TranscribeResponse */
-function transcribeOk(text: string) {
-	return { text, skip_reason: null, duration_s: 1.5 };
+function transcribeOk(text: string, truncatedS = 0) {
+	return { text, skip_reason: null, duration_s: 1.5, truncated_s: truncatedS };
 }
 
 /** Helper to create a skipped TranscribeResponse */
 function transcribeSkipped(reason: string) {
-	return { text: "", skip_reason: reason, duration_s: 0.3 };
+	return { text: "", skip_reason: reason, duration_s: 0.3, truncated_s: 0 };
 }
 
 describe("useDictation", () => {
@@ -177,6 +177,28 @@ describe("useDictation", () => {
 			expect(mockDictationStore.stopRecording).toHaveBeenCalled();
 			expect(mockPty.write).toHaveBeenCalledWith("sess-1", "hello world");
 			expect(mockSetStatusInfo).toHaveBeenCalledWith("Ready");
+		});
+
+		it("says the recording was truncated instead of reporting plain success", async () => {
+			const id = terminalsStore.add({
+				sessionId: "sess-trunc",
+				fontSize: 14,
+				name: "Test",
+				cwd: null,
+				awaitingInput: null,
+			});
+			terminalsStore.setActive(id);
+			mockDictationStore.stopRecording.mockResolvedValueOnce(transcribeOk("tail of a long recording", 42.4));
+
+			await dictation.handleDictationStart();
+			await dictation.handleDictationStop();
+
+			// The text still lands — it is the part that was transcribed.
+			expect(mockPty.write).toHaveBeenCalledWith("sess-trunc", "tail of a long recording");
+			expect(mockSetStatusInfo).toHaveBeenCalledWith(
+				"Dictation: recording too long — the first 42s were not transcribed",
+			);
+			expect(mockSetStatusInfo).not.toHaveBeenCalledWith("Ready");
 		});
 
 		it("does nothing when not recording and no pending start", async () => {

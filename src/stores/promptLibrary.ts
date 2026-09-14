@@ -1,4 +1,4 @@
-import { createMemo } from "solid-js";
+import { createMemo, createRoot } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { AGENT_TYPES } from "../agents";
 import { SMART_PROMPTS_BUILTIN } from "../data/smartPromptsBuiltIn";
@@ -326,7 +326,11 @@ function createPromptLibraryStore() {
 		},
 
 		/** Get enabled smart prompts (built-in tagged "smart" or any prompt with a placement), sorted by category then name (memoized) */
-		getSmartPrompts: (() => {
+		// The store is a module-scope singleton, so this memo is created with no
+		// owner. createRoot gives it one — without it SolidJS warns "computations
+		// created outside a createRoot or render will never be disposed". The root
+		// is never disposed on purpose: it lives as long as the singleton.
+		getSmartPrompts: createRoot(() => {
 			const memo = createMemo(() =>
 				Object.values(state.prompts)
 					.filter((p) => p.enabled !== false && (p.tags?.includes("smart") || (p.placement && p.placement.length > 0)))
@@ -336,7 +340,7 @@ function createPromptLibraryStore() {
 					}),
 			);
 			return () => memo();
-		})(),
+		}),
 
 		/** Get enabled smart prompts for a specific UI placement */
 		getSmartByPlacement(placement: SmartPlacement): SavedPrompt[] {

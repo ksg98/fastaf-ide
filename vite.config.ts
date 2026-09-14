@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import checker from "vite-plugin-checker";
 import { visualizer } from "rollup-plugin-visualizer";
@@ -22,6 +22,21 @@ const gitHash = (() => {
   catch { return "dev"; }
 })();
 
+// Identity endpoint: lets `scripts/dev-server.mjs` tell THIS checkout's dev
+// server apart from another one squatting on port 1421 (a worktree, a stray
+// process). Registered via `server.middlewares.use` so it runs before Vite's
+// internal SPA fallback, which would otherwise answer with index.html.
+const devServerIdentity = (): Plugin => ({
+  name: "tuic-dev-identity",
+  apply: "serve",
+  configureServer(server: ViteDevServer) {
+    server.middlewares.use("/__tuic_dev_root", (_req, res) => {
+      res.setHeader("content-type", "text/plain");
+      res.end(server.config.root);
+    });
+  },
+});
+
 // https://vite.dev/config/
 export default defineConfig(async ({ command }) => ({
   define: {
@@ -36,11 +51,11 @@ export default defineConfig(async ({ command }) => ({
     // mode just type-checks twice — skip it. Speeds up make dev/preview/build.
     ...(command === "serve"
       ? [
+          devServerIdentity(),
           checker({
-            // TypeScript 7 intentionally ships without the JavaScript compiler
-            // API. Keep the native TS7 CLI for builds and use Microsoft's TS6
-            // compatibility package for the checker's watch API.
-            typescript: { typescriptPath: typescriptWatchApi },
+            // vite-plugin-checker 0.14.5+ detects TypeScript 7 and runs its
+            // native CLI because TS7 no longer exposes the JavaScript compiler API.
+            typescript: true,
           }),
         ]
       : []),

@@ -15,6 +15,10 @@ export default defineConfig({
     },
   },
   test: {
+    // App tests only. Plugins ship their own `node:test` suites, which vitest
+    // collects by default and then reports as "no test suite found" — run them
+    // with `pnpm test:plugins` instead.
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
     css: {
       modules: {
         classNameStrategy: "non-scoped",

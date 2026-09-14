@@ -1,5 +1,7 @@
-import { invoke, listen } from "../invoke";
+import { invoke } from "../invoke";
+import { appLogger } from "../stores/appLogger";
 import type { ContentSearchBatch, DirEntry } from "../types/fs";
+import { listenContentSearch, newContentSearchId, startContentSearch } from "../utils/contentSearch";
 
 export interface ContentSearchOptions {
 	caseSensitive?: boolean;
@@ -62,26 +64,47 @@ export function useFileBrowser() {
 		await invoke("add_to_gitignore", { repoPath, pattern });
 	}
 
-	/** Start a streaming content search. Results arrive via content-search-batch events. */
-	async function searchContent(repoPath: string, query: string, opts?: ContentSearchOptions): Promise<void> {
-		await invoke("search_content", {
-			repoPath,
-			query,
-			caseSensitive: opts?.caseSensitive ?? false,
-			useRegex: opts?.useRegex ?? false,
-			wholeWord: opts?.wholeWord ?? false,
-			limit: opts?.limit,
+	/**
+	 * Start a streaming content search and subscribe to its results.
+	 *
+	 * Subscribing and starting are one call because the two must share a
+	 * correlation id: `content-search-batch` is a global event and the command
+	 * palette, the file browser and the markdown panel all listen to it, so a
+	 * subscription that is not tied to a specific search collects other panels'
+	 * matches. The returned function unsubscribes.
+	 *
+	 * Resolves once the subscription exists, NOT once the search finishes. Over
+	 * HTTP the command answers inline, so awaiting it would withhold the
+	 * unsubscribe hook for the whole search — a panel closed or a query retyped
+	 * meanwhile could not cancel, and its handler would fire into a disposed
+	 * component. A failure to start is reported through `onError`, the same path
+	 * a backend search error takes.
+	 */
+	async function searchContent(
+		repoPath: string,
+		query: string,
+		handlers: { onBatch: (batch: ContentSearchBatch) => void; onError?: (message: string) => void },
+		opts?: ContentSearchOptions,
+	): Promise<() => void> {
+		const searchId = newContentSearchId();
+		const unlisten = await listenContentSearch(searchId, handlers);
+		startContentSearch(
+			"search_content",
+			{
+				repoPath,
+				query,
+				caseSensitive: opts?.caseSensitive ?? false,
+				useRegex: opts?.useRegex ?? false,
+				wholeWord: opts?.wholeWord ?? false,
+				limit: opts?.limit,
+			},
+			searchId,
+		).catch((e) => {
+			const message = e instanceof Error ? e.message : String(e);
+			appLogger.error("files", "content search failed to start", { repoPath, message });
+			handlers.onError?.(message);
 		});
-	}
-
-	/** Subscribe to content search result batches. Returns unlisten function. */
-	function onContentSearchBatch(handler: (batch: ContentSearchBatch) => void): Promise<() => void> {
-		return listen<ContentSearchBatch>("content-search-batch", (event) => handler(event.payload));
-	}
-
-	/** Subscribe to content search errors. Returns unlisten function. */
-	function onContentSearchError(handler: (error: string) => void): Promise<() => void> {
-		return listen<string>("content-search-error", (event) => handler(event.payload));
+		return unlisten;
 	}
 
 	return {
@@ -98,7 +121,5 @@ export function useFileBrowser() {
 		movePathAbs,
 		addToGitignore,
 		searchContent,
-		onContentSearchBatch,
-		onContentSearchError,
 	};
 }

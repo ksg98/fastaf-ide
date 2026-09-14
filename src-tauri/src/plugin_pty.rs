@@ -31,10 +31,22 @@ pub async fn plugin_read_session_output(
     plugin_id: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<String, String> {
-    plugin_read_session_output_impl(&state, session_id, max_lines, plugin_id)
+    plugin_read_session_output_impl(&state, session_id, max_lines, plugin_id).await
 }
 
-pub(crate) fn plugin_read_session_output_impl(
+/// The shared body for both transports.
+///
+/// Reads up to `MAX_LINES` of scrollback plus the screen while holding the vt
+/// mutex — the same mutex the PTY reader holds through a whole
+/// `serialize_dirty_rows` — so it goes to the blocking pool through
+/// [`crate::pty::vt_try_read`], exactly like the grid reads. The command was
+/// already `async`, which kept it off the IPC thread but parked a Tokio worker
+/// on the lock instead; see `docs/backend/command-threading.md`.
+///
+/// The capability check stays on the caller's thread on purpose: it is a
+/// `DashMap` lookup, and a plugin without `pty:read` must be refused without
+/// occupying a pool slot at all.
+pub(crate) async fn plugin_read_session_output_impl(
     state: &Arc<AppState>,
     session_id: String,
     max_lines: Option<usize>,
@@ -42,27 +54,24 @@ pub(crate) fn plugin_read_session_output_impl(
 ) -> Result<String, String> {
     crate::plugins::check_plugin_capability(state, &plugin_id, "pty:read")?;
 
-    let vt_log = state
-        .vt_log_buffers
-        .get(&session_id)
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-    let buf = vt_log.lock();
     let limit = max_lines.unwrap_or(DEFAULT_LINES).min(MAX_LINES);
+    crate::pty::vt_try_read(state, session_id.clone(), move |buf| {
+        let total = buf.total_lines();
+        let offset = total.saturating_sub(limit);
+        let (log_lines, _) = buf.lines_since_owned(offset, limit);
 
-    let total = buf.total_lines();
-    let offset = total.saturating_sub(limit);
-    let (log_lines, _) = buf.lines_since_owned(offset, limit);
+        let screen: Vec<String> = buf
+            .screen_rows()
+            .into_iter()
+            .filter(|r| !r.is_empty())
+            .collect();
 
-    let screen: Vec<String> = buf
-        .screen_rows()
-        .into_iter()
-        .filter(|r| !r.is_empty())
-        .collect();
-
-    let mut all: Vec<String> = log_lines.iter().map(|ll| ll.text()).collect();
-    all.extend(screen);
-    Ok(all.join("\n"))
+        let mut all: Vec<String> = log_lines.iter().map(|ll| ll.text()).collect();
+        all.extend(screen);
+        all.join("\n")
+    })
+    .await?
+    .ok_or_else(|| format!("Session not found: {session_id}"))
 }
 
 #[cfg(test)]
@@ -92,35 +101,38 @@ mod tests {
             .insert(sid.to_string(), parking_lot::Mutex::new(vt));
     }
 
-    #[test]
-    fn read_requires_pty_read_capability() {
+    #[tokio::test]
+    async fn read_requires_pty_read_capability() {
         let st = state();
         // Unregistered plugin → capabilities cannot be verified at all.
-        let err =
-            plugin_read_session_output_impl(&st, "s".into(), None, "ghost".into()).unwrap_err();
+        let err = plugin_read_session_output_impl(&st, "s".into(), None, "ghost".into())
+            .await
+            .unwrap_err();
         assert!(err.contains("not registered"), "got: {err}");
         // Registered but WITHOUT pty:read → rejected before any buffer access.
         grant(&st, "reader", &["fs:read"]);
-        let err =
-            plugin_read_session_output_impl(&st, "s".into(), None, "reader".into()).unwrap_err();
+        let err = plugin_read_session_output_impl(&st, "s".into(), None, "reader".into())
+            .await
+            .unwrap_err();
         assert!(
             err.contains("pty:read") && err.contains("did not declare"),
             "got: {err}"
         );
     }
 
-    #[test]
-    fn read_errors_when_session_missing() {
+    #[tokio::test]
+    async fn read_errors_when_session_missing() {
         let st = state();
         grant(&st, "reader", &["pty:read"]);
         // Capability granted, but the session buffer does not exist.
-        let err =
-            plugin_read_session_output_impl(&st, "nope".into(), None, "reader".into()).unwrap_err();
+        let err = plugin_read_session_output_impl(&st, "nope".into(), None, "reader".into())
+            .await
+            .unwrap_err();
         assert_eq!(err, "Session not found: nope");
     }
 
-    #[test]
-    fn read_returns_tail_and_clamps_line_count() {
+    #[tokio::test]
+    async fn read_returns_tail_and_clamps_line_count() {
         let st = state();
         grant(&st, "reader", &["pty:read"]);
 
@@ -141,6 +153,7 @@ mod tests {
         // (plus the ≤2 visible screen rows), never the full ~2100.
         let out =
             plugin_read_session_output_impl(&st, "s".into(), Some(1_000_000), "reader".into())
+                .await
                 .unwrap();
         let log_count = out.lines().filter(|l| l.starts_with('L')).count();
         assert!(
@@ -152,8 +165,9 @@ mod tests {
         assert!(!out.contains("L0000"), "oldest line must be clamped out");
 
         // Omitting max_lines falls back to DEFAULT_LINES, not the whole buffer.
-        let out_default =
-            plugin_read_session_output_impl(&st, "s".into(), None, "reader".into()).unwrap();
+        let out_default = plugin_read_session_output_impl(&st, "s".into(), None, "reader".into())
+            .await
+            .unwrap();
         let default_count = out_default.lines().filter(|l| l.starts_with('L')).count();
         assert!(
             (0..=DEFAULT_LINES + 5).contains(&default_count),

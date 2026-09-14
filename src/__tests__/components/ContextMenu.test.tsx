@@ -2,7 +2,7 @@ import { fireEvent, render } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import type { ContextMenuItem } from "../../components/ContextMenu/ContextMenu";
 import { ContextMenu, createContextMenu } from "../../components/ContextMenu/ContextMenu";
-import { testInScope } from "../helpers/store";
+import { testInScope, testInScopeAsync } from "../helpers/store";
 
 const sampleItems: ContextMenuItem[] = [
 	{ label: "Copy", shortcut: "\u2318C", action: vi.fn() },
@@ -427,5 +427,45 @@ describe("createContextMenu", () => {
 		});
 		// Flush happy-dom's setImmediate-based requestAnimationFrame from close()
 		await new Promise((r) => setImmediate(r));
+	});
+
+	it("close restores focus to the element that was focused when the menu opened", async () => {
+		const opener = document.createElement("button");
+		document.body.appendChild(opener);
+		try {
+			opener.focus();
+			// Async scope: disposing it would cancel close()'s pending frame.
+			await testInScopeAsync(async () => {
+				const menu = createContextMenu();
+				menu.openAt(10, 10);
+				opener.blur();
+				menu.close();
+				await new Promise((r) => setImmediate(r));
+			});
+			expect(document.activeElement).toBe(opener);
+		} finally {
+			opener.remove();
+		}
+	});
+
+	it("close does NOT steal focus from a dialog opened by the clicked menu item", async () => {
+		const opener = document.createElement("button");
+		const dialogInput = document.createElement("input");
+		document.body.append(opener, dialogInput);
+		try {
+			opener.focus();
+			await testInScopeAsync(async () => {
+				const menu = createContextMenu();
+				menu.openAt(10, 10);
+				// The item's action opens a dialog that focuses its own input.
+				dialogInput.focus();
+				menu.close();
+				await new Promise((r) => setImmediate(r));
+			});
+			expect(document.activeElement).toBe(dialogInput);
+		} finally {
+			opener.remove();
+			dialogInput.remove();
+		}
 	});
 });

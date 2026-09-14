@@ -1,0 +1,1269 @@
+^D]11;?\[6n[?1049h[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 31 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 31 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 31 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 31 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 31 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#3
+[0m
+- 99% - 1446 hits, 11 misses, 5 errors
+[38;5;242mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM): .github#49
+[0m
+[0;0H[J[0;1;39mRefreshing run status every 3 seconds. Press Ctrl+C to quit.[0m
+
+[0;33m*[0m [0;1;39mmain[0m Nightly · [0;36m30796399053[0m
+Triggered via push about 32 minutes ago
+
+[0;1;39mJOBS[0m
+[0;32m✓[0m [0;1;39mcleanup[0m in 57s (ID [0;36m91630873695[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Move nightly tag to current commit
+  [0;32m✓[0m Delete old nightly release (keep tag, refresh published_at)
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (ubuntu-22.04, Linux-x64)[0m in 15m22s (ID [0;36m91631086449[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [0;32m✓[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [38;5;242m-[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;32m✓[0m [0;1;39mbuild (macos-latest, --target aarch64-apple-darwin, macOS-ARM)[0m in 19m41s (ID [0;36m91631086462[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [38;5;242m-[0m Short CARGO_TARGET_DIR (Windows)
+  [38;5;242m-[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [38;5;242m-[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [0;32m✓[0m Import macOS signing certificate
+  [0;32m✓[0m Write Apple API key file for notarization
+  [0;32m✓[0m Build Tauri app
+  [0;32m✓[0m Cleanup macOS keychain
+  [0;32m✓[0m Post Rust cache
+  [0;32m✓[0m Post Setup sccache
+  [0;32m✓[0m Post Setup Node.js
+  [0;32m✓[0m Post Run pnpm/action-setup@v4
+  [0;32m✓[0m Post Run actions/checkout@v6
+  [0;32m✓[0m Complete job
+[0;33m*[0m [0;1;39mbuild (windows-latest, --bundles nsis, Windows-x64)[0m (ID [0;36m91631086467[0m)
+  [0;32m✓[0m Set up job
+  [0;32m✓[0m Run actions/checkout@v6
+  [0;32m✓[0m Patch nightly version
+  [38;5;242m-[0m Install Linux dependencies
+  [0;32m✓[0m Short CARGO_TARGET_DIR (Windows)
+  [0;32m✓[0m Upgrade CMake (Windows)
+  [0;32m✓[0m Run pnpm/action-setup@v4
+  [0;32m✓[0m Setup Node.js
+  [0;32m✓[0m Install Rust stable
+  [0;32m✓[0m Setup sccache
+  [0;32m✓[0m Rust cache
+  [0;32m✓[0m Clear stale CMake cache (Windows)
+  [0;32m✓[0m Install frontend dependencies
+  [38;5;242m-[0m Import macOS signing certificate
+  [38;5;242m-[0m Write Apple API key file for notarization
+  [0;33m*[0m Build Tauri app
+  [0;33m*[0m Cleanup macOS keychain
+  [0;33m*[0m Post Rust cache
+  [0;33m*[0m Post Setup sccache
+  [0;33m*[0m Post Setup Node.js
+  [0;33m*[0m Post Run pnpm/action-setup@v4
+  [0;33m*[0m Post Run actions/checkout@v6
+
+[0;1;39mANNOTATIONS[0m
+[0;33m![0m Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#3
+[0m
+- 89% - 8 hits, 1 miss, 0 errors
+[38;5;242mbuild (ubuntu-22.04, Linux-x64): .github#41
+[0m
+[0;33m![0m Node.js 20 is deprecated. The following

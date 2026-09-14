@@ -430,6 +430,22 @@ impl<T> Grid<T> {
         self.display_offset = 0;
     }
 
+    /// Purge the history *and* the `total_scrolled` counter, so the grid starts a
+    /// fresh absolute-row era.
+    ///
+    /// `clear_history` deliberately keeps `lines_scrolled` monotonic: consumers
+    /// derive an eviction-stable absolute row id from `total_scrolled -
+    /// history_size`, and a physical line must keep its id for life. That
+    /// guarantee only holds *within* one era. The alternate screen is a
+    /// different content universe that gets wiped on every enter/exit, so it
+    /// gets its own era instead — the frame protocol flags the alt transition
+    /// and consumers drop their row caches there.
+    #[inline]
+    pub fn reset_history_era(&mut self) {
+        self.clear_history();
+        self.lines_scrolled = 0;
+    }
+
     /// This is used only for initializing after loading ref-tests.
     #[inline]
     pub fn initialize_all(&mut self)

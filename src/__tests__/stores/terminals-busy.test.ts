@@ -273,48 +273,60 @@ describe("terminalsStore debounced busy signal", () => {
 			});
 		});
 
-		it("clears a confident question after sustained busy with no re-detection (prompt answered, agent resumed work)", () => {
+		it("keeps a confident question through sustained busy (Ink dialog repaints while it waits)", () => {
 			testInScope(() => {
 				const id = addTerminal();
 				store.update(id, { shellState: "busy" });
 				store.setAwaitingInput(id, "question", true);
-				// The agent keeps producing output (busy) and the prompt is never
-				// re-detected — it was answered. The badge must not stay stuck.
-				vi.advanceTimersByTime(2499);
-				expect(store.get(id)?.awaitingInput).toBe("question");
-				vi.advanceTimersByTime(1);
-				expect(store.get(id)?.awaitingInput).toBeNull();
-				expect(store.get(id)?.awaitingInputConfident).toBe(false);
-			});
-		});
-
-		it("keeps a confident question when the terminal is idle at the deadline (genuine static prompt)", () => {
-			testInScope(() => {
-				const id = addTerminal();
-				// Menu shown, then the terminal goes idle waiting for the answer —
-				// no output. This is a real pending prompt and must stay highlighted.
-				store.update(id, { shellState: "busy" });
-				store.update(id, { shellState: "idle" });
-				store.setAwaitingInput(id, "question", true);
-				vi.advanceTimersByTime(5000);
+				// The dialog is open and the agent's spinner keeps repainting above it,
+				// so the terminal never leaves busy. Output ≠ answered: the badge must
+				// survive, or the tab falls back to the blue "working" dot while a human
+				// answer is pending. No timer may expire it.
+				vi.advanceTimersByTime(60_000);
 				expect(store.get(id)?.awaitingInput).toBe("question");
 				expect(store.get(id)?.awaitingInputConfident).toBe(true);
 			});
 		});
 
-		it("refreshes the clear timer on re-detection (Ink menu repaint keeps it highlighted)", () => {
+		it("keeps a confident question when the terminal is idle (genuine static prompt)", () => {
+			testInScope(() => {
+				const id = addTerminal();
+				// Menu shown, then the terminal goes idle waiting for the answer — no output.
+				store.update(id, { shellState: "busy" });
+				store.update(id, { shellState: "idle" });
+				store.setAwaitingInput(id, "question", true);
+				vi.advanceTimersByTime(60_000);
+				expect(store.get(id)?.awaitingInput).toBe("question");
+				expect(store.get(id)?.awaitingInputConfident).toBe(true);
+			});
+		});
+
+		it("clears a confident question only when the answer arrives (user-input / channel write)", () => {
 			testInScope(() => {
 				const id = addTerminal();
 				store.update(id, { shellState: "busy" });
 				store.setAwaitingInput(id, "question", true);
-				vi.advanceTimersByTime(2000);
-				// Repaint re-emits the same confident question — refreshes the deadline.
-				store.setAwaitingInput(id, "question", true);
-				vi.advanceTimersByTime(2000);
+				vi.advanceTimersByTime(60_000);
 				expect(store.get(id)?.awaitingInput).toBe("question");
-				// Past the refreshed deadline with no further re-detection → cleared.
-				vi.advanceTimersByTime(500);
+				// The `user-input` ParsedEvent fires for keystrokes AND for channel/MCP
+				// writes — both reach the PTY through the same path. Terminal.tsx calls
+				// clearAwaitingInput on it; that is the only thing that drops the badge.
+				store.clearAwaitingInput(id);
 				expect(store.get(id)?.awaitingInput).toBeNull();
+				expect(store.get(id)?.awaitingInputConfident).toBe(false);
+			});
+		});
+
+		it("clears a confident question on process exit (shellState → null)", () => {
+			testInScope(() => {
+				const id = addTerminal();
+				store.update(id, { shellState: "busy" });
+				store.setAwaitingInput(id, "question", true);
+				// Child died with the prompt still on screen — the next session must not
+				// inherit a stale awaiting badge.
+				store.update(id, { shellState: null });
+				expect(store.get(id)?.awaitingInput).toBeNull();
+				expect(store.get(id)?.awaitingInputConfident).toBe(false);
 			});
 		});
 	});

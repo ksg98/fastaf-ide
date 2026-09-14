@@ -30,6 +30,7 @@ const AGENT_BINARIES: Record<AgentType, string> = {
 	goose: "goose",
 	grok: "grok",
 	droid: "droid",
+	pi: "pi",
 	git: "git",
 	api: "", // Not a binary — LLM API is always "available"
 };
@@ -48,11 +49,20 @@ export function useAgentDetection() {
 		setLoading(true);
 
 		try {
-			const binaries = Object.values(AGENT_BINARIES);
+			const binaries = Object.values(AGENT_BINARIES).filter((binary) => binary.length > 0);
 			const results = await invoke<Record<string, AgentDetection>>("detect_all_agent_binaries", { binaries });
 
 			const newMap = new Map<AgentType, AgentAvailability>();
 			for (const [agentType, binary] of Object.entries(AGENT_BINARIES)) {
+				if (!binary) {
+					newMap.set(agentType as AgentType, {
+						type: agentType as AgentType,
+						available: false,
+						path: null,
+						version: null,
+					});
+					continue;
+				}
 				const det = results[binary];
 				newMap.set(agentType as AgentType, {
 					type: agentType as AgentType,
@@ -72,11 +82,12 @@ export function useAgentDetection() {
 	/** Detect version for a single agent (lazy, called on expand) */
 	async function detectVersion(type: AgentType): Promise<void> {
 		const current = detections().get(type);
-		if (!current?.available || current.version) return;
+		const binary = AGENT_BINARIES[type];
+		if (!current?.available || current.version || !binary) return;
 
 		try {
 			const result = await invoke<AgentDetection>("detect_agent_binary", {
-				binary: AGENT_BINARIES[type],
+				binary,
 			});
 			if (result.version) {
 				const newMap = new Map(detections());

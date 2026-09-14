@@ -187,9 +187,13 @@ export function createGithubOpsStore() {
 			setState("repos", repoPath, "improvementScanRunning", true);
 			setState("repos", repoPath, "improvementScanError", null);
 			try {
-				const result = await invoke<ImprovementScanResult>("run_improvement_scan", { repoPath, focus });
-				setState("repos", repoPath, "proposals", result.proposals);
-				return result;
+				// The proposals are NOT written here. The backend emits
+				// `proposals-ready` with the same payload just before it returns, and
+				// that path is the one that has to exist: it reaches every window and
+				// every transport, while this return value reaches only the caller.
+				// Writing both put the same five proposals into the same slot twice
+				// per scan. The result is still returned — callers read it directly.
+				return await invoke<ImprovementScanResult>("run_improvement_scan", { repoPath, focus });
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				setState("repos", repoPath, "improvementScanError", message);

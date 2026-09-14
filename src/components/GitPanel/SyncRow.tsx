@@ -93,7 +93,7 @@ export const SyncRow: Component<SyncRowProps> = (props) => {
 			if (result.success) {
 				const msg = result.stdout.trim().split("\n")[0] || "Done";
 				setFeedback({ success: true, message: msg.slice(0, 120) });
-				repositoriesStore.bumpRevision(props.repoPath);
+				repositoriesStore.bumpGitRevision(props.repoPath);
 			} else {
 				const msg = result.stderr.trim().split("\n")[0] || `Exit code ${result.exit_code}`;
 				setFeedback({ success: false, message: msg.slice(0, 200) });

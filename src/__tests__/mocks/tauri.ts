@@ -8,6 +8,9 @@ export const mockInvoke = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("@tauri-apps/api/core", () => ({
 	invoke: mockInvoke,
+	// Mirrors the real rewrite (asset://localhost/<path>) so anything rendering
+	// a relative image path against a baseDir works instead of throwing.
+	convertFileSrc: (path: string) => `asset://localhost${path.startsWith("/") ? "" : "/"}${path}`,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({

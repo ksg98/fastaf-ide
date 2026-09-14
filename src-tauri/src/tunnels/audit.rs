@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Result, params};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::cell::OnceCell;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelEvent {
@@ -23,14 +24,46 @@ pub enum EventKind {
     Stopped,
 }
 
+/// How long tunnel events are kept. Enforced when the connection is first
+/// opened, which happens at most once per app start.
+const RETENTION_DAYS: u32 = 30;
+
 pub struct AuditLog {
-    conn: Connection,
+    db_path: PathBuf,
+    /// Opened on first use — see [`AuditLog::open`].
+    conn: OnceCell<Connection>,
 }
 
 impl AuditLog {
-    /// Open (or create) the audit database at `db_path`, enable WAL mode, and
-    /// ensure the schema exists.
+    /// Prepare a handle to the audit database at `db_path` without touching the disk.
+    ///
+    /// The connection is deferred to the first insert or query. `AppState::new`
+    /// builds this on every launch and most launches never start a tunnel, so
+    /// connecting here put `Connection::open`, a WAL-mode pragma, three
+    /// `CREATE ... IF NOT EXISTS` statements, retention and WAL recovery on the
+    /// startup path for a database nothing would go on to read.
     pub fn open(db_path: &Path) -> Result<Self> {
+        Ok(Self {
+            db_path: db_path.to_path_buf(),
+            conn: OnceCell::new(),
+        })
+    }
+
+    /// The live connection, connecting and migrating on first use.
+    fn conn(&self) -> Result<&Connection> {
+        if let Some(conn) = self.conn.get() {
+            return Ok(conn);
+        }
+        let conn = Self::connect(&self.db_path)?;
+        // `set` can only fail if the cell is already full. Callers reach us
+        // through the `Mutex` in `AppState`, so nothing else can have filled it —
+        // and if it somehow did, that connection is equally good.
+        let _ = self.conn.set(conn);
+        Ok(self.conn.get().expect("connection was just stored"))
+    }
+
+    /// Open the database, ensure the schema, and enforce retention.
+    fn connect(db_path: &Path) -> Result<Connection> {
         let conn = Connection::open(db_path)?;
 
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -49,7 +82,23 @@ impl AuditLog {
                 ON tunnel_events(timestamp);",
         )?;
 
-        Ok(Self { conn })
+        // Enforce retention here: connecting happens at most once per app start,
+        // and it was the missing caller — `rotate` existed but nothing ever
+        // invoked it, so the table only ever grew.
+        match rotate_conn(&conn, RETENTION_DAYS) {
+            Ok(0) => {}
+            Ok(deleted) => tracing::info!(
+                source = "audit",
+                "Rotated {deleted} tunnel event(s) older than {RETENTION_DAYS} days"
+            ),
+            // Retention is housekeeping — a failure must not stop tunnels from
+            // being auditable at all.
+            Err(e) => {
+                tracing::warn!(source = "audit", error = %e, "Tunnel audit rotation failed")
+            }
+        }
+
+        Ok(conn)
     }
 
     /// Insert a new event and return the `rowid` of the inserted row.
@@ -64,16 +113,17 @@ impl AuditLog {
             .unwrap_or_else(|_| "unknown".to_owned());
         let detail_str = detail.to_string();
 
-        self.conn.execute(
+        let conn = self.conn()?;
+        conn.execute(
             "INSERT INTO tunnel_events (tunnel_id, kind, detail) VALUES (?1, ?2, ?3)",
             params![tunnel_id, kind_str, detail_str],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(conn.last_insert_rowid())
     }
 
     /// Return the most recent `limit` events for `tunnel_id`, newest first.
     pub fn query_by_tunnel(&self, tunnel_id: &str, limit: usize) -> Result<Vec<TunnelEvent>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn()?.prepare(
             "SELECT id, timestamp, tunnel_id, kind, detail
              FROM tunnel_events
              WHERE tunnel_id = ?1
@@ -94,7 +144,7 @@ impl AuditLog {
         let from_str = from.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
         let to_str = to.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn()?.prepare(
             "SELECT id, timestamp, tunnel_id, kind, detail
              FROM tunnel_events
              WHERE timestamp >= ?1 AND timestamp <= ?2
@@ -107,13 +157,18 @@ impl AuditLog {
 
     /// Delete events older than `max_age_days` days and return the number deleted.
     pub fn rotate(&self, max_age_days: u32) -> Result<usize> {
-        let age_spec = format!("-{max_age_days} days");
-        let count = self.conn.execute(
-            "DELETE FROM tunnel_events WHERE timestamp < datetime('now', ?1)",
-            params![age_spec],
-        )?;
-        Ok(count)
+        rotate_conn(self.conn()?, max_age_days)
     }
+}
+
+/// Retention against a raw connection, so [`AuditLog::connect`] can enforce it
+/// before the `AuditLog` exists.
+fn rotate_conn(conn: &Connection, max_age_days: u32) -> Result<usize> {
+    let age_spec = format!("-{max_age_days} days");
+    conn.execute(
+        "DELETE FROM tunnel_events WHERE timestamp < datetime('now', ?1)",
+        params![age_spec],
+    )
 }
 
 /// Map a SQLite row to a [`TunnelEvent`].
@@ -233,7 +288,8 @@ mod tests {
         let (log, _dir) = temp_db();
 
         // Insert an "old" event by manipulating the timestamp directly.
-        log.conn
+        log.conn()
+            .expect("connect")
             .execute(
                 "INSERT INTO tunnel_events (timestamp, tunnel_id, kind, detail)
                  VALUES (datetime('now', '-40 days'), 't4', 'started', '{}')",
@@ -272,11 +328,142 @@ mod tests {
         );
     }
 
+    /// `rotate` existed but nothing ever called it, so the file only ever grew.
+    /// Opening the log is the one moment guaranteed to happen exactly once per
+    /// app start, which makes it the place retention belongs.
+    #[test]
+    fn open_rotates_events_past_the_retention_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.db");
+
+        {
+            let log = AuditLog::open(&path).expect("open");
+            log.conn()
+                .expect("connect")
+                .execute(
+                    &format!(
+                        "INSERT INTO tunnel_events (timestamp, tunnel_id, kind, detail)
+                         VALUES (datetime('now', '-{} days'), 'old', 'started', '{{}}')",
+                        RETENTION_DAYS + 10
+                    ),
+                    [],
+                )
+                .expect("insert stale");
+            log.insert("fresh", EventKind::Started, serde_json::json!({}))
+                .expect("insert fresh");
+        }
+
+        let log = AuditLog::open(&path).expect("reopen");
+        assert!(
+            log.query_by_tunnel("old", 10).expect("query").is_empty(),
+            "reopening must drop events past the retention window"
+        );
+        assert_eq!(
+            log.query_by_tunnel("fresh", 10).expect("query").len(),
+            1,
+            "recent events must survive rotation"
+        );
+    }
+
+    /// The WAL needs no manual checkpoint: SQLite's default
+    /// `wal_autocheckpoint` (1000 pages) bounds it while the connection stays
+    /// open, and the last connection to close checkpoints and unlinks it. This
+    /// test pins both, so setting `wal_autocheckpoint=0` — the one change that
+    /// would let the sidecar outgrow the database — cannot pass unnoticed.
+    #[test]
+    fn the_write_ahead_log_stays_bounded_without_a_manual_checkpoint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.db");
+        let wal = dir.path().join("audit.db-wal");
+
+        let pages: i64 = {
+            let log = AuditLog::open(&path).expect("open");
+            for i in 0..5_000_i64 {
+                log.insert("bulk", EventKind::Connected, serde_json::json!({"i": i}))
+                    .expect("insert");
+            }
+            let auto: i64 = log
+                .conn()
+                .expect("connect")
+                .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))
+                .expect("pragma");
+            assert!(auto > 0, "autocheckpoint must stay enabled, got {auto}");
+
+            let page_size: i64 = log
+                .conn()
+                .expect("connect")
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .expect("pragma");
+            let wal_len = std::fs::metadata(&wal).map(|m| m.len() as i64).unwrap_or(0);
+            // Allow a generous multiple: the checkpoint runs *after* the threshold
+            // is crossed, and a reader can defer it briefly.
+            assert!(
+                wal_len < auto * page_size * 4,
+                "WAL grew to {wal_len} bytes with autocheckpoint at {auto} pages of {page_size}"
+            );
+            auto
+        };
+        assert!(pages > 0);
+
+        // Closing the last connection checkpoints and removes the sidecar.
+        assert!(
+            !wal.exists(),
+            "closing the last connection must unlink the WAL"
+        );
+    }
+
+    /// `AppState::new` builds this on every launch; most launches never start a
+    /// tunnel. Connecting eagerly put `Connection::open`, a WAL pragma, three
+    /// `CREATE ... IF NOT EXISTS` statements and WAL recovery on the startup path
+    /// for a database nothing would read.
+    #[test]
+    fn preparing_the_log_does_not_touch_the_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.db");
+
+        let _log = AuditLog::open(&path).expect("prepare");
+
+        assert!(
+            !path.exists(),
+            "the tunnel audit DB must not be created before a tunnel writes to it"
+        );
+    }
+
+    /// The other half of laziness: deferring must not lose the schema.
+    #[test]
+    fn the_first_write_opens_and_migrates_the_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.db");
+        let log = AuditLog::open(&path).expect("prepare");
+
+        log.insert("t1", EventKind::Started, serde_json::json!({"port": 22}))
+            .expect("first insert must create and migrate the DB");
+
+        assert!(path.exists(), "the first write must create the DB");
+        let events = log.query_by_tunnel("t1", 10).expect("query");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].detail["port"], 22);
+    }
+
+    /// A read is a first use too — the audit HTTP/IPC endpoints must not see a
+    /// missing-table error just because no tunnel has run yet.
+    #[test]
+    fn a_query_before_any_write_returns_empty_rather_than_failing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = AuditLog::open(&dir.path().join("audit.db")).expect("prepare");
+
+        let events = log
+            .query_by_tunnel("never-existed", 10)
+            .expect("a read on an unused audit log must succeed");
+        assert!(events.is_empty());
+    }
+
     #[test]
     fn wal_mode_is_active() {
         let (log, _dir) = temp_db();
         let mode: String = log
-            .conn
+            .conn()
+            .expect("connect")
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .expect("pragma");
         assert_eq!(mode, "wal");

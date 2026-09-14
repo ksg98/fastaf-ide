@@ -1,4 +1,4 @@
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, reconcile } from "solid-js/store";
 import { invoke, listen } from "../invoke";
 import type { BranchPrStatus, CheckDetail, CheckSummary, GitHubIssue, GitHubStatus } from "../types";
 import { appLogger } from "./appLogger";
@@ -72,8 +72,15 @@ function createGitHubStore() {
 
 		setState("repos", repoPath, "lastPolled", Date.now());
 
+		// The poller re-sends every branch every cycle, and each PR arrives as a
+		// fresh object from IPC deserialization. Installing it wholesale replaced
+		// the nested values too — `check_details` above all — so every consumer
+		// reading them woke on every poll even when the PR was byte-identical.
+		// `reconcile` walks the two and touches only what actually differs.
+		// `key: null` because the nested arrays hold plain records with no id.
 		for (const pr of prStatuses) {
-			setState("repos", repoPath, "branches", pr.branch, pr);
+			const existing = state.repos[repoPath]?.branches?.[pr.branch];
+			setState("repos", repoPath, "branches", pr.branch, existing ? reconcile(pr, { key: null }) : pr);
 		}
 
 		const existing = state.repos[repoPath]?.branches;

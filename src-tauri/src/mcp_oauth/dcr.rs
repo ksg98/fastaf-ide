@@ -48,7 +48,7 @@ pub(crate) async fn register_client(
 
     let status = resp.status();
 
-    if status == reqwest::StatusCode::CREATED || status == reqwest::StatusCode::OK {
+    if status.is_success() {
         let dcr_resp: DcrResponse = resp
             .json()
             .await
@@ -61,12 +61,34 @@ pub(crate) async fn register_client(
             );
         }
 
-        Ok(dcr_resp)
-    } else if status == reqwest::StatusCode::BAD_REQUEST {
-        let body = resp.text().await.unwrap_or_default();
-        bail!("DCR registration rejected (400): {body}");
-    } else {
-        bail!("DCR registration failed with HTTP {status}");
+        return Ok(dcr_resp);
+    }
+
+    // Every failure path reports the body — a bare status code (especially a
+    // 5xx) leaves nothing to diagnose from.
+    let body = resp.text().await.unwrap_or_default();
+    tracing::warn!(
+        target: "mcp_oauth",
+        %status,
+        endpoint = registration_endpoint,
+        "DCR registration failed: {body}"
+    );
+
+    let excerpt = body.trim();
+    if excerpt.is_empty() {
+        bail!("DCR registration failed with HTTP {status} (empty response body)");
+    }
+    bail!(
+        "DCR registration failed with HTTP {status}: {}",
+        truncate(excerpt, 300)
+    );
+}
+
+/// Clamp a server-supplied body so an HTML error page can't flood the dialog.
+fn truncate(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        None => s.to_string(),
+        Some((idx, _)) => format!("{}…", &s[..idx]),
     }
 }
 
@@ -152,13 +174,61 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            err.to_string().contains("rejected (400)"),
+            err.to_string().contains("HTTP 400"),
             "expected 400 error, got: {err}"
         );
         assert!(
             err.to_string().contains("bad redirect_uri"),
             "expected error body, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn register_client_500_reports_body() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/register")
+            .with_status(500)
+            .with_body(r#"{"error":"server_error","error_description":"upstream IdP timeout"}"#)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/register", server.url());
+        let err = register_client(&client, &url, &test_request())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("upstream IdP timeout"),
+            "500 body must reach the user, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_client_truncates_huge_error_body() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/register")
+            .with_status(502)
+            .with_body("x".repeat(5000))
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let url = format!("{}/register", server.url());
+        let err = register_client(&client, &url, &test_request())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("HTTP 502"), "got: {err}");
+        assert!(
+            err.len() < 400,
+            "body must be clamped, got {} chars",
+            err.len()
+        );
+        assert!(err.ends_with('…'), "expected truncation marker, got: {err}");
     }
 
     #[tokio::test]

@@ -85,8 +85,16 @@ fi
 echo "────────────────────────────────────────"
 echo ""
 
-# Interactive approval
-read -rp "Accept these notes? [Y]es / [e]dit / [r]egenerate / [q]uit: " choice
+# Interactive approval. Only prompt on a real terminal: `read` returns non-zero on
+# EOF, which `set -e` turns into a silent abort *after* the notes were generated but
+# *before* they are merged into $OUTPUT — and `make bump` chains with `;`, so it still
+# printed "Done" while release-notes.json kept the previous version.
+choice=""
+if [ -t 0 ]; then
+  read -rp "Accept these notes? [Y]es / [e]dit / [r]egenerate / [q]uit: " choice
+else
+  echo "==> stdin is not a terminal — accepting the notes above as-is."
+fi
 choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
 case "$choice" in
   e|edit)

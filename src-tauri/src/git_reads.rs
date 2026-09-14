@@ -727,8 +727,14 @@ impl GitReads for GixGitReads {
             let Ok(wt_repo) = proxy.into_repo() else {
                 continue;
             };
-            if let Some(branch) = branch_of(&wt_repo) {
-                map.insert(branch, real(&base));
+            let path = real(&base);
+            // A worktree mid-rebase is on a detached HEAD, so gix reports no branch. Recover the
+            // pre-rebase branch from git's own state files, otherwise the row vanishes from the
+            // sidebar and its terminals are closed mid-conflict-resolution (GH #112).
+            let branch = branch_of(&wt_repo)
+                .or_else(|| crate::worktree::operation_head_branch(&base.to_string_lossy()));
+            if let Some(branch) = branch {
+                map.insert(branch, path);
             }
         }
         Ok(map)
@@ -1500,7 +1506,28 @@ mod tests {
         let cli = CliGitReads;
         let gix = GixGitReads::new();
 
-        let json = |v: &Vec<CommitLogEntry>| serde_json::to_value(v).unwrap();
+        // Compare the instant, not its spelling. `%aI` renders a zero UTC offset
+        // as `+00:00` on git <= 2.34 (what Ubuntu 22.04 ships) and as `Z` on newer
+        // git, so the CLI *reference* side of this shootout changes shape with the
+        // git binary on the machine. Production is unaffected: commit_log is served
+        // by gix, whose adapter already normalizes a zero offset to `Z` (see
+        // `GixGitReads::commit_log`), so the app emits `Z` on every git version.
+        // Only this comparison is git-version-dependent — so normalize both sides.
+        // A non-zero offset, or a genuinely different instant, still fails.
+        let json = |v: &Vec<CommitLogEntry>| {
+            let mut val = serde_json::to_value(v).unwrap();
+            let items = val
+                .as_array_mut()
+                .expect("commit log serializes as an array");
+            for item in items {
+                if let Some(serde_json::Value::String(d)) = item.get_mut("author_date")
+                    && let Some(stripped) = d.strip_suffix("+00:00")
+                {
+                    *d = format!("{stripped}Z");
+                }
+            }
+            val
+        };
         let a = cli.commit_log(&repo, None, None).unwrap();
         let b = gix.commit_log(&repo, None, None).unwrap();
         assert_eq!(json(&a), json(&b), "commit_log gix != cli");
@@ -1639,13 +1666,57 @@ mod tests {
             .unwrap(),
         );
 
-        // blame on a committed, tracked file
+        // blame on a committed, tracked file.
+        //
+        // a.txt has a staged line, which git attributes to the all-zero hash with
+        // `author_time` = wall-clock *now*. The two implementations are separate `git blame`
+        // invocations, so comparing that field byte-for-byte tests whether the clock ticked
+        // between them, not whether the implementations agree — it fails whenever the two
+        // calls straddle a second boundary (rare, and widened by a loaded parallel test run).
+        //
+        // Lift those timestamps out, compare everything else strictly, then assert the two
+        // are both live and close. That is a stronger claim than the original: it also
+        // pins that an uncommitted row exists at all and that neither side reports a
+        // zero/stale time.
+        fn take_uncommitted_times(value: &mut serde_json::Value) -> Vec<i64> {
+            const UNCOMMITTED: &str = "0000000000000000000000000000000000000000";
+            let mut times = Vec::new();
+            for row in value.as_array_mut().into_iter().flatten() {
+                if row["hash"].as_str() == Some(UNCOMMITTED) {
+                    times.push(row["author_time"].as_i64().unwrap_or_default());
+                    row["author_time"] = serde_json::json!("<wall-clock>");
+                }
+            }
+            times
+        }
+
         let bl_a = cli.blame(&repo, "a.txt").unwrap();
         let bl_b = crate::git::blame_cli(&repo, "a.txt").unwrap();
+        let mut blame_a = serde_json::to_value(&bl_a).unwrap();
+        let mut blame_b = serde_json::to_value(&bl_b).unwrap();
+        let times_a = take_uncommitted_times(&mut blame_a);
+        let times_b = take_uncommitted_times(&mut blame_b);
+
+        assert_eq!(blame_a, blame_b);
         assert_eq!(
-            serde_json::to_value(&bl_a).unwrap(),
-            serde_json::to_value(&bl_b).unwrap(),
+            times_a.len(),
+            times_b.len(),
+            "both implementations must report the same uncommitted rows"
         );
+        assert!(
+            !times_a.is_empty(),
+            "a.txt has a staged line, so blame must report an uncommitted row"
+        );
+        for (a, b) in times_a.iter().zip(&times_b) {
+            assert!(
+                *a > 0 && *b > 0,
+                "uncommitted row needs a live time: {a}, {b}"
+            );
+            assert!(
+                (a - b).abs() <= 2,
+                "uncommitted author_time should track the wall clock on both sides: {a} vs {b}"
+            );
+        }
         assert!(!bl_a.is_empty());
     }
 }

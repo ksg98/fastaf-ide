@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { continuationRowsAfterSuggest, isSuggestBlock, type RowSnapshot } from "../suggestOverlay";
+import { continuationRowsAfterSuggest, isSuggestBlock, planSuggestOverlay, type RowSnapshot } from "../suggestOverlay";
 
 /** Build a `getRow` lookup from a compact string/bool list, with null past end. */
 function rows(snapshots: Array<[string, boolean]>): (i: number) => RowSnapshot | null {
@@ -121,5 +121,86 @@ describe("isSuggestBlock", () => {
 			["suggest: [ A | B ]", false],
 		]);
 		expect(isSuggestBlock(0, 2, get)).toBe(false);
+	});
+});
+
+describe("planSuggestOverlay", () => {
+	it("names every row the overlay must mask, in order", () => {
+		const get = rows([
+			["bash: unrelated", false],
+			["suggest: [ A |", false],
+			["B | C ]", true],
+			["intent: doing a thing (Thing)", false],
+		]);
+		const plan = planSuggestOverlay(4, get);
+		expect(plan.blocks).toEqual([
+			{ row: 1, kind: "suggest" },
+			{ row: 2, kind: "continuation" },
+			{ row: 3, kind: "intent" },
+		]);
+	});
+
+	// The key exists so an unchanged screen skips the DOM rebuild. Computing it
+	// from freshly built <div>s defeats the point: the elements are created and
+	// dropped on every frame that repaints, which is most of them.
+	it("gives identical screens the same key and different screens different keys", () => {
+		const screen = (): Array<[string, boolean]> => [
+			["suggest: [ A | B | C ]", false],
+			["intent: x (X)", false],
+		];
+		const a = planSuggestOverlay(2, rows(screen()));
+		const b = planSuggestOverlay(2, rows(screen()));
+		expect(a.key).toBe(b.key);
+		expect(a.key).not.toBe("");
+
+		const moved = planSuggestOverlay(
+			2,
+			rows([
+				["other", false],
+				["intent: x (X)", false],
+			]),
+		);
+		expect(moved.key).not.toBe(a.key);
+	});
+
+	// The highlight pattern is looser than the walk's stop pattern on purpose: an
+	// agent prints its intent line behind a bullet, and that row must still be
+	// tinted. Using the stop pattern here would silently leave it untinted.
+	it("tints an intent line that sits behind a bullet", () => {
+		const plan = planSuggestOverlay(1, rows([["\u23fa intent: doing a thing (Thing)", false]]));
+		expect(plan.blocks).toEqual([{ row: 0, kind: "intent" }]);
+	});
+
+	// ...but the same looseness must NOT end a suggest block early, or the row
+	// carrying the closing bracket stops being masked and the raw token shows.
+	it("does not let an indented intent mention cut a suggest block short", () => {
+		const plan = planSuggestOverlay(
+			3,
+			rows([
+				["suggest: [ A |", false],
+				["  intent: mentioned in passing", true],
+				["B | C ]", true],
+			]),
+		);
+		expect(plan.blocks).toEqual([
+			{ row: 0, kind: "suggest" },
+			{ row: 1, kind: "continuation" },
+			{ row: 2, kind: "continuation" },
+		]);
+	});
+
+	it("has an empty key when nothing needs masking", () => {
+		expect(
+			planSuggestOverlay(
+				2,
+				rows([
+					["ls -la", false],
+					["file.txt", false],
+				]),
+			),
+		).toEqual({
+			key: "",
+			blocks: [],
+		});
 	});
 });

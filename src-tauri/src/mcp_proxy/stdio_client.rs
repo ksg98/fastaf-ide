@@ -10,12 +10,266 @@
 
 use crate::mcp_proxy::http_client::UpstreamToolDef;
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 use crate::cli::expand_tilde;
 
 const MIN_RESPAWN_INTERVAL: Duration = Duration::from_secs(5);
+const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// How many stdout lines the reader may hold ahead of the caller, and how many
+/// bytes those lines may weigh in total.
+///
+/// Nothing drains this queue between calls, so the bound is what keeps an
+/// upstream that chatters while idle from growing TUIC's memory without limit.
+/// Both limits are needed: a line count alone bounds nothing, because one line
+/// can be arbitrarily long.
+const MAX_QUEUED_LINES: usize = 256;
+const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
+
+/// The longest single line the reader will assemble. A JSON-RPC message this
+/// large is not something we can act on, and a child that never sends a newline
+/// would otherwise grow one `String` until the process dies.
+const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Why a read gave up.
+enum ReadEnd {
+    /// The deadline passed. The queue may still hold lines — being out of time
+    /// outranks having something to parse, or an upstream that refills the queue
+    /// faster than we drain it would keep the call alive forever.
+    Timeout,
+    /// The child's stdout reached EOF, or the client was torn down.
+    Closed,
+}
+
+/// Bounded queue between the stdout reader thread and the caller.
+///
+/// **Lossy on purpose.** Blocking the reader when the queue is full parks the
+/// child on its stdout write, and a child that is not reading its stdin can then
+/// park *us* in `write_line` — with the request not yet sent, no deadline is
+/// armed and neither side can move again. Dropping the oldest line instead keeps
+/// the pipe drained. What is dropped is what `rpc` discards anyway: messages
+/// that arrived while nothing was waiting for them. A reply lost to a genuine
+/// flood surfaces as the timeout the call already has.
+struct LineQueue {
+    inner: std::sync::Mutex<LineQueueState>,
+    ready: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct LineQueueState {
+    lines: std::collections::VecDeque<String>,
+    bytes: usize,
+    closed: bool,
+    dropped: u64,
+}
+
+impl LineQueue {
+    fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(LineQueueState::default()),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Queue one line, evicting the oldest until it fits. Returns false once the
+    /// queue is closed, which is the reader thread's signal to stop.
+    fn push(&self, line: String) -> bool {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed {
+            return false;
+        }
+        // The newest line is always kept, even when it alone exceeds the byte
+        // budget: dropping it would lose the reply we are most likely waiting for.
+        while !state.lines.is_empty()
+            && (state.lines.len() >= MAX_QUEUED_LINES
+                || state.bytes + line.len() > MAX_QUEUED_BYTES)
+        {
+            if let Some(old) = state.lines.pop_front() {
+                state.bytes -= old.len();
+                state.dropped += 1;
+            }
+        }
+        state.bytes += line.len();
+        state.lines.push_back(line);
+        drop(state);
+        self.ready.notify_one();
+        true
+    }
+
+    /// Stop the reader and wake anyone waiting.
+    fn close(&self) {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    /// How many lines were dropped to keep the queue inside its bounds.
+    fn dropped(&self) -> u64 {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).dropped
+    }
+
+    fn recv_deadline(&self, deadline: Instant) -> Result<String, ReadEnd> {
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            // The deadline is checked before the queue on purpose — see `Timeout`.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ReadEnd::Timeout);
+            }
+            if let Some(line) = state.lines.pop_front() {
+                state.bytes -= line.len();
+                return Ok(line);
+            }
+            if state.closed {
+                return Err(ReadEnd::Closed);
+            }
+            state = self
+                .ready
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+}
+
+/// Pump the child's stdout into a bounded queue so `read_line` can wait with a
+/// deadline. The thread ends on EOF — `shutdown_internal` killing the child, or
+/// the child exiting on its own — or when the queue is closed.
+///
+/// Lines are assembled with a byte cap rather than through `BufRead::lines`,
+/// which grows one `String` until it finds a newline: a child that never sends
+/// one is otherwise an out-of-memory kill with no bound in sight.
+fn spawn_stdout_reader(stdout: impl std::io::Read + Send + 'static) -> std::sync::Arc<LineQueue> {
+    let queue = std::sync::Arc::new(LineQueue::new());
+    let reader_queue = queue.clone();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line: Vec<u8> = Vec::new();
+        // Set when the current line passed the cap: everything up to its newline
+        // is discarded rather than published as a line that was never sent.
+        let mut overflowed = false;
+        loop {
+            let (consumed, complete) = {
+                let available = match reader.fill_buf() {
+                    Ok([]) => break, // EOF
+                    Ok(buf) => buf,
+                    Err(_) => break,
+                };
+                match available.iter().position(|b| *b == b'\n') {
+                    Some(i) => {
+                        if !overflowed && line.len() + i <= MAX_LINE_BYTES {
+                            line.extend_from_slice(&available[..i]);
+                        } else {
+                            overflowed = true;
+                        }
+                        (i + 1, true)
+                    }
+                    None => {
+                        if !overflowed && line.len() + available.len() <= MAX_LINE_BYTES {
+                            line.extend_from_slice(available);
+                        } else {
+                            overflowed = true;
+                            line.clear();
+                        }
+                        (available.len(), false)
+                    }
+                }
+            };
+            reader.consume(consumed);
+            if !complete {
+                continue;
+            }
+            let finished = std::mem::take(&mut line);
+            if overflowed {
+                overflowed = false;
+                tracing::warn!(
+                    source = "mcp_proxy",
+                    "dropped a stdout line over {MAX_LINE_BYTES} bytes"
+                );
+                continue;
+            }
+            // Invalid UTF-8 is not something the protocol can recover from.
+            let Ok(text) = String::from_utf8(finished) else {
+                break;
+            };
+            if !reader_queue.push(text) {
+                break;
+            }
+        }
+        reader_queue.close();
+    });
+    queue
+}
+
+/// One line to write to the child's stdin, plus the slot its outcome goes into.
+struct WriteJob {
+    line: String,
+    done: std::sync::mpsc::SyncSender<Result<(), String>>,
+}
+
+/// How a write ended when it did not succeed.
+#[derive(Debug, PartialEq, Eq)]
+enum WriteEnd {
+    /// The pipe reported an error.
+    Failed(String),
+    /// The deadline passed with the write still parked.
+    Timeout,
+    /// The writer thread is gone.
+    WriterGone,
+}
+
+/// Pump lines into the child's stdin from a dedicated thread.
+///
+/// `write_all` on a pipe blocks until the child reads, and a child that stopped
+/// reading its stdin never lets it return. The caller is a blocking-pool thread
+/// holding this client's mutex, so that one write wedges the whole upstream for
+/// the life of the process — and the deadline cannot help, because it only ever
+/// covered the reply. Handing the write to a thread makes it interruptible: the
+/// caller waits on a channel, and the shutdown that follows a timeout kills the
+/// child, which fails the parked write and releases this thread.
+fn spawn_stdin_writer(
+    mut stdin: impl std::io::Write + Send + 'static,
+) -> std::sync::mpsc::SyncSender<WriteJob> {
+    // Depth 1: one caller holds `&mut self` and waits for its own outcome, so
+    // there is never more than one job outstanding.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<WriteJob>(1);
+    std::thread::spawn(move || {
+        while let Ok(job) = rx.recv() {
+            let result = stdin
+                .write_all(job.line.as_bytes())
+                .and_then(|()| stdin.flush())
+                .map_err(|e| e.to_string());
+            // The caller may already have given up on this write; its receiver
+            // is then gone and there is nobody to tell.
+            let _ = job.done.send(result);
+        }
+        // Dropping `stdin` closes the pipe — the EOF the child waits for.
+    });
+    tx
+}
+
+/// Hand `line` to the writer thread and wait for its outcome until `deadline`.
+fn write_through(
+    tx: &std::sync::mpsc::SyncSender<WriteJob>,
+    line: String,
+    deadline: Instant,
+) -> Result<(), WriteEnd> {
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    tx.send(WriteJob {
+        line,
+        done: done_tx,
+    })
+    .map_err(|_| WriteEnd::WriterGone)?;
+    match done_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(WriteEnd::Failed(e)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(WriteEnd::Timeout),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(WriteEnd::WriterGone),
+    }
+}
 
 /// Config for a stdio-based upstream MCP server.
 #[derive(Debug, Clone)]
@@ -25,6 +279,8 @@ pub(crate) struct StdioConfig {
     pub(crate) args: Vec<String>,
     pub(crate) env: std::collections::HashMap<String, String>,
     pub(crate) cwd: Option<String>,
+    /// How long to wait for one response line before declaring the upstream mute.
+    pub(crate) timeout: Duration,
 }
 
 /// Client for a single upstream MCP server over stdio (spawned process).
@@ -32,10 +288,17 @@ pub(crate) struct StdioMcpClient {
     config: StdioConfig,
     /// Running child process (if connected).
     child: Option<std::process::Child>,
-    /// Buffered reader over the child's stdout.
-    stdout_reader: Option<BufReader<std::process::ChildStdout>>,
-    /// Writable handle to the child's stdin.
-    stdin: Option<std::process::ChildStdin>,
+    /// Response lines pumped off the child's stdout by a dedicated reader thread.
+    /// Reading through a queue instead of straight off the pipe is what makes
+    /// the deadline in `read_line` possible: a blocking `BufRead::read_line` on a
+    /// mute upstream is uninterruptible, and the caller is a blocking-pool thread
+    /// holding this client's mutex. The queue closes when stdout hits EOF.
+    stdout_rx: Option<std::sync::Arc<LineQueue>>,
+    /// Queue into the writer thread that owns the child's stdin. Writing through
+    /// a thread instead of straight into the pipe is what makes the deadline in
+    /// `write_line` possible — see `spawn_stdin_writer`. Dropping this sender is
+    /// what closes stdin, one hop later than dropping the handle itself.
+    stdin_tx: Option<std::sync::mpsc::SyncSender<WriteJob>>,
     /// When was the last spawn attempted (for rate limiting).
     last_spawn: Option<Instant>,
     /// JSON-RPC request counter.
@@ -48,8 +311,8 @@ impl StdioMcpClient {
         Self {
             config,
             child: None,
-            stdout_reader: None,
-            stdin: None,
+            stdout_rx: None,
+            stdin_tx: None,
             last_spawn: None,
             request_id: 0,
         }
@@ -59,6 +322,7 @@ impl StdioMcpClient {
     pub(crate) fn from_upstream_config(
         name: String,
         transport: &crate::mcp_upstream_config::UpstreamTransport,
+        timeout_secs: u32,
     ) -> Option<Self> {
         match transport {
             crate::mcp_upstream_config::UpstreamTransport::Stdio {
@@ -72,6 +336,7 @@ impl StdioMcpClient {
                 args: args.clone(),
                 env: env.clone(),
                 cwd: cwd.clone(),
+                timeout: Duration::from_secs(timeout_secs.max(1) as u64),
             })),
             crate::mcp_upstream_config::UpstreamTransport::Http { .. } => None,
         }
@@ -216,8 +481,8 @@ impl StdioMcpClient {
             });
         }
 
-        self.stdout_reader = Some(BufReader::new(stdout));
-        self.stdin = Some(stdin);
+        self.stdout_rx = Some(spawn_stdout_reader(stdout));
+        self.stdin_tx = Some(spawn_stdin_writer(stdin));
         self.child = Some(child);
 
         // MCP handshake
@@ -231,7 +496,7 @@ impl StdioMcpClient {
         let init_resp = self.rpc(
             "initialize",
             serde_json::json!({
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {
                     "name": "tuicommander",
@@ -333,8 +598,10 @@ impl StdioMcpClient {
                     Ok(Some(_)) | Err(_) => {
                         // exited or error
                         self.child = None;
-                        self.stdin = None;
-                        self.stdout_reader = None;
+                        self.stdin_tx = None;
+                        if let Some(queue) = self.stdout_rx.take() {
+                            queue.close();
+                        }
                         false
                     }
                 }
@@ -350,8 +617,10 @@ impl StdioMcpClient {
 
     fn shutdown_internal(&mut self) {
         // Close stdin first — signals EOF to the child
-        drop(self.stdin.take());
-        drop(self.stdout_reader.take());
+        drop(self.stdin_tx.take());
+        if let Some(queue) = self.stdout_rx.take() {
+            queue.close();
+        }
 
         if let Some(mut child) = self.child.take() {
             // Wait up to 2s for voluntary exit
@@ -385,13 +654,19 @@ impl StdioMcpClient {
             "params": params
         });
 
-        self.write_line(&body)?;
+        // One deadline for the whole exchange — the write and every line read
+        // while waiting for the reply — rather than by a message count: counting
+        // made a chatty upstream fail a call it had answered correctly, because a
+        // backlog it produced while nothing was listening was charged against the
+        // budget meant for the reply. It starts before the write because a child
+        // that stopped reading its stdin blocks there, not at the reply.
+        let deadline = Instant::now() + self.config.timeout;
+        self.write_line(&body, deadline)?;
 
         // Loop until we get a response with matching id — skip notifications
         // and log messages the server may send in between.
-        const MAX_SKIP: usize = 64;
-        for _ in 0..MAX_SKIP {
-            let msg = self.read_line()?;
+        loop {
+            let msg = self.read_line(deadline)?;
             match msg.get("id") {
                 Some(resp_id) if resp_id.as_u64() == Some(id) => return Ok(msg),
                 Some(_) => {
@@ -408,11 +683,6 @@ impl StdioMcpClient {
                 }
             }
         }
-
-        Err(format!(
-            "Upstream '{}': no response with id {id} after {MAX_SKIP} messages",
-            self.config.name
-        ))
     }
 
     /// Send a notification (no response expected).
@@ -422,14 +692,20 @@ impl StdioMcpClient {
             "method": method,
             "params": params
         });
-        self.write_line(&body)
+        let deadline = Instant::now() + self.config.timeout;
+        self.write_line(&body, deadline)
     }
 
-    /// Write a JSON value as a newline-delimited line to stdin.
-    fn write_line(&mut self, value: &Value) -> Result<(), String> {
-        let stdin = self
-            .stdin
-            .as_mut()
+    /// Write a JSON value as a newline-delimited line to stdin, waiting until
+    /// `deadline` for the child to take it.
+    ///
+    /// On timeout the client is torn down, for the same reason `read_line` does
+    /// it and for one more: killing the child is what unblocks the writer thread
+    /// still parked on the pipe.
+    fn write_line(&mut self, value: &Value, deadline: Instant) -> Result<(), String> {
+        let tx = self
+            .stdin_tx
+            .clone()
             .ok_or_else(|| format!("Upstream '{}': stdin not available", self.config.name))?;
 
         let mut line = serde_json::to_string(value).map_err(|e| {
@@ -440,41 +716,67 @@ impl StdioMcpClient {
         })?;
         line.push('\n');
 
-        stdin.write_all(line.as_bytes()).map_err(|e| {
-            format!(
+        match write_through(&tx, line, deadline) {
+            Ok(()) => Ok(()),
+            Err(WriteEnd::Failed(e)) => Err(format!(
                 "Upstream '{}': failed to write to stdin: {e}",
                 self.config.name
-            )
-        })?;
-        stdin.flush().map_err(|e| {
-            format!(
-                "Upstream '{}': failed to flush stdin: {e}",
+            )),
+            Err(WriteEnd::Timeout) => {
+                tracing::warn!(
+                    upstream = %self.config.name,
+                    "upstream stopped reading its stdin; tearing it down"
+                );
+                self.shutdown_internal();
+                Err(format!(
+                    "Upstream '{}': timed out writing the request — the server stopped reading its stdin",
+                    self.config.name
+                ))
+            }
+            Err(WriteEnd::WriterGone) => Err(format!(
+                "Upstream '{}': stdin writer stopped",
                 self.config.name
-            )
-        })
+            )),
+        }
     }
 
-    /// Read a newline-delimited JSON response from stdout.
-    fn read_line(&mut self) -> Result<Value, String> {
-        let reader = self
-            .stdout_reader
-            .as_mut()
+    /// Read a newline-delimited JSON response from stdout, waiting until
+    /// `deadline` for it.
+    ///
+    /// On timeout the client is torn down. That is not tidiness: the request we
+    /// gave up on may still be answered later, and leaving the pipe in place
+    /// would hand that stale reply to the next call as if it were its own.
+    fn read_line(&mut self, deadline: Instant) -> Result<Value, String> {
+        let rx = self
+            .stdout_rx
+            .as_ref()
             .ok_or_else(|| format!("Upstream '{}': stdout not available", self.config.name))?;
 
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| {
-            format!(
-                "Upstream '{}': failed to read from stdout: {e}",
-                self.config.name
-            )
-        })?;
-
-        if line.is_empty() {
-            return Err(format!(
-                "Upstream '{}': server closed stdout (process may have crashed)",
-                self.config.name
-            ));
-        }
+        let line = match rx.recv_deadline(deadline) {
+            Ok(line) => line,
+            Err(ReadEnd::Timeout) => {
+                let dropped = rx.dropped();
+                let message = format!(
+                    "Upstream '{}': timed out after {}ms waiting for a response",
+                    self.config.name,
+                    self.config.timeout.as_millis()
+                );
+                tracing::warn!(
+                    source = "mcp_proxy",
+                    upstream = %self.config.name,
+                    dropped,
+                    "{message}"
+                );
+                self.shutdown_internal();
+                return Err(message);
+            }
+            Err(ReadEnd::Closed) => {
+                return Err(format!(
+                    "Upstream '{}': server closed stdout (process may have crashed)",
+                    self.config.name
+                ));
+            }
+        };
 
         serde_json::from_str(line.trim()).map_err(|e| {
             format!(
@@ -519,6 +821,7 @@ mod tests {
             args: vec![tmp.to_str().unwrap().to_string()],
             env: HashMap::new(),
             cwd: None,
+            timeout: Duration::from_secs(30),
         }
     }
 
@@ -547,6 +850,38 @@ while IFS= read -r line; do
     esac
 done
 "#.to_string()
+    }
+
+    fn protocol_offer_probe_script() -> String {
+        r#"#!/bin/sh
+offered=wrong
+while IFS= read -r line; do
+    method=$(echo "$line" | sed 's/.*"method":"\([^\"]*\)".*/\1/')
+    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+    case "$method" in
+        initialize)
+            if echo "$line" | grep -q '"protocolVersion":"2025-11-25"'; then
+                offered=legacy
+            fi
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
+            ;;
+        notifications/initialized) ;;
+        tools/list)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"%s","description":"Protocol offer probe","inputSchema":{"type":"object"}}]}}\n' "$id" "$offered"
+            ;;
+    esac
+done
+"#.to_string()
+    }
+
+    #[test]
+    fn initialize_offers_legacy_protocol_revision_over_stdio() {
+        let config = make_config_for_echo_server(&protocol_offer_probe_script());
+        let mut client = StdioMcpClient::new(config);
+
+        let tools = client.spawn_and_initialize().unwrap();
+        assert_eq!(tools[0].original_name, "legacy");
+        client.shutdown();
     }
 
     #[test]
@@ -585,6 +920,7 @@ done
             args: vec![],
             env: HashMap::new(),
             cwd: None,
+            timeout: Duration::from_secs(30),
         };
         let mut client = StdioMcpClient::new(config);
         assert!(!client.is_alive());
@@ -620,6 +956,7 @@ exit 0
             args: vec![],
             env: HashMap::new(),
             cwd: None,
+            timeout: Duration::from_secs(30),
         };
         let mut client = StdioMcpClient::new(config);
         let result = client.spawn_and_initialize();
@@ -635,6 +972,7 @@ exit 0
             args: vec![],
             env: HashMap::new(),
             cwd: None,
+            timeout: Duration::from_secs(30),
         };
         let mut client = StdioMcpClient::new(config);
 
@@ -703,6 +1041,7 @@ done
             args: vec![tmp.to_str().unwrap().to_string()],
             env,
             cwd: None,
+            timeout: Duration::from_secs(30),
         };
 
         let mut client = StdioMcpClient::new(config);
@@ -719,7 +1058,7 @@ done
             env: HashMap::new(),
             cwd: None,
         };
-        let client = StdioMcpClient::from_upstream_config("test".to_string(), &transport);
+        let client = StdioMcpClient::from_upstream_config("test".to_string(), &transport, 30);
         assert!(client.is_some());
     }
 
@@ -728,7 +1067,7 @@ done
         let transport = crate::mcp_upstream_config::UpstreamTransport::Http {
             url: "http://localhost:8080/mcp".to_string(),
         };
-        let client = StdioMcpClient::from_upstream_config("test".to_string(), &transport);
+        let client = StdioMcpClient::from_upstream_config("test".to_string(), &transport, 30);
         assert!(client.is_none());
     }
 
@@ -765,6 +1104,326 @@ done
         assert_eq!(tools[0].original_name, "alpha");
         assert_eq!(tools[1].original_name, "beta");
         client.shutdown();
+    }
+
+    /// A mute upstream used to park the calling thread inside `read_line`
+    /// forever. The stdio client is held behind a mutex and driven from the
+    /// blocking pool, so one such call wedges every other call to that upstream
+    /// and never gives the pool thread back.
+    #[test]
+    fn call_tool_gives_up_on_a_mute_upstream() {
+        // Handshake answers; `tools/call` is read and deliberately left unanswered.
+        let script = r#"#!/bin/sh
+while IFS= read -r line; do
+    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
+    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+    case "$method" in
+        initialize)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
+            ;;
+        notifications/initialized) ;;
+        tools/list)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"hang","description":"H","inputSchema":{"type":"object"}}]}}\n' "$id"
+            ;;
+        tools/call)
+            # Silence. The upstream is alive but will never answer.
+            ;;
+    esac
+done
+"#;
+        let mut config = make_config_for_echo_server(script);
+        config.timeout = Duration::from_millis(300);
+
+        // Drive the call off-thread so a client with no deadline fails the test
+        // instead of hanging it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut client = StdioMcpClient::new(config);
+            client.spawn_and_initialize().expect("handshake");
+            let result = client.call_tool("hang", serde_json::json!({}));
+            let _ = tx.send((result, client.is_alive()));
+        });
+
+        let (result, still_alive) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("call_tool never returned — no read deadline");
+        let err = result.expect_err("a mute upstream must not report success");
+        assert!(
+            err.contains("timed out"),
+            "expected a timeout error, got: {err}"
+        );
+        assert!(
+            !still_alive,
+            "a timed-out client must be torn down so the next call cannot read a stale reply"
+        );
+    }
+
+    /// The reply may sit behind any amount of server chatter. Bounding that by
+    /// a message count meant a healthy upstream that logs while it works failed
+    /// a call it had answered correctly; the wait is bounded by the deadline the
+    /// read already had, so the number of skipped messages does not matter.
+    #[test]
+    fn a_chatty_upstream_still_delivers_its_reply() {
+        let script = r#"#!/bin/sh
+while IFS= read -r line; do
+    method=$(echo "$line" | sed 's/.*"method":"\([^"]*\)".*/\1/')
+    id=$(echo "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+    case "$method" in
+        initialize)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"test","version":"1.0"}}}\n' "$id"
+            ;;
+        notifications/initialized)
+            i=0
+            while [ $i -lt 500 ]; do
+                printf '{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","n":%s}}\n' "$i"
+                i=$((i+1))
+            done
+            ;;
+        tools/list)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"delta","description":"D","inputSchema":{"type":"object"}}]}}\n' "$id"
+            ;;
+    esac
+done
+"#;
+        let config = make_config_for_echo_server(script);
+        let mut client = StdioMcpClient::new(config);
+        let tools = client
+            .spawn_and_initialize()
+            .expect("500 notifications must not cost the upstream its reply");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].original_name, "delta");
+        client.shutdown();
+    }
+
+    /// A stdout that never runs out of lines, reporting how much of it the
+    /// reader actually pulled.
+    struct EndlessLines {
+        pulled: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EndlessLines {
+        /// 64 bytes including the newline, so the counts below are in lines.
+        const LINE: &'static [u8] =
+            b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"p\":0}\n";
+    }
+
+    impl std::io::Read for EndlessLines {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = (buf.len() / Self::LINE.len()) * Self::LINE.len();
+            if n == 0 {
+                return Ok(0);
+            }
+            for chunk in buf[..n].chunks_mut(Self::LINE.len()) {
+                chunk.copy_from_slice(Self::LINE);
+            }
+            self.pulled
+                .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            Ok(n)
+        }
+    }
+
+    /// Nothing drains the reader between calls, so an unbounded queue lets an
+    /// upstream that chatters while idle grow TUIC's memory for as long as it
+    /// keeps talking. The queue drops instead of growing — and drops instead of
+    /// parking, because a parked reader parks the child on its stdout write, and
+    /// a child that has stopped reading its stdin can then park TUIC in
+    /// `write_line` with no deadline armed yet.
+    #[test]
+    fn an_idle_upstream_that_never_stops_talking_cannot_grow_the_queue() {
+        use std::sync::atomic::Ordering;
+        let pulled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queue = spawn_stdout_reader(EndlessLines {
+            pulled: pulled.clone(),
+        });
+
+        std::thread::sleep(Duration::from_millis(200));
+        let (lines, bytes, dropped) = {
+            let state = queue.inner.lock().unwrap();
+            (state.lines.len(), state.bytes, state.dropped)
+        };
+        let read = pulled.load(Ordering::Relaxed) / EndlessLines::LINE.len();
+
+        assert!(
+            read > MAX_QUEUED_LINES,
+            "the child must have written more than the queue can hold ({read} lines)"
+        );
+        assert!(
+            lines <= MAX_QUEUED_LINES && bytes <= MAX_QUEUED_BYTES,
+            "the queue must stay inside its bounds: {lines} lines / {bytes} bytes"
+        );
+        assert!(dropped > 0, "what did not fit must be counted as dropped");
+
+        // The reader is still running: it drops, it does not park.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            pulled.load(Ordering::Relaxed) / EndlessLines::LINE.len() > read,
+            "a lossy queue must never stop the reader"
+        );
+        queue.close();
+    }
+
+    /// A pipe whose reader never reads: `write_all` parks and does not return.
+    struct NeverAccepted {
+        entered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        release: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::io::Write for NeverAccepted {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.entered
+                .store(true, std::sync::atomic::Ordering::Release);
+            while !self.release.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A request larger than the pipe buffer parks in `write_all` until the child
+    /// reads it, and a child that stopped reading its stdin never does. The caller
+    /// is a blocking-pool thread holding the upstream's mutex, so that one write
+    /// used to wedge the upstream for the life of the process — the deadline could
+    /// not help, because it was only armed after the write returned.
+    #[test]
+    fn a_request_to_an_upstream_that_stopped_reading_gives_up_on_the_deadline() {
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tx = spawn_stdin_writer(NeverAccepted {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+
+        let started = Instant::now();
+        let outcome = write_through(
+            &tx,
+            "{}\n".to_string(),
+            started + Duration::from_millis(150),
+        );
+
+        assert_eq!(outcome, Err(WriteEnd::Timeout));
+        assert!(
+            entered.load(std::sync::atomic::Ordering::Acquire),
+            "the write must actually have been attempted"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the write must end on its deadline, not when the child feels like reading"
+        );
+
+        // Let the parked writer thread finish so the test leaves nothing behind.
+        release.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[test]
+    fn a_write_that_the_child_accepts_reports_success_and_sends_the_exact_bytes() {
+        /// Shares the written bytes with the test.
+        struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Recorder {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tx = spawn_stdin_writer(Recorder(written.clone()));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            write_through(&tx, "{\"id\":1}\n".to_string(), deadline),
+            Ok(())
+        );
+        assert_eq!(
+            write_through(&tx, "{\"id\":2}\n".to_string(), deadline),
+            Ok(())
+        );
+        assert_eq!(
+            String::from_utf8(written.lock().unwrap().clone()).unwrap(),
+            "{\"id\":1}\n{\"id\":2}\n"
+        );
+    }
+
+    #[test]
+    fn a_write_to_a_broken_pipe_reports_the_failure_rather_than_timing_out() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let tx = spawn_stdin_writer(Broken);
+        let outcome = write_through(
+            &tx,
+            "{}\n".to_string(),
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(
+            matches!(outcome, Err(WriteEnd::Failed(ref e)) if e.contains("gone")),
+            "got {outcome:?}"
+        );
+    }
+
+    /// A child that never writes a newline used to grow one `String` for as long
+    /// as it kept writing. The line is capped and discarded whole — the retained
+    /// tail of an over-long line is itself a line nobody sent.
+    #[test]
+    fn a_line_that_never_ends_is_dropped_rather_than_grown() {
+        struct NeverANewline {
+            pulled: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl std::io::Read for NeverANewline {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                buf.fill(b'x');
+                self.pulled
+                    .fetch_add(buf.len(), std::sync::atomic::Ordering::Relaxed);
+                Ok(buf.len())
+            }
+        }
+        let pulled = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queue = spawn_stdout_reader(NeverANewline {
+            pulled: pulled.clone(),
+        });
+
+        std::thread::sleep(Duration::from_millis(200));
+        let (lines, bytes) = {
+            let state = queue.inner.lock().unwrap();
+            (state.lines.len(), state.bytes)
+        };
+        assert!(
+            pulled.load(std::sync::atomic::Ordering::Relaxed) > MAX_LINE_BYTES,
+            "the child must have written past the cap for this to prove anything"
+        );
+        assert_eq!(
+            (lines, bytes),
+            (0, 0),
+            "an unterminated line must never reach the queue"
+        );
+        queue.close();
+    }
+
+    /// An upstream that refills the queue faster than TUIC drains it kept a call
+    /// alive forever when the read preferred a ready line over the clock: every
+    /// wait found something to parse, so the timeout arm was never reached.
+    #[test]
+    fn a_full_queue_does_not_outrank_the_deadline() {
+        let queue = LineQueue::new();
+        for i in 0..8 {
+            assert!(queue.push(format!("{{\"n\":{i}}}")));
+        }
+        let deadline = Instant::now();
+        assert!(
+            matches!(queue.recv_deadline(deadline), Err(ReadEnd::Timeout)),
+            "being out of time outranks having something to parse"
+        );
     }
 
     #[test]

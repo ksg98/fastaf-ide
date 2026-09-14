@@ -15,6 +15,7 @@ vi.mock("../../stores/appLogger", () => ({
 	appLogger: { debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() },
 }));
 
+import { handleAgentExitCompletion } from "../../components/Terminal/agentExitCompletion";
 import { useIdleTriage } from "../../hooks/useIdleTriage";
 import { useTerminalCompletionNotifications } from "../../hooks/useTerminalCompletionNotifications";
 import { activityStore } from "../../stores/activityStore";
@@ -94,12 +95,60 @@ describe("useTerminalCompletionNotifications", () => {
 		await vi.advanceTimersByTimeAsync(800);
 
 		expect(playCompletion).toHaveBeenCalledWith(id);
-		expect(terminalsStore.get(id)).toMatchObject({ activity: true, unseen: true });
+		expect(terminalsStore.get(id)).toMatchObject({ activity: true, unseen: true, completionNotified: true });
 		expect(addActivityItem).toHaveBeenCalledWith(expect.objectContaining({ id: `terminal-done-${id}` }));
 
 		const activity = addActivityItem.mock.calls[0][0];
 		activity.onClick?.();
 		expect(navigateToTerminal).toHaveBeenCalledWith(id);
+	});
+
+	it("opens a fresh notification cycle when the terminal becomes busy again", async () => {
+		const id = addTerminal("claude");
+		terminalsStore.setActive(null);
+
+		await runBusyCycle(id);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(terminalsStore.get(id)?.completionNotified).toBe(true);
+
+		terminalsStore.update(id, { shellState: "busy" });
+		expect(terminalsStore.get(id)?.completionNotified).toBe(false);
+	});
+
+	it("notifies exactly once when the agent exits before its deferred completion", async () => {
+		const id = addTerminal("claude");
+		terminalsStore.setActive(null);
+
+		await runBusyCycle(id);
+		expect(handleAgentExitCompletion(id)).toBe(true);
+		terminalsStore.update(id, { shellState: "exited", agentType: null });
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(playCompletion).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not notify again when the agent exits after deferred completion", async () => {
+		const id = addTerminal("claude");
+		terminalsStore.setActive(null);
+
+		await runBusyCycle(id);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(terminalsStore.get(id)?.completionNotified).toBe(true);
+
+		expect(handleAgentExitCompletion(id)).toBe(false);
+		expect(playCompletion).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a remote exit fallback silent while still claiming the cycle", async () => {
+		const id = addTerminal("claude");
+		terminalsStore.update(id, { isRemote: true });
+		terminalsStore.setActive(null);
+		notificationsStore.setSilenceRemoteCompletions(true);
+
+		expect(handleAgentExitCompletion(id)).toBe(true);
+		expect(terminalsStore.get(id)?.completionNotified).toBe(true);
+		expect(playCompletion).not.toHaveBeenCalled();
+		notificationsStore.setSilenceRemoteCompletions(false);
 	});
 
 	it("suppresses completion for the active terminal", async () => {

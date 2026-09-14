@@ -165,6 +165,43 @@ pub(crate) struct LogicalPrefix {
 }
 
 // Attrs byte bit positions for binary cell encoding.
+/// Bit 15 of a serialized row's `col_count` carries alacritty's WRAPLINE: the
+/// row is not a line of its own, it continues onto the next display row.
+///
+/// Stolen from the count rather than added as a new per-row byte on purpose. The
+/// row header is 4 bytes and both frontend decoders — plus every offset
+/// assertion in their tests — are written against that; a column count is a
+/// terminal width, so the top bit is dead space. Same trade, same reasoning as
+/// `keyboard_flags` bit 5 carrying the alt-screen state.
+///
+/// Without it the frontend cannot tell a wrapped continuation from a fresh line,
+/// which is what left a wrapped `suggest:` block unmasked on screen (#8fc7):
+/// the grid is the only place that knows.
+pub(crate) const ROW_WRAPPED_FLAG: u16 = 0x8000;
+
+/// Bit 14 of the wire `col_count`: this row carries only the columns alacritty
+/// reported as damaged, not the whole line. When set, a `start_col: u16` follows
+/// the count and the payload is `count` cells beginning at that column; the
+/// frontend merges them into the row it already holds.
+///
+/// Measured over 11 real captures (4810 ticker-grouped frames,
+/// `damage_overship_over_capture_corpus`): the whole-row format ships 2.44 cells
+/// per cell actually damaged on average, and 11.8x on the busiest agent session,
+/// because a spinner or an in-place TUI redraw touches a handful of columns and
+/// pays for the full width.
+///
+/// It is a flag rather than a format bump on purpose. Rust does not hot-reload in
+/// dev, so a rebuilt frontend routinely runs against yesterday's backend: an old
+/// backend simply never sets the bit and the new decoder takes the whole-row path
+/// it always took. A header change would have desynced that pairing outright —
+/// same reasoning as `ROW_WRAPPED_FLAG` above.
+///
+/// The staleness this can introduce is the one the canvas already tolerates:
+/// alacritty under-reports damage on in-place TUI redraws (see the `[dup]` heal in
+/// CanvasTerminal), so a periodic full-frame reconcile already exists and bounds a
+/// missed column to the same ~250ms-1s window it bounds a missed row.
+pub(crate) const ROW_PARTIAL_FLAG: u16 = 0x4000;
+
 const ATTR_BOLD: u8 = 0b0000_0001;
 const ATTR_ITALIC: u8 = 0b0000_0010;
 const ATTR_UNDERLINE: u8 = 0b0000_0100;
@@ -320,6 +357,31 @@ fn resolve_color(c: Color, colors: &Colors) -> Option<Rgb> {
     }
 }
 
+/// Encode a row's `col_count` field, tagging [`ROW_WRAPPED_FLAG`] when the line
+/// continues onto the next display row.
+///
+/// alacritty marks the wrap on the LAST cell of the row it wraps out of, so the
+/// flag answers "does this row continue?", not "is this row a continuation?".
+/// The frontend walks forward from an anchor, which is the direction that
+/// matches.
+///
+/// `count` is how many cells the row actually carries — the full width on the
+/// whole-row path, the damaged span on a [`ROW_PARTIAL_FLAG`] row. The wrap probe
+/// always reads the row's real last cell, so a partial row that stops short of the
+/// right edge still reports the line's true wrap state.
+fn encode_col_count(
+    grid: &alacritty_terminal::grid::Grid<Cell>,
+    line: Line,
+    num_cols: usize,
+    count: usize,
+) -> u16 {
+    let wrapped = num_cols > 0
+        && grid[line][Column(num_cols - 1)]
+            .flags
+            .contains(Flags::WRAPLINE);
+    (count as u16) | if wrapped { ROW_WRAPPED_FLAG } else { 0 }
+}
+
 /// Encode one grid cell into the 11-byte wire format shared by the dirty-row and
 /// overscan serializers: codepoint (u32 LE), fg rgb (3 bytes), bg rgb (3 bytes),
 /// attrs (u8).
@@ -390,6 +452,19 @@ pub struct TerminalGrid {
     processor: ansi::Processor,
     prev_rows: Vec<String>,
     last_frame_display_offset: Option<usize>,
+    /// The last query compiled by [`Self::compiled_query`], kept so a repainting
+    /// screen re-runs the user's search without rebuilding its DFAs. Behind a
+    /// mutex because both searches take `&self`.
+    search_regex: parking_lot::Mutex<Option<(String, RegexSearch)>>,
+    /// How many queries have actually been compiled. Test-only: it is how a test
+    /// tells a cache hit from a rebuild without reaching into the cache.
+    #[cfg(test)]
+    regex_compiles: std::sync::atomic::AtomicUsize,
+    /// How many times `process` fell back to reading and diffing the whole
+    /// screen. Test-only: it is how a test tells the fast path from the slow one
+    /// without asserting on private state.
+    #[cfg(test)]
+    full_screen_reads: usize,
     last_frame_history_size: Option<usize>,
     last_frame_screen_lines: Option<usize>,
     last_frame_columns: Option<usize>,
@@ -405,6 +480,13 @@ impl TerminalGrid {
     pub fn new(rows: u16, cols: u16, scrollback: usize) -> Self {
         let config = Config {
             scrolling_history: scrollback,
+            // User-visible parity with iTerm2's "save lines to scrollback in
+            // alternate screen mode" option:
+            // alt-screen apps that print more than a screenful (`gh run watch`,
+            // `less`, `man`) stay scrollable instead of dropping what rolls off
+            // the top. Same cap as the primary screen; wiped on every alt
+            // enter/exit, so no inactive alternate lines remain addressable.
+            alt_scrolling_history: scrollback,
             kitty_keyboard: true,
             default_cursor_style: CursorStyle {
                 shape: CursorShape::Beam,
@@ -428,6 +510,11 @@ impl TerminalGrid {
             processor: ansi::Processor::new(),
             prev_rows: Vec::new(),
             last_frame_display_offset: None,
+            search_regex: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            regex_compiles: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            full_screen_reads: 0,
             last_frame_history_size: None,
             last_frame_screen_lines: None,
             last_frame_columns: None,
@@ -447,19 +534,29 @@ impl TerminalGrid {
         // Prefer the alacritty parse-damage set: read+diff ONLY the lines whose
         // content actually changed, instead of rebuilding+diffing the whole screen
         // (O(rows*cols)) on every PTY chunk. Fall back to a full read+diff when a
-        // full re-read is required (initial frame / resize / scroll / alt-screen /
-        // clear) or when the view is scrolled (display_offset != 0) — the latter
-        // sidesteps any viewport-vs-grid line-index mismatch. The text-equality
-        // check is preserved in BOTH paths, so an over-reported damaged line (e.g.
-        // cursor-only movement) never produces a spurious ChangedRow.
+        // full re-read is required (initial frame / resize / alt-screen / clear).
+        // The text-equality check is preserved in BOTH paths, so an over-reported
+        // damaged line (e.g. cursor-only movement) never produces a spurious
+        // ChangedRow.
+        //
+        // A scrolled-back view (`display_offset != 0`) deliberately does NOT force
+        // the full path. It used to, to sidestep a viewport-vs-grid line-index
+        // mismatch — but there is none to sidestep: `read_screen_text`,
+        // `row_to_text` and the parse-damage indices all address the active screen
+        // region through `Line(i)`, and the display offset moves the viewport, not
+        // those rows. Forcing it meant a user reading scrollback paid a whole-screen
+        // rebuild per PTY chunk, precisely when a busy agent emits them fastest.
+        // `process_damage_matches_full_diff_while_scrolled_back` holds the line.
         let parse_damage = self.term.parse_damage();
         self.term.reset_parse_damage();
 
-        let must_full = self.prev_rows.is_empty()
-            || self.term.grid().display_offset() != 0
-            || matches!(parse_damage, TermParseDamage::Full);
+        let must_full = self.prev_rows.is_empty() || matches!(parse_damage, TermParseDamage::Full);
 
         if must_full {
+            #[cfg(test)]
+            {
+                self.full_screen_reads += 1;
+            }
             let curr_rows = self.read_screen_text();
             let changed: Vec<ChangedRow> = curr_rows
                 .iter()
@@ -498,6 +595,71 @@ impl TerminalGrid {
             }
         }
         changed
+    }
+
+    /// Whether a DEC 2026 synchronized update is currently open.
+    ///
+    /// Mirrors the real parser state rather than "a BSU was seen once": the
+    /// vendored VTE re-arms the deadline on a nested BSU and only clears it when
+    /// the update actually ends, so this stays true across BSU extension.
+    pub fn is_sync_update_active(&self) -> bool {
+        self.processor.sync_timeout().sync_timeout().is_some()
+    }
+
+    /// End a synchronized update whose 150ms deadline has passed, returning
+    /// whether anything was flushed.
+    ///
+    /// The vendored VTE timeout is passive — it records a deadline but never
+    /// fires on its own, so without this the buffered bytes wait for an ESU
+    /// that may never arrive and the terminal is wedged. Callers must treat a
+    /// `true` return as new damage to serialize.
+    ///
+    pub fn flush_sync_timeout_if_needed(&mut self) -> bool {
+        let Some(deadline) = self.processor.sync_timeout().sync_timeout() else {
+            return false;
+        };
+        if std::time::Instant::now() < deadline {
+            return false;
+        }
+        self.processor.stop_sync(&mut self.term);
+        self.refresh_rows_after_sync_flush();
+        true
+    }
+
+    /// End a synchronized update unconditionally when it still holds bytes.
+    ///
+    /// Used on teardown: session exit is the other "no more PTY bytes arrive"
+    /// case, where waiting for the deadline would simply drop the buffer.
+    pub fn force_stop_sync_if_buffered(&mut self) -> bool {
+        if self.processor.sync_bytes_count() == 0 {
+            return false;
+        }
+        self.processor.stop_sync(&mut self.term);
+        self.refresh_rows_after_sync_flush();
+        true
+    }
+
+    /// Re-sync the cached screen rows after a flush that bypassed `process()`.
+    ///
+    /// `screen_text_rows()` serves `prev_rows`, so without this every screen
+    /// reader (HTTP snapshots, agent screen classifiers) would keep answering
+    /// with pre-flush content until the next PTY chunk arrived — the same
+    /// staleness the flush exists to end.
+    ///
+    /// DEFERRED (2026-07-26) — refreshing the cache means the next `process()`
+    /// diff no longer reports these rows, so the output parser sees flushed
+    /// content only if the agent repaints it (Codex and Ink both do, every
+    /// frame). Feeding them to the parser needs the ticker to reach the
+    /// reader-owned `ChunkProcessor`; revisit if a parser miss is ever observed.
+    fn refresh_rows_after_sync_flush(&mut self) {
+        if !self.prev_rows.is_empty() {
+            self.prev_rows = self.read_screen_text();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_screen_reads(&self) -> usize {
+        self.full_screen_reads
     }
 
     /// Reference (pre-optimization) implementation of `process`: always rebuilds
@@ -549,6 +711,19 @@ impl TerminalGrid {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
+    /// Whether the app enabled DEC mouse reporting (click / drag / motion).
+    ///
+    /// Inline fullscreen TUIs (`grok --no-alt-screen`) turn this on without
+    /// entering the alternate screen. The durable log treats that the same
+    /// way as alt-screen: keep grid history for the scrollbar, don't ingest
+    /// viewport slices as shell output.
+    pub fn is_mouse_reporting(&self) -> bool {
+        let mode = self.term.mode();
+        mode.contains(TermMode::MOUSE_REPORT_CLICK)
+            || mode.contains(TermMode::MOUSE_DRAG)
+            || mode.contains(TermMode::MOUSE_MOTION)
+    }
+
     /// Whether the cursor is currently visible (DECTCEM / CSI ?25h).
     pub fn is_cursor_visible(&self) -> bool {
         self.term.mode().contains(TermMode::SHOW_CURSOR)
@@ -557,6 +732,11 @@ impl TerminalGrid {
     /// Number of scrollback lines above the visible screen.
     pub fn scrollback_count(&self) -> usize {
         self.term.grid().history_size()
+    }
+
+    /// Number of primary-screen scrollback lines, regardless of the active screen.
+    pub fn primary_scrollback_count(&self) -> usize {
+        self.term.primary_history_size()
     }
 
     /// Read a range of scrollback lines as plain text.
@@ -841,6 +1021,7 @@ impl TerminalGrid {
         LogLine {
             spans,
             cols: num_cols as u16,
+            chrome: false,
         }
     }
 
@@ -1179,6 +1360,42 @@ impl TerminalGrid {
 
     // --- Search API ---
 
+    /// Run `f` with the compiled form of `query`, compiling it only when the
+    /// query differs from the cached one.
+    ///
+    /// `RegexSearch::new` builds four DFAs, and a redrawing TUI re-ran the search
+    /// on every frame — for a query that only changes when the user types.
+    ///
+    /// The closure takes `&mut RegexSearch` because the DFAs are LAZY: matching
+    /// mutates their caches. It is not per-search state — a search's origin,
+    /// iterator and current DFA state are fresh locals inside alacritty's
+    /// `regex_search_internal`, so nothing about one search is carried into the
+    /// next through this value. That is why one compiled instance can serve both
+    /// `search` and `search_buffer`; the mutex is what keeps two callers from
+    /// touching the shared caches at once.
+    fn compiled_query<T>(&self, query: &str, f: impl FnOnce(&mut RegexSearch) -> T) -> Option<T> {
+        let mut slot = self.search_regex.lock();
+        if slot.as_ref().is_none_or(|(cached, _)| cached != query) {
+            let Ok(compiled) = RegexSearch::new(query) else {
+                // Leave the previous entry: an invalid query is what a user types
+                // halfway through a valid one, and the next keystroke may fix it.
+                return None;
+            };
+            #[cfg(test)]
+            self.regex_compiles
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *slot = Some((query.to_string(), compiled));
+        }
+        let (_, regex) = slot.as_mut().expect("just populated");
+        Some(f(regex))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn regex_compiles(&self) -> usize {
+        self.regex_compiles
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Regex search across visible grid + scrollback using alacritty's native DFA engine.
     /// Returns matches as (row, col_start, col_end) in absolute coordinates.
     /// The query is auto-escaped for literal substring search unless it contains
@@ -1187,10 +1404,6 @@ impl TerminalGrid {
         if query.is_empty() || query.len() > 1024 {
             return Vec::new();
         }
-        let mut regex = match RegexSearch::new(query) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
         let history = self.term.grid().history_size();
         let topmost = self.term.topmost_line();
         let bottommost = self.term.bottommost_line();
@@ -1199,40 +1412,50 @@ impl TerminalGrid {
         let start = Point::new(topmost, Column(0));
         let end = Point::new(bottommost, last_col);
 
-        let mut matches = Vec::new();
-        let mut origin = start;
+        self.compiled_query(query, |regex| {
+            let mut matches = Vec::new();
+            let mut origin = start;
 
-        while let Some(m) = self.term.regex_search_right(&mut regex, origin, end) {
-            let m_start = *m.start();
-            let m_end = *m.end();
+            while let Some(m) = self.term.regex_search_right(regex, origin, end) {
+                let m_start = *m.start();
+                let m_end = *m.end();
 
-            let abs_row = (m_start.line.0 + history as i32) as usize;
-            matches.push(SearchMatch {
-                row: abs_row,
-                col_start: m_start.column.0,
-                col_end: m_end.column.0 + 1,
-            });
+                let abs_row = (m_start.line.0 + history as i32) as usize;
+                // A match can span a wrapped line. `SearchMatch` carries a single row, so
+                // taking `m_end.column` from a DIFFERENT row would paint a highlight on the
+                // start row covering cells that never matched. Clip to the end of the start
+                // row instead: an under-highlight is invisible, an over-highlight is a bug.
+                // DEFERRED (2026-08-07) — full multi-row highlighting needs SearchMatch to
+                // carry per-row segments and the match count to stay 1 per logical hit.
+                let col_end = if m_end.line == m_start.line {
+                    m_end.column.0 + 1
+                } else {
+                    last_col.0 + 1
+                };
+                matches.push(SearchMatch {
+                    row: abs_row,
+                    col_start: m_start.column.0,
+                    col_end,
+                });
 
-            // Advance past this match
-            if m_end.column < last_col {
-                origin = Point::new(m_end.line, m_end.column + 1);
-            } else if m_end.line < bottommost {
-                origin = Point::new(m_end.line + 1i32, Column(0));
-            } else {
-                break;
+                // Advance past this match
+                if m_end.column < last_col {
+                    origin = Point::new(m_end.line, m_end.column + 1);
+                } else if m_end.line < bottommost {
+                    origin = Point::new(m_end.line + 1i32, Column(0));
+                } else {
+                    break;
+                }
             }
-        }
-        matches
+            matches
+        })
+        .unwrap_or_default()
     }
 
     pub fn search_buffer(&self, query: &str) -> Vec<BufferSearchMatch> {
         if query.is_empty() || query.len() > 1024 {
             return Vec::new();
         }
-        let mut regex = match RegexSearch::new(query) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
         let history = self.term.grid().history_size();
         let topmost = self.term.topmost_line();
         let bottommost = self.term.bottommost_line();
@@ -1241,39 +1464,42 @@ impl TerminalGrid {
         let start = Point::new(topmost, Column(0));
         let end = Point::new(bottommost, last_col);
 
-        let mut matches = Vec::new();
-        let mut origin = start;
-        let mut last_row_line: Option<(usize, String)> = None;
+        self.compiled_query(query, |regex| {
+            let mut matches = Vec::new();
+            let mut origin = start;
+            let mut last_row_line: Option<(usize, String)> = None;
 
-        while let Some(m) = self.term.regex_search_right(&mut regex, origin, end) {
-            let m_start = *m.start();
-            let m_end = *m.end();
-            let abs_row = (m_start.line.0 + history as i32) as usize;
+            while let Some(m) = self.term.regex_search_right(regex, origin, end) {
+                let m_start = *m.start();
+                let m_end = *m.end();
+                let abs_row = (m_start.line.0 + history as i32) as usize;
 
-            let line_text = if last_row_line.as_ref().is_some_and(|(r, _)| *r == abs_row) {
-                last_row_line.as_ref().unwrap().1.clone()
-            } else {
-                let text = self.row_to_text(m_start.line).unwrap_or_default();
-                last_row_line = Some((abs_row, text.clone()));
-                text
-            };
+                let line_text = if last_row_line.as_ref().is_some_and(|(r, _)| *r == abs_row) {
+                    last_row_line.as_ref().unwrap().1.clone()
+                } else {
+                    let text = self.row_to_text(m_start.line).unwrap_or_default();
+                    last_row_line = Some((abs_row, text.clone()));
+                    text
+                };
 
-            matches.push(BufferSearchMatch {
-                line_index: abs_row,
-                line_text,
-                match_start: m_start.column.0,
-                match_end: m_end.column.0 + 1,
-            });
+                matches.push(BufferSearchMatch {
+                    line_index: abs_row,
+                    line_text,
+                    match_start: m_start.column.0,
+                    match_end: m_end.column.0 + 1,
+                });
 
-            if m_end.column < last_col {
-                origin = Point::new(m_end.line, m_end.column + 1);
-            } else if m_end.line < bottommost {
-                origin = Point::new(m_end.line + 1i32, Column(0));
-            } else {
-                break;
+                if m_end.column < last_col {
+                    origin = Point::new(m_end.line, m_end.column + 1);
+                } else if m_end.line < bottommost {
+                    origin = Point::new(m_end.line + 1i32, Column(0));
+                } else {
+                    break;
+                }
             }
-        }
-        matches
+            matches
+        })
+        .unwrap_or_default()
     }
 
     /// Get text of a single screen row (0-based, relative to viewport).
@@ -1351,6 +1577,44 @@ impl TerminalGrid {
     ///
     /// Absolute rows: 0 = oldest history line, historySize = first screen line.
     /// Columns are 0-based cell indices.
+    fn normalize_copied_selection(text: &str, num_cols: usize) -> String {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut out: Vec<String> = Vec::with_capacity(lines.len());
+        let mut index = 0;
+
+        while index < lines.len() {
+            if gutter_content(lines[index]).is_none() {
+                out.push(lines[index].to_string());
+                index += 1;
+                continue;
+            }
+
+            let run_start = index;
+            while index < lines.len() && gutter_content(lines[index]).is_some() {
+                index += 1;
+            }
+            let contents: Vec<&str> = lines[run_start..index]
+                .iter()
+                .filter_map(|line| gutter_content(line))
+                .collect();
+            // A single quoted line is more likely a coincidence (a table rule, a
+            // box-drawn frame) than a Claude blockquote, so leave it verbatim.
+            let should_strip = contents
+                .iter()
+                .filter(|content| !content.is_empty())
+                .count()
+                >= 2;
+
+            if should_strip {
+                out.extend(reflow_quoted_run(&contents, num_cols));
+            } else {
+                out.extend(lines[run_start..index].iter().map(|line| line.to_string()));
+            }
+        }
+
+        out.join("\n")
+    }
+
     pub fn get_selection_text(
         &self,
         start_row: usize,
@@ -1409,8 +1673,7 @@ impl TerminalGrid {
             }
         }
 
-        let trimmed = result.trim_end_matches('\n');
-        trimmed.to_owned()
+        Self::normalize_copied_selection(result.trim_end_matches('\n'), num_cols)
     }
 
     /// Serialize dirty rows as a compact binary frame.
@@ -1421,14 +1684,19 @@ impl TerminalGrid {
     /// Header: [num_rows: u16] [cursor_row: u16] [cursor_col: u16] [cursor_visible: u8]
     ///         [display_offset: u32] [history_size: u32] [has_selection: u8]
     ///         [keyboard_flags: u8] [frame_flags: u8] [num_lines: u16] [num_cols: u16]
-    /// Per row: [row_index: u16] [col_count: u16] [cells...]
+    /// Per row: [row_index: u16] [col_count: u16] ([start_col: u16]) [cells...]
     /// Per cell: [char: u32 LE] [fg_r, fg_g, fg_b] [bg_r, bg_g, bg_b] [attrs: u8]
     /// ```
+    /// `col_count` carries two flags in its top bits: [`ROW_WRAPPED_FLAG`] (the
+    /// line continues onto the next display row) and [`ROW_PARTIAL_FLAG`]. Only
+    /// when the latter is set does `start_col` follow, and then the row carries
+    /// `col_count` cells starting at that column instead of the whole width —
+    /// the frontend merges them into the row it already holds.
     /// attrs: bit0=bold, bit1=italic, bit2=underline, bit3=strikeout,
     ///        bit4=dim, bit5=inverse, bit6=default_fg, bit7=default_bg
     /// keyboard_flags: bit0=disambiguate_esc_codes, bit1=report_event_types,
     ///                 bit2=report_alternate_keys, bit3=report_all_keys_as_esc,
-    ///                 bit4=report_associated_text
+    ///                 bit4=report_associated_text, bit5=alternate_screen
     /// frame_flags: bit0=bell, bits1-2=cursor_shape (0=block,1=underline,2=beam),
     ///              bits3-4=mouse_mode (0=none,1=click,2=drag,3=motion),
     ///              bit5=sgr_mouse, bit6=focus_reporting, bit7=bracketed_paste
@@ -1465,6 +1733,16 @@ impl TerminalGrid {
         if mode.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
             keyboard_flags |= 0x10;
         }
+        // bit 5: alternate screen active. Not a keyboard flag — it rides in this
+        // byte because `frame_flags` has no bit left, and adding a header byte
+        // would desync any frontend running against an older backend (Rust does
+        // not hot-reload in dev). An unused bit degrades to 0 instead.
+        // The frontend keys its absolute-row cache off `history_base`, which
+        // restarts from 0 on every alt enter/exit (`reset_history_era`), so it
+        // must drop that cache whenever this bit flips.
+        if mode.contains(TermMode::ALT_SCREEN) {
+            keyboard_flags |= 0x20;
+        }
 
         let viewport_changed = self.last_frame_display_offset != Some(display_offset)
             || self.last_frame_history_size != Some(history_size)
@@ -1474,13 +1752,35 @@ impl TerminalGrid {
             self.term.mark_fully_damaged();
         }
 
-        let dirty_lines: Vec<usize> = {
+        // REJECTED (2026-08-20) — F24, skipping the full damage above when only
+        // `history_size` grew. Measured and not worth it: over 11 real captures
+        // (4810 frames, `damage_overship_over_capture_corpus`) full frames are
+        // 0.4% of all frames, and that already counts resizes and scrollback moves
+        // as well as history growth. The audit's "every scrolled line forces a
+        // full-screen frame" does not hold on real workloads. Doing it needs the
+        // frame to carry a scroll delta the frontend applies before indexing rows,
+        // and getting that wrong scrambles text silently. Re-open only if a capture
+        // shows a full-frame rate high enough to pay for that risk.
+        //
+        // DEFERRED (2026-08-20) — F26, not holding the vt lock across this
+        // serialization. It is not a lock-placement fix: this method takes
+        // `&mut self` to reset damage and update the `last_frame_*` state, so
+        // releasing the lock means double-buffering the grid — and copying the grid
+        // costs about what the encode it unblocks costs. No measurement exists
+        // showing the contention is real; take one before paying for it.
+        //
+        // (line, left, right) — `right` inclusive. Keeping the column bounds is
+        // what lets a row ship only its damaged span (see `ROW_PARTIAL_FLAG`);
+        // discarding them cost 2.44x the cells on the measured corpus.
+        let dirty_lines: Vec<(usize, usize, usize)> = {
+            let last_col = num_cols.saturating_sub(1);
             let damage = self.term.damage();
             match damage {
-                TermDamage::Full => (0..num_lines).collect(),
-                TermDamage::Partial(iter) => {
-                    iter.map(|b| b.line).filter(|&l| l < num_lines).collect()
-                }
+                TermDamage::Full => (0..num_lines).map(|l| (l, 0, last_col)).collect(),
+                TermDamage::Partial(iter) => iter
+                    .filter(|b| b.line < num_lines)
+                    .map(|b| (b.line, b.left.min(last_col), b.right.min(last_col)))
+                    .collect(),
             }
         };
 
@@ -1551,12 +1851,25 @@ impl TerminalGrid {
 
         let grid = self.term.grid();
         let colors = self.term.colors();
-        for &row_idx in &dirty_lines {
+        for &(row_idx, left, right) in &dirty_lines {
             let line = Line(row_idx as i32 - display_offset as i32);
+            // A span shorter than the row saves 11 bytes per column dropped and
+            // costs 2 for `start_col`, so any narrowing at all is worth sending
+            // partial. An empty grid (num_cols == 0) has nothing to narrow.
+            let span = (right + 1).saturating_sub(left).min(num_cols);
+            let partial = span < num_cols;
             buf.extend_from_slice(&(row_idx as u16).to_le_bytes());
-            buf.extend_from_slice(&(num_cols as u16).to_le_bytes());
+            let count = encode_col_count(grid, line, num_cols, span);
+            buf.extend_from_slice(
+                &(count | if partial { ROW_PARTIAL_FLAG } else { 0 }).to_le_bytes(),
+            );
+            if partial {
+                buf.extend_from_slice(&(left as u16).to_le_bytes());
+            }
 
-            for col in 0..num_cols {
+            // Bounded by `num_cols`, not `right`, so a zero-column grid indexes
+            // nothing — the old `0..num_cols` loop was empty there too.
+            for col in left..num_cols.min(right + 1) {
                 encode_cell(&mut buf, &grid[line][Column(col)], colors);
             }
         }
@@ -1567,6 +1880,57 @@ impl TerminalGrid {
         self.last_frame_screen_lines = Some(num_lines);
         self.last_frame_columns = Some(num_cols);
         buf
+    }
+
+    /// Damage geometry for one frame, as `serialize_dirty_rows` would see it: the
+    /// rows it would ship, and how many of those rows' cells alacritty actually
+    /// reported as damaged. Consumes the damage the same way the serializer does,
+    /// so a replay alternating `process` and this call sees exactly the frames a
+    /// live ticker would.
+    ///
+    /// Exists to measure F23 (per-row column bounds are discarded at the
+    /// `TermDamage::Partial` match above) against real captures instead of
+    /// guessing at the win. `shipped / damaged` is the byte multiplier the current
+    /// whole-row format pays.
+    #[cfg(test)]
+    pub(crate) fn take_damage_geometry(&mut self) -> DamageGeometry {
+        let num_cols = self.term.grid().columns();
+        let num_lines = self.term.grid().screen_lines();
+        let display_offset = self.term.grid().display_offset();
+        let history_size = self.term.grid().history_size();
+
+        let viewport_changed = self.last_frame_display_offset != Some(display_offset)
+            || self.last_frame_history_size != Some(history_size)
+            || self.last_frame_screen_lines != Some(num_lines)
+            || self.last_frame_columns != Some(num_cols);
+        if viewport_changed {
+            self.term.mark_fully_damaged();
+        }
+
+        let (rows, damaged_cells) = match self.term.damage() {
+            TermDamage::Full => (num_lines, num_lines * num_cols),
+            TermDamage::Partial(iter) => {
+                iter.filter(|b| b.line < num_lines)
+                    .fold((0usize, 0usize), |(rows, cells), b| {
+                        // `right` is inclusive, and a damaged line always has
+                        // `left <= right`, so the span is at least one cell.
+                        (rows + 1, cells + (b.right - b.left + 1).min(num_cols))
+                    })
+            }
+        };
+
+        self.term.reset_damage();
+        self.last_frame_display_offset = Some(display_offset);
+        self.last_frame_history_size = Some(history_size);
+        self.last_frame_screen_lines = Some(num_lines);
+        self.last_frame_columns = Some(num_cols);
+
+        DamageGeometry {
+            rows,
+            damaged_cells,
+            shipped_cells: rows * num_cols,
+            full_frame: viewport_changed,
+        }
     }
 
     /// Serialize a range of styled rows by *eviction-stable absolute index*. Feeds
@@ -1615,7 +1979,10 @@ impl TerminalGrid {
         for rel in rows {
             let line = Line(rel as i32 - history_size as i32);
             buf.extend_from_slice(&((rel + history_base) as u32).to_le_bytes());
-            buf.extend_from_slice(&(num_cols as u16).to_le_bytes());
+            // Scrollback rows are always whole: this serializer answers "give me
+            // these rows", not "what changed", so there is no damage span and no
+            // prior row on the frontend to merge into.
+            buf.extend_from_slice(&encode_col_count(grid, line, num_cols, num_cols).to_le_bytes());
             for col in 0..num_cols {
                 encode_cell(&mut buf, &grid[line][Column(col)], colors);
             }
@@ -1670,9 +2037,839 @@ impl TerminalGrid {
     }
 }
 
+/// Content of a Claude blockquote row, with the `▎` gutter removed.
+///
+/// Claude Code draws a markdown blockquote as a two-cell indent, U+258E, and a
+/// separator. The indent cells are plain spaces in current releases and were
+/// non-breaking spaces in older ones, so both are accepted — matching only NBSP
+/// silently disabled the whole strip and pasted raw `▎` bars into Slack.
+/// Separators are consumed the same way; body NBSPs past the first survive,
+/// because agents use them to align columns inside the quote.
+fn gutter_content(line: &str) -> Option<&str> {
+    const GUTTER_BAR: char = '▎';
+
+    let mut chars = line.chars();
+    for _ in 0..2 {
+        match chars.next() {
+            Some(' ') | Some('\u{a0}') => {}
+            _ => return None,
+        }
+    }
+    if chars.next() != Some(GUTTER_BAR) {
+        return None;
+    }
+    let rest = chars.as_str();
+    if rest.is_empty() {
+        return Some("");
+    }
+    rest.strip_prefix(' ')
+        .or_else(|| rest.strip_prefix('\u{a0}'))
+}
+
+/// Rejoin rows that Claude Code broke only to fit the terminal width.
+///
+/// Claude wraps its own output and emits real newlines, so `WRAPLINE` is unset
+/// and the row-level unwrap in `get_selection_text` cannot help: pasting a
+/// quoted draft into a chat client keeps every mid-sentence break.
+///
+/// The join rule is the inverse of greedy word wrap. With width `W`, a wrapper
+/// breaks after a line exactly when the next word no longer fits, so a break is
+/// mechanical when `line + " " + next_word` would exceed `W`, and deliberate
+/// when it would have fit. `W` is the widest row in the run, the only exact
+/// width evidence the copied text carries — agents wrap short of the terminal
+/// edge by a margin of their own choosing.
+///
+/// That estimate is only meaningful once the run proves it was wrapped at all.
+/// A short quote of three deliberate ten-column lines yields `W = 10`, under
+/// which every following word overflows and the whole quote collapses into one
+/// line. So a run whose widest row stays far from the terminal edge is left
+/// untouched: `num_cols` is the one thing here that cannot be inferred from the
+/// text, and without the gate the rule fails open on exactly the quotes a user
+/// wrote by hand.
+///
+/// Blank rows, list markers and deeper indents always start a new line: they
+/// mark structure the author chose, which the width rule alone cannot see.
+fn reflow_quoted_run(contents: &[&str], num_cols: usize) -> Vec<String> {
+    // Gutter overhead: two indent cells, the bar, and the separator space.
+    const GUTTER_COLS: usize = 4;
+    // Room for an agent's own right margin plus the ragged edge a greedy
+    // wrapper leaves when the overflowing word is long.
+    const WRAP_EVIDENCE_SLACK: usize = 24;
+    // Below this the slack swallows the whole terminal and the gate would let
+    // every run through. Prose quotes do not happen at such widths anyway.
+    const MIN_REFLOW_COLS: usize = 48;
+
+    let width = contents
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let wrap_threshold = num_cols.saturating_sub(GUTTER_COLS + WRAP_EVIDENCE_SLACK);
+    if num_cols < MIN_REFLOW_COLS || width < wrap_threshold {
+        return contents.iter().map(|line| (*line).to_string()).collect();
+    }
+    let mut out: Vec<String> = Vec::with_capacity(contents.len());
+    // The width rule asks what the *previous screen row* looked like, so the
+    // measurements come from the source row, never from the paragraph built so
+    // far. A joined paragraph always exceeds the wrap width, so measuring the
+    // accumulator would make every later row overflow and glue the author's own
+    // short lines onto the paragraph.
+    let mut previous_row: Option<(usize, usize)> = None;
+
+    for line in contents {
+        let trimmed = line.trim_start();
+        let length = line.chars().count();
+        let indent = length - trimmed.chars().count();
+
+        let joinable = match previous_row {
+            Some((previous_length, previous_indent)) => {
+                !trimmed.is_empty()
+                    && previous_length > previous_indent
+                    && indent <= previous_indent
+                    && !starts_list_item(trimmed)
+                    && previous_length + 1 + trimmed.split(' ').next().unwrap_or("").chars().count()
+                        > width
+            }
+            None => false,
+        };
+
+        if joinable {
+            let previous = out.last_mut().expect("joinable implies a previous line");
+            previous.push(' ');
+            previous.push_str(trimmed);
+        } else {
+            out.push((*line).to_string());
+        }
+        previous_row = Some((length, indent));
+    }
+
+    out
+}
+
+/// Whether a line opens a bullet or an ordered-list item.
+fn starts_list_item(trimmed: &str) -> bool {
+    if let Some(rest) = trimmed.strip_prefix(['-', '*', '+', '•', '·']) {
+        return rest.starts_with(' ');
+    }
+    let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return false;
+    }
+    let rest = &trimmed[digits.len()..];
+    matches!(rest.strip_prefix(['.', ')']), Some(after) if after.starts_with(' '))
+}
+
+/// One frame's worth of damage geometry — see `take_damage_geometry`.
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DamageGeometry {
+    /// Rows the frame would carry.
+    pub rows: usize,
+    /// Cells alacritty reported as damaged across those rows.
+    pub damaged_cells: usize,
+    /// Cells the current whole-row wire format actually ships.
+    pub shipped_cells: usize,
+    /// The viewport moved, so the serializer forced full damage (F24's path).
+    pub full_frame: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- DEC 2026 synchronized update (see `flush_sync_timeout_if_needed`) ---
+
+    const BSU: &[u8] = b"\x1b[?2026h";
+    const ESU: &[u8] = b"\x1b[?2026l";
+    /// Slightly past the vendored VTE `SYNC_UPDATE_TIMEOUT` (150ms).
+    const PAST_DEADLINE: std::time::Duration = std::time::Duration::from_millis(170);
+
+    fn screen_contains(grid: &TerminalGrid, needle: &str) -> bool {
+        grid.screen_text_rows().iter().any(|r| r.contains(needle))
+    }
+
+    // --- F23: how much does the whole-row wire format overship? ---
+
+    /// The grid ticker's period. Frames are taken on this boundary so a replay
+    /// batches the same chunks into the same frame a live session would.
+    const TICK_US: u64 = 16_000;
+
+    #[derive(Debug, Default)]
+    struct DamageTotals {
+        frames: usize,
+        full_frames: usize,
+        rows: usize,
+        damaged_cells: usize,
+        shipped_cells: usize,
+    }
+
+    impl DamageTotals {
+        fn add(&mut self, g: DamageGeometry) {
+            if g.rows == 0 {
+                return;
+            }
+            self.frames += 1;
+            self.full_frames += usize::from(g.full_frame);
+            self.rows += g.rows;
+            self.damaged_cells += g.damaged_cells;
+            self.shipped_cells += g.shipped_cells;
+        }
+
+        /// Cells shipped per cell actually damaged. 1.0 means the current format
+        /// wastes nothing; 10.0 means F23 would cut this workload's row payload
+        /// by 90%.
+        fn overship(&self) -> f64 {
+            if self.damaged_cells == 0 {
+                return 1.0;
+            }
+            self.shipped_cells as f64 / self.damaged_cells as f64
+        }
+    }
+
+    /// Replay a capture the way the grid ticker sees it: feed every output record
+    /// into the vt, and take a frame each time the capture's own clock crosses a
+    /// tick boundary. Input records are skipped — they never reach the vt.
+    ///
+    /// The tick grouping is what makes the result meaningful. Sampling per chunk
+    /// instead would split one repaint across several frames and report damage
+    /// far narrower than production ever sees.
+    fn replay_damage(bytes: &[u8], rows: u16, cols: u16) -> DamageTotals {
+        let records = crate::pty_capture::decode(bytes).expect("decodable capture");
+        let mut grid = TerminalGrid::new(rows, cols, 10_000);
+        let mut totals = DamageTotals::default();
+        let mut tick = 0u64;
+        for rec in records {
+            if rec.direction != crate::pty_capture::CaptureDirection::Output {
+                continue;
+            }
+            grid.process(&rec.data);
+            if rec.elapsed_us / TICK_US > tick {
+                tick = rec.elapsed_us / TICK_US;
+                totals.add(grid.take_damage_geometry());
+            }
+        }
+        totals.add(grid.take_damage_geometry());
+        totals
+    }
+
+    /// `take_damage_geometry` must agree with `serialize_dirty_rows` about which
+    /// rows a frame carries, or every number measured through it is fiction.
+    #[test]
+    fn damage_geometry_row_count_matches_the_serializer() {
+        let mut measured = TerminalGrid::new(10, 40, 100);
+        let mut serialized = TerminalGrid::new(10, 40, 100);
+
+        for chunk in [
+            b"\x1b[2Jhello".as_slice(),
+            b" world".as_slice(),
+            b"\r\nsecond line".as_slice(),
+        ] {
+            measured.process(chunk);
+            serialized.process(chunk);
+
+            let geometry = measured.take_damage_geometry();
+            let frame = serialized.serialize_dirty_rows();
+            let rows_in_frame = if frame.is_empty() {
+                0
+            } else {
+                u16::from_le_bytes([frame[0], frame[1]]) as usize
+            };
+
+            assert_eq!(
+                geometry.rows, rows_in_frame,
+                "geometry and serializer disagree on row count"
+            );
+            assert_eq!(
+                geometry.shipped_cells,
+                rows_in_frame * 40,
+                "the wire format ships whole rows"
+            );
+        }
+    }
+
+    /// The premise under F23: alacritty reports narrow column bounds when only a
+    /// few cells change, and the serializer throws them away. A spinner ticking
+    /// one glyph damages one column and ships forty.
+    #[test]
+    fn narrow_edits_report_narrow_column_damage() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        grid.process(b"\x1b[2J\x1b[H");
+        let _ = grid.take_damage_geometry();
+
+        // Home, then overwrite a single cell — the shape of a spinner frame.
+        for glyph in [b"\x1b[H|", b"\x1b[H/", b"\x1b[H-"] {
+            grid.process(glyph);
+            let g = grid.take_damage_geometry();
+            assert_eq!(g.rows, 1, "one row damaged");
+            // Two, not one: the glyph lands on column 0 and the cursor ends on
+            // column 1, and alacritty damages the cell the cursor sits on. So the
+            // floor for any edit is the edit plus one cell — which is why F23's
+            // win is measured, not assumed.
+            assert_eq!(g.damaged_cells, 2, "the edit plus the cursor cell");
+            assert_eq!(g.shipped_cells, 40, "but a whole row is shipped");
+        }
+    }
+
+    /// Decode the first row header of a dirty-row frame: (row_index, count,
+    /// wrapped, start_col, cell_bytes).
+    fn first_row_header(frame: &[u8], num_cols: usize) -> (usize, usize, bool, usize, usize) {
+        const HEADER: usize = 26;
+        let row_index = u16::from_le_bytes([frame[HEADER], frame[HEADER + 1]]) as usize;
+        let raw = u16::from_le_bytes([frame[HEADER + 2], frame[HEADER + 3]]);
+        let wrapped = raw & ROW_WRAPPED_FLAG != 0;
+        let partial = raw & ROW_PARTIAL_FLAG != 0;
+        let count = (raw & !(ROW_WRAPPED_FLAG | ROW_PARTIAL_FLAG)) as usize;
+        let (start_col, consumed) = if partial {
+            (
+                u16::from_le_bytes([frame[HEADER + 4], frame[HEADER + 5]]) as usize,
+                6,
+            )
+        } else {
+            (0, 4)
+        };
+        assert!(
+            start_col + count <= num_cols,
+            "a row's span must fit the screen: start {start_col} + count {count} > {num_cols}"
+        );
+        (
+            row_index,
+            count,
+            wrapped,
+            start_col,
+            frame.len() - HEADER - consumed,
+        )
+    }
+
+    /// F23: a narrow edit must ship a narrow row. Without this the change is a
+    /// no-op that still compiles and still passes every whole-row test.
+    #[test]
+    fn a_narrow_edit_ships_only_the_damaged_span() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        grid.process(b"\x1b[2J\x1b[H");
+        let _ = grid.serialize_dirty_rows();
+
+        // Jump to column 11 (1-based) and write. This frame is NOT the one under
+        // test: alacritty damages the cell the cursor left as well as the one it
+        // arrived at, so a jump spans everything between them. Serializing here
+        // absorbs that, leaving the cursor already in place.
+        grid.process(b"\x1b[1;11HX");
+        let jump = grid.serialize_dirty_rows();
+        let (_, jump_count, _, jump_start, _) = first_row_header(&jump, 40);
+        assert_eq!(
+            (jump_start, jump_count),
+            (0, 12),
+            "a cursor jump damages the whole path it travelled"
+        );
+
+        // Now the steady-state case: one more glyph where the cursor already is.
+        grid.process(b"Y");
+        let frame = grid.serialize_dirty_rows();
+        assert!(!frame.is_empty(), "the edit produced a frame");
+
+        let (row_index, count, _wrapped, start_col, cell_bytes) = first_row_header(&frame, 40);
+        assert_eq!(row_index, 0, "the edited row");
+        assert_eq!(start_col, 11, "the span starts at the edited column");
+        // The glyph plus the cell the cursor lands on — see
+        // `narrow_edits_report_narrow_column_damage`.
+        assert_eq!(count, 2, "only the damaged span is carried");
+        assert_eq!(cell_bytes, count * 11, "and only that many cells follow");
+        assert!(
+            frame.len() < 26 + 6 + 40 * 11,
+            "the frame is smaller than the whole-row format would produce"
+        );
+    }
+
+    /// Overwriting one half of a fullwidth pair rewrites the OTHER half — the
+    /// terminal calls `clear_wide()` on it, which resets its character to a space.
+    /// The whole-row format shipped that cell as a side effect of re-encoding every
+    /// column; the partial-row format only ships the damaged span, so if the
+    /// neighbour never enters damage tracking the client keeps rendering the stale
+    /// half and a ghost `中` survives next to the character that replaced its spacer.
+    #[test]
+    fn breaking_up_a_wide_char_ships_both_halves() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        grid.process(b"\x1b[2J\x1b[H");
+        let _ = grid.serialize_dirty_rows();
+
+        // 中 occupies columns 4 and 5 (the second is a WIDE_CHAR_SPACER).
+        grid.process("\x1b[1;5H中".as_bytes());
+        let _ = grid.serialize_dirty_rows();
+
+        // Land the cursor directly on the spacer and overwrite it. Column 4 is not
+        // on the cursor's path (it moves from 6 to 5), so only the fix puts it in
+        // the damaged span.
+        grid.process(b"\x1b[1;6HX");
+        let frame = grid.serialize_dirty_rows();
+        assert!(!frame.is_empty(), "the edit produced a frame");
+
+        let (row_index, count, _wrapped, start_col, _) = first_row_header(&frame, 40);
+        assert_eq!(row_index, 0, "the edited row");
+        assert!(
+            start_col <= 4 && start_col + count > 4,
+            "the wide char's leading column must be shipped, got span [{start_col}, {})",
+            start_col + count
+        );
+    }
+
+    /// The whole-row path must stay byte-identical, or an old frontend paired
+    /// with this backend decodes garbage.
+    #[test]
+    fn a_full_row_frame_carries_no_start_col() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        // A fresh grid has never sent a frame, so the viewport check forces full
+        // damage — every row, full width.
+        grid.process(b"hello");
+        let frame = grid.serialize_dirty_rows();
+
+        let raw = u16::from_le_bytes([frame[28], frame[29]]);
+        assert_eq!(raw & ROW_PARTIAL_FLAG, 0, "full rows carry no partial flag");
+        assert_eq!(
+            (raw & !(ROW_WRAPPED_FLAG | ROW_PARTIAL_FLAG)) as usize,
+            40,
+            "and count is the full width"
+        );
+        assert_eq!(
+            frame.len(),
+            26 + 10 * (4 + 40 * 11),
+            "ten whole rows, four-byte row headers, no start_col anywhere"
+        );
+    }
+
+    /// Measure the overship ratio over a corpus of real `.tcap` captures.
+    ///
+    /// Ignored by default: the corpus is whatever the operator recorded through
+    /// `POST /diagnostics/capture`, and those files hold real session content, so
+    /// they are deliberately NOT committed. Point it at a capture directory and
+    /// run it when the F23 trade-off needs re-deciding:
+    ///
+    /// ```text
+    /// TUIC_DAMAGE_CORPUS="$HOME/Library/Application Support/com.tuic.commander/captures" \
+    ///   cargo test -p tuicommander damage_overship_over_capture_corpus -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a capture corpus; see TUIC_DAMAGE_CORPUS"]
+    fn damage_overship_over_capture_corpus() {
+        let Ok(dir) = std::env::var("TUIC_DAMAGE_CORPUS") else {
+            panic!("set TUIC_DAMAGE_CORPUS to a directory of .tcap captures");
+        };
+        let mut corpus = DamageTotals::default();
+        let mut files = 0usize;
+
+        for entry in std::fs::read_dir(&dir).expect("readable corpus directory") {
+            let path = entry.expect("readable entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("tcap") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("readable capture");
+            let totals = replay_damage(&bytes, 50, 200);
+            if totals.frames == 0 {
+                continue;
+            }
+            files += 1;
+            println!(
+                "{:<40} frames {:>5}  full {:>5}  rows/frame {:>6.1}  overship {:>6.2}x",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                totals.frames,
+                totals.full_frames,
+                totals.rows as f64 / totals.frames as f64,
+                totals.overship(),
+            );
+            corpus.frames += totals.frames;
+            corpus.full_frames += totals.full_frames;
+            corpus.rows += totals.rows;
+            corpus.damaged_cells += totals.damaged_cells;
+            corpus.shipped_cells += totals.shipped_cells;
+        }
+
+        assert!(files > 0, "corpus held no usable .tcap captures");
+        println!(
+            "\nCORPUS  files {files}  frames {}  full-frame {:.1}%  rows/frame {:.1}  overship {:.2}x",
+            corpus.frames,
+            100.0 * corpus.full_frames as f64 / corpus.frames as f64,
+            corpus.rows as f64 / corpus.frames as f64,
+            corpus.overship(),
+        );
+    }
+
+    #[test]
+    fn sync_update_active_tracks_bsu_and_esu() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        assert!(
+            !grid.is_sync_update_active(),
+            "idle grid is not in sync mode"
+        );
+        grid.process(BSU);
+        assert!(
+            grid.is_sync_update_active(),
+            "BSU opens a synchronized update"
+        );
+        grid.process(ESU);
+        assert!(!grid.is_sync_update_active(), "ESU closes it");
+    }
+
+    #[test]
+    fn stalled_sync_update_flushes_once_the_deadline_passes() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        grid.process(b"BEFORE\r\n");
+        grid.process(BSU);
+        grid.process(b"BUFFERED\r\n");
+
+        assert!(
+            !screen_contains(&grid, "BUFFERED"),
+            "content inside an open sync update stays buffered"
+        );
+        assert!(
+            !grid.flush_sync_timeout_if_needed(),
+            "no flush before the deadline"
+        );
+
+        std::thread::sleep(PAST_DEADLINE);
+
+        assert!(
+            grid.flush_sync_timeout_if_needed(),
+            "an expired sync update must flush without any further PTY bytes"
+        );
+        assert!(
+            screen_contains(&grid, "BUFFERED"),
+            "flushed content is visible"
+        );
+        assert!(
+            !grid.is_sync_update_active(),
+            "the update is closed after flushing"
+        );
+        assert!(
+            !grid.flush_sync_timeout_if_needed(),
+            "a closed update does not flush twice"
+        );
+    }
+
+    #[test]
+    fn esu_before_the_deadline_leaves_nothing_to_flush() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        grid.process(BSU);
+        grid.process(b"QUICK\r\n");
+        grid.process(ESU);
+        assert!(screen_contains(&grid, "QUICK"), "ESU applies the update");
+
+        std::thread::sleep(PAST_DEADLINE);
+        assert!(
+            !grid.flush_sync_timeout_if_needed(),
+            "an already-closed update must not be flushed again by the ticker"
+        );
+    }
+
+    #[test]
+    fn nested_bsu_extends_the_deadline_instead_of_closing() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        grid.process(BSU);
+        grid.process(b"FIRST\r\n");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        grid.process(BSU); // re-arm before the first deadline expires
+        grid.process(b"SECOND\r\n");
+
+        assert!(
+            grid.is_sync_update_active(),
+            "a nested BSU keeps the update open"
+        );
+        assert!(
+            !grid.flush_sync_timeout_if_needed(),
+            "the nested BSU restarted the deadline, so 100ms in there is nothing to flush"
+        );
+
+        std::thread::sleep(PAST_DEADLINE);
+        assert!(
+            grid.flush_sync_timeout_if_needed(),
+            "the extended deadline still expires"
+        );
+        assert!(
+            screen_contains(&grid, "SECOND"),
+            "content after the nested BSU surfaces"
+        );
+    }
+
+    #[test]
+    fn force_stop_surfaces_buffered_content_without_waiting() {
+        let mut grid = TerminalGrid::new(10, 40, 100);
+        grid.process(BSU);
+        grid.process(b"ONSHUTDOWN\r\n");
+
+        assert!(
+            grid.force_stop_sync_if_buffered(),
+            "teardown must not wait out the deadline"
+        );
+        assert!(
+            screen_contains(&grid, "ONSHUTDOWN"),
+            "buffered output is not dropped"
+        );
+        assert!(
+            !grid.force_stop_sync_if_buffered(),
+            "nothing left to force once the buffer drained"
+        );
+    }
+
+    fn canonical_rows(grid: &TerminalGrid) -> Vec<String> {
+        let total = grid.total_lines();
+        if total == 0 {
+            Vec::new()
+        } else {
+            grid.read_rows_in_range(0, total - 1)
+        }
+    }
+
+    fn synchronized_stress_stream(frames: usize) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for line in 0..24 {
+            stream.extend_from_slice(format!("seed-{line:03}\r\n").as_bytes());
+        }
+        for frame in 0..frames {
+            stream.extend_from_slice(BSU);
+            stream.extend_from_slice(format!("section-{frame:03}\r\n").as_bytes());
+            stream.extend_from_slice(
+                format!("payload-{frame:03}-abcdefghijklmnopqrstuvwxyz\r\n").as_bytes(),
+            );
+            stream.extend_from_slice(ESU);
+        }
+        stream
+    }
+
+    #[test]
+    fn synchronized_updates_are_invariant_across_every_chunk_boundary() {
+        let stream = synchronized_stress_stream(64);
+
+        let mut whole = TerminalGrid::new(12, 80, 10_000);
+        whole.process(&stream);
+        let expected = canonical_rows(&whole);
+
+        // One byte per process call exercises every possible split inside BSU,
+        // ESU, UTF-8-free payload text, CRLF, cursor movement, and scroll.
+        let mut bytewise = TerminalGrid::new(12, 80, 10_000);
+        for byte in &stream {
+            bytewise.process(std::slice::from_ref(byte));
+        }
+        assert_eq!(canonical_rows(&bytewise), expected, "bytewise stream");
+
+        // A deterministic irregular schedule models reader chunks under load.
+        for schedule in [
+            &[1, 2, 3, 5, 8, 13, 21][..],
+            &[127, 4, 31, 2, 255, 7][..],
+            &[9, 1, 1, 1, 64, 3, 17, 5][..],
+        ] {
+            let mut chunked = TerminalGrid::new(12, 80, 10_000);
+            let mut offset = 0;
+            let mut step = 0;
+            while offset < stream.len() {
+                let end = (offset + schedule[step % schedule.len()]).min(stream.len());
+                chunked.process(&stream[offset..end]);
+                offset = end;
+                step += 1;
+            }
+            assert_eq!(
+                canonical_rows(&chunked),
+                expected,
+                "irregular chunk schedule {schedule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn synchronized_redraws_while_scrolled_preserve_history_and_final_screen() {
+        let mut grid = TerminalGrid::new(8, 72, 10_000);
+        for line in 0..40 {
+            grid.process(format!("history-{line:03}\r\n").as_bytes());
+        }
+        let history_before = grid.read_rows_in_range(0, grid.scrollback_count() - 1);
+        grid.scroll(17);
+        assert!(grid.display_offset() > 0, "fixture must be scrolled up");
+
+        for frame in 0..512 {
+            let redraw = format!(
+                "\x1b[?2026h\x1b[H\x1b[2Ksection: canonical\r\n\x1b[2Kframe: {frame:03}\r\n\x1b[2Kdata: never truncate this payload\x1b[?2026l"
+            );
+            // Split each redraw differently but reproducibly, including inside
+            // escape sequences and printable lines.
+            let pivot = 1 + (frame * 17 % (redraw.len() - 1));
+            grid.process(&redraw.as_bytes()[..pivot]);
+            grid.process(&redraw.as_bytes()[pivot..]);
+        }
+
+        let history_after = grid.read_rows_in_range(0, grid.scrollback_count() - 1);
+        assert_eq!(
+            history_after, history_before,
+            "redraws must not rewrite history"
+        );
+        let screen = grid.read_screen_text();
+        assert_eq!(
+            screen
+                .iter()
+                .filter(|row| row.contains("section: canonical"))
+                .count(),
+            1,
+            "section duplicated on the final screen: {screen:?}"
+        );
+        assert!(screen.iter().any(|row| row == "frame: 511"));
+        assert!(
+            screen
+                .iter()
+                .any(|row| row == "data: never truncate this payload")
+        );
+    }
+
+    #[test]
+    fn expired_update_then_late_esu_preserves_each_logical_record_once() {
+        let mut grid = TerminalGrid::new(4, 80, 100);
+        grid.process(b"seed-0\r\nseed-1\r\nseed-2\r\nseed-3\r\n");
+        grid.process(BSU);
+        grid.process(b"timeout-record\r\n");
+        std::thread::sleep(PAST_DEADLINE);
+        assert!(grid.flush_sync_timeout_if_needed());
+
+        // The producer eventually resumes and sends the remainder plus the ESU
+        // that would normally have closed the already-expired update.
+        grid.process(b"late-record\r\n");
+        grid.process(ESU);
+
+        let rows = canonical_rows(&grid);
+        for record in ["timeout-record", "late-record"] {
+            assert_eq!(
+                rows.iter().filter(|row| row.as_str() == record).count(),
+                1,
+                "{record} duplicated or lost after timeout: {rows:?}"
+            );
+        }
+    }
+
+    /// A live TUI redraw re-runs the same search over and over, and each run was
+    /// compiling the query from scratch — `RegexSearch::new` builds four DFAs
+    /// (forward/backward x literal/regex). The query changes when the user types,
+    /// not when the screen repaints, so the compiled form is worth keeping.
+    #[test]
+    fn repeating_a_search_compiles_the_query_once() {
+        let mut grid = TerminalGrid::new(24, 80, 500);
+        grid.process(b"hello world\r\nhello again\r\n");
+
+        let before = grid.regex_compiles();
+        for _ in 0..5 {
+            assert_eq!(grid.search("hello").len(), 2);
+        }
+        assert_eq!(
+            grid.regex_compiles() - before,
+            1,
+            "the query was recompiled on every repaint"
+        );
+    }
+
+    /// ...but a different query must not be answered with the cached one.
+    #[test]
+    fn changing_the_query_recompiles_it() {
+        let mut grid = TerminalGrid::new(24, 80, 500);
+        grid.process(b"alpha beta\r\n");
+
+        assert_eq!(grid.search("alpha").len(), 1);
+        assert_eq!(grid.search("beta").len(), 1);
+        assert_eq!(grid.search("gamma").len(), 0);
+        assert_eq!(grid.search("alpha").len(), 1);
+        assert_eq!(
+            grid.regex_compiles(),
+            4,
+            "each distinct query compiles once"
+        );
+    }
+
+    /// The buffer search shares the cache: it is the same query, from the same
+    /// find bar, and compiling it a second time defeats the point.
+    #[test]
+    fn the_buffer_search_shares_the_compiled_query() {
+        let mut grid = TerminalGrid::new(24, 80, 500);
+        grid.process(b"needle here\r\n");
+
+        assert_eq!(grid.search("needle").len(), 1);
+        let after_first = grid.regex_compiles();
+        assert_eq!(grid.search_buffer("needle").len(), 1);
+        assert_eq!(grid.regex_compiles(), after_first);
+    }
+
+    /// A user reading scrollback pinned `process()` to the slow path: the
+    /// `display_offset != 0` guard rebuilt and diffed the WHOLE screen for every
+    /// PTY chunk, exactly while a busy agent is producing them fastest.
+    ///
+    /// Measured against a control at the bottom of the buffer, because a chunk
+    /// that scrolls the grid marks damage `Full` either way — the guard's cost
+    /// is only visible on writes that stay within the screen. Scrolling the
+    /// viewport still costs ONE rebuild (`scroll_to_offset` marks the screen
+    /// fully damaged so the next frame is complete); what must not happen is one
+    /// per chunk after that.
+    #[test]
+    fn reading_scrollback_does_not_force_a_full_rebuild_per_chunk() {
+        fn seeded() -> TerminalGrid {
+            let mut grid = TerminalGrid::new(6, 40, 200);
+            for i in 0..40 {
+                grid.process(format!("history line {i}\r\n").as_bytes());
+            }
+            grid
+        }
+        fn in_place_writes(grid: &mut TerminalGrid) -> usize {
+            let before = grid.full_screen_reads();
+            for i in 0..10 {
+                grid.process(format!("\x1b[1;1Hstreamed {i}").as_bytes());
+            }
+            grid.full_screen_reads() - before
+        }
+
+        let mut control = seeded();
+        let at_bottom = in_place_writes(&mut control);
+
+        let mut scrolled = seeded();
+        scrolled.scroll_to_offset(20);
+        assert!(
+            scrolled.display_offset() > 0,
+            "test needs a scrolled-back view"
+        );
+        let while_scrolled = in_place_writes(&mut scrolled);
+
+        assert_eq!(
+            while_scrolled,
+            at_bottom + 1,
+            "reading scrollback costs a full screen rebuild per chunk, not one for the jump"
+        );
+    }
+
+    /// The differential oracle again, this time with the view scrolled back:
+    /// the fast path must report the same `ChangedRow`s the full rebuild would.
+    #[test]
+    fn process_damage_matches_full_diff_while_scrolled_back() {
+        let inputs: &[&[u8]] = &[
+            b"streaming line one",
+            b"\r\nstreaming line two",
+            b"\x1b[1;1Hoverwrite row 0",
+            b"\r\n\r\n\r\n",
+            b"wide \xe4\xb8\xad\xe6\x96\x87 while scrolled",
+            b"\x1b[2Ktrailing erase",
+            b"\r\nlast one",
+        ];
+
+        let mut opt = TerminalGrid::new(8, 40, 200);
+        let mut reference = TerminalGrid::new(8, 40, 200);
+        for i in 0..30 {
+            let seed = format!("seed {i}\r\n");
+            opt.process(seed.as_bytes());
+            reference.process_full(seed.as_bytes());
+        }
+        opt.scroll_to_offset(15);
+        reference.scroll_to_offset(15);
+
+        for (idx, chunk) in inputs.iter().enumerate() {
+            let mut a = opt.process(chunk);
+            let mut b = reference.process_full(chunk);
+            a.sort_by_key(|r| r.row_index);
+            b.sort_by_key(|r| r.row_index);
+            assert_eq!(
+                a,
+                b,
+                "scrolled-back ChangedRow mismatch at chunk {idx} ({:?})",
+                String::from_utf8_lossy(chunk),
+            );
+        }
+    }
 
     /// Differential oracle (story 138): the parse-damage fast path in `process()`
     /// must produce byte-identical `ChangedRow`s to the old full-screen
@@ -1800,7 +2997,7 @@ mod tests {
         for c in data.chunks(chunk) {
             while next_resize < resizes.len() && resizes[next_resize].0 <= fed {
                 let (_, r, w) = resizes[next_resize];
-                // Mirror production: VtLogBuffer::resize_with_shell_state uses
+                // Mirror production: VtLogBuffer::resize uses
                 // ReflowMode::All on the normal screen (None only for alt).
                 let mode = if grid.is_alternate_screen() {
                     ReflowMode::None
@@ -1948,6 +3145,20 @@ mod tests {
     }
 
     #[test]
+    fn mouse_reporting_combined_decset() {
+        let mut grid = TerminalGrid::new(24, 80, 1000);
+        assert!(!grid.is_mouse_reporting());
+        let _ = grid.process(b"\x1b[?1000;1002;1003;1006h");
+        assert!(
+            grid.is_mouse_reporting(),
+            "combined DECSET must enable mouse reporting"
+        );
+        assert!(!grid.is_alternate_screen());
+        let _ = grid.process(b"\x1b[?1000;1002;1003;1006l");
+        assert!(!grid.is_mouse_reporting());
+    }
+
+    #[test]
     fn alt_screen_toggle() {
         let mut grid = TerminalGrid::new(24, 80, 1000);
         assert!(!grid.is_alternate_screen());
@@ -2057,6 +3268,51 @@ mod tests {
         )
     }
 
+    /// A `suggest:` line longer than the terminal is one logical line split over
+    /// two display rows. The frontend overlay has to know that to mask the block
+    /// (#8fc7) — and the frame is its only source of truth about the grid.
+    #[test]
+    fn serialized_rows_carry_the_wrapline_flag() {
+        let mut grid = TerminalGrid::new(5, 10, 0);
+        let _ = grid.process(b"abcdefghijklmno");
+        let buf = grid.serialize_dirty_rows();
+
+        let h = TEST_HEADER_SIZE;
+        let first = u16::from_le_bytes([buf[h + 2], buf[h + 3]]);
+        assert_eq!(
+            first & ROW_WRAPPED_FLAG,
+            ROW_WRAPPED_FLAG,
+            "row 0 continues onto row 1"
+        );
+        assert_eq!(
+            first & !ROW_WRAPPED_FLAG,
+            10,
+            "column count survives the flag"
+        );
+
+        // Row 1 holds the tail: nothing continues after it.
+        let second = h + 4 + 10 * 11;
+        let tail = u16::from_le_bytes([buf[second + 2], buf[second + 3]]);
+        assert_eq!(
+            tail & ROW_WRAPPED_FLAG,
+            0,
+            "the last row of a line is not wrapped"
+        );
+        assert_eq!(tail & !ROW_WRAPPED_FLAG, 10);
+    }
+
+    #[test]
+    fn styled_range_rows_carry_the_wrapline_flag() {
+        let mut grid = TerminalGrid::new(5, 10, 0);
+        let _ = grid.process(b"abcdefghijklmno");
+        let buf = grid.serialize_styled_range(0, 2);
+
+        // Header: start_abs u32, history_size u32, cols u16, row_count u16.
+        let first = u16::from_le_bytes([buf[12 + 4], buf[12 + 5]]);
+        assert_eq!(first & ROW_WRAPPED_FLAG, ROW_WRAPPED_FLAG);
+        assert_eq!(first & !ROW_WRAPPED_FLAG, 10);
+    }
+
     #[test]
     fn serialize_plain_text_roundtrip() {
         let mut grid = TerminalGrid::new(5, 10, 0);
@@ -2073,7 +3329,7 @@ mod tests {
         // First dirty row header starts after header
         let h = TEST_HEADER_SIZE;
         let row_idx = u16::from_le_bytes([buf[h], buf[h + 1]]);
-        let col_count = u16::from_le_bytes([buf[h + 2], buf[h + 3]]);
+        let col_count = row_col_count(u16::from_le_bytes([buf[h + 2], buf[h + 3]]));
         assert_eq!(row_idx, 0);
         assert_eq!(col_count, 10);
 
@@ -2340,6 +3596,69 @@ mod tests {
         assert!(matches.is_empty());
     }
 
+    /// A match that wraps onto the next row must never report an end column taken
+    /// from that next row: `SearchMatch` carries a single row, so the renderer would
+    /// paint the highlight on the START row across cells that never matched.
+    #[test]
+    fn search_clips_wrapped_match_to_the_start_row() {
+        let cols = 10;
+        let mut grid = TerminalGrid::new(5, cols, 0);
+        // "abcdefgh" starts at col 6 of row 0 and wraps: "abcd" on row 0, "efgh" on row 1.
+        let _ = grid.process(b"......abcdefgh");
+        let matches = grid.search("abcdefgh");
+        assert_eq!(matches.len(), 1, "one logical hit");
+        let m = &matches[0];
+        assert_eq!(m.col_start, 6);
+        assert_eq!(
+            m.col_end,
+            usize::from(cols),
+            "end column clipped to the start row, not carried over from the wrapped row"
+        );
+        assert!(
+            m.col_end > m.col_start,
+            "highlight width must stay positive"
+        );
+    }
+
+    /// Same clip when the hit spans three rows — the end column must still come
+    /// from the START row, never from the row two lines further down.
+    #[test]
+    fn search_clips_match_wrapping_across_three_rows() {
+        let cols = 10;
+        let mut grid = TerminalGrid::new(5, cols, 0);
+        // 25 chars at col 0 of a 10-column grid occupy rows 0, 1 and 2.
+        let needle = "abcdefghijklmnopqrstuvwxy";
+        assert_eq!(needle.len(), 25, "needle must span three 10-column rows");
+        let _ = grid.process(needle.as_bytes());
+        let matches = grid.search(needle);
+        assert_eq!(matches.len(), 1, "one logical hit");
+        assert_eq!(matches[0].col_start, 0);
+        assert_eq!(matches[0].col_end, usize::from(cols));
+    }
+
+    /// The clip must not shrink a match that fits on one row.
+    #[test]
+    fn search_keeps_full_span_for_single_row_match() {
+        let mut grid = TerminalGrid::new(5, 40, 0);
+        let _ = grid.process(b"..hello..");
+        let matches = grid.search("hello");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 2);
+        assert_eq!(matches[0].col_end, 7, "exclusive end of 'hello' at col 2");
+    }
+
+    /// A match ending exactly on the last column stays on its own row.
+    #[test]
+    fn search_match_ending_at_last_column_is_not_clipped_short() {
+        let cols = 10;
+        let mut grid = TerminalGrid::new(5, cols, 0);
+        let _ = grid.process(b".....World");
+        let matches = grid.search("World");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].col_start, 5);
+        assert_eq!(matches[0].col_end, usize::from(cols));
+    }
+
     #[test]
     fn search_rejects_query_over_1024_bytes() {
         let mut grid = TerminalGrid::new(5, 40, 0);
@@ -2448,7 +3767,7 @@ mod tests {
         for _ in 0..count {
             let abs = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
             off += 4;
-            let col_count = u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
+            let col_count = row_col_count(u16::from_le_bytes([buf[off], buf[off + 1]]));
             off += 2;
             let mut text = String::new();
             for _ in 0..col_count {
@@ -2575,6 +3894,147 @@ mod tests {
         // Row 0: "abcdefghij" (WRAPLINE), Row 1: "klmno" (no wrap), Row 2: "second"
         let text = grid.get_selection_text(0, 0, 2, 5);
         assert_eq!(text, "abcdefghijklmno\nsecond");
+    }
+
+    #[test]
+    fn copied_selection_strips_repeated_claude_gutters() {
+        let input = concat!(
+            "Hola :wave:\n",
+            "\u{a0}\u{a0}▎\n",
+            "\u{a0}\u{a0}▎ First paragraph\n",
+            "\u{a0}\u{a0}▎   • nested bullet\n",
+            "\u{a0}\u{a0}▎ 1. numbered item\n",
+            "\u{a0}\u{a0}▎ Thanks :pray:"
+        );
+
+        assert_eq!(
+            TerminalGrid::normalize_copied_selection(input, 80),
+            "Hola :wave:\n\nFirst paragraph\n  • nested bullet\n1. numbered item\nThanks :pray:"
+        );
+    }
+
+    #[test]
+    fn copied_selection_strips_space_indented_gutters() {
+        // Claude Code v2.1.x indents the blockquote bar with ASCII spaces, not
+        // the non-breaking spaces older releases used. Matching NBSP alone let
+        // every bar through and pasted them into Slack verbatim.
+        let input = concat!("  ▎ first quoted line\n", "  ▎ second quoted line");
+
+        assert_eq!(
+            TerminalGrid::normalize_copied_selection(input, 80),
+            "first quoted line\nsecond quoted line"
+        );
+    }
+
+    #[test]
+    fn copied_selection_accepts_nbsp_separator_and_preserves_body_nbsp() {
+        let input = concat!(
+            "\u{a0}\u{a0}▎\u{a0}QA\u{a0}\u{a0}Engineering\n",
+            "\u{a0}\u{a0}▎\u{a0}UX team"
+        );
+
+        assert_eq!(
+            TerminalGrid::normalize_copied_selection(input, 80),
+            "QA\u{a0}\u{a0}Engineering\nUX team"
+        );
+    }
+
+    #[test]
+    fn copied_selection_keeps_lone_or_non_claude_gutters() {
+        let input = concat!(
+            "\u{a0}\u{a0}▎ one candidate\n",
+            "plain separator\n",
+            "\u{a0}\u{a0}▎ another candidate\n",
+            "plain separator\n",
+            "table | ▎ | value"
+        );
+
+        assert_eq!(TerminalGrid::normalize_copied_selection(input, 80), input);
+    }
+
+    #[test]
+    fn copied_selection_normalizes_after_unwrapping_soft_wrapped_rows() {
+        let mut grid = TerminalGrid::new(5, 12, 0);
+        let _ = grid.process(
+            concat!("\u{a0}\u{a0}▎ first long\r\n", "\u{a0}\u{a0}▎ second long").as_bytes(),
+        );
+
+        let text = grid.get_selection_text(0, 0, 3, 11);
+        assert_eq!(text, "first long\nsecond long");
+    }
+
+    /// The Slack-paste report: a quoted draft Claude wrapped at its own margin,
+    /// then copied verbatim into a chat client. Widths are the ones measured on
+    /// the reported 106-column session.
+    #[test]
+    fn copied_selection_rejoins_rows_claude_wrapped_for_width() {
+        let input = concat!(
+            "  ▎ Question about three existing custom fields\n",
+            "  ▎\n",
+            "  ▎ Our Jira has three custom fields with very similar names. They look unused, but I can't check them\n",
+            "  ▎ without admin rights:\n",
+            "  ▎\n",
+            "  ▎ - customfield_12217 — \"Work Category\" (option)\n",
+            "  ▎ - customfield_10489 — \"Cost Allocation\" (option)\n",
+            "  ▎\n",
+            "  ▎ If one of them is clean and fits, I'd rather reuse it than create a new field. If they are\n",
+            "  ▎ half-configured or in use for something else, I'll ask for new fields instead."
+        );
+
+        assert_eq!(
+            TerminalGrid::normalize_copied_selection(input, 106),
+            concat!(
+                "Question about three existing custom fields\n",
+                "\n",
+                "Our Jira has three custom fields with very similar names. They look unused, but I can't check them without admin rights:\n",
+                "\n",
+                "- customfield_12217 — \"Work Category\" (option)\n",
+                "- customfield_10489 — \"Cost Allocation\" (option)\n",
+                "\n",
+                "If one of them is clean and fits, I'd rather reuse it than create a new field. If they are half-configured or in use for something else, I'll ask for new fields instead."
+            )
+        );
+    }
+
+    #[test]
+    fn copied_selection_keeps_deliberate_breaks_in_a_short_quote() {
+        // No row comes near the terminal edge, so nothing shows the agent
+        // wrapped anything — every break here is the author's own.
+        let input = concat!("  ▎ Ship it\n", "  ▎ Then tell the team\n", "  ▎ Thanks");
+
+        assert_eq!(
+            TerminalGrid::normalize_copied_selection(input, 106),
+            "Ship it\nThen tell the team\nThanks"
+        );
+    }
+
+    /// Once a paragraph is rejoined it is far wider than the wrap width, so the
+    /// rule has to keep measuring the source rows. Measuring the accumulator
+    /// instead swallowed every short line that followed a wrapped paragraph.
+    #[test]
+    fn copied_selection_stops_rejoining_after_the_wrapped_paragraph_ends() {
+        let filler = "y".repeat(91);
+        let input = format!(
+            "  ▎ {filler} wordy\n  ▎ continuation words\n  ▎ Short deliberate line\n  ▎ Another one"
+        );
+
+        assert_eq!(
+            TerminalGrid::normalize_copied_selection(&input, 106),
+            format!("{filler} wordy continuation words\nShort deliberate line\nAnother one")
+        );
+    }
+
+    /// A wrapped bullet keeps its continuation, but the next bullet stays on its
+    /// own line even though the width rule alone would swallow it.
+    #[test]
+    fn copied_selection_rejoins_bullet_continuations_but_not_the_next_bullet() {
+        let filler = "x".repeat(90);
+        let input = format!("  ▎ - {filler} wordy\n  ▎ continuation text\n  ▎ 2. second item");
+
+        assert_eq!(
+            TerminalGrid::normalize_copied_selection(&input, 106),
+            format!("- {filler} wordy continuation text\n2. second item")
+        );
     }
 
     // --- Logical line tests ---
@@ -3264,7 +4724,7 @@ mod tests {
 
         // The prompt must be on the cursor's line, not displaced.
         assert_eq!(
-            rows_after[line_after as usize].trim_end(),
+            rows_after[line_after].trim_end(),
             "ABCDEFGHIJKLMNOPQRST",
             "prompt must be on cursor row after shrink-grow roundtrip"
         );
@@ -3274,6 +4734,14 @@ mod tests {
         );
     }
 
+    /// Strip [`ROW_WRAPPED_FLAG`] from a serialized row's `col_count`.
+    ///
+    /// Every reader of the wire format has to do this before using the value as a
+    /// stride — forgetting it walks 32768 cells past the end of the buffer.
+    fn row_col_count(raw: u16) -> usize {
+        (raw & !ROW_WRAPPED_FLAG) as usize
+    }
+
     /// Helper: find the cell data offset for a given (row_index, col) in a serialized frame.
     /// Returns the byte offset of the cell's 11-byte block, or None if not found.
     fn find_cell_offset(buf: &[u8], target_row: u16, target_col: u16) -> Option<usize> {
@@ -3281,12 +4749,12 @@ mod tests {
         let mut offset = TEST_HEADER_SIZE;
         for _ in 0..num_rows {
             let row_idx = u16::from_le_bytes([buf[offset], buf[offset + 1]]);
-            let col_count = u16::from_le_bytes([buf[offset + 2], buf[offset + 3]]);
+            let col_count = row_col_count(u16::from_le_bytes([buf[offset + 2], buf[offset + 3]]));
             offset += 4;
-            if row_idx == target_row && target_col < col_count {
+            if row_idx == target_row && (target_col as usize) < col_count {
                 return Some(offset + target_col as usize * 11);
             }
-            offset += col_count as usize * 11;
+            offset += col_count * 11;
         }
         None
     }
@@ -3607,5 +5075,227 @@ mod tests {
             (bg_r2, bg_g2, bg_b2),
             "bg must match on resize+redraw wrap"
         );
+    }
+
+    // --- Alternate-screen scrollback --------------------------------------
+    //
+    // Driven by a REAL PTY capture of `gh run watch <run-id>` — the command that
+    // exposed the bug. Fixture: src/fixtures/alt_screen/gh-run-watch.raw,
+    // recorded with `script -q /dev/null gh run watch <id> | head -c 60000`.
+    // It opens with `ESC[?1049h` (alt screen), then repeatedly homes the cursor
+    // (`ESC[0;0H ESC[J`) and reprints a job list far taller than the viewport —
+    // that reprint is what scrolls lines off the top. gh never exits while the
+    // run is live, so the capture has no `ESC[?1049l`; tests that need the exit
+    // append it explicitly.
+
+    fn gh_run_watch_capture() -> Vec<u8> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/fixtures/alt_screen/gh-run-watch.raw");
+        std::fs::read(&path).unwrap_or_else(|e| panic!("missing fixture {}: {e}", path.display()))
+    }
+
+    /// The reported bug: text renders but there is no scrollbar, because the alt
+    /// grid had no history at all. The frontend hides the scrollbar exactly when
+    /// `historySize == 0` (CanvasTerminal.tsx), so a non-zero history IS the fix.
+    #[test]
+    fn gh_run_watch_builds_alt_screen_scrollback() {
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        let _ = grid.process(&gh_run_watch_capture());
+
+        assert!(
+            grid.is_alternate_screen(),
+            "fixture must leave the terminal in the alternate screen"
+        );
+        assert!(
+            grid.scrollback_count() > 0,
+            "alt-screen scrollback must accumulate — 0 means the scrollbar stays hidden"
+        );
+    }
+
+    /// Scrolling back must reach the lines the app pushed off the top, not just
+    /// show an empty history. The gh banner is printed once at the very top of
+    /// every refresh, so it is guaranteed to have scrolled away.
+    #[test]
+    fn gh_run_watch_scrollback_holds_the_lines_that_scrolled_off() {
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        let _ = grid.process(&gh_run_watch_capture());
+
+        let history = grid.scrollback_count();
+        let lines = grid.read_scrollback_lines(0, history);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Refreshing run status every 3 seconds")),
+            "the banner scrolled off the top must be recoverable from alt scrollback"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("JOBS")),
+            "job list header must be recoverable from alt scrollback"
+        );
+    }
+
+    /// The frame protocol has to tell the frontend it is looking at the alternate
+    /// screen (keyboard_flags bit5), because `history_base` restarts at 0 there and
+    /// the client row cache — keyed by absolute row — must be dropped on the flip.
+    #[test]
+    fn frame_flags_report_alternate_screen() {
+        // Header layout (see serialize_dirty_rows): row_count u16, cursor_row u16,
+        // cursor_col u16, cursor_visible u8, display_offset u32, history_size u32,
+        // has_selection u8 → keyboard_flags lands at byte 16.
+        const KEYBOARD_FLAGS_OFFSET: usize = 16;
+
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        let _ = grid.process(b"plain shell output\r\n");
+        let frame = grid.serialize_dirty_rows();
+        assert_eq!(
+            frame[KEYBOARD_FLAGS_OFFSET] & 0x20,
+            0,
+            "primary screen must not set the alt-screen bit"
+        );
+
+        let _ = grid.process(&gh_run_watch_capture());
+        let frame = grid.serialize_dirty_rows();
+        assert_eq!(
+            frame[KEYBOARD_FLAGS_OFFSET] & 0x20,
+            0x20,
+            "alt screen must set keyboard_flags bit5"
+        );
+    }
+
+    /// An alt session never inherits the previous one's lines: `swap_alt` resets
+    /// the alt history era on both enter and exit.
+    #[test]
+    fn alt_screen_history_is_wiped_between_sessions() {
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        let _ = grid.process(&gh_run_watch_capture());
+        assert!(
+            grid.scrollback_count() > 0,
+            "first alt session builds history"
+        );
+
+        // Leave the alternate screen (gh does this on Ctrl+C / completion).
+        let _ = grid.process(b"\x1b[?1049l");
+        assert!(!grid.is_alternate_screen());
+
+        // Re-enter: the new session starts from an empty history, never showing
+        // the previous app's leftovers.
+        let _ = grid.process(b"\x1b[?1049h");
+        assert_eq!(
+            grid.scrollback_count(),
+            0,
+            "a fresh alt session must start with no scrollback"
+        );
+    }
+
+    /// Leaving the alternate screen must restore the primary screen's own history
+    /// untouched — the alt lines must not leak into the shell's scrollback.
+    #[test]
+    fn alt_screen_scrollback_never_leaks_into_primary() {
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        for i in 0..40 {
+            let _ = grid.process(format!("shell line {i}\r\n").as_bytes());
+        }
+        let primary_history = grid.scrollback_count();
+        assert!(primary_history > 0, "sanity: primary built scrollback");
+
+        let _ = grid.process(&gh_run_watch_capture());
+        let _ = grid.process(b"\x1b[?1049l");
+
+        assert!(!grid.is_alternate_screen());
+        assert_eq!(
+            grid.scrollback_count(),
+            primary_history,
+            "primary scrollback must be exactly what it was before the alt app ran"
+        );
+        let lines = grid.read_scrollback_lines(0, grid.scrollback_count());
+        assert!(
+            !lines.iter().any(|l| l.contains("Refreshing run status")),
+            "no alt-screen line may end up in the primary scrollback"
+        );
+    }
+
+    /// Alt-screen apps that redraw in place (`ESC[H` + `ESC[J`, no scrolling) must
+    /// not manufacture history: only lines that actually scroll off the top count.
+    /// This is what keeps `vim`/`htop` from flooding the scrollback.
+    #[test]
+    fn alt_screen_redraw_without_scrolling_creates_no_history() {
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        let _ = grid.process(b"\x1b[?1049h");
+        for _ in 0..20 {
+            let _ = grid.process(b"\x1b[0;0H\x1b[Jstatus pane redraw");
+        }
+        assert_eq!(
+            grid.scrollback_count(),
+            0,
+            "an in-place redraw must not produce scrollback"
+        );
+    }
+
+    /// Resizing while the alt screen holds history exercises grid paths that were
+    /// unreachable when the alt grid had capacity 0. It must not panic or lose the
+    /// alt-screen state.
+    #[test]
+    fn alt_screen_with_history_survives_resize() {
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        let _ = grid.process(&gh_run_watch_capture());
+        assert!(grid.scrollback_count() > 0);
+
+        grid.resize(40, 80);
+        grid.resize(12, 200);
+        grid.resize(24, 120);
+
+        assert!(grid.is_alternate_screen(), "resize must not drop alt mode");
+        let _ = grid.serialize_dirty_rows();
+    }
+
+    /// The user-visible half of the fix: the viewport must actually move through
+    /// the alt history. `scroll()` is the wheel path, `scroll_to_offset()` the
+    /// scrollbar-drag / coalesced-wheel path — both must reach content that
+    /// scrolled off, clamp at the top, and return to the live tail.
+    #[test]
+    fn alt_screen_wheel_and_drag_scroll_reach_the_scrolled_off_lines() {
+        let mut grid = TerminalGrid::new(24, 120, 1000);
+        let _ = grid.process(&gh_run_watch_capture());
+
+        let history = grid.scrollback_count();
+        assert!(
+            history > 3,
+            "fixture must leave enough alt history to scroll"
+        );
+        assert_eq!(grid.display_offset(), 0, "starts pinned to the live tail");
+
+        // Wheel up three lines.
+        grid.scroll(3);
+        assert_eq!(grid.display_offset(), 3, "wheel must move the alt viewport");
+
+        // Scrollbar drag straight to a line that scrolled off: it must land in
+        // the viewport, which is what makes the history usable rather than merely
+        // present. `read_scrollback_lines` is oldest-first, so its index IS the
+        // absolute history row.
+        let banner = grid
+            .read_scrollback_lines(0, history)
+            .iter()
+            .position(|l| l.contains("Refreshing run status every 3 seconds"))
+            .expect("the gh banner must have scrolled off into alt history");
+        grid.scroll_to_line(banner);
+        assert_eq!(grid.display_offset(), history - banner);
+        assert!(
+            grid.get_row_text(0)
+                .contains("Refreshing run status every 3 seconds"),
+            "scrolled-to line must be the top viewport row, got: {:?}",
+            grid.get_row_text(0)
+        );
+
+        // Scrollbar drag to the very top of the alt history.
+        grid.scroll_to_offset(history);
+        assert_eq!(grid.display_offset(), history);
+
+        // Dragging past the top clamps instead of running off the grid.
+        grid.scroll_to_offset(history + 500);
+        assert_eq!(grid.display_offset(), history, "top of history must clamp");
+
+        // Wheel back down: the viewport returns to the live tail.
+        grid.scroll(-(history as i32 + 10));
+        assert_eq!(grid.display_offset(), 0, "must snap back to the live tail");
     }
 }

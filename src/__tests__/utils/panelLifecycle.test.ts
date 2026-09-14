@@ -51,6 +51,7 @@ describe("panelLifecycle", () => {
 		if (uiStore.isDetached("test-panel")) {
 			uiStore.clearDetached("test-panel");
 		}
+		uiStore._testCancelPendingSave();
 
 		const mod = await import("../../panelRouter");
 		detachPanel = mod.detachPanel;

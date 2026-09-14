@@ -5,6 +5,28 @@ use std::sync::{Arc, Mutex};
 #[cfg(feature = "desktop")]
 use tauri::Emitter;
 
+/// Run a blocking filesystem closure on Tokio's blocking pool, flattening the
+/// `JoinError` into the closure's own `Result<T, String>`.
+///
+/// This is what keeps a `#[tauri::command]` off the UI thread. A command written
+/// as a plain `fn` gets `ExecutionContext::Blocking` and runs inline in the IPC
+/// handler — on macOS that is the main thread, so a recursive copy or a 250 MB
+/// read freezes the WebView until it finishes. Writing the command as
+/// `async fn` moves it to the Tokio executor, and wrapping the actual syscalls
+/// here keeps them off the async workers too.
+///
+/// Both transports go through the commands, so the IPC and HTTP twins inherit
+/// the same threading decision instead of each choosing one (story 607-f483).
+pub(crate) async fn spawn_blocking_fs<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("fs task failed: {e}"))?
+}
+
 /// A directory entry returned by `list_directory`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DirEntry {
@@ -29,9 +51,10 @@ pub struct ContentMatch {
     pub line_number: u32,
     /// Full line content (without trailing newline).
     pub line_text: String,
-    /// Byte offset of match start within `line_text`.
+    /// UTF-16 code-unit offset of match start within `line_text`.
+    /// This is the coordinate system used by JavaScript `String.slice`.
     pub match_start: u32,
-    /// Byte offset of match end (exclusive) within `line_text`.
+    /// UTF-16 code-unit offset of match end (exclusive) within `line_text`.
     pub match_end: u32,
     /// Absolute repo root path — set only by cross-repo search; absent for single-repo results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -39,7 +62,7 @@ pub struct ContentMatch {
 }
 
 /// Aggregated result of a full-text content search.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ContentSearchResult {
     pub matches: Vec<ContentMatch>,
     pub files_searched: u32,
@@ -47,16 +70,42 @@ pub struct ContentSearchResult {
     pub files_skipped: u32,
     /// `true` when the global match limit was reached.
     pub truncated: bool,
+    /// Cross-repo search only: registered repos whose content index was not
+    /// ready yet, so they contributed nothing to this result. A build is kicked
+    /// off for each, so a later search covers them. Zero for single-repo search.
+    /// Non-zero means "not found HERE yet" — never report a clean miss.
+    #[serde(default)]
+    pub repos_pending: u32,
+    /// Cross-repo search only: registered repos actually searched.
+    #[serde(default)]
+    pub repos_searched: u32,
 }
 
 /// Streamed batch payload emitted via the `content-search-batch` event.
 #[derive(Debug, Clone, Serialize)]
 pub struct ContentSearchBatch {
+    /// Echoed from the request that started this search. The event is global and
+    /// several panels listen to it at once; without it, the command palette's
+    /// results land in the file browser's list and flip its spinner off.
+    pub search_id: String,
     pub matches: Vec<ContentMatch>,
     pub is_final: bool,
     pub files_searched: u32,
     pub files_skipped: u32,
     pub truncated: bool,
+    /// Mirrors `ContentSearchResult` — lets the UI distinguish "no match" from
+    /// "not searched yet" on a cross-repo search.
+    pub repos_pending: u32,
+    pub repos_searched: u32,
+}
+
+/// Failure payload emitted via the `content-search-error` event. Carries the
+/// same `search_id` as the batches, for the same reason: only the panel that
+/// started the search may show the error.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContentSearchError {
+    pub search_id: String,
+    pub message: String,
 }
 
 /// Managed state for cancelling in-flight content searches.
@@ -120,6 +169,13 @@ fn validate_path_for_creation(
 /// Directory names that are always excluded from repo walks — VCS internals and
 /// heavy build/cache outputs that are useless to search and often bypass `.gitignore`
 /// (missing, incomplete, or outside-of-git).
+///
+/// A name lands here only when no project uses it for tracked source. `build` and
+/// `out` do not qualify and were removed: a `build/` of tracked release scripts and
+/// a monorepo package named `packages/build/` are both ordinary source that git
+/// reports, and matching the bare name classified every edit under them as noise.
+/// Generated `build/` and `out/` directories are gitignored, and every walker here
+/// honours git's ignore rules (parents included), so they stay pruned anyway.
 pub(crate) const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
     ".git",
     ".hg",
@@ -129,8 +185,6 @@ pub(crate) const ALWAYS_EXCLUDED_DIRS: &[&str] = &[
     "node_modules",
     "target",
     "dist",
-    "build",
-    "out",
     ".next",
     ".nuxt",
     ".svelte-kit",
@@ -309,9 +363,13 @@ pub async fn stat_path(path: String) -> PathStat {
 }
 
 /// List entries in a directory within a repository.
+///
+/// Not the microsecond `read_dir` it looks like: `list_directory_impl` runs
+/// `git status --porcelain` as a **subprocess** for the requested subdir, which
+/// costs tens to hundreds of ms on a large repo. It goes to the blocking pool.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn list_directory(repo_path: String, subdir: String) -> Result<Vec<DirEntry>, String> {
-    list_directory_impl(repo_path, subdir)
+    spawn_blocking_fs(move || list_directory_impl(repo_path, subdir)).await
 }
 
 pub(crate) fn list_directory_impl(
@@ -450,8 +508,16 @@ pub async fn search_files(
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<DirEntry>, String> {
-    let _guard = app_state.indexer_throttle.begin_search();
-    search_files_impl(repo_path, query, limit)
+    // `search_files_impl` is a synchronous `WalkBuilder` traversal and can block
+    // for hundreds of ms on large repos. The HTTP twin has always moved it off
+    // the executor; this one used to run it inline, so the same work made two
+    // different threading decisions depending on the transport (story 607-f483).
+    let guard = app_state.indexer_throttle.begin_search();
+    spawn_blocking_fs(move || {
+        let _g = guard; // hold across the walk; dropped when the closure returns
+        search_files_impl(repo_path, query, limit)
+    })
+    .await
 }
 
 #[cfg(feature = "desktop")]
@@ -463,83 +529,151 @@ pub fn warm_content_index(
     crate::content_index::ensure_index(&app_state, &repo_path);
 }
 
-/// Emit a `ContentSearchResult` to the frontend as `content-search-batch` events
-/// in chunks of 50, honoring cancellation. Always emits a final (possibly empty)
-/// batch so the UI knows the search is done. Shared by single- and all-repo search.
-#[cfg(feature = "desktop")]
-fn emit_content_batches(
-    app: &tauri::AppHandle,
+/// Split a `ContentSearchResult` into `content-search-batch` payloads of 50
+/// matches, handing each to `emit`, and stop early once `cancel` is raised.
+///
+/// **Every search gets a final batch, cancelled ones included.** There is one
+/// cancellation slot for the whole process, so starting a search in the command
+/// palette cancels the file browser's — and the file browser only listens for
+/// batches carrying its own `search_id`, so the palette's `is_final` cannot
+/// release it. Returning early on cancellation left that panel spinning for the
+/// life of the window. The cut-short search still owes its caller a last word.
+///
+/// Takes a sink rather than an `AppHandle` so the batching and the cancellation
+/// contract are testable without a running Tauri app.
+fn dispatch_content_batches(
     result: ContentSearchResult,
-    cancel: &Arc<AtomicBool>,
+    cancel: &AtomicBool,
+    search_id: &str,
+    mut emit: impl FnMut(ContentSearchBatch),
 ) {
+    let mut batch = |matches: Vec<ContentMatch>, is_final: bool| {
+        emit(ContentSearchBatch {
+            search_id: search_id.to_string(),
+            matches,
+            is_final,
+            files_searched: result.files_searched,
+            files_skipped: result.files_skipped,
+            truncated: result.truncated,
+            repos_pending: result.repos_pending,
+            repos_searched: result.repos_searched,
+        });
+    };
+
     let batch_size = 50;
     let total = result.matches.len();
     let mut sent = 0;
 
     for chunk in result.matches.chunks(batch_size) {
         if cancel.load(Ordering::Relaxed) {
-            return;
+            break;
         }
         sent += chunk.len();
-        let _ = app.emit(
-            "content-search-batch",
-            &ContentSearchBatch {
-                matches: chunk.to_vec(),
-                is_final: sent >= total,
-                files_searched: result.files_searched,
-                files_skipped: result.files_skipped,
-                truncated: result.truncated,
-            },
-        );
+        batch(chunk.to_vec(), sent >= total);
     }
 
-    // No matches → still emit a final empty batch so the UI stops spinning.
-    if total == 0 {
-        let _ = app.emit(
-            "content-search-batch",
-            &ContentSearchBatch {
-                matches: Vec::new(),
-                is_final: true,
-                files_searched: result.files_searched,
-                files_skipped: result.files_skipped,
-                truncated: result.truncated,
-            },
-        );
+    // Nothing to send, or cancelled before the last chunk: close the search with
+    // an empty final batch. The counters are the real ones, so a panel that was
+    // superseded reports what it did search rather than claiming zero.
+    if sent < total || total == 0 {
+        batch(Vec::new(), true);
     }
 }
 
-/// Search every ready content index (all registered repos) and merge the results,
-/// tagging each match with its `repo_path`. The global limit is split evenly across
-/// repos (min 5 each). Repos whose index isn't built yet are skipped. Shared by the
-/// `search_content_all` Tauri command and the `/fs/search-content-all` HTTP route.
+/// Emit a `ContentSearchResult` to the frontend as `content-search-batch`
+/// events. Shared by single- and all-repo search.
+#[cfg(feature = "desktop")]
+fn emit_content_batches(
+    app: &tauri::AppHandle,
+    result: ContentSearchResult,
+    cancel: &Arc<AtomicBool>,
+    search_id: &str,
+) {
+    dispatch_content_batches(result, cancel, search_id, |batch| {
+        let _ = app.emit("content-search-batch", &batch);
+    });
+}
+
+/// Every registered repo, from `repositories.json` — NOT just the ones that
+/// happen to have an index entry. The index map only holds repos someone
+/// already touched this session, so iterating it silently narrows "all repos"
+/// to "repos I visited".
+fn registered_repo_paths() -> Vec<String> {
+    crate::config::load_repositories()
+        .get("repos")
+        .and_then(|r| r.as_object())
+        .map(|repos| repos.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Search every registered repo and merge the results, tagging each match with
+/// its `repo_path`. The global limit is split evenly across repos (min 5 each).
+/// Shared by the `search_content_all` Tauri command and the
+/// `/fs/search-content-all` HTTP route.
+///
+/// A repo whose index is not built yet cannot be searched now, but it is counted
+/// in `repos_pending` rather than silently dropped. The configured warm strategy
+/// owns build scheduling: one cross-repo query must not enqueue every registered
+/// repo behind the single global build semaphore.
 pub(crate) fn search_content_all_impl(
-    content_indices: &dashmap::DashMap<
-        String,
-        Arc<parking_lot::RwLock<crate::content_index::ContentIndex>>,
-    >,
+    state: &Arc<crate::state::AppState>,
     query: &str,
     case_sensitive: bool,
     global_limit: usize,
 ) -> ContentSearchResult {
-    let repos: Vec<(
-        String,
-        Arc<parking_lot::RwLock<crate::content_index::ContentIndex>>,
-    )> = content_indices
-        .iter()
-        .map(|e| (e.key().clone(), Arc::clone(e.value())))
-        .collect();
+    search_content_all_impl_with_cancel(
+        state,
+        query,
+        case_sensitive,
+        global_limit,
+        &AtomicBool::new(false),
+    )
+}
 
-    let per_repo_limit = (global_limit / repos.len().max(1)).max(5);
+fn search_content_all_impl_with_cancel(
+    state: &Arc<crate::state::AppState>,
+    query: &str,
+    case_sensitive: bool,
+    global_limit: usize,
+    cancel: &AtomicBool,
+) -> ContentSearchResult {
+    // Union of registered repos and already-indexed ones: a repo can hold an
+    // index (e.g. an agent searched it) without being registered, and must
+    // still be searchable.
+    let mut repo_paths = registered_repo_paths();
+    for entry in state.content_indices.iter() {
+        if !repo_paths.iter().any(|p| p == entry.key()) {
+            repo_paths.push(entry.key().clone());
+        }
+    }
+
+    let per_repo_limit = (global_limit / repo_paths.len().max(1)).max(5);
 
     let mut all_matches = Vec::new();
     let mut files_searched: u32 = 0;
+    let mut repos_searched: u32 = 0;
+    let mut repos_pending: u32 = 0;
 
-    for (repo_path, index_arc) in &repos {
-        let index = index_arc.read();
-        if !index.is_ready() {
-            continue;
+    for repo_path in &repo_paths {
+        if cancel.load(Ordering::Relaxed) {
+            break;
         }
-        if let Ok(result) = search_via_index(&index, query, case_sensitive, Some(per_repo_limit)) {
+        let Some(index_arc) = state
+            .content_indices
+            .get(repo_path)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            repos_pending += 1;
+            continue;
+        };
+        let Some(plan) = prepare_index_search(&index_arc, query, 50) else {
+            repos_pending += 1;
+            continue;
+        };
+        repos_searched += 1;
+        if let Ok(result) =
+            search_index_plan(plan, query, case_sensitive, Some(per_repo_limit), cancel)
+        {
             files_searched += result.files_searched;
             for mut m in result.matches {
                 m.repo_path = Some(repo_path.clone());
@@ -560,6 +694,8 @@ pub(crate) fn search_content_all_impl(
         files_searched,
         files_skipped: 0,
         truncated,
+        repos_pending,
+        repos_searched,
     }
 }
 
@@ -575,6 +711,7 @@ pub async fn search_content_all(
     query: String,
     case_sensitive: Option<bool>,
     limit: Option<usize>,
+    search_id: String,
 ) -> Result<(), String> {
     // Cancel any previous search (shares the slot with single-repo search).
     let cancel_token = Arc::new(AtomicBool::new(false));
@@ -593,16 +730,17 @@ pub async fn search_content_all(
 
     tokio::task::spawn_blocking(move || {
         let _throttle_guard = throttle_guard;
-        let result = search_content_all_impl(
-            &app_state.content_indices,
+        let result = search_content_all_impl_with_cancel(
+            &app_state,
             &query,
             case_sensitive,
             global_limit,
+            &cancel_token,
         );
-        if cancel_token.load(Ordering::Relaxed) {
-            return;
-        }
-        emit_content_batches(&app, result, &cancel_token);
+        // No early return on cancellation: `emit_content_batches` skips the
+        // payload but still closes the search with a final batch under this
+        // `search_id`, which is the only thing that stops the caller's spinner.
+        emit_content_batches(&app, result, &cancel_token, &search_id);
     });
 
     Ok(())
@@ -621,6 +759,7 @@ pub async fn search_content(
     use_regex: Option<bool>,
     whole_word: Option<bool>,
     limit: Option<usize>,
+    search_id: String,
 ) -> Result<(), String> {
     // Cancel any previous search
     let cancel_token = Arc::new(AtomicBool::new(false));
@@ -655,15 +794,21 @@ pub async fn search_content(
             use_regex,
             whole_word,
             limit,
+            &cancel_token,
         ) {
             Ok(result) => {
-                if cancel_token.load(Ordering::Relaxed) {
-                    return;
-                }
-                emit_content_batches(&app, result, &cancel_token);
+                // Cancellation is handled inside: a superseded search still owes
+                // its panel a final batch carrying its own `search_id`.
+                emit_content_batches(&app, result, &cancel_token, &search_id);
             }
             Err(e) => {
-                let _ = app.emit("content-search-error", &e);
+                let _ = app.emit(
+                    "content-search-error",
+                    &ContentSearchError {
+                        search_id: search_id.clone(),
+                        message: e,
+                    },
+                );
             }
         }
     });
@@ -674,6 +819,7 @@ pub async fn search_content(
 /// Two-phase content search: BM25 index narrows to top files, then grep for lines.
 /// Falls back to full `search_content_impl` when the index isn't ready or the query
 /// requires regex/whole-word matching.
+#[allow(clippy::too_many_arguments)]
 fn search_content_indexed(
     index_arc: &std::sync::Arc<parking_lot::RwLock<crate::content_index::ContentIndex>>,
     repo_path: String,
@@ -682,24 +828,26 @@ fn search_content_indexed(
     use_regex: bool,
     whole_word: bool,
     limit: Option<usize>,
+    cancel: &AtomicBool,
 ) -> Result<ContentSearchResult, String> {
     // Fall back to full grep for regex, whole-word, or if index isn't ready
     let can_use_index = !use_regex && !whole_word && !query.is_empty();
     if can_use_index {
         let index = index_arc.read();
         if index.is_ready() {
-            return search_via_index(&index, &query, case_sensitive, limit);
+            return search_via_index_with_cancel(&index, &query, case_sensitive, limit, cancel);
         }
     }
 
     // Index not ready or not applicable — fall back to full grep
-    search_content_impl(
+    search_content_impl_with_cancel(
         repo_path,
         query,
         case_sensitive,
         use_regex,
         whole_word,
         limit,
+        cancel,
     )
 }
 
@@ -710,20 +858,63 @@ pub(crate) fn search_via_index(
     case_sensitive: bool,
     limit: Option<usize>,
 ) -> Result<ContentSearchResult, String> {
-    use grep_matcher::Matcher;
-    use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::UTF8};
+    search_via_index_with_cancel(index, query, case_sensitive, limit, &AtomicBool::new(false))
+}
+
+fn search_via_index_with_cancel(
+    index: &crate::content_index::ContentIndex,
+    query: &str,
+    case_sensitive: bool,
+    limit: Option<usize>,
+    cancel: &AtomicBool,
+) -> Result<ContentSearchResult, String> {
+    let plan = index_search_plan(index, query, 50);
+    search_index_plan(plan, query, case_sensitive, limit, cancel)
+}
+
+struct IndexSearchPlan {
+    files: Vec<(String, PathBuf)>,
+}
+
+fn index_search_plan(
+    index: &crate::content_index::ContentIndex,
+    query: &str,
+    candidate_limit: usize,
+) -> IndexSearchPlan {
+    let files = index
+        .search(query, candidate_limit)
+        .into_iter()
+        .map(|ranked| {
+            let absolute = index.absolute_path(&ranked.rel_path);
+            (ranked.rel_path, absolute)
+        })
+        .collect();
+    IndexSearchPlan { files }
+}
+
+fn prepare_index_search(
+    index: &Arc<parking_lot::RwLock<crate::content_index::ContentIndex>>,
+    query: &str,
+    candidate_limit: usize,
+) -> Option<IndexSearchPlan> {
+    let index = index.read();
+    index
+        .is_ready()
+        .then(|| index_search_plan(&index, query, candidate_limit))
+}
+
+fn search_index_plan(
+    plan: IndexSearchPlan,
+    query: &str,
+    case_sensitive: bool,
+    limit: Option<usize>,
+    cancel: &AtomicBool,
+) -> Result<ContentSearchResult, String> {
+    use grep_searcher::{BinaryDetection, SearcherBuilder};
 
     let max_matches = limit.unwrap_or(1000);
-    // BM25 phase: get top-ranked files (~1ms)
-    let ranked_files = index.search(query, 50);
-
-    if ranked_files.is_empty() {
-        return Ok(ContentSearchResult {
-            matches: Vec::new(),
-            files_searched: 0,
-            files_skipped: 0,
-            truncated: false,
-        });
+    if plan.files.is_empty() {
+        return Ok(ContentSearchResult::default());
     }
 
     // Grep phase: search only the ranked files for exact line matches
@@ -742,48 +933,35 @@ pub(crate) fn search_via_index(
     let mut files_searched: u32 = 0;
     let mut truncated = false;
 
-    for ranked in &ranked_files {
+    for (rel_path, abs_path) in plan.files {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         if all_matches.len() >= max_matches {
             truncated = true;
             break;
         }
 
-        let abs_path = index.absolute_path(&ranked.rel_path);
         if !abs_path.is_file() {
             continue;
         }
 
         files_searched += 1;
-        let rel_path = ranked.rel_path.clone();
 
-        let _ = searcher.search_path(
+        let stopped_by_cancel = grep_file_with_cancel(
+            &mut searcher,
             &matcher,
             &abs_path,
-            UTF8(|line_number, line| {
-                if all_matches.len() >= max_matches {
-                    truncated = true;
-                    return Ok(false);
-                }
-
-                let line_trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-                let mut match_start: u32 = 0;
-                let mut match_end: u32 = 0;
-                if let Ok(Some(m)) = matcher.find(line.as_bytes()) {
-                    match_start = m.start() as u32;
-                    match_end = m.end() as u32;
-                }
-
-                all_matches.push(ContentMatch {
-                    path: rel_path.clone(),
-                    line_number: line_number as u32,
-                    line_text: line_trimmed.to_string(),
-                    match_start,
-                    match_end,
-                    repo_path: None,
-                });
-                Ok(true)
-            }),
-        );
+            &rel_path,
+            max_matches,
+            &mut all_matches,
+            &mut truncated,
+            &|| cancel.load(Ordering::Relaxed),
+        )
+        .unwrap_or(false);
+        if stopped_by_cancel {
+            break;
+        }
     }
 
     // BM25 already ranked the files by relevance — no need for post-hoc reranking
@@ -792,7 +970,80 @@ pub(crate) fn search_via_index(
         files_searched,
         files_skipped: 0,
         truncated,
+        ..Default::default()
     })
+}
+
+/// Convert the byte offsets produced by grep into the UTF-16 code-unit offsets
+/// consumed by JavaScript `String.slice`. Rust `char` counts are not sufficient:
+/// a non-BMP scalar such as an emoji occupies one `char` but two UTF-16 units.
+fn utf16_match_offsets(line: &str, byte_start: usize, byte_end: usize) -> Option<(u32, u32)> {
+    if byte_start > byte_end
+        || byte_end > line.len()
+        || !line.is_char_boundary(byte_start)
+        || !line.is_char_boundary(byte_end)
+    {
+        return None;
+    }
+
+    let match_start = line[..byte_start].encode_utf16().count();
+    let match_end = match_start + line[byte_start..byte_end].encode_utf16().count();
+    Some((
+        u32::try_from(match_start).ok()?,
+        u32::try_from(match_end).ok()?,
+    ))
+}
+
+/// Both indexed and fallback search use this sink so cancellation, limits, and
+/// match offsets cannot drift between the two disk-grep paths.
+#[allow(clippy::too_many_arguments)]
+fn grep_file_with_cancel(
+    searcher: &mut grep_searcher::Searcher,
+    matcher: &grep_regex::RegexMatcher,
+    path: &std::path::Path,
+    relative: &str,
+    max_matches: usize,
+    all_matches: &mut Vec<ContentMatch>,
+    truncated: &mut bool,
+    is_cancelled: &impl Fn() -> bool,
+) -> std::io::Result<bool> {
+    use grep_matcher::Matcher;
+    use grep_searcher::sinks::UTF8;
+
+    let mut stopped_by_cancel = false;
+    searcher.search_path(
+        matcher,
+        path,
+        UTF8(|line_number, line| {
+            if is_cancelled() {
+                stopped_by_cancel = true;
+                return Ok(false);
+            }
+            if all_matches.len() >= max_matches {
+                *truncated = true;
+                return Ok(false);
+            }
+
+            let line_trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+            let (match_start, match_end) = matcher
+                .find(line.as_bytes())
+                .ok()
+                .flatten()
+                .and_then(|m| utf16_match_offsets(line_trimmed, m.start(), m.end()))
+                .unwrap_or((0, 0));
+
+            all_matches.push(ContentMatch {
+                path: relative.to_string(),
+                line_number: line_number as u32,
+                line_text: line_trimmed.to_string(),
+                match_start,
+                match_end,
+                repo_path: None,
+            });
+            Ok(true)
+        }),
+    )?;
+    Ok(stopped_by_cancel)
 }
 
 pub(crate) fn search_files_impl(
@@ -895,16 +1146,30 @@ pub(crate) fn search_content_impl(
     whole_word: bool,
     limit: Option<usize>,
 ) -> Result<ContentSearchResult, String> {
-    use grep_matcher::Matcher;
-    use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::UTF8};
+    search_content_impl_with_cancel(
+        repo_path,
+        query,
+        case_sensitive,
+        use_regex,
+        whole_word,
+        limit,
+        &AtomicBool::new(false),
+    )
+}
 
-    if query.is_empty() {
-        return Ok(ContentSearchResult {
-            matches: Vec::new(),
-            files_searched: 0,
-            files_skipped: 0,
-            truncated: false,
-        });
+fn search_content_impl_with_cancel(
+    repo_path: String,
+    query: String,
+    case_sensitive: bool,
+    use_regex: bool,
+    whole_word: bool,
+    limit: Option<usize>,
+    cancel: &AtomicBool,
+) -> Result<ContentSearchResult, String> {
+    use grep_searcher::{BinaryDetection, SearcherBuilder};
+
+    if query.is_empty() || cancel.load(Ordering::Relaxed) {
+        return Ok(ContentSearchResult::default());
     }
 
     let repo = PathBuf::from(&repo_path);
@@ -947,6 +1212,9 @@ pub(crate) fn search_content_impl(
         .build();
 
     'walk: for entry in walker {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -990,44 +1258,27 @@ pub(crate) fn search_content_impl(
 
         let matches_before = all_matches.len();
 
-        let _search_result = searcher.search_path(
+        let search_result = grep_file_with_cancel(
+            &mut searcher,
             &matcher,
             entry.path(),
-            UTF8(|line_number, line| {
-                if all_matches.len() >= max_matches {
-                    truncated = true;
-                    // Returning false stops the search for this file
-                    return Ok(false);
-                }
-
-                // Find match offsets within the line (strip trailing newline for display)
-                let line_trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-
-                let mut match_start: u32 = 0;
-                let mut match_end: u32 = 0;
-                if let Ok(Some(m)) = matcher.find(line.as_bytes()) {
-                    match_start = m.start() as u32;
-                    match_end = m.end() as u32;
-                }
-
-                all_matches.push(ContentMatch {
-                    path: relative.clone(),
-                    line_number: line_number as u32,
-                    line_text: line_trimmed.to_string(),
-                    match_start,
-                    match_end,
-                    repo_path: None,
-                });
-                Ok(true)
-            }),
+            &relative,
+            max_matches,
+            &mut all_matches,
+            &mut truncated,
+            &|| cancel.load(Ordering::Relaxed),
         );
 
         // If the searcher encountered an error (e.g. non-UTF-8 that slipped past binary check),
         // roll back any partial matches for this file and count it as skipped
-        if _search_result.is_err() {
+        if search_result.is_err() {
             all_matches.truncate(matches_before);
             files_searched -= 1;
             files_skipped += 1;
+        }
+
+        if search_result.unwrap_or(false) {
+            break 'walk;
         }
 
         if truncated {
@@ -1069,6 +1320,7 @@ pub(crate) fn search_content_impl(
         files_searched,
         files_skipped,
         truncated,
+        ..Default::default()
     })
 }
 
@@ -1101,8 +1353,8 @@ fn build_search_pattern(query: &str) -> regex::Regex {
 /// Read a file's content within a repository.
 /// Re-uses the existing `read_file_impl` from lib.rs.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn fs_read_file(repo_path: String, file: String) -> Result<String, String> {
-    crate::read_file_impl(repo_path, file)
+pub async fn fs_read_file(repo_path: String, file: String) -> Result<String, String> {
+    spawn_blocking_fs(move || crate::read_file_impl(repo_path, file)).await
 }
 
 /// Atomically write `data` to `target` via temp-file + rename, PRESERVING the
@@ -1148,7 +1400,11 @@ pub(crate) fn atomic_write(target: &std::path::Path, data: &[u8]) -> Result<(), 
 /// Used by editor saves — creates parent directories as needed so saving to a
 /// not-yet-existing nested path can't fail.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn write_file(repo_path: String, file: String, content: String) -> Result<(), String> {
+pub async fn write_file(repo_path: String, file: String, content: String) -> Result<(), String> {
+    spawn_blocking_fs(move || write_file_impl(repo_path, file, content)).await
+}
+
+fn write_file_impl(repo_path: String, file: String, content: String) -> Result<(), String> {
     let target = if PathBuf::from(&repo_path).join(&file).exists() {
         validate_path(&repo_path, &file)?.1
     } else {
@@ -1223,7 +1479,11 @@ pub fn create_file(repo_path: String, file: String) -> Result<(), String> {
 
 /// Create a directory (and parents) within a repository.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn create_directory(repo_path: String, dir: String) -> Result<(), String> {
+pub async fn create_directory(repo_path: String, dir: String) -> Result<(), String> {
+    spawn_blocking_fs(move || create_directory_impl(repo_path, dir)).await
+}
+
+fn create_directory_impl(repo_path: String, dir: String) -> Result<(), String> {
     let repo = PathBuf::from(&repo_path);
     let target = repo.join(&dir);
 
@@ -1253,8 +1513,15 @@ pub fn create_directory(repo_path: String, dir: String) -> Result<(), String> {
 }
 
 /// Delete a file or directory within a repository.
+///
+/// `remove_dir_all` on a deep tree is unbounded work, which is why the command
+/// hands it to the blocking pool instead of running it on the IPC thread.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn delete_path(repo_path: String, path: String) -> Result<(), String> {
+pub async fn delete_path(repo_path: String, path: String) -> Result<(), String> {
+    spawn_blocking_fs(move || delete_path_impl(repo_path, path)).await
+}
+
+fn delete_path_impl(repo_path: String, path: String) -> Result<(), String> {
     let (_canonical_repo, canonical_target) = validate_path(&repo_path, &path)?;
 
     if canonical_target.is_dir() {
@@ -1267,29 +1534,44 @@ pub fn delete_path(repo_path: String, path: String) -> Result<(), String> {
 
 /// Rename/move a file or directory within a repository.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn rename_path(repo_path: String, from: String, to: String) -> Result<(), String> {
+pub async fn rename_path(repo_path: String, from: String, to: String) -> Result<(), String> {
+    spawn_blocking_fs(move || rename_path_impl(repo_path, from, to)).await
+}
+
+fn rename_path_impl(repo_path: String, from: String, to: String) -> Result<(), String> {
     let (_canonical_repo, canonical_from) = validate_path(&repo_path, &from)?;
-    let (_, canonical_to) = if PathBuf::from(&repo_path).join(&to).exists() {
-        validate_path(&repo_path, &to)?
-    } else {
-        validate_path_for_creation(&repo_path, &to)?
-    };
+    // NEVER canonicalize the destination — only its parent. On case-insensitive
+    // filesystems (macOS APFS, Windows NTFS) `canonicalize("readme.md")` resolves
+    // to the existing on-disk `README.md`, so a case-only rename would collapse to
+    // `rename(README.md, README.md)` and silently do nothing.
+    let (_, canonical_to) = validate_path_for_creation(&repo_path, &to)?;
 
     std::fs::rename(&canonical_from, &canonical_to).map_err(|e| format!("Failed to rename: {e}"))
 }
 
 /// Copy a file within a repository.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn copy_path(repo_path: String, from: String, to: String) -> Result<(), String> {
+pub async fn copy_path(repo_path: String, from: String, to: String) -> Result<(), String> {
+    spawn_blocking_fs(move || copy_path_impl(repo_path, from, to)).await
+}
+
+fn copy_path_impl(repo_path: String, from: String, to: String) -> Result<(), String> {
     let (_canonical_repo, canonical_from) = validate_path(&repo_path, &from)?;
-    let (_, canonical_to) = if PathBuf::from(&repo_path).join(&to).exists() {
-        validate_path(&repo_path, &to)?
-    } else {
-        validate_path_for_creation(&repo_path, &to)?
-    };
+    // Same rule as `rename_path`: the destination keeps the requested spelling.
+    let (_, canonical_to) = validate_path_for_creation(&repo_path, &to)?;
 
     if canonical_from.is_dir() {
         return Err("Cannot copy directories. Only files can be copied.".to_string());
+    }
+
+    // On a case-insensitive filesystem `README.md` and `readme.md` are the same
+    // file: copying it onto itself opens the source for truncation and destroys
+    // the content. Compare resolved paths, not the literal ones.
+    if canonical_to
+        .canonicalize()
+        .is_ok_and(|resolved| resolved == canonical_from)
+    {
+        return Err("Source and destination are the same file".to_string());
     }
 
     std::fs::copy(&canonical_from, &canonical_to)
@@ -1306,7 +1588,11 @@ pub fn copy_path(repo_path: String, from: String, to: String) -> Result<(), Stri
 /// user is the trust boundary — so any path the user can already see is allowed
 /// (mirrors `read_external_file`).
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn copy_path_abs(from: String, to: String) -> Result<(), String> {
+pub async fn copy_path_abs(from: String, to: String) -> Result<(), String> {
+    spawn_blocking_fs(move || copy_path_abs_impl(from, to)).await
+}
+
+fn copy_path_abs_impl(from: String, to: String) -> Result<(), String> {
     let from_path = PathBuf::from(&from);
     let to_path = PathBuf::from(&to);
     if from_path == to_path {
@@ -1327,7 +1613,11 @@ pub fn copy_path_abs(from: String, to: String) -> Result<(), String> {
 /// Falls back to copy+remove when `rename` fails across filesystems (EXDEV).
 /// See [`copy_path_abs`] for the trust-boundary rationale.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn move_path_abs(from: String, to: String) -> Result<(), String> {
+pub async fn move_path_abs(from: String, to: String) -> Result<(), String> {
+    spawn_blocking_fs(move || move_path_abs_impl(from, to)).await
+}
+
+fn move_path_abs_impl(from: String, to: String) -> Result<(), String> {
     let from_path = PathBuf::from(&from);
     let to_path = PathBuf::from(&to);
     if from_path == to_path {
@@ -1407,6 +1697,15 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 /// directory, the function performs no filesystem operations and returns
 /// `needs_confirm=true`. When `allow_recursive=true`, directories are moved
 /// via rename (or copy+remove on cross-device) or copied recursively.
+///
+/// DEFERRED (2026-08-18) — still a sync command, so `copy_dir_recursive` runs
+/// on the IPC thread (the macOS main thread) and dropping a large folder
+/// freezes the WebView until the copy finishes. Every sibling command in this
+/// file was moved to `async fn` + `spawn_blocking_fs` in story 607-f483; this
+/// one was held back because it is the backend of a drag-drop and the D&D
+/// surface needs Boss's approval before it is touched. The conversion is
+/// mechanical when that approval comes: body → `fs_transfer_paths_impl`,
+/// command → `async fn` wrapper. Nothing else changes.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn fs_transfer_paths(
     dest_dir: String,
@@ -1524,7 +1823,9 @@ fn libc_cross_device() -> i32 {
 }
 
 /// Result of resolving a terminal path candidate.
-#[derive(Debug, Clone, Serialize)]
+// PartialEq so a batched resolve can be asserted equal, entry by entry, to the
+// single-candidate command it must not diverge from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ResolvedFilePath {
     pub absolute_path: String,
     pub is_directory: bool,
@@ -1635,9 +1936,39 @@ pub fn resolve_terminal_path(cwd: String, candidate: String) -> Option<ResolvedF
     }
 }
 
+/// Validate many path candidates from one screen in a single call.
+///
+/// The link verifier issued one `resolve_terminal_path` per candidate per row and
+/// awaited each row before starting the next: a screen with links on twenty rows
+/// cost twenty serial round trips, each carrying one string. The work per
+/// candidate is unchanged — the round trips are what is removed — so the answer
+/// at index `i` is exactly what the single-candidate command returns for
+/// `candidates[i]`. An unresolved candidate stays a `None` hole rather than
+/// dropping out, which would shift every answer after it onto the wrong span.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn resolve_terminal_paths(
+    cwd: String,
+    candidates: Vec<String>,
+) -> Result<Vec<Option<ResolvedFilePath>>, String> {
+    // Every candidate canonicalizes, which hits the disk; a screenful of them has
+    // no business on the caller's thread.
+    spawn_blocking_fs(move || {
+        let resolved = candidates
+            .into_iter()
+            .map(|candidate| resolve_terminal_path(cwd.clone(), candidate))
+            .collect::<Vec<_>>();
+        Ok(resolved)
+    })
+    .await
+}
+
 /// Append a path pattern to the repo's .gitignore file.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub fn add_to_gitignore(repo_path: String, pattern: String) -> Result<(), String> {
+pub async fn add_to_gitignore(repo_path: String, pattern: String) -> Result<(), String> {
+    spawn_blocking_fs(move || add_to_gitignore_impl(repo_path, pattern)).await
+}
+
+fn add_to_gitignore_impl(repo_path: String, pattern: String) -> Result<(), String> {
     let repo = PathBuf::from(&repo_path);
     let canonical_repo = repo
         .canonicalize()
@@ -1714,6 +2045,130 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// `content-search-batch` is one global event with three panels listening,
+    /// and each drops anything whose `search_id` is not its own. The field name
+    /// is that contract: rename it here and every panel silently stops
+    /// accepting its own results, with nothing on either side to fail.
+    #[test]
+    fn a_batch_carries_its_search_id_under_that_exact_name() {
+        let batch = ContentSearchBatch {
+            search_id: "cs-7".to_string(),
+            matches: Vec::new(),
+            is_final: true,
+            files_searched: 0,
+            files_skipped: 0,
+            truncated: false,
+            repos_pending: 0,
+            repos_searched: 0,
+        };
+        let wire = serde_json::to_value(&batch).unwrap();
+        assert_eq!(wire["search_id"], "cs-7");
+    }
+
+    /// A failed search has to be as correlated as a successful one, or the
+    /// panel that did not ask is the one that shows the error.
+    #[test]
+    fn an_error_carries_the_same_search_id() {
+        let wire = serde_json::to_value(ContentSearchError {
+            search_id: "cs-7".to_string(),
+            message: "boom".to_string(),
+        })
+        .unwrap();
+        assert_eq!(wire["search_id"], "cs-7");
+        assert_eq!(wire["message"], "boom");
+    }
+
+    fn result_with_matches(count: usize) -> ContentSearchResult {
+        ContentSearchResult {
+            matches: (0..count)
+                .map(|i| ContentMatch {
+                    path: format!("src/f{i}.rs"),
+                    line_number: 1,
+                    line_text: "hit".to_string(),
+                    match_start: 0,
+                    match_end: 3,
+                    repo_path: None,
+                })
+                .collect(),
+            files_searched: 12,
+            files_skipped: 3,
+            truncated: false,
+            repos_pending: 0,
+            repos_searched: 1,
+        }
+    }
+
+    fn collect_batches(
+        result: ContentSearchResult,
+        cancel: &AtomicBool,
+    ) -> Vec<ContentSearchBatch> {
+        let mut batches = Vec::new();
+        dispatch_content_batches(result, cancel, "cs-7", |b| batches.push(b));
+        batches
+    }
+
+    /// Exactly one batch closes the search, and it is the last one.
+    #[test]
+    fn a_completed_search_ends_with_a_single_final_batch() {
+        let batches = collect_batches(result_with_matches(120), &AtomicBool::new(false));
+        assert_eq!(batches.len(), 3, "50 + 50 + 20");
+        assert_eq!(
+            batches.iter().filter(|b| b.is_final).count(),
+            1,
+            "a second final would let a panel accept results after it stopped listening"
+        );
+        assert!(batches.last().unwrap().is_final);
+        assert_eq!(
+            batches.iter().map(|b| b.matches.len()).sum::<usize>(),
+            120,
+            "no match may be dropped by the chunking"
+        );
+    }
+
+    /// An empty result still has to say so. Without this the panel spins on a
+    /// search that found nothing.
+    #[test]
+    fn a_search_with_no_matches_still_emits_a_final_batch() {
+        let batches = collect_batches(result_with_matches(0), &AtomicBool::new(false));
+        assert_eq!(batches.len(), 1);
+        assert!(batches[0].is_final);
+        assert!(batches[0].matches.is_empty());
+    }
+
+    /// The regression this guards: a search cancelled by a *different* panel
+    /// starting its own must still close under its own `search_id`. It is the
+    /// only event that panel accepts, so dropping it strands the spinner for
+    /// the life of the window.
+    #[test]
+    fn a_search_cancelled_before_it_emits_still_closes_itself() {
+        let batches = collect_batches(result_with_matches(120), &AtomicBool::new(true));
+        assert_eq!(batches.len(), 1, "the payload is skipped, the close is not");
+        assert_eq!(batches[0].search_id, "cs-7");
+        assert!(batches[0].is_final);
+        assert!(batches[0].matches.is_empty());
+        assert_eq!(
+            batches[0].files_searched, 12,
+            "the counters report the work actually done, not zero"
+        );
+    }
+
+    /// Cancellation part-way through: the chunks already sent stand, and the
+    /// search still gets its terminator.
+    #[test]
+    fn a_search_cancelled_mid_stream_closes_after_the_chunks_it_sent() {
+        let cancel = AtomicBool::new(false);
+        let mut batches = Vec::new();
+        dispatch_content_batches(result_with_matches(120), &cancel, "cs-7", |b| {
+            cancel.store(true, Ordering::Relaxed);
+            batches.push(b);
+        });
+        assert_eq!(batches.len(), 2, "one chunk, then the close");
+        assert_eq!(batches[0].matches.len(), 50);
+        assert!(!batches[0].is_final);
+        assert!(batches[1].is_final);
+        assert!(batches[1].matches.is_empty());
+    }
 
     fn setup_test_repo() -> TempDir {
         let dir = TempDir::new().unwrap();
@@ -1901,7 +2356,7 @@ mod tests {
         let repo_path = dir.path().to_string_lossy().to_string();
 
         // Write a new file
-        write_file(
+        write_file_impl(
             repo_path.clone(),
             "new.txt".to_string(),
             "hello".to_string(),
@@ -1913,7 +2368,7 @@ mod tests {
         );
 
         // Overwrite
-        write_file(repo_path, "new.txt".to_string(), "world".to_string()).unwrap();
+        write_file_impl(repo_path, "new.txt".to_string(), "world".to_string()).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "world"
@@ -1925,7 +2380,7 @@ mod tests {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
 
-        let result = write_file(repo_path, "../escape.txt".to_string(), "bad".to_string());
+        let result = write_file_impl(repo_path, "../escape.txt".to_string(), "bad".to_string());
         assert!(result.is_err());
     }
 
@@ -1934,7 +2389,7 @@ mod tests {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
 
-        create_directory(repo_path.clone(), "nested/deep/dir".to_string()).unwrap();
+        create_directory_impl(repo_path.clone(), "nested/deep/dir".to_string()).unwrap();
         assert!(dir.path().join("nested/deep/dir").is_dir());
     }
 
@@ -1966,7 +2421,7 @@ mod tests {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
 
-        write_file(
+        write_file_impl(
             repo_path.clone(),
             "keep.txt".to_string(),
             "important".to_string(),
@@ -1997,7 +2452,7 @@ mod tests {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
 
-        write_file(repo_path, "x/y/deep.txt".to_string(), "content".to_string()).unwrap();
+        write_file_impl(repo_path, "x/y/deep.txt".to_string(), "content".to_string()).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("x/y/deep.txt")).unwrap(),
             "content"
@@ -2010,7 +2465,7 @@ mod tests {
         let repo_path = dir.path().to_string_lossy().to_string();
 
         assert!(dir.path().join("README.md").exists());
-        delete_path(repo_path, "README.md".to_string()).unwrap();
+        delete_path_impl(repo_path, "README.md".to_string()).unwrap();
         assert!(!dir.path().join("README.md").exists());
     }
 
@@ -2020,7 +2475,7 @@ mod tests {
         let repo_path = dir.path().to_string_lossy().to_string();
 
         assert!(dir.path().join("src").exists());
-        delete_path(repo_path, "src".to_string()).unwrap();
+        delete_path_impl(repo_path, "src".to_string()).unwrap();
         assert!(!dir.path().join("src").exists());
     }
 
@@ -2029,10 +2484,46 @@ mod tests {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
 
-        rename_path(repo_path, "main.rs".to_string(), "app.rs".to_string()).unwrap();
+        rename_path_impl(repo_path, "main.rs".to_string(), "app.rs".to_string()).unwrap();
 
         assert!(!dir.path().join("main.rs").exists());
         assert!(dir.path().join("app.rs").exists());
+    }
+
+    /// A case-only rename must actually change the name on disk. On
+    /// case-insensitive filesystems this used to no-op because the destination
+    /// was canonicalized back to the source's existing spelling.
+    /// `exists()` is case-insensitive there too, so assert on the real dir entry.
+    #[test]
+    fn test_rename_path_case_only() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        rename_path_impl(repo_path, "main.rs".to_string(), "MAIN.rs".to_string()).unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"MAIN.rs".to_string()), "got {names:?}");
+        assert!(!names.contains(&"main.rs".to_string()), "got {names:?}");
+    }
+
+    /// Copying a file onto itself would open the source for truncation and wipe
+    /// it — the guard must reject it instead.
+    #[test]
+    fn test_copy_path_onto_itself_rejected() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+        let before = std::fs::read_to_string(dir.path().join("main.rs")).unwrap();
+
+        let result = copy_path_impl(repo_path, "main.rs".to_string(), "main.rs".to_string());
+
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("main.rs")).unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -2040,7 +2531,7 @@ mod tests {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
 
-        let result = rename_path(
+        let result = rename_path_impl(
             repo_path,
             "main.rs".to_string(),
             "../escaped.rs".to_string(),
@@ -2055,7 +2546,7 @@ mod tests {
         let from = src.path().join("main.rs").to_string_lossy().to_string();
         let to = dst.path().join("copied.rs").to_string_lossy().to_string();
 
-        copy_path_abs(from, to).unwrap();
+        copy_path_abs_impl(from, to).unwrap();
 
         assert!(
             dst.path().join("copied.rs").exists(),
@@ -2072,7 +2563,7 @@ mod tests {
         let to = dst.path().join("src_copy").to_string_lossy().to_string();
 
         assert!(
-            copy_path_abs(from, to).is_err(),
+            copy_path_abs_impl(from, to).is_err(),
             "directories cannot be copied"
         );
     }
@@ -2082,7 +2573,7 @@ mod tests {
         let src = setup_test_repo();
         let p = src.path().join("main.rs").to_string_lossy().to_string();
 
-        copy_path_abs(p.clone(), p).unwrap();
+        copy_path_abs_impl(p.clone(), p).unwrap();
 
         assert!(src.path().join("main.rs").exists());
     }
@@ -2094,7 +2585,7 @@ mod tests {
         let from = src.path().join("main.rs").to_string_lossy().to_string();
         let to = dst.path().join("moved.rs").to_string_lossy().to_string();
 
-        move_path_abs(from, to).unwrap();
+        move_path_abs_impl(from, to).unwrap();
 
         assert!(
             dst.path().join("moved.rs").exists(),
@@ -2286,6 +2777,67 @@ mod tests {
     // --- search_content tests ---
 
     #[test]
+    fn content_match_offsets_count_utf16_code_units() {
+        let cases = [
+            ("ascii needle", 6, 6, 6),
+            ("— needle", 4, 2, 2),
+            ("é needle", 3, 2, 2),
+            ("😀 needle", 5, 2, 3),
+        ];
+
+        for (line, byte_start, scalar_start, utf16_start) in cases {
+            assert_eq!(line[..byte_start].chars().count(), scalar_start);
+            assert_eq!(
+                utf16_match_offsets(line, byte_start, byte_start + "needle".len()),
+                Some((utf16_start, utf16_start + 6)),
+                "wrong UTF-16 range for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn content_search_returns_utf16_offsets_for_ascii_and_unicode_prefixes() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("unicode.txt"),
+            "ascii needle\n— needle\né needle\n😀 needle\n",
+        )
+        .unwrap();
+
+        let result = search_content_impl(
+            dir.path().to_string_lossy().to_string(),
+            "needle".to_string(),
+            true,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+
+        for (line, expected_start) in [
+            ("ascii needle", 6),
+            ("— needle", 2),
+            ("é needle", 2),
+            ("😀 needle", 3),
+        ] {
+            let found = result
+                .matches
+                .iter()
+                .find(|content_match| content_match.line_text == line)
+                .unwrap_or_else(|| panic!("missing match for {line:?}"));
+            assert_eq!(
+                found.match_start, expected_start,
+                "wrong start for {line:?}"
+            );
+            assert_eq!(
+                found.match_end,
+                expected_start + 6,
+                "wrong end for {line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_search_content_basic() {
         let dir = setup_test_repo();
         let repo_path = dir.path().to_string_lossy().to_string();
@@ -2298,6 +2850,64 @@ mod tests {
             "Expected match in src/lib.rs"
         );
         assert!(result.files_searched > 0);
+    }
+
+    #[test]
+    fn cancelled_content_walk_stops_before_searching_files() {
+        let dir = setup_test_repo();
+        let cancel = AtomicBool::new(true);
+
+        let result = search_content_impl_with_cancel(
+            dir.path().to_string_lossy().to_string(),
+            "hello".to_string(),
+            true,
+            false,
+            false,
+            None,
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(result.files_searched, 0);
+        assert!(result.matches.is_empty());
+    }
+
+    #[test]
+    fn grep_sink_stops_when_cancelled_between_matching_lines() {
+        use grep_searcher::{BinaryDetection, SearcherBuilder};
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("matches.txt");
+        fs::write(&path, "needle one\nneedle two\nneedle three\n").unwrap();
+        let matcher = grep_regex::RegexMatcherBuilder::new()
+            .build("needle")
+            .unwrap();
+        let mut searcher = SearcherBuilder::new()
+            .binary_detection(BinaryDetection::quit(0))
+            .build();
+        let checks = std::cell::Cell::new(0usize);
+        let mut matches = Vec::new();
+        let mut truncated = false;
+
+        let stopped_by_cancel = grep_file_with_cancel(
+            &mut searcher,
+            &matcher,
+            &path,
+            "matches.txt",
+            100,
+            &mut matches,
+            &mut truncated,
+            &|| {
+                let current = checks.get();
+                checks.set(current + 1);
+                current > 0
+            },
+        )
+        .unwrap();
+
+        assert!(stopped_by_cancel);
+        assert_eq!(matches.len(), 1, "the second sink call must stop grep");
+        assert!(!truncated, "cancellation is not a result-limit truncation");
     }
 
     #[test]
@@ -2628,6 +3238,59 @@ mod tests {
     }
 
     // --- resolve_terminal_path tests ---
+
+    /// The link verifier issued one IPC per candidate per row and awaited each
+    /// row before starting the next, so a screen with links on many rows cost one
+    /// round trip per link, serially. Batching removes the round trips, not the
+    /// work: every answer must still equal what the single-candidate command
+    /// returns, positionally.
+    #[tokio::test]
+    async fn resolving_a_batch_answers_each_candidate_in_order() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        fs::write(dir.path().join("first.rs"), "").unwrap();
+        fs::write(dir.path().join("third.rs"), "").unwrap();
+
+        let candidates = vec![
+            "first.rs".to_string(),
+            "missing.rs".to_string(),
+            "third.rs:12:3".to_string(),
+        ];
+        let batched = resolve_terminal_paths(cwd.clone(), candidates.clone())
+            .await
+            .expect("batched resolve failed");
+
+        assert_eq!(
+            batched.len(),
+            candidates.len(),
+            "a batch must not drop entries"
+        );
+        for (i, candidate) in candidates.iter().enumerate() {
+            assert_eq!(
+                batched[i],
+                resolve_terminal_path(cwd.clone(), candidate.clone()),
+                "batched answer for {candidate:?} differs from the single-candidate one"
+            );
+        }
+        // Pinned explicitly so the equality above cannot pass by both being wrong.
+        assert!(batched[0].is_some());
+        assert!(
+            batched[1].is_none(),
+            "an unresolved candidate must stay a hole"
+        );
+        assert!(
+            batched[2].is_some(),
+            "the :line:col suffix must still be stripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolving_an_empty_batch_is_not_an_error() {
+        assert_eq!(
+            resolve_terminal_paths("/tmp".to_string(), Vec::new()).await,
+            Ok(Vec::new())
+        );
+    }
 
     #[test]
     fn test_resolve_absolute_existing_file() {
@@ -3028,8 +3691,35 @@ mod tests {
         ))
     }
 
+    /// Cross-repo search now takes the whole `AppState` (it must be able to
+    /// kick off a missing index), so the fixtures build one and pre-populate
+    /// `content_indices` exactly as the old DashMap fixtures did.
+    fn state_with_indices(
+        entries: Vec<(
+            String,
+            Arc<parking_lot::RwLock<crate::content_index::ContentIndex>>,
+        )>,
+    ) -> Arc<crate::state::AppState> {
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        for (path, index) in entries {
+            state.content_indices.insert(path, index);
+        }
+        state
+    }
+
+    /// Cross-repo search reads the repo registry from the config dir, so a test
+    /// that does not isolate it would search the developer's REAL repos and get
+    /// machine-dependent counts. Returns the guard — keep it alive.
+    fn empty_repo_registry(cfg: &TempDir) -> impl Drop {
+        let guard = crate::config::set_config_dir_override(cfg.path().to_path_buf());
+        crate::config::replace_repositories_for_test(serde_json::json!({ "repos": {} })).unwrap();
+        guard
+    }
+
     #[test]
     fn search_content_all_merges_and_tags_each_repo() {
+        let cfg = TempDir::new().unwrap();
+        let _registry_guard = empty_repo_registry(&cfg);
         let repo_a = TempDir::new().unwrap();
         fs::write(
             repo_a.path().join("a.txt"),
@@ -3045,11 +3735,12 @@ mod tests {
 
         let path_a = repo_a.path().to_string_lossy().to_string();
         let path_b = repo_b.path().to_string_lossy().to_string();
-        let indices = dashmap::DashMap::new();
-        indices.insert(path_a.clone(), ready_index(repo_a.path()));
-        indices.insert(path_b.clone(), ready_index(repo_b.path()));
+        let state = state_with_indices(vec![
+            (path_a.clone(), ready_index(repo_a.path())),
+            (path_b.clone(), ready_index(repo_b.path())),
+        ]);
 
-        let result = search_content_all_impl(&indices, "zebrafish", false, 100);
+        let result = search_content_all_impl(&state, "zebrafish", false, 100);
 
         assert_eq!(result.matches.len(), 2, "one match per repo");
         let repos: std::collections::HashSet<_> = result
@@ -3063,6 +3754,8 @@ mod tests {
 
     #[test]
     fn search_content_all_skips_unready_indices() {
+        let cfg = TempDir::new().unwrap();
+        let _registry_guard = empty_repo_registry(&cfg);
         let repo_a = TempDir::new().unwrap();
         fs::write(repo_a.path().join("a.txt"), "the zebrafish swims here\n").unwrap();
         let repo_b = TempDir::new().unwrap();
@@ -3070,36 +3763,116 @@ mod tests {
 
         let path_a = repo_a.path().to_string_lossy().to_string();
         let path_b = repo_b.path().to_string_lossy().to_string();
-        let indices = dashmap::DashMap::new();
-        indices.insert(path_a.clone(), ready_index(repo_a.path()));
-        // repo_b's index never built → not ready → must be skipped
-        indices.insert(
-            path_b.clone(),
-            Arc::new(parking_lot::RwLock::new(
-                crate::content_index::ContentIndex::empty(repo_b.path().to_path_buf()),
-            )),
-        );
+        let state = state_with_indices(vec![
+            (path_a.clone(), ready_index(repo_a.path())),
+            // repo_b's index never built → not ready → cannot contribute now
+            (
+                path_b.clone(),
+                Arc::new(parking_lot::RwLock::new(
+                    crate::content_index::ContentIndex::empty(repo_b.path().to_path_buf()),
+                )),
+            ),
+        ]);
 
-        let result = search_content_all_impl(&indices, "zebrafish", false, 100);
+        let result = search_content_all_impl(&state, "zebrafish", false, 100);
 
         assert_eq!(result.matches.len(), 1, "only the ready repo contributes");
         assert_eq!(
             result.matches[0].repo_path.as_deref(),
             Some(path_a.as_str())
         );
+        // Regression: the unready repo used to vanish silently, so a query that
+        // only exists there rendered as a confident "No results". It must be
+        // reported as still-indexing instead.
+        assert_eq!(result.repos_pending, 1, "unready repo must be reported");
+        assert_eq!(result.repos_searched, 1);
+    }
+
+    /// A cross-repo search must report EVERY registered repo, but it must not
+    /// enqueue the entire registry behind the single build semaphore. The
+    /// configured warm strategy owns which repos are indexed; search reports
+    /// the remainder as pending without turning one query into hours of work.
+    #[test]
+    fn search_content_all_reports_unindexed_repos_without_enqueuing_builds() {
+        let cfg = TempDir::new().unwrap();
+        let _config_guard = crate::config::set_config_dir_override(cfg.path().to_path_buf());
+
+        let indexed = TempDir::new().unwrap();
+        fs::write(indexed.path().join("a.txt"), "the zebrafish swims here\n").unwrap();
+        let never_visited = TempDir::new().unwrap();
+        fs::write(never_visited.path().join("b.txt"), "zebrafish here too\n").unwrap();
+
+        let indexed_path = indexed.path().to_string_lossy().to_string();
+        let unvisited_path = never_visited.path().to_string_lossy().to_string();
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": { indexed_path.clone(): {}, unvisited_path.clone(): {} }
+        }))
+        .unwrap();
+
+        // Only the "active" repo has an index — exactly the boot-time shape.
+        let state = state_with_indices(vec![(indexed_path.clone(), ready_index(indexed.path()))]);
+
+        let result = search_content_all_impl(&state, "zebrafish", false, 100);
+
+        assert_eq!(result.repos_searched, 1, "only the indexed repo is ready");
+        assert_eq!(
+            result.repos_pending, 1,
+            "the registered-but-unindexed repo must be surfaced, not dropped"
+        );
+        assert!(
+            !state.content_indices.contains_key(&unvisited_path),
+            "cross-repo search must not enqueue a build for every registered repo"
+        );
+    }
+
+    #[test]
+    fn preparing_an_index_search_releases_the_read_lock_before_grep() {
+        let repo = TempDir::new().unwrap();
+        fs::write(repo.path().join("a.txt"), "zebrafish lives here\n").unwrap();
+        let index = ready_index(repo.path());
+
+        let plan = prepare_index_search(&index, "zebrafish", 50).unwrap();
+        let writer = index.try_write().expect(
+            "the search plan must own paths and scores so disk grep does not retain the read lock",
+        );
+        drop(writer);
+
+        let result =
+            search_index_plan(plan, "zebrafish", false, Some(100), &AtomicBool::new(false))
+                .unwrap();
+        assert_eq!(result.matches.len(), 1);
+    }
+
+    /// A repo holding an index without being registered (an agent searched it)
+    /// must still be searched — the union, not just the registry.
+    #[test]
+    fn search_content_all_includes_indexed_but_unregistered_repo() {
+        let cfg = TempDir::new().unwrap();
+        let _registry_guard = empty_repo_registry(&cfg);
+
+        let repo = TempDir::new().unwrap();
+        fs::write(repo.path().join("a.txt"), "the zebrafish swims here\n").unwrap();
+        let path = repo.path().to_string_lossy().to_string();
+        let state = state_with_indices(vec![(path.clone(), ready_index(repo.path()))]);
+
+        let result = search_content_all_impl(&state, "zebrafish", false, 100);
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].repo_path.as_deref(), Some(path.as_str()));
     }
 
     #[test]
     fn search_content_all_no_matches_returns_empty() {
+        let cfg = TempDir::new().unwrap();
+        let _registry_guard = empty_repo_registry(&cfg);
         let repo = TempDir::new().unwrap();
         fs::write(repo.path().join("a.txt"), "nothing relevant here\n").unwrap();
-        let indices = dashmap::DashMap::new();
-        indices.insert(
+        let state = state_with_indices(vec![(
             repo.path().to_string_lossy().to_string(),
             ready_index(repo.path()),
-        );
+        )]);
 
-        let result = search_content_all_impl(&indices, "zebrafish", false, 100);
+        let result = search_content_all_impl(&state, "zebrafish", false, 100);
 
         assert!(result.matches.is_empty());
         assert!(!result.truncated);
@@ -3147,5 +3920,185 @@ mod tests {
         let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755, "atomic_write must preserve existing file mode");
         assert_eq!(fs::read_to_string(&target).unwrap(), "#!/bin/sh\necho new");
+    }
+
+    // ── Commands stay off the UI thread ──────────────────────────────────
+    //
+    // A `#[tauri::command]` declared as a plain `fn` gets
+    // `ExecutionContext::Blocking` and runs inline in the IPC handler; on macOS
+    // that is the main thread, so a directory copy or a large read freezes the
+    // WebView. Each mutation command is therefore an `async fn` that does its
+    // syscalls inside `spawn_blocking_fs`.
+    //
+    // These tests cannot observe *which* thread ran the work — they pin the
+    // shape that puts it there: the command is awaitable, and awaiting it
+    // performs the same operation as calling the `_impl` directly. If someone
+    // collapses a command back into a sync `fn`, these stop compiling.
+
+    #[tokio::test]
+    async fn write_file_creates_a_dotfile_and_lists_it() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+        fs::write(dir.path().join(".gitignore"), ".env\n").unwrap();
+
+        write_file(repo_path.clone(), ".env".to_string(), String::new())
+            .await
+            .unwrap();
+
+        assert!(
+            dir.path().join(".env").exists(),
+            ".env was not created on disk"
+        );
+        let entries = list_directory_impl(repo_path, String::new()).unwrap();
+        let env = entries.iter().find(|e| e.name == ".env");
+        assert!(
+            env.is_some(),
+            "listing dropped .env: {:?}",
+            entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        assert!(env.unwrap().is_ignored, "expected .env flagged ignored");
+    }
+
+    #[tokio::test]
+    async fn write_file_command_is_awaitable_and_writes() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        write_file(repo_path, "async.txt".to_string(), "hello".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("async.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_directory_command_is_awaitable_and_creates() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        create_directory(repo_path, "a/b/c".to_string())
+            .await
+            .unwrap();
+
+        assert!(dir.path().join("a/b/c").is_dir());
+    }
+
+    #[tokio::test]
+    async fn delete_path_command_is_awaitable_and_deletes() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        delete_path(repo_path, "README.md".to_string())
+            .await
+            .unwrap();
+
+        assert!(!dir.path().join("README.md").exists());
+    }
+
+    #[tokio::test]
+    async fn rename_path_command_is_awaitable_and_renames() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        rename_path(repo_path, "README.md".to_string(), "READ.md".to_string())
+            .await
+            .unwrap();
+
+        assert!(!dir.path().join("README.md").exists());
+        assert!(dir.path().join("READ.md").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_path_command_is_awaitable_and_copies() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        copy_path(repo_path, "README.md".to_string(), "COPY.md".to_string())
+            .await
+            .unwrap();
+
+        assert!(dir.path().join("README.md").exists());
+        assert!(dir.path().join("COPY.md").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_path_abs_command_is_awaitable_and_copies() {
+        let dir = TempDir::new().unwrap();
+        let from = dir.path().join("a.txt");
+        let to = dir.path().join("b.txt");
+        fs::write(&from, "content").unwrap();
+
+        copy_path_abs(
+            from.to_string_lossy().to_string(),
+            to.to_string_lossy().to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&to).unwrap(), "content");
+    }
+
+    #[tokio::test]
+    async fn move_path_abs_command_is_awaitable_and_moves() {
+        let dir = TempDir::new().unwrap();
+        let from = dir.path().join("a.txt");
+        let to = dir.path().join("b.txt");
+        fs::write(&from, "content").unwrap();
+
+        move_path_abs(
+            from.to_string_lossy().to_string(),
+            to.to_string_lossy().to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!from.exists());
+        assert_eq!(fs::read_to_string(&to).unwrap(), "content");
+    }
+
+    #[tokio::test]
+    async fn add_to_gitignore_command_is_awaitable_and_appends() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        add_to_gitignore(repo_path, "target/".to_string())
+            .await
+            .unwrap();
+
+        let content = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+        assert!(content.lines().any(|l| l == "target/"));
+    }
+
+    #[tokio::test]
+    async fn fs_read_file_command_is_awaitable_and_reads() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+        fs::write(dir.path().join("data.txt"), "payload").unwrap();
+
+        let content = fs_read_file(repo_path, "data.txt".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(content, "payload");
+    }
+
+    // A failure inside the blocking closure must surface as the closure's own
+    // error, not as an opaque join failure — the FileBrowser shows this string.
+    #[tokio::test]
+    async fn a_command_error_survives_the_blocking_hop() {
+        let dir = setup_test_repo();
+        let repo_path = dir.path().to_string_lossy().to_string();
+
+        let err = write_file(repo_path, "../escape.txt".to_string(), "bad".to_string())
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.contains("outside repository") || err.contains("Access denied"),
+            "expected the validation error, got: {err}"
+        );
     }
 }

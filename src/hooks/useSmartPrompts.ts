@@ -1,5 +1,4 @@
 import { invoke } from "../invoke";
-import { isWindows } from "../platform";
 import { agentConfigsStore } from "../stores/agentConfigs";
 import { appLogger } from "../stores/appLogger";
 import { githubStore } from "../stores/github";
@@ -87,6 +86,16 @@ interface ResolvedAgent {
 	isApi: boolean;
 }
 
+/** Resolve whether an inject-mode prompt submits after insertion.
+ *
+ * Explicit UI actions win: Insert always withholds Enter, while Insert & Run
+ * and double-click always submit. Otherwise the persisted autoExecute flag is
+ * authoritative. Prompts created before that flag existed retain the legacy
+ * target default: terminal submits, compose remains editable. */
+export function shouldSubmitInjectPrompt(prompt: SavedPrompt, submitOverride?: boolean): boolean {
+	return submitOverride ?? prompt.autoExecute ?? (prompt.injectTarget ?? "compose") === "terminal";
+}
+
 function resolveHeadlessAgent(prompt: SavedPrompt): ResolvedAgent {
 	const preferred = prompt.preferredAgent;
 	const global = agentConfigsStore.getHeadlessAgent();
@@ -145,11 +154,9 @@ export function useSmartPrompts() {
 		const active = terminalsStore.getActive();
 		if (!active?.sessionId) return { ok: false, reason: "No active terminal" };
 		if (!active.agentType) return { ok: false, reason: "No agent detected in terminal" };
-		// Idle only matters when we send straight to the agent. The "compose" target
-		// just fills the input box for the user to review, so a busy agent must not
-		// block it.
-		const target = prompt.injectTarget ?? "compose";
-		if (target === "terminal" && prompt.requiresIdle !== false) {
+		// Idle only matters when this action will submit. Review-only insertions do
+		// not steer the active turn, regardless of their preferred UI target.
+		if (shouldSubmitInjectPrompt(prompt) && prompt.requiresIdle !== false) {
 			const busy = terminalsStore.isBusy(active.id);
 			if (busy) return { ok: false, reason: "Agent is busy" };
 		}
@@ -228,24 +235,25 @@ export function useSmartPrompts() {
 		return executeInject(prompt, processed);
 	}
 
-	async function executeInject(prompt: SavedPrompt, content: string): Promise<SmartPromptResult> {
+	async function executeInject(
+		prompt: SavedPrompt,
+		content: string,
+		submitOverride?: boolean,
+	): Promise<SmartPromptResult> {
 		const active = terminalsStore.getActive();
 		if (!active?.sessionId) return { ok: false, reason: "No active terminal" };
 
 		try {
 			const target = prompt.injectTarget ?? "compose";
-			if (target === "compose" && active.ref?.openComposeWithText) {
+			const submit = shouldSubmitInjectPrompt(prompt, submitOverride);
+			if (!submit && target === "compose" && active.ref?.openComposeWithText) {
 				// Fill the compose box; the user reviews and sends.
 				active.ref.openComposeWithText(content);
-			} else if (target === "terminal" && prompt.autoExecute !== false) {
-				// Send straight to the agent via agent-aware Enter semantics.
-				await pty.sendCommand(active.sessionId, content, active.agentType);
 			} else {
-				// Terminal target awaiting review, or compose with no panel available
-				// (e.g. web/PWA): write the text without Enter so the user can edit
-				// before sending.
-				const prefix = isWindows() && !active.agentType ? "" : "\x15";
-				await pty.write(active.sessionId, prefix + content);
+				// Submission and the PTY fallback for review both use the central helper.
+				// submit=false keeps the text editable while retaining platform-specific
+				// line clearing and bracketed-paste behavior.
+				await pty.sendCommand(active.sessionId, content, active.agentType, submit);
 			}
 			promptLibraryStore.markAsUsed(prompt.id);
 			return { ok: true };

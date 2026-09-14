@@ -1,13 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import "../mocks/tauri";
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mockInvoke } from "../mocks/tauri";
 
 // Use vi.hoisted so these are available to vi.mock factories (which are hoisted)
-const { mockGitHubStatus, mockGitHubRefresh, mockGetActive, mockGetBranchPrData } = vi.hoisted(() => ({
+const { mockGitHubStatus, mockGitHubRefresh, mockGetActive, mockGetBranchPrData, mockIsGitRepo } = vi.hoisted(() => ({
 	mockGitHubStatus: vi.fn<() => unknown>(() => null),
 	mockGitHubRefresh: vi.fn(),
 	mockGetActive: vi.fn<() => unknown>(() => null),
 	mockGetBranchPrData: vi.fn<() => unknown>(() => null),
+	mockIsGitRepo: vi.fn<() => boolean>(() => true),
 }));
 
 vi.mock("../../hooks/useGitHub", () => ({
@@ -27,6 +28,7 @@ vi.mock("../../stores/repositories", () => ({
 		get: vi.fn(() => undefined),
 		getGroupForRepo: vi.fn(() => undefined),
 		getRevision: vi.fn(() => 0),
+		isGitRepo: mockIsGitRepo,
 	},
 }));
 
@@ -147,6 +149,7 @@ describe("StatusBar", () => {
 		mockDictationState.processing = false;
 		mockDictationState.loading = false;
 		mockLastActivityAt.mockReturnValue(0);
+		mockIsGitRepo.mockReturnValue(true);
 	});
 
 	afterEach(() => {
@@ -174,6 +177,21 @@ describe("StatusBar", () => {
 		const gitBtn = findToggleByTitle(container, "Git")!;
 		fireEvent.click(gitBtn);
 		expect(onToggleDiff).toHaveBeenCalledOnce();
+	});
+
+	// A plain directory registered as a repo has no git index. Querying it made
+	// `get_working_tree_status` fail on every repo-revision bump, flooding the log.
+	it("does not query the working tree for a plain (non-git) directory", () => {
+		mockIsGitRepo.mockReturnValue(false);
+		render(() => <StatusBar {...defaultProps} currentRepoPath="/plain-dir" />);
+		const calls = mockInvoke.mock.calls.filter((c) => c[0] === "get_working_tree_status");
+		expect(calls).toHaveLength(0);
+	});
+
+	it("queries the working tree for a git repo", () => {
+		render(() => <StatusBar {...defaultProps} currentRepoPath="/git-repo" />);
+		const calls = mockInvoke.mock.calls.filter((c) => c[0] === "get_working_tree_status");
+		expect(calls).toHaveLength(1);
 	});
 
 	it("does not render githubStatus when github status is null", () => {

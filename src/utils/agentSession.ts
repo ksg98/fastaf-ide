@@ -57,6 +57,16 @@ function applyDefaultRunConfig(agentType: AgentType, command: string, launchComm
 	return joinDedupingSkipPerms([runConfig!.command, ...resumeFlags, ...runConfig!.args]);
 }
 
+/** Resolve the environment of the run config that produced a persisted launch command. */
+function resolveLaunchEnv(agentType: AgentType, launchCommand?: string | null): Record<string, string> {
+	const config = launchCommand
+		? agentConfigsStore
+				.getRunConfigs(agentType)
+				.find((candidate) => [candidate.command, ...candidate.args].join(" ") === launchCommand)
+		: agentConfigsStore.getDefaultConfig(agentType);
+	return config?.env ?? {};
+}
+
 /**
  * Build the launch command for an agent, injecting --session-id when applicable.
  *
@@ -108,11 +118,12 @@ export function buildResumeCommand(
 }
 
 /**
- * Verify a session UUID against the agent's local session storage, then
+ * Verify a discovered session ID against the agent's local session storage, then
  * build the appropriate resume command.
  *
- * For Claude: uses agentSessionId (discovered from disk during the session).
- * For other agents: tries tuicSession first, then agentSessionId.
+ * Discovery-backed agents use agentSessionId, which is the ID the agent wrote
+ * to disk. TUIC's tab UUID is not a valid substitute unless an agent explicitly
+ * supports forced binding (those agents do not expose sessionDiscovery).
  * Falls back gracefully when verify_agent_session is unavailable (browser mode).
  */
 export async function verifyAndBuildResumeCommand(
@@ -124,20 +135,18 @@ export async function verifyAndBuildResumeCommand(
 ): Promise<string | null> {
 	const disc = AGENTS[agentType].sessionDiscovery;
 
-	// For Claude, agentSessionId is the source of truth (discovered from newest session file).
-	// For other agents, tuicSession is preferred (injected at launch via shell wrapper).
-	const sessionId = agentType === "claude" ? agentSessionId : (tuicSession ?? agentSessionId);
+	const sessionId = disc ? agentSessionId : (tuicSession ?? agentSessionId);
 
 	if (sessionId && cwd && disc) {
 		try {
 			// At restore time the agent process has exited, so agentPid is null.
-			// The backend falls back to default paths (or run-config env if provided).
+			// Preserve profile-root overrides such as CODEX_HOME.
 			const exists = await rpc<boolean>("verify_agent_session", {
 				agentType,
 				sessionId,
 				cwd,
 				agentPid: null,
-				envOverrides: {},
+				envOverrides: resolveLaunchEnv(agentType, launchCommand),
 			});
 			if (exists) {
 				const cmd = disc.resumeWithId(sessionId);

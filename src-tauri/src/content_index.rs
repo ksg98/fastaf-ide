@@ -5,10 +5,19 @@
 //! load time. Queries hit the in-memory index (~1ms) and then grep only the
 //! top-ranked files for exact line matches — avoiding a full repo walk.
 //!
-//! The index is stored per-repo in `AppState::content_indices` and rebuilt
-//! incrementally on `RepoChanged` events via file mtime tracking.
+//! The index is stored per-repo in `AppState::content_indices` and rebuilt on
+//! `RepoChanged` events, but only when a stat-only walk finds an indexable file
+//! whose mtime or size moved (`ContentIndex::is_current`) — a git-state change that
+//! touches no file content must not pay for a full re-read of the repo. The
+//! rebuild itself is whole-corpus, not per-file. `repo_watcher::stop_watching`
+//! releases a repo's index when it is no longer in use.
+//!
+//! Search results need only the BM25 embeddings and their file ids. The source
+//! text is deliberately dropped after each build; a future feature that needs
+//! snippets or previews must read the current file from disk rather than serve
+//! a stale second copy retained by the index.
 
-use bm25::{Language, SearchEngineBuilder, SearchResult};
+use bm25::{DefaultTokenizer, Embedder, EmbedderBuilder, Language, Scorer, Tokenizer};
 use dashmap::DashSet;
 use ignore::WalkBuilder;
 use std::collections::HashMap;
@@ -32,8 +41,8 @@ const THROTTLE_SEARCH_POLL: Duration = Duration::from_millis(100);
 /// is significantly slower and runs unoptimised.
 const THROTTLE_BUILD_YIELD: Duration = Duration::from_millis(10);
 
-/// Cooperative throttle that yields CPU during index builds and pauses
-/// indexing while user-initiated searches are in flight.
+/// Cooperative throttle that yields CPU during index builds and gives
+/// user-initiated searches a bounded head start.
 #[derive(Default)]
 pub struct IndexerThrottle {
     search_active: AtomicUsize,
@@ -65,32 +74,66 @@ impl IndexerThrottle {
     }
 
     /// Called from the indexer loop every `THROTTLE_CHECKPOINT_INTERVAL` files.
-    /// Blocks (via `thread::sleep`) while any search is active, then yields
-    /// unconditionally so index builds don't saturate CPU cores.
+    /// Defers once when a search is active, then yields unconditionally so
+    /// index builds don't saturate CPU cores. A fallback grep can span the whole
+    /// repository, so waiting for every search guard to drop would starve the
+    /// missing index whose absence selected that fallback in the first place.
     pub fn checkpoint(&self) {
-        while self.search_active.load(Ordering::Acquire) > 0 {
+        if self.search_active.load(Ordering::Acquire) > 0 {
             std::thread::sleep(THROTTLE_SEARCH_POLL);
         }
         std::thread::sleep(THROTTLE_BUILD_YIELD);
     }
 }
 
+/// The stat-only fingerprint `is_current` compares a file against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    /// File mtime at indexing time, in nanoseconds since the epoch.
+    ///
+    /// Nanoseconds, not seconds: an agent editing the same file twice inside one
+    /// second is the normal case here — second granularity would report the index
+    /// as still current and the edit would stay unsearchable until something else
+    /// invalidated it.
+    mtime: u64,
+    /// File size in bytes.
+    ///
+    /// mtime alone misses a content replacement that preserves it, and the tools
+    /// that restore files do exactly that: `cp -p`, `rsync -a`, `tar -x`, `unzip`
+    /// with timestamps. The index would then serve the old text for as long as
+    /// nothing else touched the file. The size is free — the walk already stats
+    /// every file — and catches such a replacement whenever the length changes. A
+    /// same-size, same-mtime rewrite still slips through; catching that needs the
+    /// content read this check exists to avoid.
+    len: u64,
+}
+
 /// A single indexed file entry.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields used during build, read path uses engine results
 struct FileEntry {
     /// Path relative to repo root (forward-slash separated).
     rel_path: String,
-    /// File mtime at indexing time, for incremental rebuilds.
-    mtime: u64,
+    /// What the file looked like on disk when it was indexed.
+    stamp: FileStamp,
+}
+
+/// A file's stat fingerprint; the mtime is `0` when unavailable.
+fn file_stamp(metadata: &std::fs::Metadata) -> FileStamp {
+    FileStamp {
+        mtime: metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as u64),
+        len: metadata.len(),
+    }
 }
 
 /// Pre-built BM25 index over file contents in a single repository.
-#[allow(dead_code)] // path_to_idx populated for future incremental rebuilds
 pub struct ContentIndex {
-    engine: bm25::SearchEngine<u32>,
+    engine: EmbeddingIndex,
     entries: Vec<FileEntry>,
-    /// rel_path → index into `entries` (for incremental mtime checks).
+    /// rel_path → index into `entries`, for `is_current`'s stamp comparison.
     path_to_idx: HashMap<String, usize>,
     /// Absolute repo root used to resolve relative paths.
     repo_root: PathBuf,
@@ -98,9 +141,9 @@ pub struct ContentIndex {
     ready: bool,
     /// When the last successful build completed.
     built_at: std::time::Instant,
-    /// Files confirmed binary (rel_path → mtime). Carried across rebuilds
-    /// so we skip the 8KB read probe for files whose mtime hasn't changed.
-    known_binaries: HashMap<String, u64>,
+    /// Files confirmed binary (rel_path → stamp). Carried across rebuilds
+    /// so we skip the 8KB read probe for files whose stamp hasn't changed.
+    known_binaries: HashMap<String, FileStamp>,
 }
 
 /// Result of a BM25 file-level query: ranked file paths.
@@ -111,15 +154,102 @@ pub struct RankedFile {
     pub score: f32,
 }
 
+type BuildTokenCache = HashMap<(usize, usize), Vec<String>>;
+
+/// Shares tokens between the crate's avgdl-fitting and embedding passes. The
+/// pointer key is valid only while `EmbeddingIndex::build` owns the corpus; the
+/// cache is cleared before it returns, avoiding a second copy of each document.
+struct BuildTokenizer {
+    inner: DefaultTokenizer,
+    cache: Arc<parking_lot::Mutex<Option<BuildTokenCache>>>,
+    #[cfg(test)]
+    tokenizations: Arc<AtomicUsize>,
+}
+
+impl Tokenizer for BuildTokenizer {
+    fn tokenize(&self, input_text: &str) -> Vec<String> {
+        let key = (input_text.as_ptr() as usize, input_text.len());
+        if let Some(tokens) = self
+            .cache
+            .lock()
+            .as_ref()
+            .and_then(|cache| cache.get(&key))
+            .cloned()
+        {
+            return tokens;
+        }
+
+        let tokens = self.inner.tokenize(input_text);
+        let mut cache = self.cache.lock();
+        if let Some(cache) = cache.as_mut() {
+            cache.insert(key, tokens.clone());
+            #[cfg(test)]
+            self.tokenizations.fetch_add(1, Ordering::Relaxed);
+        }
+        tokens
+    }
+}
+
+/// The parts of the BM25 crate needed to rank file ids. Its higher-level
+/// `SearchEngine` also retains every document string so it can return the text
+/// with each result, but callers map ids back to `entries` and never use it.
+struct EmbeddingIndex {
+    embedder: Embedder<u32, BuildTokenizer>,
+    scorer: Scorer<u32>,
+    #[cfg(test)]
+    build_cache: Arc<parking_lot::Mutex<Option<BuildTokenCache>>>,
+    #[cfg(test)]
+    build_document_tokenizations: usize,
+}
+
+impl EmbeddingIndex {
+    fn build(corpus: &[String]) -> Self {
+        let documents: Vec<&str> = corpus.iter().map(String::as_str).collect();
+        let cache = Arc::new(parking_lot::Mutex::new(Some(HashMap::new())));
+        #[cfg(test)]
+        let tokenizations = Arc::new(AtomicUsize::new(0));
+        let tokenizer = BuildTokenizer {
+            inner: DefaultTokenizer::new(Language::English),
+            cache: Arc::clone(&cache),
+            #[cfg(test)]
+            tokenizations: Arc::clone(&tokenizations),
+        };
+        let embedder = EmbedderBuilder::<u32, BuildTokenizer>::with_tokenizer_and_fit_to_corpus(
+            tokenizer, &documents,
+        )
+        .build();
+        let mut scorer = Scorer::new();
+        for (id, document) in corpus.iter().enumerate() {
+            scorer.upsert(&(id as u32), embedder.embed(document));
+        }
+        // The cache only bridges the crate's avgdl-fitting and embedding passes.
+        // Queries tokenize directly, and no source text survives this point.
+        drop(cache.lock().take());
+        Self {
+            embedder,
+            scorer,
+            #[cfg(test)]
+            build_cache: cache,
+            #[cfg(test)]
+            build_document_tokenizations: tokenizations.load(Ordering::Relaxed),
+        }
+    }
+
+    fn search(&self, query: &str, limit: usize) -> Vec<bm25::ScoredDocument<u32>> {
+        let query = self.embedder.embed(query);
+        self.scorer
+            .matches(&query)
+            .into_iter()
+            .take(limit)
+            .collect()
+    }
+}
+
 impl ContentIndex {
     /// Create an empty, not-yet-built index for a repo.
     pub fn empty(repo_root: PathBuf) -> Self {
         Self {
-            engine: SearchEngineBuilder::<u32>::with_corpus(
-                Language::English,
-                Vec::<String>::new(),
-            )
-            .build(),
+            engine: EmbeddingIndex::build(&[]),
             entries: Vec::new(),
             path_to_idx: HashMap::new(),
             repo_root,
@@ -134,12 +264,12 @@ impl ContentIndex {
     /// This is I/O-heavy and should be called from `spawn_blocking`. Respects
     /// .gitignore, skips binary files and files > 1 MB. When `throttle` is
     /// provided, the walker yields cooperatively every `THROTTLE_CHECKPOINT_INTERVAL`
-    /// files and pauses entirely while a search is active. Pass `None` for
-    /// tests or one-shot builds where throttling is irrelevant.
+    /// files and briefly defers to an active search at each checkpoint. Pass
+    /// `None` for tests or one-shot builds where throttling is irrelevant.
     pub fn build(
         repo_root: PathBuf,
         throttle: Option<&IndexerThrottle>,
-        prior_binaries: HashMap<String, u64>,
+        prior_binaries: HashMap<String, FileStamp>,
     ) -> Self {
         let canonical = repo_root
             .canonicalize()
@@ -150,13 +280,7 @@ impl ContentIndex {
         let mut path_to_idx = HashMap::new();
         let mut known_binaries = HashMap::new();
 
-        let walker = WalkBuilder::new(&canonical)
-            .hidden(false)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .filter_entry(|e| !crate::fs::is_always_excluded_dir(e))
-            .build();
+        let walker = Self::walker(&canonical);
 
         let mut processed: usize = 0;
         for entry in walker {
@@ -190,27 +314,31 @@ impl ContentIndex {
                 Err(_) => continue,
             };
 
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_secs());
+            let stamp = file_stamp(&metadata);
 
-            // Skip binary files — use cached result if mtime unchanged
-            if let Some(&cached_mtime) = prior_binaries.get(&rel_path)
-                && cached_mtime == mtime
+            // Skip binary files — use cached result if the stamp is unchanged
+            if let Some(&cached) = prior_binaries.get(&rel_path)
+                && cached == stamp
             {
-                known_binaries.insert(rel_path, mtime);
+                known_binaries.insert(rel_path, stamp);
                 continue;
             }
             if is_binary(entry.path()) {
-                known_binaries.insert(rel_path, mtime);
+                known_binaries.insert(rel_path, stamp);
                 continue;
             }
 
             let content = match std::fs::read_to_string(entry.path()) {
                 Ok(c) => c,
-                Err(_) => continue,
+                // Unreadable or not UTF-8 (Latin-1 text with no null byte in the
+                // probed 8 KB gets here). Record it as unindexable: `is_current`
+                // requires every file on disk to be accounted for, so a file in
+                // neither map would report the index stale on every single event
+                // for the life of the repo.
+                Err(_) => {
+                    known_binaries.insert(rel_path, stamp);
+                    continue;
+                }
             };
 
             let idx = entries.len();
@@ -219,10 +347,10 @@ impl ContentIndex {
             // BM25 document: filename + content for searchability
             corpus.push(format!("{}\n{}", rel_path, content));
 
-            entries.push(FileEntry { rel_path, mtime });
+            entries.push(FileEntry { rel_path, stamp });
         }
 
-        let engine = SearchEngineBuilder::<u32>::with_corpus(Language::English, corpus).build();
+        let engine = EmbeddingIndex::build(&corpus);
 
         Self {
             engine,
@@ -233,6 +361,63 @@ impl ContentIndex {
             built_at: std::time::Instant::now(),
             known_binaries,
         }
+    }
+
+    /// The repo walk both `build` and `is_current` must agree on — same ignore
+    /// rules, same pruning — so the currency check can never disagree with the
+    /// build about which files the index is supposed to cover.
+    fn walker(canonical_root: &Path) -> ignore::Walk {
+        WalkBuilder::new(canonical_root)
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .filter_entry(|e| !crate::fs::is_always_excluded_dir(e))
+            .build()
+    }
+
+    /// Whether the index still reflects the repo on disk: a stat-only walk, no
+    /// file reads and no corpus construction.
+    ///
+    /// Most `RepoChanged` events do not touch indexable content — `git add`,
+    /// `git commit`, a stash, a ref move all emit one while every working-tree
+    /// file is byte-for-byte unchanged — and each of those otherwise paid for a
+    /// full re-read of the repo plus a complete BM25 rebuild, once a minute for
+    /// as long as the events kept coming.
+    pub fn is_current(&self) -> bool {
+        if !self.ready {
+            return false;
+        }
+        let mut matched = 0usize;
+        for entry in Self::walker(&self.repo_root) {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.len() > MAX_FILE_SIZE {
+                continue;
+            }
+            let Ok(rel) = entry.path().strip_prefix(&self.repo_root) else {
+                continue;
+            };
+            let rel_path = rel.to_string_lossy().replace('\\', "/");
+            let known = self
+                .path_to_idx
+                .get(&rel_path)
+                .and_then(|&i| self.entries.get(i))
+                .map(|e| e.stamp)
+                .or_else(|| self.known_binaries.get(&rel_path).copied());
+            // A file we have never seen, or one whose mtime or size moved: stale.
+            if known != Some(file_stamp(&metadata)) {
+                return false;
+            }
+            matched += 1;
+        }
+        // Every file we hold must still be on disk, or something was deleted.
+        matched == self.entries.len() + self.known_binaries.len()
     }
 
     /// Whether the index has been built at least once.
@@ -248,16 +433,14 @@ impl ContentIndex {
             return Vec::new();
         }
 
-        let results: Vec<SearchResult<u32>> = self.engine.search(query, limit);
-        results
+        self.engine
+            .search(query, limit)
             .into_iter()
             .filter_map(|r| {
-                self.entries
-                    .get(r.document.id as usize)
-                    .map(|e| RankedFile {
-                        rel_path: e.rel_path.clone(),
-                        score: r.score,
-                    })
+                self.entries.get(r.id as usize).map(|e| RankedFile {
+                    rel_path: e.rel_path.clone(),
+                    score: r.score,
+                })
             })
             .collect()
     }
@@ -271,6 +454,22 @@ impl ContentIndex {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The custom engine retains embeddings and ids only; there is no document
+    /// store whose byte count could grow with the source corpus.
+    #[cfg(test)]
+    fn retained_document_text_bytes(&self) -> usize {
+        self.engine
+            .build_cache
+            .lock()
+            .as_ref()
+            .map_or(0, |cache| cache.values().flatten().map(String::len).sum())
+    }
+
+    #[cfg(test)]
+    fn build_document_tokenizations(&self) -> usize {
+        self.engine.build_document_tokenizations
     }
 }
 
@@ -405,7 +604,6 @@ pub fn rebuild_index(state: &Arc<crate::state::AppState>, repo_path: &str) {
     let throttle = Arc::clone(&state.indexer_throttle);
     let sem = Arc::clone(&state.index_build_sem);
     let repo_for_log = repo.clone();
-    let prior_binaries = index.read().known_binaries.clone();
     #[cfg(feature = "desktop")]
     let rt = tauri::async_runtime::handle();
     #[cfg(not(feature = "desktop"))]
@@ -417,14 +615,34 @@ pub fn rebuild_index(state: &Arc<crate::state::AppState>, repo_path: &str) {
         #[cfg(not(feature = "desktop"))]
         &rt,
         repo_for_log,
-        move || {
-            let built = ContentIndex::build(PathBuf::from(&repo), Some(&throttle), prior_binaries);
-            *index.write() = built;
-            tracing::debug!(repo = %repo, "content index rebuilt");
-        },
+        move || rebuild_in_place(&index, &repo, Some(&throttle)),
         Some(Arc::clone(in_flight)),
         sem,
     );
+}
+
+/// Re-index `repo` into `index`, unless the index already reflects what is on
+/// disk. Blocking — runs on the build pool.
+///
+/// The currency check is why this exists as its own function: it is the whole
+/// point of the rebuild path and has to be testable without a 60-second cooldown
+/// and a background task in the way.
+fn rebuild_in_place(
+    index: &parking_lot::RwLock<ContentIndex>,
+    repo: &str,
+    throttle: Option<&IndexerThrottle>,
+) {
+    let prior_binaries = {
+        let idx = index.read();
+        if idx.is_current() {
+            tracing::debug!(repo = %repo, "content index rebuild skipped (no indexable change)");
+            return;
+        }
+        idx.known_binaries.clone()
+    };
+    let built = ContentIndex::build(PathBuf::from(repo), throttle, prior_binaries);
+    *index.write() = built;
+    tracing::debug!(repo = %repo, "content index rebuilt");
 }
 
 /// Spawn a background task that listens to the event bus and rebuilds
@@ -434,8 +652,15 @@ pub fn spawn_content_index_updater(state: Arc<crate::state::AppState>) {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(crate::state::AppEvent::RepoChanged { repo_path }) => {
-                    if crate::config::load_app_config().index_strategy != "disabled" {
+                // Both kinds, deliberately: a `git checkout` is git-state and
+                // rewrites indexable files wholesale, so narrowing this to
+                // working-tree would leave the index describing the old branch.
+                Ok(crate::state::AppEvent::RepoChanged { repo_path, .. }) => {
+                    // The in-memory cache, NOT `load_app_config()`: that holds the
+                    // config mutex and a cross-process *file* lock across the whole
+                    // read, and this arm runs on every RepoChanged — hundreds an
+                    // hour per repo. `state.config` is kept current by every save.
+                    if state.config.read().index_strategy != "disabled" {
                         rebuild_index(&state, &repo_path);
                     }
                 }
@@ -516,6 +741,30 @@ mod tests {
     }
 
     #[test]
+    fn build_does_not_retain_document_text() {
+        let repo = make_test_repo();
+        let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
+
+        assert_eq!(
+            index.retained_document_text_bytes(),
+            0,
+            "search needs embeddings and file ids, not a second in-memory copy of every file"
+        );
+    }
+
+    #[test]
+    fn build_tokenizes_each_document_once() {
+        let repo = make_test_repo();
+        let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
+
+        assert_eq!(
+            index.build_document_tokenizations(),
+            index.len(),
+            "fitting avgdl and creating embeddings must share the first tokenization"
+        );
+    }
+
+    #[test]
     fn search_finds_relevant_file() {
         let repo = make_test_repo();
         let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
@@ -550,6 +799,28 @@ mod tests {
         let index = ContentIndex::empty(PathBuf::from("/nonexistent"));
         assert!(!index.is_ready());
         assert!(index.search("anything", 5).is_empty());
+    }
+
+    #[test]
+    fn a_fallback_search_guard_cannot_starve_an_index_checkpoint() {
+        let throttle = Arc::new(IndexerThrottle::default());
+        let guard = throttle.begin_search();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            throttle.checkpoint();
+            tx.send(()).unwrap();
+        });
+
+        let completed_while_search_was_active = rx
+            .recv_timeout(THROTTLE_SEARCH_POLL * 2 + Duration::from_millis(100))
+            .is_ok();
+        drop(guard);
+        worker.join().unwrap();
+
+        assert!(
+            completed_while_search_was_active,
+            "a long fallback grep must defer the build briefly, not pause it until grep completes"
+        );
     }
 
     #[test]
@@ -615,6 +886,178 @@ mod tests {
         let index = ContentIndex::build(root.to_path_buf(), None, HashMap::new());
         assert_eq!(index.len(), 1); // only real.rs
         assert!(index.search("pack data", 5).is_empty());
+    }
+
+    /// Most `RepoChanged` events do not touch indexable content: `git add`,
+    /// `git commit`, a stash, a branch ref move — every git-state change emits one
+    /// while the working tree's bytes are unchanged. Each of those used to
+    /// schedule a full re-read of every text file in the repo plus a complete BM25
+    /// corpus rebuild, once a minute, forever. A stat-only walk answers "did
+    /// anything indexable change" for a fraction of the cost.
+    #[test]
+    fn is_current_detects_edits_additions_and_deletions() {
+        let repo = make_test_repo();
+        let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
+
+        assert!(
+            index.is_current(),
+            "nothing changed since the build — a rebuild would be pure waste"
+        );
+
+        fs::write(repo.path().join("main.rs"), "fn main() { /* edited */ }").unwrap();
+        assert!(
+            !index.is_current(),
+            "an edited indexed file must invalidate"
+        );
+
+        let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
+        fs::write(repo.path().join("brand_new.rs"), "fn brand_new() {}").unwrap();
+        assert!(!index.is_current(), "a new file must invalidate");
+
+        let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
+        fs::remove_file(repo.path().join("brand_new.rs")).unwrap();
+        assert!(!index.is_current(), "a deleted file must invalidate");
+    }
+
+    /// A file the build could not decode is in neither `entries` nor
+    /// `known_binaries`, so `is_current` would count it as never-seen and report
+    /// stale forever — silently reverting this repo to a full rebuild a minute,
+    /// with nothing to show why. Latin-1 text whose first 8 KB has no null byte
+    /// is exactly that: not binary by the probe, not valid UTF-8 either.
+    #[test]
+    fn is_current_is_stable_for_a_file_that_cannot_be_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("ok.rs"), "fn ok() {}").unwrap();
+        // No null bytes (so `is_binary` says text) but invalid UTF-8 past 8 KB.
+        let mut latin1 = vec![b'a'; 9000];
+        latin1.extend_from_slice(&[0xE9, 0xE8, 0xFF]);
+        fs::write(root.join("latin1.txt"), &latin1).unwrap();
+
+        let index = ContentIndex::build(root.to_path_buf(), None, HashMap::new());
+        assert!(
+            index.is_current(),
+            "an undecodable file must not make the index look permanently stale"
+        );
+    }
+
+    /// An edit landing in the same wall-clock second as the build must still
+    /// invalidate. Second-granularity mtimes silently miss those, and an agent
+    /// editing a file twice in a second is the normal case here.
+    #[test]
+    fn is_current_detects_a_same_second_edit() {
+        let repo = make_test_repo();
+        let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
+        fs::write(repo.path().join("lib.rs"), "pub fn add() -> i32 { 0 }").unwrap();
+        assert!(
+            !index.is_current(),
+            "an edit within the same second as the build must invalidate"
+        );
+    }
+
+    /// A restore that preserves timestamps — `cp -p`, `rsync -a`, `tar -x`,
+    /// unpacking a build cache — replaces the content while leaving mtime exactly
+    /// as the build recorded it. On mtime alone the index reports itself current
+    /// and keeps serving the old text for as long as nothing else touches the
+    /// file. The size is stat'd by the same walk, so comparing it costs nothing.
+    #[test]
+    fn is_current_detects_a_replacement_that_preserved_the_mtime() {
+        let repo = make_test_repo();
+        let target = repo.path().join("main.rs");
+        let original_mtime = fs::metadata(&target).unwrap().modified().unwrap();
+
+        let index = ContentIndex::build(repo.path().to_path_buf(), None, HashMap::new());
+        assert!(index.is_current());
+
+        // Different content, different length, mtime restored to the indexed value.
+        fs::write(
+            &target,
+            "fn main() { println!(\"restored from an archive\"); }",
+        )
+        .unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().modified().unwrap(),
+            original_mtime,
+            "the test must actually restore the mtime, or it proves nothing"
+        );
+
+        assert!(
+            !index.is_current(),
+            "content replaced under a preserved mtime must invalidate"
+        );
+    }
+
+    #[test]
+    fn rebuild_in_place_leaves_an_unchanged_index_alone() {
+        let repo = make_test_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let index = parking_lot::RwLock::new(ContentIndex::build(
+            repo.path().to_path_buf(),
+            None,
+            HashMap::new(),
+        ));
+        let built_at = index.read().built_at;
+
+        rebuild_in_place(&index, &repo_path, None);
+        assert_eq!(
+            index.read().built_at,
+            built_at,
+            "an unchanged repo must not be re-indexed"
+        );
+
+        fs::write(repo.path().join("main.rs"), "fn main() { /* edited */ }").unwrap();
+        rebuild_in_place(&index, &repo_path, None);
+        assert!(
+            index.read().built_at > built_at,
+            "a real content change must still be re-indexed"
+        );
+    }
+
+    /// The updater must read `index_strategy` from the in-memory config, not from
+    /// disk. `load_app_config` takes the in-process config mutex AND a
+    /// cross-process file lock for the whole read, and this ran once per
+    /// `RepoChanged` — hundreds of times an hour during a working-tree storm,
+    /// serialising against every other config reader and writer in both the
+    /// release app and a `make dev` build sharing the config dir.
+    #[tokio::test]
+    async fn repo_changed_reads_index_strategy_from_the_in_memory_config() {
+        let cfg_dir = tempfile::tempdir().unwrap();
+        // On-disk config keeps indexing enabled (the default), so reading the
+        // file instead of the cache is observable as a rebuild that should not
+        // have happened.
+        let _guard = crate::config::set_config_dir_override(cfg_dir.path().to_path_buf());
+
+        let repo = make_test_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        state.config.write().index_strategy = "disabled".to_string();
+        let index = Arc::new(parking_lot::RwLock::new(ContentIndex::empty(
+            repo.path().to_path_buf(),
+        )));
+        state
+            .content_indices
+            .insert(repo_path.clone(), Arc::clone(&index));
+
+        spawn_content_index_updater(Arc::clone(&state));
+        // Let the subscriber attach before the send — a broadcast delivers only
+        // to receivers that already exist.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = state.event_bus.send(crate::state::AppEvent::RepoChanged {
+            repo_path: repo_path.clone(),
+            kind: crate::repo_watcher::RepoChangeKind::WorkingTree,
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert!(
+            !index.read().is_ready(),
+            "index_strategy=disabled in the live config must suppress the rebuild"
+        );
     }
 
     #[test]

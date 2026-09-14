@@ -43,4 +43,18 @@ describe("canvas terminal link controller", () => {
 		expect(links.rowCache.size).toBe(1);
 		expect(links.fileCache.size).toBe(1);
 	});
+
+	it("invalidates active checks and queued verification when detected rows are replaced", async () => {
+		vi.useFakeTimers();
+		const verify = vi.fn();
+		const links = createCanvasLinkController(25);
+		const oldGeneration = links.beginCheck();
+		links.scheduleVerification(verify);
+
+		links.clearDetected();
+
+		expect(links.isCurrent(oldGeneration)).toBe(false);
+		await vi.runAllTimersAsync();
+		expect(verify).not.toHaveBeenCalled();
+	});
 });

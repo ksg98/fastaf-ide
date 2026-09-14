@@ -437,7 +437,7 @@ mod tests {
 
         // read_screen should NOT be blocked
         let read_result = handle(&state, READ_SCREEN, &args).await;
-        assert!(read_result.get("error").map_or(true, |e| {
+        assert!(read_result.get("error").is_none_or(|e| {
             e.as_str().unwrap() != "Session is controlled by an active agent loop"
         }));
 

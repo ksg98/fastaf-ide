@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildHttpUrl, INTENTIONALLY_UNMAPPED, isTauri, mapCommandToHttp } from "../transport";
@@ -61,13 +61,135 @@ function extractRegisteredTauriCommands(): Set<string> {
 		.filter((entry) => entry.length > 0)
 		.map((entry) => {
 			const parts = entry.split("::");
-			return parts[parts.length - 1];
+			const rustName = parts[parts.length - 1];
+			const renamedCommand = libSource.match(
+				new RegExp(
+					`#\\[tauri::command\\(rename\\s*=\\s*"([^"]+)"\\)\\]\\s*(?:pub\\(super\\)\\s+)?async\\s+fn\\s+${rustName}\\b`,
+				),
+			)?.[1];
+			return renamedCommand ?? rustName;
 		});
 
 	return new Set(commandList);
 }
 
+/** Every .ts/.tsx under src/, excluding the test tree itself. */
+function collectFrontendSources(): { path: string; source: string }[] {
+	const root = join(process.cwd(), "src");
+	const files: { path: string; source: string }[] = [];
+	const walk = (dir: string) => {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const full = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (entry.name === "__tests__" || entry.name === "node_modules") continue;
+				walk(full);
+			} else if (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) {
+				files.push({ path: full, source: readFileSync(full, "utf8") });
+			}
+		}
+	};
+	walk(root);
+	return files;
+}
+
+/**
+ * Per-session Tauri event names the frontend subscribes to, as `pty-<name>-`
+ * prefixes. Two spellings reach the same events:
+ *   - a literal `` listen(`pty-foo-${sessionId}`) ``
+ *   - `transport.onEvent("foo")`, which TauriTransport expands to
+ *     `pty-foo-${sessionId}` (canvasTerminalTransport.ts)
+ */
+function extractSubscribedPtyEvents(): Map<string, string[]> {
+	const subscribed = new Map<string, string[]>();
+	const add = (name: string, path: string) => {
+		const where = subscribed.get(name) ?? [];
+		where.push(path.replace(`${process.cwd()}/`, ""));
+		subscribed.set(name, where);
+	};
+	for (const { path, source } of collectFrontendSources()) {
+		for (const match of source.matchAll(/listen(?:<[^>]*>)?\(\s*`(pty-[a-z0-9-]+?)-\$\{/g)) {
+			add(match[1], path);
+		}
+		for (const match of source.matchAll(/\.onEvent\(\s*"([a-z0-9-]+)"/g)) {
+			add(`pty-${match[1]}`, path);
+		}
+	}
+	return subscribed;
+}
+
 describe("transport", () => {
+	/**
+	 * A listener whose emitter has been deleted fails silently and forever: the
+	 * callback simply stops running. That is not hypothetical — commit cda39f31
+	 * removed the Rust `pty-output` emit and left `subscribePty` subscribed to
+	 * it, freezing desktop `lastDataAt` and the background-tab unread flag for a
+	 * commit with nothing red (story 625-56b0).
+	 *
+	 * So: every per-session event the frontend listens for must be emitted by
+	 * Rust. This asserts the direction that broke. The reverse (an emit nobody
+	 * consumes) is wasteful but harmless, and is deliberately not asserted.
+	 */
+	describe("per-session Tauri event parity", () => {
+		it("every pty-* event the frontend subscribes to is emitted by Rust", () => {
+			const rustSources = ["src-tauri/src/pty.rs", "src-tauri/src/state.rs", "src-tauri/src/terminal_grid.rs"]
+				.map((relative) => readRepoFile(relative))
+				.join("\n");
+
+			const subscribed = extractSubscribedPtyEvents();
+			expect(subscribed.size).toBeGreaterThan(0);
+
+			const orphaned = [...subscribed.entries()].filter(([name]) => !rustSources.includes(`${name}-{session_id}`));
+
+			expect(orphaned.map(([name, where]) => `${name}-{session_id} (listened in ${where.join(", ")})`)).toEqual([]);
+		});
+
+		it("includes the activity pulse, which is the signal that regressed", () => {
+			// Guards the guard: if the extraction above silently stopped matching,
+			// the parity test would pass vacuously for the very event it exists for.
+			expect([...extractSubscribedPtyEvents().keys()]).toContain("pty-activity");
+		});
+	});
+
+	/**
+	 * The desktop app receives `repo-changed` over Tauri IPC; browser, PWA and
+	 * remote clients receive it over `/events` SSE. They are two transports for
+	 * one event, and the same store code consumes both — so the payload keys
+	 * must be identical, not merely similar.
+	 *
+	 * This is the shape the `kind` field was added to. Adding a field to the
+	 * Tauri struct and forgetting the SSE arm (or vice versa) is silent: the
+	 * desktop build keeps working and only remote clients degrade, which is
+	 * exactly the class of drift nobody notices locally.
+	 */
+	describe("repo-changed cross-transport payload parity", () => {
+		/** Field names of the `RepoChangedPayload` struct the Tauri emit sends. */
+		function tauriPayloadFields(): string[] {
+			const source = readRepoFile("src-tauri/src/repo_watcher.rs");
+			const struct = source.match(/pub\(crate\) struct RepoChangedPayload \{([\s\S]*?)\n\}/);
+			expect(struct, "RepoChangedPayload struct not found — the extractor is stale").not.toBeNull();
+			return [...struct![1].matchAll(/pub (\w+):/g)].map((m) => m[1]).sort();
+		}
+
+		/** JSON keys the `/events` SSE arm sends for `AppEvent::RepoChanged`. */
+		function ssePayloadKeys(): string[] {
+			const source = readRepoFile("src-tauri/src/mcp_http/sse_routes.rs");
+			const arm = source.match(/AppEvent::RepoChanged \{[^}]*\} => \{\s*serde_json::json!\(\{([^}]*)\}\)/);
+			expect(arm, "RepoChanged SSE arm not found — the extractor is stale").not.toBeNull();
+			return [...arm![1].matchAll(/"(\w+)":/g)].map((m) => m[1]).sort();
+		}
+
+		it("the Tauri emit and the SSE arm carry the identical field set", () => {
+			expect(ssePayloadKeys()).toEqual(tauriPayloadFields());
+		});
+
+		it("that field set is the one the frontend reads", () => {
+			// Guards the guard: both extractors returning [] would make the
+			// equality above pass vacuously. These are the two keys
+			// useAppInit.ts and remoteEventBridge.ts destructure.
+			expect(tauriPayloadFields()).toEqual(["kind", "repo_path"]);
+		});
+	});
+
 	describe("isTauri()", () => {
 		const original = (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
 
@@ -113,6 +235,44 @@ describe("transport", () => {
 			expect(result.body).toEqual({ data: "hello" });
 		});
 
+		it("maps enqueue_agent_command to POST /sessions/{id}/queue", () => {
+			const result = mapCommandToHttp("enqueue_agent_command", { sessionId: "abc", text: "run tests" });
+			expect(result.method).toBe("POST");
+			expect(result.path).toBe("/sessions/abc/queue");
+			expect(result.body).toEqual({ text: "run tests" });
+		});
+
+		it("maps clear_queued_agent_commands to DELETE /sessions/{id}/queue", () => {
+			const result = mapCommandToHttp("clear_queued_agent_commands", { sessionId: "abc" });
+			expect(result.method).toBe("DELETE");
+			expect(result.path).toBe("/sessions/abc/queue");
+		});
+
+		it("maps list_queued_agent_commands to GET /sessions/{id}/queue", () => {
+			const result = mapCommandToHttp("list_queued_agent_commands", { sessionId: "abc" });
+			expect(result.method).toBe("GET");
+			expect(result.path).toBe("/sessions/abc/queue");
+		});
+
+		it("maps remove_queued_agent_command to DELETE /sessions/{id}/queue/{commandId}", () => {
+			const result = mapCommandToHttp("remove_queued_agent_command", { sessionId: "abc", commandId: 7 });
+			expect(result.method).toBe("DELETE");
+			expect(result.path).toBe("/sessions/abc/queue/7");
+		});
+
+		it("maps session names with their custom-name origin", () => {
+			const result = mapCommandToHttp("set_session_name", {
+				sessionId: "abc",
+				name: "Ollama audit",
+				isCustom: false,
+			});
+			expect(result).toEqual({
+				method: "PUT",
+				path: "/sessions/abc/name",
+				body: { name: "Ollama audit", isCustom: false },
+			});
+		});
+
 		it("maps resize_pty to POST /sessions/{id}/resize", () => {
 			const result = mapCommandToHttp("resize_pty", { sessionId: "abc", rows: 40, cols: 120 });
 			expect(result.method).toBe("POST");
@@ -145,6 +305,24 @@ describe("transport", () => {
 			expect(result.transform).toBeDefined();
 			expect(result.transform?.({ agent: "claude" })).toBe("claude");
 			expect(result.transform?.({ agent: null })).toBeNull();
+		});
+
+		it("maps get_pty_capture to GET /diagnostics/capture", () => {
+			const result = mapCommandToHttp("get_pty_capture", {});
+			expect(result.method).toBe("GET");
+			expect(result.path).toBe("/diagnostics/capture");
+		});
+
+		it("maps set_pty_capture to POST /diagnostics/capture with a session filter", () => {
+			const result = mapCommandToHttp("set_pty_capture", { enabled: true, sessionId: "abc" });
+			expect(result.method).toBe("POST");
+			expect(result.path).toBe("/diagnostics/capture");
+			expect(result.body).toEqual({ enabled: true, session_id: "abc" });
+		});
+
+		it("maps set_pty_capture without a session to an unfiltered tap", () => {
+			const result = mapCommandToHttp("set_pty_capture", { enabled: false });
+			expect(result.body).toEqual({ enabled: false, session_id: null });
 		});
 
 		it("maps get_orchestrator_stats to GET /stats", () => {
@@ -183,6 +361,15 @@ describe("transport", () => {
 			expect(result.method).toBe("PUT");
 			expect(result.path).toBe("/config");
 			expect(result.body).toEqual(cfg);
+		});
+
+		it("maps upstream saves with both the loaded base and desired config", () => {
+			const base = { servers: [{ id: "a", enabled: true }] };
+			const config = { servers: [{ id: "a", enabled: false }] };
+			const result = mapCommandToHttp("save_mcp_upstreams", { base, config });
+			expect(result.method).toBe("PUT");
+			expect(result.path).toBe("/mcp/upstreams");
+			expect(result.body).toEqual({ base, config });
 		});
 
 		it("throws for unknown commands", () => {
@@ -405,6 +592,18 @@ describe("transport", () => {
 				is_directory: false,
 			});
 			expect(result.transform?.(null)).toBeNull();
+		});
+
+		// POST, not GET: a screenful of candidates does not belong in a query
+		// string, and the whole point of the batch is that it can be large.
+		it("maps resolve_terminal_paths to POST with the candidates in the body", () => {
+			const result = mapCommandToHttp("resolve_terminal_paths", {
+				cwd: "/repo",
+				candidates: ["src/x.ts", "missing.ts"],
+			});
+			expect(result.method).toBe("POST");
+			expect(result.path).toBe("/fs/resolve-terminal-paths");
+			expect(result.body).toEqual({ cwd: "/repo", candidates: ["src/x.ts", "missing.ts"] });
 		});
 
 		it("maps stat_path to GET /fs/stat?path=", () => {
@@ -693,6 +892,55 @@ describe("transport", () => {
 				branchName: "feat",
 				targetBranch: "main",
 				afterMerge: "archive",
+				force: undefined,
+			});
+		});
+
+		it("forwards the merge_and_archive_worktree force flag over HTTP", () => {
+			const result = mapCommandToHttp("merge_and_archive_worktree", {
+				repoPath: "/r",
+				branchName: "feat",
+				targetBranch: "main",
+				afterMerge: "archive",
+				force: true,
+			});
+			expect(result.body).toEqual({
+				repoPath: "/r",
+				branchName: "feat",
+				targetBranch: "main",
+				afterMerge: "archive",
+				force: true,
+			});
+		});
+
+		it("forwards the finalize_merged_worktree force flag over HTTP", () => {
+			// Finalize ends in `git worktree remove --force` just like merge-and-archive,
+			// so the confirmation override has to reach the backend on both transports.
+			const guarded = mapCommandToHttp("finalize_merged_worktree", {
+				repoPath: "/r",
+				branchName: "feat",
+				action: "archive",
+			});
+			expect(guarded.method).toBe("POST");
+			expect(guarded.path).toBe("/worktrees/finalize");
+			expect(guarded.body).toEqual({
+				repoPath: "/r",
+				branchName: "feat",
+				action: "archive",
+				force: undefined,
+			});
+
+			const forced = mapCommandToHttp("finalize_merged_worktree", {
+				repoPath: "/r",
+				branchName: "feat",
+				action: "archive",
+				force: true,
+			});
+			expect(forced.body).toEqual({
+				repoPath: "/r",
+				branchName: "feat",
+				action: "archive",
+				force: true,
 			});
 		});
 
@@ -1063,6 +1311,16 @@ describe("transport", () => {
 			expect(rf.method).toBe("GET");
 			expect(rf.path).toBe("/api/plugins/my-plugin/fs/read?path=%2Fhome%2Fuser%2Ff.txt");
 
+			// plugin_read_files — the batch read goes in the body: a query string
+			// cannot carry hundreds of paths.
+			const rfs = mapCommandToHttp("plugin_read_files", {
+				pluginId: "my-plugin",
+				paths: ["/home/user/a.md", "/home/user/b.md"],
+			});
+			expect(rfs.method).toBe("POST");
+			expect(rfs.path).toBe("/api/plugins/my-plugin/fs/read-batch");
+			expect(rfs.body).toEqual({ paths: ["/home/user/a.md", "/home/user/b.md"] });
+
 			// plugin_read_file_base64
 			const rfb = mapCommandToHttp("plugin_read_file_base64", { pluginId: "my-plugin", path: "/home/user/f.docx" });
 			expect(rfb.method).toBe("GET");
@@ -1134,6 +1392,17 @@ describe("transport", () => {
 			expect(del.method).toBe("POST");
 			expect(del.path).toBe("/api/plugins/build-cleaner/build-artifacts/delete");
 			expect(del.body).toEqual({ path: "/home/user/repoA/target", repoPaths: ["/home/user/repoA"] });
+
+			// trim_build_artifact — same body as delete, different route. A browser
+			// client must be able to reclaim intermediates without the desktop app.
+			const trim = mapCommandToHttp("trim_build_artifact", {
+				pluginId: "build-cleaner",
+				path: "/home/user/repoA/target",
+				repoPaths: ["/home/user/repoA"],
+			});
+			expect(trim.method).toBe("POST");
+			expect(trim.path).toBe("/api/plugins/build-cleaner/build-artifacts/trim");
+			expect(trim.body).toEqual({ path: "/home/user/repoA/target", repoPaths: ["/home/user/repoA"] });
 
 			// plugin_exec_cli
 			const ex = mapCommandToHttp("plugin_exec_cli", {
@@ -1250,6 +1519,13 @@ describe("transport", () => {
 	});
 
 	describe("INTENTIONALLY_UNMAPPED (native/host-only commands)", () => {
+		it("classifies renamed async wrappers by their public IPC name", () => {
+			const registeredCommands = extractRegisteredTauriCommands();
+
+			expect(registeredCommands.has("load_activity")).toBe(true);
+			expect(registeredCommands.has("load_activity_async")).toBe(false);
+		});
+
 		it("classifies every registered Tauri command as HTTP-mapped or intentionally host-only", () => {
 			const mappedCommands = extractCommandTableCommands();
 			const registeredCommands = extractRegisteredTauriCommands();
@@ -1315,6 +1591,23 @@ describe("transport", () => {
 	describe("rpc()", () => {
 		const originalFetch = globalThis.fetch;
 		const originalTauri = (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
+		const discoverArgs = {
+			agentType: "claude",
+			cwd: "/repo",
+			claimedIds: [],
+			agentPid: 123,
+			envOverrides: {},
+		};
+
+		function jsonResponse(body: string, status = 200, statusText = "OK") {
+			return {
+				ok: status >= 200 && status < 300,
+				status,
+				statusText,
+				headers: new Headers({ "content-type": "application/json" }),
+				text: vi.fn().mockResolvedValue(body),
+			};
+		}
 
 		beforeEach(() => {
 			// Ensure non-Tauri mode for HTTP tests
@@ -1336,7 +1629,7 @@ describe("transport", () => {
 			const mockResponse = {
 				ok: true,
 				headers: new Headers({ "content-type": "application/json" }),
-				json: vi.fn().mockResolvedValue({ sessions: [] }),
+				text: vi.fn().mockResolvedValue('{"sessions":[]}'),
 			};
 			globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
 
@@ -1348,13 +1641,212 @@ describe("transport", () => {
 			);
 		});
 
+		it("returns a decoded JSON null response as null", async () => {
+			const { rpc } = await import("../transport");
+			globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse("null"));
+
+			await expect(rpc<string | null>("discover_agent_session", discoverArgs)).resolves.toBeNull();
+		});
+
+		it("preserves a decoded non-null JSON response", async () => {
+			const { rpc } = await import("../transport");
+			globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse('"agent-session-1"'));
+
+			await expect(rpc<string | null>("discover_agent_session", discoverArgs)).resolves.toBe("agent-session-1");
+		});
+
+		it("rejects a zero-length JSON response with command context", async () => {
+			const { rpc } = await import("../transport");
+			globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse(""));
+
+			await expect(rpc("discover_agent_session", discoverArgs)).rejects.toThrow(
+				"RPC discover_agent_session: empty response body",
+			);
+		});
+
+		it("rejects malformed JSON with command context", async () => {
+			const { rpc } = await import("../transport");
+			globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse("{"));
+
+			await expect(rpc("discover_agent_session", discoverArgs)).rejects.toThrow(
+				"RPC discover_agent_session: invalid JSON response",
+			);
+		});
+
+		it("rejects a non-success JSON response with command context", async () => {
+			const { rpc } = await import("../transport");
+			globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse("backend unavailable", 503, "Service Unavailable"));
+
+			await expect(rpc("discover_agent_session", discoverArgs)).rejects.toThrow(
+				"RPC discover_agent_session failed: 503 backend unavailable",
+			);
+		});
+
+		/** Drives a burst of writes with the first request held open, and reports
+		 *  each request as the list of inputs it carried. */
+		async function burstWrites(
+			rpc: (c: string, a: Record<string, unknown>) => Promise<unknown>,
+			datas: string[],
+		): Promise<{ url: string; parts: string[] }[]> {
+			const requests: { url: string; parts: string[] }[] = [];
+			let releaseFirst: (() => void) | undefined;
+			const firstSent = new Promise<void>((resolve) => {
+				releaseFirst = resolve;
+			});
+			globalThis.fetch = vi.fn().mockImplementation((url: string, init: { body: string }) => {
+				const body = JSON.parse(init.body);
+				requests.push({ url, parts: body.parts ?? [body.data] });
+				const settle = requests.length === 1 ? firstSent : Promise.resolve();
+				return settle.then(() => ({
+					ok: true,
+					headers: new Headers({ "content-type": "application/json" }),
+					text: vi.fn().mockResolvedValue("{}"),
+				}));
+			});
+			const writes = datas.map((data) => rpc("write_pty", { sessionId: "s1", data }));
+			releaseFirst?.();
+			await Promise.all(writes);
+			return requests;
+		}
+
+		it("coalesces keystrokes typed while a write is in flight", async () => {
+			// Browser mode posts one HTTP request per keystroke and awaits each before
+			// sending the next, so typing speed is capped at one character per RTT.
+			const { rpc } = await import("../transport");
+
+			const requests = await burstWrites(rpc, ["h", "e", "l", "l", "o"]);
+
+			expect(requests.flatMap((r) => r.parts).join("")).toBe("hello");
+			expect(requests.length).toBeLessThan(5);
+			expect(requests[0].parts).toEqual(["h"]);
+		});
+
+		it("keeps coalesced keystrokes separate instead of joining them", async () => {
+			// The bytes reaching the PTY are the same either way, but `write_pty` is
+			// not a byte pipe: the backend runs its per-input bookkeeping once per
+			// REQUEST, and that is not a function of the concatenated bytes. A lone
+			// "/" opens slash mode; an Escape dismisses it. Joined into "\x1b/" the
+			// backend reads a dismissal and the slash menu never opens — so what
+			// piles up must travel as parts, not as one string.
+			const { rpc } = await import("../transport");
+
+			const requests = await burstWrites(rpc, ["\x1b", "/", "h"]);
+
+			const coalesced = requests.slice(1);
+			expect(coalesced.length).toBeGreaterThan(0);
+			for (const request of coalesced) {
+				expect(request.url).toContain("/write-parts");
+			}
+			expect(coalesced.flatMap((r) => r.parts)).toEqual(["/", "h"]);
+		});
+
+		it("sends a solitary keystroke on the single-input route", async () => {
+			// Nothing piled up behind it, so there is no batch — and routing it
+			// through the N-ary path would change nothing except the shape.
+			const { rpc } = await import("../transport");
+			const requests = await burstWrites(rpc, ["x"]);
+			expect(requests).toHaveLength(1);
+			expect(requests[0].url).toContain("/write");
+			expect(requests[0].url).not.toContain("/write-parts");
+			expect(requests[0].parts).toEqual(["x"]);
+		});
+
+		it("collapses a resize burst to the newest dimensions", async () => {
+			// A drag-resize fires one resize_pty per frame and never awaits the last
+			// one. The backend reflows on the blocking pool, so two resizes in flight
+			// race for the per-session lock and can be applied newest-first: the PTY
+			// is left at the OLDER size while the frontend has already recorded the
+			// newer one, and nothing corrects it until the next physical resize.
+			// Only the newest size means anything, so only the newest may follow the
+			// request already in flight — an intermediate size in flight is an
+			// intermediate size that can land last.
+			const { rpc } = await import("../transport");
+
+			const sent: Array<{ rows: number; cols: number }> = [];
+			let releaseFirst: (() => void) | undefined;
+			const firstSent = new Promise<void>((resolve) => {
+				releaseFirst = resolve;
+			});
+			globalThis.fetch = vi.fn().mockImplementation((_url: string, init: { body: string }) => {
+				const { rows, cols } = JSON.parse(init.body);
+				sent.push({ rows, cols });
+				const settle = sent.length === 1 ? firstSent : Promise.resolve();
+				return settle.then(() => ({
+					ok: true,
+					headers: new Headers({ "content-type": "application/json" }),
+					text: vi.fn().mockResolvedValue("{}"),
+				}));
+			});
+
+			const resizes = [
+				rpc("resize_pty", { sessionId: "s1", rows: 10, cols: 40 }),
+				rpc("resize_pty", { sessionId: "s1", rows: 20, cols: 80 }),
+				rpc("resize_pty", { sessionId: "s1", rows: 30, cols: 120 }),
+				rpc("resize_pty", { sessionId: "s1", rows: 40, cols: 160 }),
+			];
+			releaseFirst?.();
+			await Promise.all(resizes);
+
+			expect(sent[0]).toEqual({ rows: 10, cols: 40 });
+			expect(sent[sent.length - 1]).toEqual({ rows: 40, cols: 160 });
+			expect(sent).toHaveLength(2);
+		});
+
+		it("keeps one session's resize out of another's", async () => {
+			// The queue is keyed per session for the same reason the write queue is:
+			// collapsing across sessions would drop a real resize, not a stale one.
+			const { rpc } = await import("../transport");
+
+			const seen: Array<{ url: string; rows: number }> = [];
+			globalThis.fetch = vi.fn().mockImplementation((url: string, init: { body: string }) => {
+				seen.push({ url, rows: JSON.parse(init.body).rows });
+				return Promise.resolve({
+					ok: true,
+					headers: new Headers({ "content-type": "application/json" }),
+					text: vi.fn().mockResolvedValue("{}"),
+				});
+			});
+
+			await Promise.all([
+				rpc("resize_pty", { sessionId: "a", rows: 10, cols: 40 }),
+				rpc("resize_pty", { sessionId: "b", rows: 20, cols: 80 }),
+			]);
+
+			expect(seen.filter((s) => s.url.includes("/sessions/a/")).map((s) => s.rows)).toEqual([10]);
+			expect(seen.filter((s) => s.url.includes("/sessions/b/")).map((s) => s.rows)).toEqual([20]);
+		});
+
+		it("keeps each session's keystrokes to itself", async () => {
+			const { rpc } = await import("../transport");
+			const seen: Array<{ url: string; data: string }> = [];
+			globalThis.fetch = vi.fn().mockImplementation((url: string, init: { body: string }) => {
+				seen.push({ url, data: JSON.parse(init.body).data });
+				return Promise.resolve({
+					ok: true,
+					headers: new Headers({ "content-type": "application/json" }),
+					text: vi.fn().mockResolvedValue("{}"),
+				});
+			});
+
+			await Promise.all([
+				rpc("write_pty", { sessionId: "a", data: "1" }),
+				rpc("write_pty", { sessionId: "b", data: "2" }),
+				rpc("write_pty", { sessionId: "a", data: "3" }),
+			]);
+
+			const a = seen.filter((s) => s.url.includes("/sessions/a/")).map((s) => s.data);
+			const b = seen.filter((s) => s.url.includes("/sessions/b/")).map((s) => s.data);
+			expect(a.join("")).toBe("13");
+			expect(b.join("")).toBe("2");
+		});
+
 		it("sends body for POST requests", async () => {
 			const { rpc } = await import("../transport");
 
 			const mockResponse = {
 				ok: true,
 				headers: new Headers({ "content-type": "application/json" }),
-				json: vi.fn().mockResolvedValue({ id: "sess-1" }),
+				text: vi.fn().mockResolvedValue('{"id":"sess-1"}'),
 			};
 			globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
 
@@ -1362,6 +1854,53 @@ describe("transport", () => {
 			const fetchCall = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
 			expect(fetchCall[1].body).toBeDefined();
 			expect(JSON.parse(fetchCall[1].body)).toEqual({ rows: 24, cols: 80, shell: null, cwd: "/tmp" });
+		});
+
+		// Styled row chunks are packed bytes, ~141 KB each. Reading them with
+		// `text()` (the pre-binary path) hands the decoder a mojibake string, and
+		// `json()` throws. The content-type is what tells the two apart.
+		it("reads an octet-stream response as an ArrayBuffer", async () => {
+			const { rpc } = await import("../transport");
+
+			const payload = new Uint8Array([26, 0, 200, 7]);
+			const mockResponse = {
+				ok: true,
+				headers: new Headers({ "content-type": "application/octet-stream" }),
+				arrayBuffer: vi.fn().mockResolvedValue(payload.buffer),
+				json: vi.fn(),
+				text: vi.fn(),
+			};
+			globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+			const result = await rpc<ArrayBuffer>("terminal_styled_rows", {
+				sessionId: "s1",
+				start: 0,
+				count: 64,
+			});
+			expect(result).toBeInstanceOf(ArrayBuffer);
+			expect([...new Uint8Array(result)]).toEqual([26, 0, 200, 7]);
+			expect(mockResponse.text).not.toHaveBeenCalled();
+			expect(mockResponse.json).not.toHaveBeenCalled();
+		});
+
+		// A dead session answers with zero bytes. That is a valid empty chunk, and
+		// the generic "empty response body" guard must not turn it into a throw.
+		it("accepts an empty octet-stream body", async () => {
+			const { rpc } = await import("../transport");
+
+			const mockResponse = {
+				ok: true,
+				headers: new Headers({ "content-type": "application/octet-stream" }),
+				arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(0)),
+			};
+			globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
+
+			const result = await rpc<ArrayBuffer>("terminal_styled_rows", {
+				sessionId: "s1",
+				start: 0,
+				count: 64,
+			});
+			expect(result.byteLength).toBe(0);
 		});
 
 		it("handles text response without content-type as JSON fallback", async () => {
@@ -1412,7 +1951,7 @@ describe("transport", () => {
 			const mockResponse = {
 				ok: true,
 				headers: new Headers({ "content-type": "application/json" }),
-				json: vi.fn().mockResolvedValue({ active_sessions: 2, max_sessions: 5 }),
+				text: vi.fn().mockResolvedValue('{"active_sessions":2,"max_sessions":5}'),
 			};
 			globalThis.fetch = vi.fn().mockResolvedValue(mockResponse);
 
@@ -1531,6 +2070,76 @@ describe("transport", () => {
 			globalThis.WebSocket = origWs;
 		});
 
+		it("routes the WebSocket activity frame to onActivity, not onData", async () => {
+			const { subscribePty } = await import("../transport");
+
+			let wsInstance: {
+				onopen: (() => void) | null;
+				onmessage: ((event: { data: string }) => void) | null;
+				onclose: (() => void) | null;
+				onerror: unknown;
+				close: () => void;
+			};
+
+			class MockWebSocket {
+				onopen: (() => void) | null = null;
+				onmessage: ((event: { data: string }) => void) | null = null;
+				onclose: (() => void) | null = null;
+				onerror: unknown = null;
+				close = vi.fn();
+				constructor() {
+					wsInstance = this as never;
+				}
+			}
+
+			const origWs = globalThis.WebSocket;
+			globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+			const onData = vi.fn();
+			const onActivity = vi.fn();
+			const subscribePromise = subscribePty("sess-1", onData, vi.fn(), { onActivity });
+			wsInstance!.onopen!();
+			const unsub = await subscribePromise;
+
+			wsInstance!.onmessage!({ data: JSON.stringify({ type: "activity", session_id: "sess-1" }) });
+
+			expect(onActivity).toHaveBeenCalledTimes(1);
+			// The pulse carries no output; anything else would mean the browser is
+			// still deriving activity from bytes while desktop is not.
+			expect(onData).not.toHaveBeenCalled();
+
+			unsub();
+			globalThis.WebSocket = origWs;
+		});
+
+		it("routes the Tauri activity event to onActivity and subscribes to no output event", async () => {
+			const { listen } = await import("@tauri-apps/api/event");
+			const handlers = new Map<string, (event: { payload: unknown }) => void>();
+			vi.mocked(listen).mockImplementation((async (name: string, handler: never) => {
+				handlers.set(name, handler);
+				return vi.fn();
+			}) as never);
+
+			(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+			const { subscribePty } = await import("../transport");
+
+			const onData = vi.fn();
+			const onActivity = vi.fn();
+			const unsub = await subscribePty("sess-1", onData, vi.fn(), { onActivity });
+
+			expect([...handlers.keys()]).toContain("pty-activity-sess-1");
+			// The regression: a listener for an event Rust no longer emits.
+			expect([...handlers.keys()].filter((name) => name.startsWith("pty-output"))).toEqual([]);
+
+			handlers.get("pty-activity-sess-1")!({ payload: { session_id: "sess-1" } });
+			expect(onActivity).toHaveBeenCalledTimes(1);
+			expect(onData).not.toHaveBeenCalled();
+
+			unsub();
+			vi.mocked(listen).mockReset();
+			vi.mocked(listen).mockResolvedValue(vi.fn());
+		});
+
 		it("logs warning and schedules reconnect on abnormal WebSocket close", async () => {
 			const { subscribePty } = await import("../transport");
 
@@ -1632,6 +2241,431 @@ describe("transport", () => {
 			unsub();
 			globalThis.WebSocket = origWs;
 			vi.useRealTimers();
+		});
+
+		/**
+		 * A backgrounded PWA must stop draining the socket, and the naive way to
+		 * do that ships two silent bugs: `ws.close()` looks exactly like a session
+		 * exit to the close handler, and re-subscribing from scratch replays from
+		 * the MOUNT offset because the live cursor is closure-private. So pause and
+		 * resume live here, next to the cursor they have to preserve.
+		 */
+		describe("pause/resume", () => {
+			interface FakeWs {
+				url: string;
+				onopen: (() => void) | null;
+				onmessage: ((e: { data: string }) => void) | null;
+				onclose: ((e: { code: number; reason?: string }) => void) | null;
+				onerror: unknown;
+				close: ReturnType<typeof vi.fn>;
+			}
+
+			let instances: FakeWs[] = [];
+			let origWs: typeof WebSocket;
+
+			beforeEach(() => {
+				instances = [];
+				class MockWebSocket {
+					url: string;
+					onopen: (() => void) | null = null;
+					onmessage: ((e: { data: string }) => void) | null = null;
+					onclose: ((e: { code: number; reason?: string }) => void) | null = null;
+					onerror: unknown = null;
+					close = vi.fn();
+					constructor(url: string) {
+						this.url = url;
+						instances.push(this as unknown as FakeWs);
+					}
+				}
+				origWs = globalThis.WebSocket;
+				globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+			});
+
+			afterEach(() => {
+				globalThis.WebSocket = origWs;
+			});
+
+			/** Mount in log mode at the given offset and settle the handshake. */
+			async function mount(onExit = vi.fn(), opts: Record<string, unknown> = {}) {
+				const { subscribePty } = await import("../transport");
+				const onLogLines = vi.fn();
+				const pending = subscribePty("sess-1", vi.fn(), onExit, {
+					format: "log",
+					logOffset: 50,
+					onLogLines,
+					...opts,
+				});
+				instances[0].onopen?.();
+				return { sub: await pending, onExit, onLogLines };
+			}
+
+			it("closes the socket on pause without reporting a session exit", async () => {
+				const { sub, onExit } = await mount();
+
+				sub.pause();
+				// A real socket answers close() with onclose, and 1000 is the code the
+				// live handler reads as "the session is over".
+				instances[0].onclose?.({ code: 1000 });
+
+				expect(instances[0].close).toHaveBeenCalled();
+				expect(onExit).not.toHaveBeenCalled();
+			});
+
+			it("delivers nothing that arrives after a pause", async () => {
+				const { sub, onLogLines } = await mount();
+
+				sub.pause();
+				instances[0].onmessage?.({
+					data: JSON.stringify({ type: "log", lines: [{ spans: [{ text: "late" }] }], total_lines: 99 }),
+				});
+
+				expect(onLogLines).not.toHaveBeenCalled();
+			});
+
+			it("resumes from the live cursor, not the mount offset", async () => {
+				const { sub } = await mount();
+
+				// Server advances the consumed line cursor to 80.
+				instances[0].onmessage?.({
+					data: JSON.stringify({ type: "log", lines: [{ spans: [{ text: "x" }] }], total_lines: 80 }),
+				});
+				sub.pause();
+				instances[0].onclose?.({ code: 1000 });
+				sub.resume();
+
+				expect(instances.length).toBe(2);
+				expect(instances[1].url).toContain("offset=80");
+				expect(instances[1].url).not.toContain("offset=50");
+				instances[1].onopen?.();
+			});
+
+			it("delivers again after a resume", async () => {
+				const { sub, onLogLines } = await mount();
+
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				instances[1].onmessage?.({
+					data: JSON.stringify({ type: "log", lines: [{ spans: [{ text: "back" }] }], total_lines: 81 }),
+				});
+
+				expect(onLogLines).toHaveBeenCalledTimes(1);
+			});
+
+			it("does not open a second socket when resume follows no pause", async () => {
+				const { sub } = await mount();
+
+				sub.resume();
+
+				expect(instances.length).toBe(1);
+			});
+
+			it("does not reconnect while paused", async () => {
+				vi.useFakeTimers();
+				const { sub } = await mount();
+
+				sub.pause();
+				// An abnormal code is the reconnect trigger; a paused subscription
+				// must not race the backoff timer against its own resume.
+				instances[0].onclose?.({ code: 1006 });
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect(instances.length).toBe(1);
+				vi.useRealTimers();
+			});
+
+			it("cancels a pending reconnect when it is paused mid-backoff", async () => {
+				vi.useFakeTimers();
+				const { sub } = await mount();
+
+				instances[0].onclose?.({ code: 1006 });
+				sub.pause();
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect(instances.length).toBe(1);
+				vi.useRealTimers();
+			});
+
+			/**
+			 * Pause suppresses DATA, never lifecycle. Swallowing the exit frame
+			 * would leave the view showing a live session until the reconnect
+			 * backoff finally gave up — ten attempts, roughly three minutes — and
+			 * on desktop, where there is no socket to fail, forever.
+			 */
+			it("reports a session exit that arrives while paused", async () => {
+				const { sub, onExit } = await mount();
+
+				sub.pause();
+				instances[0].onmessage?.({ data: JSON.stringify({ type: "exit" }) });
+
+				expect(onExit).toHaveBeenCalledTimes(1);
+			});
+
+			it("does not reopen the socket after an exit seen while paused", async () => {
+				const { sub } = await mount();
+
+				sub.pause();
+				instances[0].onmessage?.({ data: JSON.stringify({ type: "exit" }) });
+				sub.resume();
+
+				expect(instances.length).toBe(1);
+			});
+
+			it("still reports the exit on desktop while paused", async () => {
+				const { listen } = await import("@tauri-apps/api/event");
+				const handlers = new Map<string, (event: { payload: unknown }) => void>();
+				vi.mocked(listen).mockImplementation((async (name: string, handler: never) => {
+					handlers.set(name, handler);
+					return vi.fn();
+				}) as never);
+				(globalThis as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+
+				const { subscribePty } = await import("../transport");
+				const onExit = vi.fn();
+				const onActivity = vi.fn();
+				const sub = await subscribePty("sess-1", vi.fn(), onExit, { onActivity });
+
+				sub.pause();
+				handlers.get("pty-activity-sess-1")?.({ payload: {} });
+				handlers.get("pty-exit-sess-1")?.({ payload: {} });
+
+				expect(onActivity).not.toHaveBeenCalled();
+				expect(onExit).toHaveBeenCalledTimes(1);
+
+				sub();
+				delete (globalThis as Record<string, unknown>).__TAURI_INTERNALS__;
+				vi.mocked(listen).mockReset();
+				vi.mocked(listen).mockResolvedValue(vi.fn());
+			});
+
+			/**
+			 * `close()` is asynchronous: the socket a pause dropped can still fire
+			 * its handlers after the resume that replaced it. A `paused` flag alone
+			 * cannot see that — by then the flag is false again — so the guard has
+			 * to be socket identity, not subscription state.
+			 */
+			it("ignores data from the socket it already paused, even after resume", async () => {
+				const { sub, onLogLines } = await mount();
+
+				instances[0].onmessage?.({
+					data: JSON.stringify({ type: "log", lines: [{ spans: [{ text: "a" }] }], total_lines: 80 }),
+				});
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				onLogLines.mockClear();
+
+				// The dropped socket flushes what it had buffered, late.
+				instances[0].onmessage?.({
+					data: JSON.stringify({ type: "log", lines: [{ spans: [{ text: "stale" }] }], total_lines: 200 }),
+				});
+
+				expect(onLogLines).not.toHaveBeenCalled();
+			});
+
+			it("does not let a stale socket's cursor rewrite the live one", async () => {
+				const { sub } = await mount();
+
+				instances[0].onmessage?.({
+					data: JSON.stringify({ type: "log", lines: [{ spans: [{ text: "a" }] }], total_lines: 80 }),
+				});
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				// A late frame from the dropped socket claiming a cursor we never
+				// consumed. If it were tracked, the NEXT reconnect would resume past
+				// lines the user never saw.
+				instances[0].onmessage?.({
+					data: JSON.stringify({ type: "log", lines: [{ spans: [{ text: "stale" }] }], total_lines: 999 }),
+				});
+
+				sub.pause();
+				sub.resume();
+				instances[2].onopen?.();
+
+				expect(instances[2].url).toContain("offset=80");
+				expect(instances[2].url).not.toContain("offset=999");
+			});
+
+			it("does not read a stale socket's close as a session exit", async () => {
+				const { sub, onExit } = await mount();
+
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				instances[0].onclose?.({ code: 1000 });
+
+				expect(onExit).not.toHaveBeenCalled();
+			});
+
+			it("does not reconnect on a stale socket's abnormal close", async () => {
+				vi.useFakeTimers();
+				const { sub } = await mount();
+
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				instances[0].onclose?.({ code: 1006 });
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect(instances.length).toBe(2);
+				vi.useRealTimers();
+			});
+
+			/**
+			 * The window a pause can land in is not just "connected": a backoff
+			 * timer may already have called connect(), which assigns the socket
+			 * synchronously but resolves much later. That in-flight attempt has to
+			 * be superseded, or its late failure schedules a reconnect of its own
+			 * and the session ends up on two live sockets at once.
+			 */
+			it("does not open a parallel socket when a pause lands mid-connect", async () => {
+				vi.useFakeTimers();
+				const { sub } = await mount();
+
+				instances[0].onclose?.({ code: 1006 });
+				await vi.advanceTimersByTimeAsync(1000);
+				expect(instances.length).toBe(2); // the backoff attempt, still opening
+
+				sub.pause();
+				sub.resume();
+				instances[2].onopen?.();
+				// The superseded attempt now reports its failure, late.
+				instances[1].onclose?.({ code: 1006 });
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				expect(instances.length).toBe(3);
+				vi.useRealTimers();
+			});
+
+			it("closes an attempt that opens after it was superseded", async () => {
+				vi.useFakeTimers();
+				const { sub } = await mount();
+
+				instances[0].onclose?.({ code: 1006 });
+				await vi.advanceTimersByTimeAsync(1000);
+				sub.pause();
+				sub.resume();
+				instances[2].onopen?.();
+				instances[1].close.mockClear();
+				// The superseded attempt completes its handshake anyway. Left open it
+				// would stream a second copy of the session at the server's expense.
+				instances[1].onopen?.();
+
+				expect(instances[1].close).toHaveBeenCalled();
+				vi.useRealTimers();
+			});
+
+			it("gives up for good once the retry budget is spent", async () => {
+				vi.useFakeTimers();
+				const { sub, onExit } = await mount();
+
+				// Ten failures is MAX_RETRIES; the eleventh close is the one that
+				// finds the budget spent.
+				for (let i = 0; i < 11; i++) {
+					instances[instances.length - 1].onclose?.({ code: 1006 });
+					await vi.advanceTimersByTimeAsync(60_000);
+				}
+				expect(onExit).toHaveBeenCalledTimes(1);
+
+				const opened = instances.length;
+				sub.pause();
+				sub.resume();
+				await vi.advanceTimersByTimeAsync(60_000);
+
+				// A dead subscription stays dead. Refilling the budget on every
+				// hide/show would let a session that is gone retry forever, and
+				// report its exit again each time the budget ran out.
+				expect(instances.length).toBe(opened);
+				expect(onExit).toHaveBeenCalledTimes(1);
+				vi.useRealTimers();
+			});
+
+			/**
+			 * Exit frames and retry exhaustion are terminal. A clean close is the
+			 * same news arriving by a third route, so it has to be terminal too —
+			 * otherwise the session is declared exited to the consumer while the
+			 * subscription still believes it can be reopened.
+			 */
+			it("treats a clean close as terminal, so hide/show cannot reopen it", async () => {
+				const { sub, onExit } = await mount();
+
+				instances[0].onclose?.({ code: 1000 });
+				expect(onExit).toHaveBeenCalledTimes(1);
+
+				sub.pause();
+				sub.resume();
+
+				expect(instances.length).toBe(1);
+				expect(onExit).toHaveBeenCalledTimes(1);
+			});
+
+			it("reports the reconnection that a pause interrupted", async () => {
+				const onReconnecting = vi.fn();
+				const onReconnected = vi.fn();
+				const { sub } = await mount(vi.fn(), { onReconnecting, onReconnected });
+
+				instances[0].onclose?.({ code: 1006 });
+				expect(onReconnecting).toHaveBeenCalledTimes(1);
+
+				// The user backgrounds the page mid-backoff and comes back. The
+				// socket is healthy again, so a consumer told "reconnecting" must be
+				// told it finished — otherwise its banner never comes down.
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				await Promise.resolve();
+
+				expect(onReconnected).toHaveBeenCalledTimes(1);
+			});
+
+			it("does not announce a reconnection for a resume that never lost one", async () => {
+				const onReconnected = vi.fn();
+				const { sub } = await mount(vi.fn(), { onReconnected });
+
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				await Promise.resolve();
+
+				expect(onReconnected).not.toHaveBeenCalled();
+			});
+
+			/**
+			 * The reconnect callbacks sit on the same promise chain as `connect()`.
+			 * A consumer that throws inside `onReconnected` would land in the
+			 * rejection handler and be read as a failed connection — announcing a
+			 * reconnect that never broke and opening a second socket alongside the
+			 * healthy one. A consumer's bug must not become a transport failure.
+			 */
+			it("does not read a throwing onReconnected as a failed connection", async () => {
+				const onReconnecting = vi.fn();
+				const onReconnected = vi.fn(() => {
+					throw new Error("consumer blew up");
+				});
+				const { sub } = await mount(vi.fn(), { onReconnecting, onReconnected });
+
+				instances[0].onclose?.({ code: 1006 });
+				sub.pause();
+				sub.resume();
+				instances[1].onopen?.();
+				await Promise.resolve();
+				await Promise.resolve();
+
+				expect(onReconnected).toHaveBeenCalledTimes(1);
+				// One announcement, from the abnormal close that really happened.
+				expect(onReconnecting).toHaveBeenCalledTimes(1);
+			});
+
+			it("stays disposed when pause or resume arrive after unsubscribe", async () => {
+				const { sub } = await mount();
+
+				sub();
+				sub.pause();
+				sub.resume();
+
+				expect(instances.length).toBe(1);
+			});
 		});
 	});
 });

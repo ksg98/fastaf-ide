@@ -85,14 +85,16 @@ export const HistoryTab: Component<HistoryTabProps> = (props) => {
 		props.onOpenDiff(repoPath, filePath, "M", hash);
 	}
 
-	// Re-fetch when repo, file, or revision changes
+	// Re-fetch when the repo, the file, or the repo's git state changes. The GIT
+	// revision, not the general one: `get_file_history` lists commits, so editing
+	// the file it describes does not change the list.
 	createEffect(
 		on(
 			() => {
 				const repoPath = props.repoPath;
 				const filePath = props.filePath;
-				// Track revision to re-fetch on repo changes (value consumed for reactivity)
-				const rev = repoPath ? repositoriesStore.getRevision(repoPath) : 0;
+				// Value consumed for reactivity
+				const rev = repoPath ? repositoriesStore.getGitRevision(repoPath) : 0;
 				return `${repoPath ?? ""}:${filePath ?? ""}:${rev}`;
 			},
 			() => {

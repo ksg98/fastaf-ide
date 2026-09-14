@@ -55,35 +55,55 @@ pub(super) async fn put_config(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     auth: Option<Extension<Authenticated>>,
-    Json(config): Json<crate::config::AppConfig>,
+    Json(incoming): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
         return resp;
     }
-    // Preserve server-managed secrets — clients must not overwrite these via save
-    let mut config = config;
-    {
-        let current = state.config.read();
-        crate::config::preserve_redacted_app_config_secrets(&mut config, &current);
-    }
-    match crate::config::save_app_config(config.clone()) {
-        Ok(()) => {
-            let (old_disabled, old_collapse) = {
-                let c = state.config.read();
-                (c.disabled_native_tools.clone(), c.collapse_tools)
+    // The merge runs INSIDE the config write lock (commit_config_change) so a partial
+    // body is applied to the config as it is at write time, not to a snapshot another
+    // writer has already replaced. Blocking pool: the critical section does disk I/O.
+    let saved = {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::config::commit_config_change(&state, |current| {
+                crate::config::merge_partial_app_config(current, incoming)
+            })
+        })
+        .await
+    };
+
+    let effects = match saved {
+        Ok(Ok(effects)) => effects,
+        Ok(Err(e)) => {
+            // A merge/validation failure is the caller's fault; a write failure is ours.
+            let code = if e.starts_with("Invalid config") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
             };
-            *state.config.write() = config.clone();
-            if old_disabled != config.disabled_native_tools || old_collapse != config.collapse_tools
-            {
-                let _ = state.mcp_tools_changed.send(());
-            }
-            (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+            return (code, Json(serde_json::json!({"error": e})));
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("config save task failed: {e}")})),
+            );
+        }
+    };
+
+    if effects.tools_changed {
+        let _ = state.mcp_tools_changed.send(());
     }
+    // Parity with the IPC `save_config`: rebind the listener so the running process
+    // cannot keep serving a config the disk disagrees with.
+    if effects.server_changed {
+        super::restart_after_server_settings_change(
+            &state,
+            "remote-access configuration changed over HTTP",
+        );
+    }
+    (StatusCode::OK, Json(serde_json::json!({"ok": true})))
 }
 
 pub(super) async fn hash_password_http(
@@ -118,12 +138,12 @@ pub(super) async fn rotate_session_token(
     if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
         return resp;
     }
-    let new_token = uuid::Uuid::new_v4().to_string();
-    *state.session_token.write() = new_token.clone();
-    let mut cfg = state.config.read().clone();
-    cfg.services.auth.session_token = new_token;
-    cfg.services.auth.session_token_exists = true;
-    if let Err(e) = crate::config::save_app_config(cfg) {
+    // Blocking pool: the rotation takes the config write lock and touches disk.
+    let rotated = tokio::task::spawn_blocking(move || crate::config::rotate_session_token(&state))
+        .await
+        .map_err(|e| format!("token rotation task failed: {e}"))
+        .and_then(|r| r);
+    if let Err(e) = rotated {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to persist token: {e}")})),
@@ -208,17 +228,27 @@ pub(super) async fn get_repositories() -> impl IntoResponse {
 pub(super) async fn put_repositories(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     auth: Option<Extension<Authenticated>>,
+    State(state): State<Arc<AppState>>,
     Json(config): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
         return resp;
     }
-    match crate::config::save_repositories(config) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
+    match crate::config::save_repositories_request(config) {
+        Ok(changed) => {
+            if changed {
+                state.notify_repositories_changed();
+            }
+            (StatusCode::OK, Json(serde_json::json!({"ok": true})))
+        }
+        Err(e) => {
+            let status = match &e {
+                crate::config::RepositorySaveError::Conflict(_) => StatusCode::CONFLICT,
+                crate::config::RepositorySaveError::Invalid(_) => StatusCode::BAD_REQUEST,
+                crate::config::RepositorySaveError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()})))
+        }
     }
 }
 
@@ -323,7 +353,14 @@ pub(super) async fn put_repo_defaults(
 // --- Notes ---
 
 pub(super) async fn get_notes() -> impl IntoResponse {
-    Json(crate::config::load_notes())
+    match crate::config::load_notes() {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        // 500 so the client stays un-hydrated and never overwrites the file it could not read.
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
 }
 
 pub(super) async fn put_notes(
@@ -878,5 +915,160 @@ mod tests {
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn stale_repository_delta_returns_http_conflict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let original = serde_json::json!({"path":"/repo","displayName":"Original","branches":{}});
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": {"/repo": original.clone()},
+            "repoOrder": ["/repo"]
+        }))
+        .expect("seed repositories");
+        crate::config::save_repositories_request(serde_json::json!({
+            "mutationVersion": 1,
+            "repos": [{
+                "id":"/repo",
+                "before":original.clone(),
+                "after":{"path":"/repo","displayName":"First","branches":{}}
+            }],
+            "groups": []
+        }))
+        .expect("first mutation");
+
+        let response = put_repositories(
+            ConnectInfo(loopback()),
+            None,
+            State(super::super::tests::test_state()),
+            Json(serde_json::json!({
+                "mutationVersion": 1,
+                "repos": [{
+                    "id":"/repo",
+                    "before":original,
+                    "after":{"path":"/repo","displayName":"Stale","branches":{}}
+                }],
+                "groups": []
+            })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// The whole point of the write is the announcement: a second client only learns
+    /// the document moved because this fires. Both tests subscribe before the request,
+    /// so a broadcast dropped or made unconditional fails here rather than in a
+    /// two-window session nobody can reproduce on demand.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_accepted_delta_announces_the_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let state = super::super::tests::test_state();
+        let mut events = state.event_bus.subscribe();
+
+        let response = put_repositories(
+            ConnectInfo(loopback()),
+            None,
+            State(state.clone()),
+            Json(serde_json::json!({
+                "mutationVersion": 1,
+                "repos": [{
+                    "id":"/repo",
+                    "before":null,
+                    "after":{"path":"/repo","displayName":"Added","branches":{}}
+                }],
+                "groups": []
+            })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            matches!(
+                events.try_recv(),
+                Ok(crate::state::AppEvent::RepositoriesChanged)
+            ),
+            "an accepted delta must announce itself on the event bus"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_delta_that_changes_nothing_stays_quiet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let record = serde_json::json!({"path":"/repo","displayName":"Added","branches":{}});
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": {"/repo": record.clone()},
+            "repoOrder": ["/repo"]
+        }))
+        .expect("seed repositories");
+        let state = super::super::tests::test_state();
+        let mut events = state.event_bus.subscribe();
+
+        // Same record, already on disk: accepted, but nothing moved. Announcing it
+        // would make every client re-read for nothing.
+        let response = put_repositories(
+            ConnectInfo(loopback()),
+            None,
+            State(state.clone()),
+            Json(serde_json::json!({
+                "mutationVersion": 1,
+                "repos": [{"id":"/repo","before":record.clone(),"after":record}],
+                "groups": []
+            })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            events.try_recv().is_err(),
+            "a no-op delta must not announce a change"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn malformed_repository_delta_returns_http_bad_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let response = put_repositories(
+            ConnectInfo(loopback()),
+            None,
+            State(super::super::tests::test_state()),
+            Json(serde_json::json!({
+                "mutationVersion": 1,
+                "repos": [{"id":"/repo","before":null,"after":"not-an-object"}],
+                "groups": []
+            })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn unversioned_repository_document_returns_http_bad_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
+        let response = put_repositories(
+            ConnectInfo(loopback()),
+            None,
+            State(super::super::tests::test_state()),
+            Json(serde_json::json!({"repos": {}, "repoOrder": []})),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

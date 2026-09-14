@@ -119,20 +119,26 @@ fn keyring_socket() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+    use std::sync::LazyLock;
     use tempfile::NamedTempFile;
 
+    /// `SSH_AUTH_SOCK` is process-global, so the tests that set it cannot run at
+    /// the same time: whichever one clears the variable first makes the other
+    /// read the wrong value. They take this lock instead of asking the whole
+    /// suite to run single-threaded. `parking_lot` so a failing assertion does
+    /// not poison the lock and turn one failure into several.
+    static SSH_AUTH_SOCK_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
     /// `SSH_AUTH_SOCK` pointing at an existing file is returned immediately.
-    ///
-    /// NOTE: `set_var` is unsafe in a multi-threaded context; we accept that
-    /// risk here because tests are short-lived and the env mutation is local.
-    /// Use `cargo test -- --test-threads=1` if flakiness is observed.
     #[test]
     fn env_var_existing_path_is_returned() {
+        let _env_guard = SSH_AUTH_SOCK_GUARD.lock();
         let tmp = NamedTempFile::new().expect("tempfile");
         let path = tmp.path().to_path_buf();
 
-        // SAFETY: single-threaded test binary section; no other thread reads
-        // SSH_AUTH_SOCK concurrently in this test.
+        // SAFETY: `SSH_AUTH_SOCK_GUARD` keeps every reader and writer of this
+        // variable in the test binary serialized around this section.
         unsafe {
             std::env::set_var("SSH_AUTH_SOCK", &path);
         }
@@ -151,6 +157,8 @@ mod tests {
     /// NOT return the bad path itself).
     #[test]
     fn env_var_nonexistent_path_falls_through() {
+        let _env_guard = SSH_AUTH_SOCK_GUARD.lock();
+        // SAFETY: serialized against the other reader/writer by the guard above.
         unsafe {
             std::env::set_var("SSH_AUTH_SOCK", "/tmp/tuic-test-no-such-socket-xyzzy");
         }

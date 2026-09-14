@@ -52,3 +52,31 @@ export function getCompletionSuppression(ctx: CompletionContext): CompletionSupp
 	if (ctx.usesShellIntegration && !ctx.ranCommandDuringBusy) return "no-command-ran";
 	return null;
 }
+
+/**
+ * Should the completion *chime* play for a terminal that has already been
+ * cleared to notify?
+ *
+ * Deliberately separate from `getCompletionSuppression`: suppressing there
+ * cancels the whole notification (activity item, unseen badge, OS notification).
+ * Orchestrated sessions still deserve those — an agent swarm just must not turn
+ * every finished worker into a beep. Only the audio is dropped.
+ */
+export function shouldPlayCompletionSound(ctx: {
+	/** Terminal was created over MCP/HTTP (`session create`, `agent spawn`)
+	 *  rather than by the local UI — it belongs to an orchestration, not the user. */
+	isRemoteSession: boolean;
+	/** User setting `silence_remote_completions`. */
+	silenceRemoteCompletions: boolean;
+}): boolean {
+	return !(ctx.silenceRemoteCompletions && ctx.isRemoteSession);
+}
+
+/** Session exit is a fallback completion signal, not a second notification. */
+export function shouldNotifyAgentExit(ctx: {
+	hadAgent: boolean;
+	isBackground: boolean;
+	completionNotified: boolean;
+}): boolean {
+	return ctx.hadAgent && ctx.isBackground && !ctx.completionNotified;
+}

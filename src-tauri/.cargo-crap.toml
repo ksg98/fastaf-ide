@@ -1,0 +1,29 @@
+# cargo-crap: CRAP metric = complexity² × (1 − coverage)³ + complexity.
+# Run via `make crap` from the repo root — it pairs this file with the lcov.info
+# emitted by `make cov`. Config is found by walking up from the CWD, so it only
+# applies when cargo-crap is invoked from src-tauri/.
+
+threshold = 30.0
+
+# `pessimistic` (the built-in default) scores every function with no LCOV entry
+# as 0% covered. `make cov` runs `cargo llvm-cov nextest` on the `tuicommander`
+# package only, so the tuic-cli / tuic-bridge binaries are never instrumented —
+# reporting them at 0% is fabricated data, not a finding. Omit them instead.
+# Consequence: those two binaries are invisible here until the coverage run
+# itself covers them.
+missing = "skip"
+
+# patches/ holds our vendored alacritty_terminal / vte / wayland-scanner forks.
+# Upstream complexity (Performer::csi_dispatch is cyclomatic 94) is not ours to
+# refactor and swamps the report: 110 of 312 crappy functions came from there.
+#
+# NOTE: exclude globs are matched relative to each analyzed root, so this only
+# matches when the walk root is src-tauri/ — i.e. WITHOUT `--workspace`. In
+# workspace mode the fork crates are members walked from their own roots, where
+# their paths are `src/**`. `make crap` deliberately avoids `--workspace`.
+exclude = ["patches/**"]
+
+# `sort` is deliberately left at the default ("crap"): cargo-crap 0.3.1 derives
+# the `Worst:` field of `--summary` from the sorted order rather than the max, so
+# `sort = "file"` makes it report an arbitrary function (observed: CRAP 1.0).
+# If we ever commit a JSON baseline, pass `--sort file` on that command only.

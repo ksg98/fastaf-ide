@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { containsShellMetacharacters, sendCommand, shouldAutoSubmitSuggestion } from "../../utils/sendCommand";
+import { resetPlatformCache } from "../../platform";
+import {
+	AGENT_ENTER_GAP_MS,
+	containsShellMetacharacters,
+	sendCommand,
+	shouldAutoSubmitSuggestion,
+} from "../../utils/sendCommand";
 
 /**
  * Fake writer that records every call in order. Returns a resolved promise
@@ -16,12 +22,18 @@ function makeRecorder() {
 /**
  * Replace navigator.platform for the duration of a test so isWindows()
  * returns the expected value. Restored via afterEach.
+ *
+ * The cache reset is not optional: `detectPlatform` answers from the UA string
+ * once and remembers, because the platform cannot change while the app runs.
+ * Swapping `navigator.platform` without clearing it leaves the answer from
+ * whichever test ran first, which makes the outcome depend on file order.
  */
 function setPlatform(value: string) {
 	Object.defineProperty(navigator, "platform", {
 		value,
 		configurable: true,
 	});
+	resetPlatformCache();
 }
 
 describe("sendCommand", () => {
@@ -115,6 +127,65 @@ describe("sendCommand", () => {
 		const { writeFn, calls } = makeRecorder();
 		await sendCommand(writeFn, "ls", null, "posix");
 		expect(calls).toEqual(["\x15ls", "\r"]);
+	});
+
+	/**
+	 * Regression: two writes are not two reads. Without an elapsed-time gap the
+	 * PTY coalesces payload + CR into one read() and an Ink/raw-mode agent
+	 * (Codex, Claude Code) renders the CR as a newline in its composer instead
+	 * of submitting — the suggestion is typed but never sent.
+	 */
+	it("separates the Enter from the payload in TIME when an agent is attached", async () => {
+		setPlatform("MacIntel");
+		const stamps: number[] = [];
+		const writeFn = async (): Promise<void> => {
+			stamps.push(performance.now());
+		};
+		await sendCommand(writeFn, "run the tests", "codex", "posix");
+		expect(stamps.length).toBe(2);
+		// setTimeout never fires early; allow a small scheduler tolerance.
+		expect(stamps[1] - stamps[0]).toBeGreaterThanOrEqual(AGENT_ENTER_GAP_MS - 5);
+	});
+
+	it("does not delay the Enter on a plain shell (line-buffered, no coalescing risk)", async () => {
+		setPlatform("MacIntel");
+		const stamps: number[] = [];
+		const writeFn = async (): Promise<void> => {
+			stamps.push(performance.now());
+		};
+		await sendCommand(writeFn, "ls", null, "posix");
+		expect(stamps[1] - stamps[0]).toBeLessThan(AGENT_ENTER_GAP_MS);
+	});
+
+	/**
+	 * pi (0.83.0) accepts BOTH shapes — verified live against a real pi PTY:
+	 * a single combined `text\r` write submits, and so does the split
+	 * Ctrl-U + text / gap / CR sequence this function emits. Ctrl-U is consumed
+	 * as a line-kill, never echoed literally. So pi needs no special-casing: it
+	 * takes the same agent path as every other agent. This pins that — a future
+	 * "optimization" that routes pi around the gap would be a silent regression
+	 * on the agents that DO need it, for no gain on pi.
+	 */
+	it("routes pi through the standard agent path (Ctrl-U + gapped Enter)", async () => {
+		setPlatform("MacIntel");
+		const stamps: number[] = [];
+		const calls: string[] = [];
+		const writeFn = async (data: string): Promise<void> => {
+			calls.push(data);
+			stamps.push(performance.now());
+		};
+		await sendCommand(writeFn, "say only the word OK", "pi", "posix");
+		expect(calls).toEqual(["\x15say only the word OK", "\r"]);
+		expect(stamps[1] - stamps[0]).toBeGreaterThanOrEqual(AGENT_ENTER_GAP_MS - 5);
+	});
+
+	it("does not delay when the Enter is withheld", async () => {
+		setPlatform("MacIntel");
+		const started = performance.now();
+		const { writeFn, calls } = makeRecorder();
+		await sendCommand(writeFn, "run the tests", "codex", "posix", false);
+		expect(calls).toEqual(["\x15run the tests"]);
+		expect(performance.now() - started).toBeLessThan(AGENT_ENTER_GAP_MS);
 	});
 });
 

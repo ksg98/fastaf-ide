@@ -23,6 +23,31 @@ describe("editorTabsStore", () => {
 			});
 		});
 
+		it("leaves a background tab inactive", () => {
+			// `tuic://edit` with focus:false must not switch repo AND must not activate,
+			// or the tab's content renders while its button is filtered out of the bar.
+			testInScope(() => {
+				const first = editorTabsStore.add("/repo", "src/main.ts");
+				const background = editorTabsStore.add("/repo", "src/other.ts", undefined, { background: true });
+
+				expect(background).not.toBe(first);
+				expect(editorTabsStore.getCount()).toBe(2);
+				expect(editorTabsStore.state.activeId).toBe(first);
+			});
+		});
+
+		it("does not steal focus when a background open hits an already-open file", () => {
+			testInScope(() => {
+				const target = editorTabsStore.add("/repo", "src/main.ts");
+				const other = editorTabsStore.add("/repo", "src/other.ts");
+				expect(editorTabsStore.state.activeId).toBe(other);
+
+				const again = editorTabsStore.add("/repo", "src/main.ts", undefined, { background: true });
+				expect(again).toBe(target);
+				expect(editorTabsStore.state.activeId).toBe(other);
+			});
+		});
+
 		it("deduplicates: returns existing id when same repoPath+filePath", () => {
 			testInScope(() => {
 				const id1 = editorTabsStore.add("/repo", "src/main.ts");

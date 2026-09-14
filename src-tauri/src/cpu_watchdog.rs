@@ -16,7 +16,7 @@
 //! | Check                    | Past incident (mdkb)                     |
 //! |--------------------------|------------------------------------------|
 //! | CPU %                    | ack-flush-loop-cpu-spike                 |
-//! | grid_frame_in_flight     | ui-freeze-investigation-2026-05-28       |
+//! | grid frames outstanding  | ui-freeze-investigation-2026-05-28       |
 //! | Event bus throughput     | invoke.ts thundering herd comment         |
 //! | Content index state      | content-index-global-semaphore           |
 //! | FD / thread count trend  | (previous investigation session)         |
@@ -233,11 +233,15 @@ struct HealthSnapshot {
 }
 
 fn collect_snapshot(state: &Arc<AppState>, cpu_pct: f64) -> HealthSnapshot {
+    // A session appears here with the number of frames it was sent and has not
+    // reported back: anything above zero means the WebView is behind.
     let in_flight_stuck: Vec<String> = state
-        .grid_frame_in_flight
+        .grid_gates
         .iter()
-        .filter(|entry| entry.value().load(Ordering::Relaxed))
-        .map(|entry| entry.key().clone())
+        .filter_map(|entry| {
+            let outstanding = entry.value().outstanding();
+            (outstanding > 0).then(|| format!("{}×{}", entry.key(), outstanding))
+        })
         .collect();
 
     HealthSnapshot {

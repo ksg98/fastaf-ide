@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "corpus_basis": {
+    "claude_jsonl_files": 348,
+    "codex_jsonl_files": 2933,
+    "note": "Transcript histories define semantic scenarios only; terminal protocol evidence must come from framed PTY captures."
+  },
+  "scenarios": [
+    {
+      "id": "claude-ask-user-single-select",
+      "agent": "claude",
+      "source": "history-template",
+      "set": "awaiting_input",
+      "clear": ["submitted-option", "interrupt", "pty-exit"]
+    },
+    {
+      "id": "claude-ask-user-multi-select",
+      "agent": "claude",
+      "source": "history-template",
+      "set": "awaiting_input",
+      "clear": ["submitted-selection", "interrupt", "pty-exit"]
+    },
+    {
+      "id": "claude-plan-picker-osc777",
+      "agent": "claude",
+      "source": "raw-fixture",
+      "fixture": "claude-plan-picker.raw",
+      "set": "awaiting_input-low-confidence",
+      "clear": ["submitted-option", "question-cleared", "protocol-busy", "pty-exit"]
+    },
+    {
+      "id": "claude-generic-attention-completion",
+      "agent": "claude",
+      "source": "raw-fixture",
+      "fixture": "claude-generic-attention.raw",
+      "set": "none",
+      "clear": []
+    },
+    {
+      "id": "claude-permission-approval",
+      "agent": "claude",
+      "source": "capture-template",
+      "set": "awaiting_input-confident",
+      "clear": ["submitted-option", "interrupt", "pty-exit"]
+    },
+    {
+      "id": "codex-edit-approval",
+      "agent": "codex",
+      "source": "capture-template",
+      "set": "choice_prompt",
+      "clear": ["submitted-option", "bare-enter", "choice-disappeared", "pty-exit"]
+    },
+    {
+      "id": "codex-question-answer-repaint-complete",
+      "agent": "codex",
+      "source": "runtime-regression-template",
+      "set": "awaiting_input-low-confidence",
+      "clear": ["submitted-line"],
+      "must_not_set_after": ["historical-question-repaint", "completion"]
+    },
+    {
+      "id": "codex-working-to-completed",
+      "agent": "codex",
+      "source": "history-template",
+      "set": "working",
+      "clear": ["protocol-completion", "ready-screen", "turn-aborted", "pty-exit"]
+    },
+    {
+      "id": "codex-bare-enter",
+      "agent": "codex",
+      "source": "capture-template",
+      "set": "awaiting_input",
+      "clear": ["bare-enter"]
+    },
+    {
+      "id": "turn-timer-input-race",
+      "agent": "cross-agent",
+      "source": "synthetic-concurrency",
+      "set": "awaiting_input",
+      "clear": ["newer-turn-epoch"],
+      "must_not_set_after": ["newer-turn-epoch"]
+    },
+    {
+      "id": "bottom-zone-question-mark",
+      "agent": "cross-agent",
+      "source": "synthetic-screen",
+      "set": "none",
+      "clear": []
+    },
+    {
+      "id": "two-session-relay-isolation",
+      "agent": "cross-agent",
+      "source": "synthetic-state",
+      "set": "awaiting_input-per-session",
+      "clear": ["same-session-input", "same-session-retraction", "same-session-exit"]
+    }
+  ]
+}

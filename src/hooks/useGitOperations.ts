@@ -3,8 +3,13 @@ import { batch, createSignal } from "solid-js";
 import type { DiscoveredProject } from "../components/ImportDialog";
 import { invoke } from "../invoke";
 import { appLogger } from "../stores/appLogger";
+import { diffTabsStore } from "../stores/diffTabs";
+import { editorTabsStore } from "../stores/editorTabs";
+import { clearForRepo as clearFocusForRepo } from "../stores/focusRegistry";
+import { mdTabsStore } from "../stores/mdTabs";
 import { repoSettingsStore } from "../stores/repoSettings";
 import { repositoriesStore } from "../stores/repositories";
+import { reconcileTerminalOwnership } from "../stores/terminalOwnership";
 import { terminalsStore } from "../stores/terminals";
 import { isTauri, rpc } from "../transport";
 import type { RepoInfo } from "../types";
@@ -67,11 +72,19 @@ export interface GitOperationsDeps {
 			branchName: string,
 			targetBranch: string,
 			afterMerge: string,
-		) => Promise<{ merged: boolean; action: string; archive_path: string | null }>;
+			force?: boolean,
+		) => Promise<{
+			merged: boolean;
+			action: string;
+			archive_path: string | null;
+			commits_ahead?: number;
+			worktree_dirty?: boolean;
+		}>;
 		finalizeMergedWorktree: (
 			repoPath: string,
 			branchName: string,
 			action: "archive" | "delete",
+			force?: boolean,
 		) => Promise<{ merged: boolean; action: string; archive_path: string | null }>;
 		listLocalBranches: (repoPath: string) => Promise<string[]>;
 		getMergedBranches: (repoPath: string) => Promise<string[]>;
@@ -97,6 +110,8 @@ export interface GitOperationsDeps {
 		confirmRemoveLockedWorktree?: (branchName: string, deleteBranch?: boolean) => Promise<boolean>;
 		confirmStashAndSwitch?: (branchName: string) => Promise<boolean>;
 		confirmOrphanCleanup?: (paths: string[]) => Promise<boolean>;
+		/** Archiving or deleting this worktree would destroy uncommitted work — proceed anyway? */
+		confirmDirtyWorktreeCleanup?: (branchName: string, action: string, commitsAhead: number) => Promise<boolean>;
 		/** Surface a git failure in a dialog with the full output; returns true if the user chose Retry. */
 		reportGitError?: (title: string, detail: string, offerRetry?: boolean) => Promise<boolean>;
 		/** Browser mode only: show an in-app text-input dialog to enter a repo path */
@@ -150,7 +165,10 @@ export function useGitOperations(deps: GitOperationsDeps) {
 		repoPath: string;
 		branchName: string;
 		baseBranch: string;
+		/** Base repo has uncommitted changes — the "Switch to base" step stashes them. */
 		hasDirtyFiles: boolean;
+		/** The branch's own worktree has uncommitted changes — archive/delete destroys them. */
+		worktreeDirty: boolean;
 	} | null>(null);
 
 	const { markRecentlyCreated, refreshAllBranchStats } = createRepositoryRefreshCoordinator({
@@ -187,6 +205,23 @@ export function useGitOperations(deps: GitOperationsDeps) {
 				await deps.closeTerminal(termId, true);
 			}
 		}
+
+		// The repo's file-backed tabs go with it. Left behind they become
+		// unreachable rather than harmless: getVisibleIds filters on a branch key
+		// that no longer resolves, so the tab is invisible AND immortal, and every
+		// removal leaks another set. closeTerminal is the one path that closes a tab
+		// completely — store entry, pane slot, next selection — so reuse it instead
+		// of re-deriving that cleanup here. No `skipConfirm`: removing a repo from
+		// the sidebar deletes nothing on disk, so a dirty editor still gets its save
+		// prompt rather than losing the edit silently.
+		for (const tab of [
+			...editorTabsStore.getForRepo(repoPath),
+			...diffTabsStore.getForRepo(repoPath),
+			...mdTabsStore.getForRepo(repoPath),
+		]) {
+			await deps.closeTerminal(tab.id);
+		}
+		clearFocusForRepo(repoPath);
 
 		invoke("stop_repo_watcher", { repoPath }).catch((err) =>
 			appLogger.warn("app", `RepoWatcher failed to stop for ${repoPath}`, err),
@@ -270,10 +305,11 @@ export function useGitOperations(deps: GitOperationsDeps) {
 		return activeRepo.branches[activeRepo.activeBranch]?.runCommand;
 	};
 
-	/** Register an existing local folder as a project: repo info, store entry,
-	 *  branch/terminal setup, watcher, and branch stats. Shared by the folder
-	 *  picker (handleAddRepo) and the clone-from-GitHub flow. */
-	const addRepoFromPath = async (path: string) => {
+	/** Add a repo by path and make it active: repo info, store entry,
+	 *  branch/terminal setup, watcher, and branch stats. Shared by the sidebar
+	 *  picker, the `fastaf <dir>` deep link and the clone-from-GitHub flow — all
+	 *  must land on the exact same state. */
+	const addRepoByPath = async (path: string) => {
 		try {
 			const info = await deps.repo.getInfo(path);
 
@@ -328,6 +364,10 @@ export function useGitOperations(deps: GitOperationsDeps) {
 				appLogger.warn("app", `RepoWatcher failed to start for ${info.path}`, err),
 			);
 
+			// A terminal already running inside this path was parked in some other repo
+			// because nothing claimed its cwd. Now something does.
+			reconcileTerminalOwnership();
+
 			await refreshAllBranchStats();
 		} catch (err) {
 			appLogger.error("git", "Failed to add repository", err);
@@ -355,7 +395,7 @@ export function useGitOperations(deps: GitOperationsDeps) {
 		}
 
 		if (!path) return;
-		await addRepoFromPath(path);
+		await addRepoByPath(path);
 	};
 
 	/** Import projects discovered from other tools (Claude Code / Codex / Cursor /
@@ -454,6 +494,7 @@ export function useGitOperations(deps: GitOperationsDeps) {
 				await handleAddTerminalToBranch(info.path, shellBranch);
 			}
 
+			reconcileTerminalOwnership();
 			repositoriesStore.setActive(info.path);
 		} catch (err) {
 			appLogger.error("git", `Failed to add remote repo from ${connectionId}`, err);
@@ -488,6 +529,10 @@ export function useGitOperations(deps: GitOperationsDeps) {
 		repo: deps.repo,
 		closeTerminal: deps.closeTerminal,
 		setStatusInfo: deps.setStatusInfo,
+		// No dialog wired: refuse rather than silently destroy. The guard only fires
+		// when uncommitted work would be swept away by the cleanup.
+		confirmDirtyWorktreeCleanup: (branchName, action, commitsAhead) =>
+			deps.dialogs.confirmDirtyWorktreeCleanup?.(branchName, action, commitsAhead) ?? Promise.resolve(false),
 		creatingWorktreeRepos,
 		setCreatingWorktreeRepos,
 		setMergePendingCtx,
@@ -806,7 +851,9 @@ export function useGitOperations(deps: GitOperationsDeps) {
 		activeWorktreePath,
 		activeRunCommand,
 		handleAddRepo,
-		addRepoFromPath,
+		addRepoByPath,
+		/** FastAF alias kept for the clone-from-GitHub flow. */
+		addRepoFromPath: addRepoByPath,
 		handleImportProjects,
 		handleAddRemoteRepo,
 		handleAddWorktree,

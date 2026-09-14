@@ -26,6 +26,12 @@ export const TIPS: Tip[] = [
 		shortcut: `${mod}+K`,
 	},
 	{
+		feature: "Terminal Context",
+		description:
+			"Expand Context above an agent terminal to see its current intent, assigned task, and last submitted prompt.",
+		shortcut: null,
+	},
+	{
 		feature: "Split Panes",
 		description: "Split the current terminal into two side-by-side panes.",
 		shortcut: `${mod}+\\`,
@@ -44,6 +50,12 @@ export const TIPS: Tip[] = [
 		feature: "Terminal Zoom",
 		description: "Full-screen the active terminal, hiding sidebar and toolbar chrome.",
 		shortcut: `${mod}+=`,
+	},
+	{
+		feature: "Fullscreen App Scrollback",
+		description:
+			"Fullscreen apps keep a separate scrollback. Hold Shift while using the wheel, or drag the scrollbar, when the app captures mouse input.",
+		shortcut: "Shift+wheel",
 	},
 	{
 		feature: "File Browser",

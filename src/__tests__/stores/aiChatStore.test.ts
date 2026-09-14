@@ -1,8 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock invoke before importing the store
 vi.mock("../../invoke", () => ({
-	invoke: vi.fn().mockResolvedValue(undefined),
+	invoke: vi
+		.fn()
+		.mockImplementation(async (command: string) =>
+			command === "new_conversation_id" ? "test-conversation-id" : undefined,
+		),
 }));
 
 vi.mock("../../transport", () => ({
@@ -19,6 +23,10 @@ vi.mock("../../stores/appLogger", () => ({
 }));
 
 import { conversationStore } from "../../stores/conversationStore";
+
+afterEach(() => {
+	conversationStore.clearHistory();
+});
 
 describe("conversationStore (chat)", () => {
 	beforeEach(() => {

@@ -114,8 +114,8 @@ pub(crate) fn set_last_seen_version(version: String) {
     let _ = std::fs::write(path, version);
 }
 
-/// Auto-update: if the CLI is installed, overwrite it with the current sidecar.
-/// Called at app startup — silent, no elevation prompt (relies on existing permissions).
+/// Auto-update: if the CLI is installed, atomically replace it with the current sidecar.
+/// Called off the setup path — silent, no elevation prompt (relies on directory permissions).
 pub(crate) fn auto_update_cli() {
     let install_path = resolve_install_path();
     if !std::path::Path::new(&install_path).exists() {
@@ -130,13 +130,12 @@ pub(crate) fn auto_update_cli() {
         return;
     };
 
-    // Try direct copy (no elevation) — will succeed if user owns the file
-    if std::fs::copy(&sidecar_path, &install_path).is_ok() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&install_path, std::fs::Permissions::from_mode(0o755));
-        }
+    if replace_cli_atomically(
+        std::path::Path::new(&sidecar_path),
+        std::path::Path::new(&install_path),
+    )
+    .is_ok()
+    {
         tracing::info!(source = "tuic_cli", "CLI auto-updated at {install_path}");
     } else {
         tracing::debug!(
@@ -149,6 +148,31 @@ pub(crate) fn auto_update_cli() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn replace_cli_atomically(
+    sidecar: &std::path::Path,
+    install_path: &std::path::Path,
+) -> Result<(), String> {
+    let staged = install_path.with_extension(format!("update.{}", uuid::Uuid::new_v4()));
+    let result = (|| {
+        std::fs::copy(sidecar, &staged).map_err(|e| format!("Failed to stage CLI update: {e}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("Failed to make staged CLI executable: {e}"))?;
+        }
+        std::fs::File::open(&staged)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| format!("Failed to flush staged CLI update: {e}"))?;
+        std::fs::rename(&staged, install_path)
+            .map_err(|e| format!("Failed to install staged CLI update: {e}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
 
 fn resolve_install_path() -> String {
     // macOS: /usr/local/bin (in default PATH, standard for user-installed CLIs)
@@ -311,32 +335,6 @@ pub(crate) fn copy_with_elevation(src: &str, dst: &str) -> Result<(), String> {
     Err("Unsupported platform".to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Regression for issue #52: the bundled sidecar must be looked up by its
-    /// plain name (no `-{target-triple}` suffix), since Tauri strips the triple
-    /// when bundling `externalBin`. A reintroduced triple would make the lookup
-    /// miss the packaged binary and fall through to the dev-only path.
-    #[test]
-    fn sidecar_name_has_no_target_triple() {
-        let name = sidecar_name();
-        assert!(
-            !name.contains("aarch64")
-                && !name.contains("x86_64")
-                && !name.contains("apple")
-                && !name.contains("pc-windows")
-                && !name.contains("unknown-linux"),
-            "sidecar name must not embed a target triple, got {name:?}"
-        );
-        #[cfg(target_os = "windows")]
-        assert_eq!(name, "tuic.exe");
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(name, "tuic");
-    }
-}
-
 pub(crate) fn remove_with_elevation(path: &str) -> Result<(), String> {
     if std::fs::remove_file(path).is_ok() {
         return Ok(());
@@ -381,4 +379,54 @@ pub(crate) fn remove_with_elevation(path: &str) -> Result<(), String> {
 
     #[allow(unreachable_code)]
     Err("Unsupported platform".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_update_replaces_the_installed_binary_atomically() {
+        let dir = tempfile::tempdir().expect("temp CLI dir");
+        let sidecar = dir.path().join("sidecar-tuic");
+        let installed = dir.path().join("tuic");
+        std::fs::write(&sidecar, b"complete-new-binary").expect("write sidecar");
+        std::fs::write(&installed, b"complete-old-binary").expect("write installed CLI");
+
+        replace_cli_atomically(&sidecar, &installed).expect("replace installed CLI");
+
+        assert_eq!(
+            std::fs::read(&installed).expect("read installed CLI"),
+            b"complete-new-binary"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path())
+                .expect("read CLI dir")
+                .filter_map(Result::ok)
+                .count(),
+            2,
+            "the staging file must not survive the replacement"
+        );
+    }
+
+    /// Regression for issue #52: the bundled sidecar must be looked up by its
+    /// plain name (no `-{target-triple}` suffix), since Tauri strips the triple
+    /// when bundling `externalBin`. A reintroduced triple would make the lookup
+    /// miss the packaged binary and fall through to the dev-only path.
+    #[test]
+    fn sidecar_name_has_no_target_triple() {
+        let name = sidecar_name();
+        assert!(
+            !name.contains("aarch64")
+                && !name.contains("x86_64")
+                && !name.contains("apple")
+                && !name.contains("pc-windows")
+                && !name.contains("unknown-linux"),
+            "sidecar name must not embed a target triple, got {name:?}"
+        );
+        #[cfg(target_os = "windows")]
+        assert_eq!(name, "tuic.exe");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(name, "tuic");
+    }
 }

@@ -26,7 +26,7 @@ async function fetchRepo(repoPath: string): Promise<void> {
 			{ path: repoPath, args: ["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=15", "fetch", "--all"] },
 		);
 		if (result.success) {
-			repositoriesStore.bumpRevision(repoPath);
+			repositoriesStore.bumpGitRevision(repoPath);
 			failCount.delete(repoPath);
 			appLogger.debug("git", `Auto-fetch completed for ${repoPath}`);
 		} else {

@@ -58,9 +58,29 @@ impl TriageSession {
     }
 
     fn is_valid(&self, model: &str) -> bool {
-        self.model == model
-            && self.messages.len() < MAX_SESSION_MESSAGES
-            && self.created_at.elapsed() < SESSION_TTL
+        self.model == model && self.created_at.elapsed() < SESSION_TTL
+    }
+
+    /// Append a message, trimming the oldest turns so the log stays bounded by
+    /// `MAX_SESSION_MESSAGES`.
+    ///
+    /// The cap used to be enforced by `is_valid`, whose only failure handling is
+    /// to drop the session and build a fresh one — which threw away
+    /// `classifications` and `file_hashes` as collateral and sent every
+    /// already-classified file back to the LLM. Trimming here bounds the
+    /// uploaded prompt without touching the caches.
+    ///
+    /// Turns are dropped in pairs so the remaining history still starts on a
+    /// user message. Dropping the oldest per-file turns is safe: each carries
+    /// its own file diff and expects one self-contained JSONL line back, and the
+    /// changeset overview lives in `summary`, not in the log. (#612-9a22)
+    fn push_msg(&mut self, role: MsgRole, content: String) {
+        self.messages.push(SessionMsg { role, content });
+        if self.messages.len() > MAX_SESSION_MESSAGES {
+            let excess = self.messages.len() - MAX_SESSION_MESSAGES;
+            let drop_n = (excess + excess % 2).min(self.messages.len());
+            self.messages.drain(..drop_n);
+        }
     }
 }
 
@@ -181,15 +201,19 @@ pub struct UnifiedDiffFile {
     pub deletions: u32,
 }
 
+/// A PR review is a [`TriageResult`] plus the PR it came from.
+///
+/// The triage fields are EMBEDDED and `#[serde(flatten)]`ed rather than
+/// redeclared: the wire shape is identical to the four-field copy it replaces, so
+/// no client changes, but the two can no longer drift and a new triage field
+/// cannot be forgotten at one of the construction sites.
 #[derive(Debug, Clone, Serialize)]
 pub struct PrReviewResult {
     pub repo_path: String,
     pub pr_number: i64,
     pub head_sha: String,
-    pub summary: Option<String>,
-    pub files: Vec<FileClassification>,
-    pub llm_used: bool,
-    pub llm_model: Option<String>,
+    #[serde(flatten)]
+    pub triage: TriageResult,
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +688,25 @@ struct DiffSignals {
     hunk_count: u32,
 }
 
+/// SQL/schema statement prefixes, matched on the raw line.
+///
+/// Replaces `trimmed.to_ascii_uppercase()` + six `starts_with` calls, which
+/// allocated a full copy of every added and removed line of every diff. `(?i-u)`
+/// is ASCII-only case folding, exactly what `to_ascii_uppercase` did — Unicode
+/// `(?i)` would additionally fold characters like `ſ` into `s`. (#612-9a22)
+static SCHEMA_PREFIXES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i-u)^(?:CREATE TABLE|ALTER TABLE|DROP |INSERT |UPDATE |DELETE )")
+        .expect("static schema-prefix regex")
+});
+
+/// Auth/security keywords, matched on the raw line. Replaces
+/// `trimmed.to_ascii_lowercase()` + six `contains` calls — the second full copy
+/// of every changed line. (#612-9a22)
+static AUTH_WORDS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i-u)password|secret|token|encrypt|decrypt|auth")
+        .expect("static auth-keyword regex")
+});
+
 fn analyze_diff(diff: &str) -> DiffSignals {
     let mut s = DiffSignals::default();
     for line in diff.lines() {
@@ -742,25 +785,11 @@ fn analyze_diff(diff: &str) -> DiffSignals {
             s.test_signals += 1;
         }
         // Schema/SQL signals
-        let upper = trimmed.to_ascii_uppercase();
-        if upper.starts_with("CREATE TABLE")
-            || upper.starts_with("ALTER TABLE")
-            || upper.starts_with("DROP ")
-            || upper.starts_with("INSERT ")
-            || upper.starts_with("UPDATE ")
-            || upper.starts_with("DELETE ")
-        {
+        if SCHEMA_PREFIXES.is_match(trimmed) {
             s.schema_signals += 1;
         }
         // Auth/security signals
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.contains("password")
-            || lower.contains("secret")
-            || lower.contains("token")
-            || lower.contains("encrypt")
-            || lower.contains("decrypt")
-            || lower.contains("auth")
-        {
+        if AUTH_WORDS.is_match(trimmed) {
             s.auth_signals += 1;
         }
     }
@@ -1230,15 +1259,9 @@ async fn do_turn(
         let tool_calls = response.into_tool_calls();
 
         if tool_calls.is_empty() {
-            session.messages.push(SessionMsg {
-                role: MsgRole::User,
-                content: user_msg,
-            });
+            session.push_msg(MsgRole::User, user_msg);
             if let Some(ref t) = text {
-                session.messages.push(SessionMsg {
-                    role: MsgRole::Assistant,
-                    content: t.clone(),
-                });
+                session.push_msg(MsgRole::Assistant, t.clone());
             }
             return text;
         }
@@ -1250,10 +1273,7 @@ async fn do_turn(
         }
     }
 
-    session.messages.push(SessionMsg {
-        role: MsgRole::User,
-        content: user_msg,
-    });
+    session.push_msg(MsgRole::User, user_msg);
     None
 }
 
@@ -1270,6 +1290,33 @@ enum ProgressSink<'a> {
         state: &'a crate::AppState,
         pr_number: i64,
     },
+}
+
+/// Build the `review-progress` payload.
+///
+/// `files` carries the COUNT, not the classification vector: this fires on every
+/// file the engine classifies, over both the Tauri window and the SSE bus, and
+/// the only consumer (`githubOpsStore`) reads `files.length` and nothing else.
+/// The frontend already accepts either shape, so a stale client keeps working.
+#[cfg(feature = "desktop")]
+fn pr_review_payload(
+    pr_number: i64,
+    summary: Option<&str>,
+    files: &[FileClassification],
+    phase: &'static str,
+    done: bool,
+    llm_used: bool,
+    llm_model: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "pr_number": pr_number,
+        "summary": summary,
+        "files": files.len(),
+        "phase": phase,
+        "done": done,
+        "llm_used": llm_used,
+        "llm_model": llm_model,
+    })
 }
 
 #[cfg(feature = "desktop")]
@@ -1296,15 +1343,8 @@ impl ProgressSink<'_> {
                 state,
                 pr_number,
             } => {
-                let payload = serde_json::json!({
-                    "pr_number": pr_number,
-                    "summary": summary,
-                    "files": files,
-                    "phase": phase,
-                    "done": done,
-                    "llm_used": llm_used,
-                    "llm_model": llm_model,
-                });
+                let payload =
+                    pr_review_payload(*pr_number, summary, files, phase, done, llm_used, llm_model);
                 // Desktop window event (native listener), if a handle exists.
                 if let Some(app) = app {
                     let _ = app.emit(
@@ -1772,13 +1812,15 @@ pub(crate) async fn run_pr_review_impl(
             repo_path,
             pr_number,
             head_sha,
-            summary: Some(format!(
-                "Reviewed {n} file{}",
-                if n == 1 { "" } else { "s" }
-            )),
-            files: heuristic,
-            llm_used: false,
-            llm_model: None,
+            triage: TriageResult {
+                summary: Some(format!(
+                    "Reviewed {n} file{}",
+                    if n == 1 { "" } else { "s" }
+                )),
+                files: heuristic,
+                llm_used: false,
+                llm_model: None,
+            },
         });
     }
 
@@ -1907,10 +1949,12 @@ pub(crate) async fn run_pr_review_impl(
         repo_path,
         pr_number,
         head_sha,
-        summary,
-        files,
-        llm_used: true,
-        llm_model: Some(model_name),
+        triage: TriageResult {
+            summary,
+            files,
+            llm_used: true,
+            llm_model: Some(model_name),
+        },
     })
 }
 
@@ -1928,6 +1972,31 @@ pub(crate) async fn run_pr_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The PR-review progress payload is emitted on every file the engine
+    /// classifies, over BOTH the Tauri window and the SSE bus. Its only consumer
+    /// (`githubOpsStore`, src/stores/githubOps.ts) reads nothing but the number
+    /// of files, so shipping the whole classification vector serialized, sent
+    /// and JSON-parsed a payload that was thrown away on arrival.
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn pr_review_payload_ships_the_count_not_the_vector() {
+        let files = vec![
+            heuristic_classify("Cargo.lock", 10, 5).unwrap(),
+            heuristic_classify("package-lock.json", 3, 1).unwrap(),
+        ];
+
+        let payload =
+            pr_review_payload(42, Some("sum"), &files, "classify", false, true, Some("m"));
+
+        assert_eq!(payload["files"], serde_json::json!(2));
+        assert_eq!(payload["pr_number"], serde_json::json!(42));
+        assert_eq!(payload["summary"], serde_json::json!("sum"));
+        assert_eq!(payload["phase"], serde_json::json!("classify"));
+        assert_eq!(payload["done"], serde_json::json!(false));
+        assert_eq!(payload["llm_used"], serde_json::json!(true));
+        assert_eq!(payload["llm_model"], serde_json::json!("m"));
+    }
 
     fn classify(path: &str) -> Option<FileClassification> {
         heuristic_classify(path, 10, 5)
@@ -2227,7 +2296,7 @@ mod tests {
         unsafe {
             std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "0.4");
         }
-        assert_eq!(finding_confidence_threshold(), 0.4);
+        assert!((finding_confidence_threshold() - 0.4).abs() < f32::EPSILON);
         unsafe {
             std::env::remove_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD");
         }
@@ -2239,17 +2308,17 @@ mod tests {
         unsafe {
             std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "1.5");
         }
-        assert_eq!(
-            finding_confidence_threshold(),
-            DEFAULT_FINDING_CONFIDENCE_THRESHOLD
+        assert!(
+            (finding_confidence_threshold() - DEFAULT_FINDING_CONFIDENCE_THRESHOLD).abs()
+                < f32::EPSILON
         );
 
         unsafe {
             std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "-0.1");
         }
-        assert_eq!(
-            finding_confidence_threshold(),
-            DEFAULT_FINDING_CONFIDENCE_THRESHOLD
+        assert!(
+            (finding_confidence_threshold() - DEFAULT_FINDING_CONFIDENCE_THRESHOLD).abs()
+                < f32::EPSILON
         );
 
         unsafe {
@@ -2263,9 +2332,9 @@ mod tests {
         unsafe {
             std::env::set_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD", "not-a-number");
         }
-        assert_eq!(
-            finding_confidence_threshold(),
-            DEFAULT_FINDING_CONFIDENCE_THRESHOLD
+        assert!(
+            (finding_confidence_threshold() - DEFAULT_FINDING_CONFIDENCE_THRESHOLD).abs()
+                < f32::EPSILON
         );
         unsafe {
             std::env::remove_var("TUIC_REVIEW_CONFIDENCE_THRESHOLD");
@@ -2524,16 +2593,69 @@ diff --git a/src/b.rs b/src/b.rs
         assert!(!s.is_valid("sonnet"));
     }
 
+    /// The message log must stay bounded — an unbounded conversation would grow
+    /// the uploaded prompt without limit.
     #[test]
-    fn session_is_valid_message_cap() {
+    fn session_message_log_is_trimmed_to_cap() {
         let mut s = TriageSession::new("haiku".to_string());
-        for i in 0..MAX_SESSION_MESSAGES {
-            s.messages.push(SessionMsg {
-                role: MsgRole::User,
-                content: format!("msg {i}"),
-            });
+        for i in 0..MAX_SESSION_MESSAGES * 2 {
+            s.push_msg(MsgRole::User, format!("msg {i}"));
         }
-        assert!(!s.is_valid("haiku"));
+        assert!(
+            s.messages.len() <= MAX_SESSION_MESSAGES,
+            "message log must stay bounded, got {}",
+            s.messages.len()
+        );
+        // Trimming drops the OLDEST turns — the newest must survive.
+        assert_eq!(
+            s.messages.last().unwrap().content,
+            format!("msg {}", MAX_SESSION_MESSAGES * 2 - 1)
+        );
+    }
+
+    /// Crossing the message cap used to make `is_valid` return false, and the
+    /// only handling of an invalid session is to drop it and build a fresh one
+    /// (diff_triage.rs:1631-1641 / :1843). That silently discarded
+    /// `classifications` and `file_hashes` too, so a long triage run sent every
+    /// already-classified file back to the LLM. Trimming the log must not cost
+    /// the caches. (#612-9a22)
+    #[test]
+    fn crossing_message_cap_keeps_classification_cache() {
+        let mut s = TriageSession::new("haiku".to_string());
+        let h = hash_diff("some diff content");
+        s.file_hashes.insert("src/foo.rs".to_string(), h);
+        s.classifications.insert(
+            "src/foo.rs".to_string(),
+            FileClassification {
+                path: "src/foo.rs".to_string(),
+                relevance: Relevance::High,
+                category: Category::BusinessLogic,
+                risk: Risk::BehavioralChange,
+                summary: "does stuff".to_string(),
+                findings: Vec::new(),
+                source: ClassificationSource::Llm,
+                additions: 10,
+                deletions: 2,
+            },
+        );
+
+        for i in 0..MAX_SESSION_MESSAGES + 10 {
+            s.push_msg(MsgRole::User, format!("msg {i}"));
+        }
+
+        assert!(
+            s.is_valid("haiku"),
+            "a session over the message cap must stay reusable so its caches survive"
+        );
+        assert!(
+            s.classifications.contains_key("src/foo.rs"),
+            "classification cache must survive the trim"
+        );
+        assert_eq!(
+            s.file_hashes.get("src/foo.rs").copied(),
+            Some(h),
+            "diff-hash cache must survive the trim"
+        );
     }
 
     #[test]
@@ -3021,6 +3143,36 @@ diff --git a/src/b.rs b/src/b.rs
     }
 
     // ── analyze_diff tests ───────────────────────────────────────────────────
+
+    /// Equivalence guard for #612-9a22: the schema and auth checks moved from
+    /// `to_ascii_uppercase()`/`to_ascii_lowercase()` copies of every changed line
+    /// to two static regexes. The folding must stay ASCII-only, so a Unicode
+    /// look-alike must NOT be treated as its ASCII counterpart the way a plain
+    /// `(?i)` pattern would.
+    #[test]
+    fn analyze_diff_signal_matching_is_ascii_case_insensitive() {
+        // Mixed case + leading whitespace, on both added and removed lines.
+        let diff =
+            "+  create TABLE users (id int);\n-  Alter Table users drop col;\n+  DELETE from t;";
+        let s = analyze_diff(diff);
+        assert_eq!(
+            s.schema_signals, 3,
+            "ASCII case must fold in both directions"
+        );
+
+        let auth = "+  let API_Token = readSecret();\n-  const PassWord = 1;\n+  fn Authorize() {}";
+        let s = analyze_diff(auth);
+        assert_eq!(s.auth_signals, 3);
+
+        // `ſ` (long s) folds to `s` under Unicode `(?i)` but not under ASCII
+        // folding, which is what the replaced `to_ascii_lowercase` did.
+        let unicode = "+  let ſecret = 1;\n+  ſELECT 1;";
+        let s = analyze_diff(unicode);
+        assert_eq!(
+            s.auth_signals, 0,
+            "Unicode look-alikes must not match — folding is ASCII-only"
+        );
+    }
 
     #[test]
     fn analyze_diff_rust_pub_fn_added() {

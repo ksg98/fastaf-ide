@@ -42,7 +42,9 @@
 }
 
 .popover {
-  width: 360px;
+  /* The clamp only bites on a phone, which these dialogs now reach:
+     McpConfirmHost renders one in the mobile shell. */
+  width: min(360px, calc(100vw - 32px));
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
   -webkit-backdrop-filter: var(--blur-overlay);
@@ -100,6 +102,11 @@
 
 .body {
   padding: 4px 16px 16px;
+  /* An agent's confirm message is arbitrary text. `.popover` clips its overflow,
+     so without a scroll here a long one loses its tail — including, on a short
+     phone viewport, the buttons under it. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 /* Align body inputs with the controls .input recipe (focus ring). */

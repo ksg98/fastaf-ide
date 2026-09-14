@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Mock @tauri-apps/api/core — conversationStore dynamic-imports invoke from here.
+// Desktop regression coverage: the shared invoke wrapper delegates to Tauri core.
 const mockInvoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
 	invoke: mockInvoke,
@@ -438,5 +438,108 @@ describe("conversationStore history panel (1412-ae57)", () => {
 		store.setActiveTerminal("T1");
 		expect(store.messages()).toHaveLength(1);
 		expect(store.messages()[0]?.content).toBe("T1 message");
+	});
+});
+
+// A detached AI Chat window fires its disk hydration on mount and does not wait
+// for it — the input is live straight away, because the terminal it sends to
+// came in as a param and needs no IPC. So a send can overtake a slow read, and
+// the read then arrives holding the conversation as it was BEFORE that send.
+// Applying it would erase the user's turn and drop the streaming flag, leaving
+// the reply to land on a history that never asked the question.
+describe("conversationStore detached hand-over (624-a6c3)", () => {
+	let store: typeof import("../../stores/conversationStore").conversationStore;
+
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		mockInvoke.mockReset();
+		globalThis.localStorage?.clear();
+		store = (await import("../../stores/conversationStore")).conversationStore;
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("drops a disk read that a send overtook", async () => {
+		let releaseLoad: (value: unknown) => void = () => {};
+		mockInvoke.mockImplementation((cmd: string) => {
+			if (cmd === "load_conversation") {
+				return new Promise((resolve) => {
+					releaseLoad = resolve;
+				});
+			}
+			return Promise.resolve();
+		});
+
+		const loading = store.loadConversation("conv-on-disk");
+		// Let the read reach the backend and block there.
+		await vi.advanceTimersByTimeAsync(0);
+
+		// Fired, not awaited — the panel's send handler does not await either, and
+		// the user turn plus the streaming flag are set before the first await.
+		void store.sendMessage("a question typed before the read came back", "sess-1");
+
+		expect(store.isStreaming()).toBe(true);
+		expect(store.messages()).toHaveLength(1);
+
+		releaseLoad({
+			meta: { id: "conv-on-disk", title: "Past", created: 1, updated: 2, message_count: 1 },
+			messages: [{ role: "user", content: "an older turn", timestamp: 1 }],
+			schema_version: 1,
+		});
+		await loading;
+
+		expect(store.messages()).toHaveLength(1);
+		expect(store.messages()[0]?.content).toBe("a question typed before the read came back");
+		expect(store.isStreaming()).toBe(true);
+	});
+
+	// The ordinary case must keep working: nothing happened during the read, so
+	// what came off disk is the conversation.
+	it("applies a disk read that nothing overtook", async () => {
+		mockInvoke.mockImplementation((cmd: string) => {
+			if (cmd === "load_conversation") {
+				return Promise.resolve({
+					meta: { id: "conv-on-disk", title: "Past", created: 1, updated: 2, message_count: 1 },
+					messages: [{ role: "user", content: "an older turn", timestamp: 1 }],
+					schema_version: 1,
+				});
+			}
+			return Promise.resolve();
+		});
+
+		await store.loadConversation("conv-on-disk");
+
+		expect(store.messages()).toHaveLength(1);
+		expect(store.messages()[0]?.content).toBe("an older turn");
+		expect(store.chatId()).toBe("conv-on-disk");
+	});
+});
+
+// Criterion 2 rests on this and nothing else: the detached window fires the
+// hydration and never looks at the result, so an id with nothing behind it has
+// to be the store's problem, not an unhandled rejection in the panel.
+describe("conversationStore load of an unknown id (624-a6c3)", () => {
+	let store: typeof import("../../stores/conversationStore").conversationStore;
+
+	beforeEach(async () => {
+		vi.resetModules();
+		mockInvoke.mockReset();
+		globalThis.localStorage?.clear();
+		store = (await import("../../stores/conversationStore")).conversationStore;
+	});
+
+	it("resolves and leaves the conversation empty when the backend read fails", async () => {
+		mockInvoke.mockImplementation((cmd: string) => {
+			if (cmd === "load_conversation") return Promise.reject(new Error("conversation not found"));
+			return Promise.resolve();
+		});
+
+		await expect(store.loadConversation("never-saved")).resolves.toBeUndefined();
+
+		expect(store.messages()).toEqual([]);
+		expect(store.error()).toBeNull();
 	});
 });

@@ -1,11 +1,5 @@
 // Shared types for FastAF
 
-/** PTY output event from Tauri */
-export interface PtyOutput {
-	session_id: string;
-	data: string;
-}
-
 /** Repository info from git */
 export interface RepoInfo {
 	path: string;
@@ -64,10 +58,8 @@ export interface IPty {
 
 /**
  * PTY event handler types for Tauri event listeners.
- * Usage: listen<PtyOutput>(`pty-output-${sessionId}`, handler)
  * Usage: listen<PtyExit>(`pty-exit-${sessionId}`, handler)
  */
-export type PtyDataHandler = (data: PtyOutput) => void;
 export type PtyExitHandler = (data: PtyExit) => void;
 
 /** Git remote + branch status (PR/CI data comes from githubStore via batch query) */
@@ -96,6 +88,9 @@ export interface CheckDetail {
 
 /** Merge state: MERGEABLE, CONFLICTING, UNKNOWN */
 export type MergeableState = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+/** Backend verdict on whether the branch conflicts. `checking` means GitHub is
+ *  still recomputing and `mergeable` is a stale value nobody may render. */
+export type ConflictState = "conflicting" | "checking" | "clear";
 
 /** Merge state status: BEHIND, BLOCKED, CLEAN, DIRTY, DRAFT, HAS_HOOKS, UNKNOWN, UNSTABLE */
 export type MergeStateStatus =
@@ -144,6 +139,8 @@ export interface BranchPrStatus {
 	head_ref_oid: string;
 	created_at: string;
 	updated_at: string;
+	/** Pre-computed by the backend so badge and popover cannot disagree. */
+	conflict_state: ConflictState;
 	merge_state_label: { label: string; css_class: string } | null;
 	review_state_label: { label: string; css_class: string } | null;
 	merge_commit_allowed: boolean;
@@ -244,3 +241,14 @@ export interface OrchestratorStats {
 	max_sessions: number;
 	available_slots: number;
 }
+
+/**
+ * Which half of a repo changed, as reported by `repo-changed`.
+ *
+ * `git-state` means `.git/` was written (commit, refs, index) — and, because
+ * the backend's git-state emit cancels the pending working-tree one, it also
+ * covers any working-tree write in the same change. `working-tree` therefore
+ * means "files changed and `.git` did not", which is what lets the committed-
+ * history panels skip the refresh.
+ */
+export type RepoChangeKind = "git-state" | "working-tree";

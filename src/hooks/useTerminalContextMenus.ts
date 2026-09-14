@@ -4,6 +4,7 @@ import type { ContextMenuItem } from "../components/ContextMenu";
 import { invoke } from "../invoke";
 import { getModifierSymbol } from "../platform";
 import { agentConfigsStore } from "../stores/agentConfigs";
+import { appLogger } from "../stores/appLogger";
 import { contextMenuActionsStore } from "../stores/contextMenuActionsStore";
 import { paneLayoutStore } from "../stores/paneLayout";
 import { repositoriesStore } from "../stores/repositories";
@@ -156,7 +157,15 @@ export function useTerminalContextMenus(options: TerminalContextMenuOptions): {
 				const term = activeId ? terminalsStore.get(activeId) : undefined;
 				const lastBlock = term?.commandBlocks[term.commandBlocks.length - 1];
 				if (!term?.ref || !lastBlock || lastBlock.executionLine == null || lastBlock.endLine == null) return;
-				const lines = await term.ref.getBufferLines(lastBlock.executionLine + 1, lastBlock.endLine);
+				// The menu invokes this without awaiting it, so a rejected buffer read
+				// would surface as an unhandled rejection instead of a failed copy.
+				let lines: string[];
+				try {
+					lines = await term.ref.getBufferLines(lastBlock.executionLine + 1, lastBlock.endLine);
+				} catch (e) {
+					appLogger.warn("terminal", "Copy Block Output failed to read the buffer", { error: String(e) });
+					return;
+				}
 				const text = lines.join("\n").trimEnd();
 				if (text) void writeClipboard(text);
 			},

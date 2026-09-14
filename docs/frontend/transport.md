@@ -47,18 +47,63 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 
 This replaces the previous 370-line switch statement with a flat lookup table for easier maintenance and review.
 
+### HTTP Response Semantics
+
+Successful JSON responses preserve the backend's decoded value exactly. In
+particular, a literal `null` body is a valid result for commands whose Tauri
+contract returns `Option<T>`; browser and PWA callers receive the same `null`
+that desktop IPC returns for `None`.
+
+A zero-length text or JSON body is not the same value and is rejected with the
+command name in the error. Responses declared as JSON are also rejected when
+their non-empty body is malformed, while non-success HTTP statuses retain their
+status and command context. Binary `application/octet-stream` routes are the
+deliberate exception: an empty buffer can be a valid terminal chunk.
+
 ### PTY Subscription
 
 ```typescript
 export function subscribePty(
   sessionId: string,
-  onData: PtyDataHandler,
-  onExit: PtyExitHandler
-): Unsubscribe
+  onData: (data: string) => void,
+  onExit: () => void,
+  onParsedOrOptions?: ((event: WsParsedEvent) => void) | SubscribePtyOptions
+): PtySubscription
 ```
 
-- **Tauri mode:** Uses `listen("pty-output")` and `listen("pty-exit")` Tauri events
+- **Tauri mode:** Uses `listen("pty-activity-{id}")` and `listen("pty-exit-{id}")` Tauri events
 - **Browser mode:** Opens WebSocket to `/sessions/{id}/stream`
+
+`PtySubscription` is still callable to dispose the subscription — every existing
+caller works unchanged — and carries `pause()` / `resume()` for a client that is
+not on screen (`src/mobile/utils/pageVisibility.ts` wires them to
+`visibilitychange`).
+
+`pause()` is deliberately NOT `unsubscribe()` followed by a fresh
+`subscribePty()`. Two things would break:
+
+- The close handler reads codes 1000/1001 as a real session exit, so the view
+  would print "session exited" and clear the screen on every tab switch.
+- The consumed-line cursor is closure-private, so a fresh subscription replays
+  from the **mount** offset and duplicates the whole scrollback.
+
+Instead the paused socket is closed with the cursor kept alive, `onExit` stays
+silent, pending reconnect backoff is cancelled, and `resume()` reopens from that
+cursor. A paused subscription delivers nothing, and because the cursor only
+advances on delivery, nothing is skipped either. On desktop there is no socket
+to drop, so `pause()` suppresses delivery instead — the same observable
+contract.
+
+`onData` receives PTY output in **browser/PWA mode only**. Desktop sends no output
+over IPC: the canvas renders from grid frames and plugin watcher lines are
+assembled in Rust, so no desktop consumer needs the bytes.
+
+For "is this session producing output", use `options.onActivity` — a payload-free
+pulse the backend throttles to ~1/s and delivers on both transports from one
+signal (`pty-activity-{id}` on desktop, the `{"type":"activity"}` WS frame in the
+browser). It is the only activity signal that works for a background tab: the
+canvas stops acking grid frames while a terminal is hidden, so frame traffic
+cannot stand in for it.
 
 ### URL Building
 

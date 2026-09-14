@@ -25,7 +25,6 @@ const TunnelsPanel = lazy(() => import("./components/TunnelsPanel").then((m) => 
 
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { AIChatPanel } from "./components/AIChatPanel/AIChatPanel";
 import { DictationToast } from "./components/DictationToast/DictationToast";
 import { ErrorLogPanel } from "./components/ErrorLogPanel";
 import { McpPopup } from "./components/McpPopup/McpPopup";
@@ -65,15 +64,16 @@ import { useShortcutRegistration } from "./hooks/useShortcutRegistration";
 import { useSmartPrompts } from "./hooks/useSmartPrompts";
 import { useSplitPanes } from "./hooks/useSplitPanes";
 import { useSystemLifecycle } from "./hooks/useSystemLifecycle";
-import { useTabActivationSync } from "./hooks/useTabActivationSync";
 import { useTerminalCompletionNotifications } from "./hooks/useTerminalCompletionNotifications";
 import { useTerminalContextMenus } from "./hooks/useTerminalContextMenus";
 import { useTerminalLifecycle } from "./hooks/useTerminalLifecycle";
 import { useTerminalReattachBridge } from "./hooks/useTerminalReattachBridge";
 import { useTerminalShellExit } from "./hooks/useTerminalShellExit";
+import { useWorktreeConsolidation } from "./hooks/useWorktreeConsolidation";
 import { useWorktreeSwitchPrompt } from "./hooks/useWorktreeSwitchPrompt";
 import { invoke, listen } from "./invoke";
 import { activityPanelAdapter } from "./panelAdapters/activity";
+import { aiChatPanelAdapter } from "./panelAdapters/aiChat";
 import { fileBrowserPanelAdapter } from "./panelAdapters/fileBrowser";
 import { gitPanelAdapter } from "./panelAdapters/git";
 import { markdownPanelAdapter } from "./panelAdapters/markdown";
@@ -85,7 +85,6 @@ import { activityStore } from "./stores/activityStore";
 import { agentConfigsStore } from "./stores/agentConfigs";
 import { appLogger } from "./stores/appLogger";
 import { contextMenuActionsStore } from "./stores/contextMenuActionsStore";
-import { conversationStore } from "./stores/conversationStore";
 import { dictationStore } from "./stores/dictation";
 import { diffTabsStore } from "./stores/diffTabs";
 import { errorLogStore } from "./stores/errorLog";
@@ -101,10 +100,11 @@ import { prNotificationsStore } from "./stores/prNotifications";
 import { promptLibraryStore } from "./stores/promptLibrary";
 import { repoDefaultsStore } from "./stores/repoDefaults";
 import { repoSettingsStore } from "./stores/repoSettings";
-import { repositoriesStore } from "./stores/repositories";
+import { locateFile, repositoriesStore } from "./stores/repositories";
 import { settingsStore } from "./stores/settings";
 import { tasksStore } from "./stores/tasks";
 import { terminalsStore } from "./stores/terminals";
+import { TOAST_ACTIVITY_SECTION_ID } from "./stores/toasts";
 import { uiStore } from "./stores/ui";
 import { updaterStore } from "./stores/updater";
 import { userActivityStore } from "./stores/userActivity";
@@ -113,7 +113,6 @@ import { isTauri } from "./transport";
 import { openFileAction, openFileBesideTerminal } from "./utils/filePreview";
 import { navigateToTerminal } from "./utils/navigateToTerminal";
 import { initPaneTabAssignment } from "./utils/paneTabAssign";
-import { pathStartsWith, pathStripPrefix } from "./utils/pathUtils";
 import { getShellFamily, sendCommand } from "./utils/sendCommand";
 
 const getDefaultFontSize = () => settingsStore.state.defaultFontSize;
@@ -122,19 +121,7 @@ const getMaxTabNameLength = () => settingsStore.state.maxTabNameLength;
 /** Detect secondary window mode via URL query param */
 const isSecondaryWindow = () => new URLSearchParams(window.location.search).get("mode") === "secondary";
 
-registerPanel({
-	id: "ai-chat",
-	title: "AI Chat",
-	defaultSize: { width: 500, height: 700 },
-	toggle: () => uiStore.toggleAiChatPanel(),
-	detachParams: () => ({ chatId: conversationStore.chatId() }),
-	Component: (props: { params: URLSearchParams }) => {
-		const chatId = props.params.get("chatId");
-		if (chatId) conversationStore.setChatId(chatId);
-		return <AIChatPanel visible={true} onClose={() => window.close()} />;
-	},
-});
-
+registerPanel(aiChatPanelAdapter);
 registerPanel(activityPanelAdapter);
 registerPanel(gitPanelAdapter);
 registerPanel(fileBrowserPanelAdapter);
@@ -200,11 +187,14 @@ const App: Component = () => {
 	}
 	const [settingsPanelVisible, setSettingsPanelVisible] = createSignal(false);
 	const [settingsInitialTab, setSettingsInitialTab] = createSignal<string | undefined>(undefined);
+	const [settingsInitialSection, setSettingsInitialSection] = createSignal<string | undefined>(undefined);
 	const [settingsContext, setSettingsContext] = createSignal<SettingsContext>({ kind: "global" });
 
-	const openSettings = (tab?: string) => {
+	/** `section` is the DOM id of a block to scroll to — see SettingsPanel/sections.ts */
+	const openSettings = (tab?: string, section?: string) => {
 		setSettingsContext({ kind: "global" });
 		setSettingsInitialTab(tab);
+		setSettingsInitialSection(section);
 		setSettingsPanelVisible(true);
 	};
 	const [taskQueueVisible, setTaskQueueVisible] = createSignal(false);
@@ -297,6 +287,10 @@ const App: Component = () => {
 	// repo switch / window focus regain.
 	useFocusTracker();
 
+	// Keep each repo's consolidated worktree view in sync with its worktrees,
+	// and show it when the active repo has the toggle on (#e767).
+	useWorktreeConsolidation();
+
 	const terminalLifecycle = useTerminalLifecycle({
 		pty,
 		dialogs,
@@ -312,6 +306,7 @@ const App: Component = () => {
 			promptRepoPath,
 			confirmOrphanCleanup: dialogs.confirmOrphanCleanup,
 			confirmRemoveLockedWorktree: dialogs.confirmRemoveLockedWorktree,
+			confirmDirtyWorktreeCleanup: dialogs.confirmDirtyWorktreeCleanup,
 		},
 		closeTerminal: terminalLifecycle.closeTerminal,
 		createNewTerminal: terminalLifecycle.createNewTerminal,
@@ -405,14 +400,21 @@ const App: Component = () => {
 	// Auto-delete local branches when their PR is merged/closed
 	useAutoDeleteBranch({ confirm: (opts) => dialogs.confirm(opts) });
 
-	// Offer to switch to newly created worktrees (from MCP) + activity notification
+	// Offer to switch to newly created worktrees (from MCP) + activity notification,
+	// and prune the sidebar row when a worktree is removed backend-side.
 	useWorktreeSwitchPrompt({
-		confirm: (opts) => dialogs.confirm(opts),
 		handleBranchSelect: gitOps.handleBranchSelect,
+		closeTerminalsForBranch: gitOps.closeTerminalsForBranch,
 	});
 
 	// Register built-in activity sections for git and worktree notifications
 	activityStore.registerSection({ id: "terminals", label: "TERMINALS", priority: 10, canDismissAll: true });
+	activityStore.registerSection({
+		id: TOAST_ACTIVITY_SECTION_ID,
+		label: "MESSAGES",
+		priority: 20,
+		canDismissAll: true,
+	});
 	activityStore.registerSection({ id: "git-ops", label: "GIT", priority: 30, canDismissAll: true });
 	activityStore.registerSection({ id: "worktrees", label: "WORKTREES", priority: 40, canDismissAll: true });
 
@@ -443,12 +445,12 @@ const App: Component = () => {
 		restoreDetachedPanels: detachedPanelBridge.restoreDetachedPanels,
 		setWhatsNewVersion,
 		openSettings,
+		openRepoPath: gitOps.addRepoByPath,
 		confirm: (options) => dialogs.confirm(options),
 	});
 
 	useAppearanceSync();
 
-	useTabActivationSync();
 	useActiveTerminalSync();
 
 	useTerminalShellExit(terminalLifecycle.closeTerminal);
@@ -503,19 +505,18 @@ const App: Component = () => {
 
 	/** Open a file path from terminal output — .md/.mdx in MD viewer, others in internal editor */
 	const handleOpenFilePath = (absolutePath: string, _line?: number, _col?: number) => {
-		const repoPath = repositoriesStore.state.activeRepoPath;
+		// Scoped to the repo that owns the PATH. It used to relativize against the
+		// active worktree, so a path printed by an agent working in another repo
+		// opened as a tab filed under whichever repo the user happened to be on.
+		const { repoPath, fsRoot, filePath } = locateFile(absolutePath);
 		if (!repoPath) return;
-		const fsRoot = gitOps.activeWorktreePath() || repoPath;
-
-		// Convert to relative path when inside the effective root (worktree or repo), keep absolute otherwise
-		const filePath = pathStartsWith(absolutePath, fsRoot) ? pathStripPrefix(absolutePath, fsRoot)! : absolutePath;
 
 		openFileAction(filePath, repoPath, fsRoot, undefined, (tabId) => {
 			terminalLifecycle.handleTerminalSelect(tabId);
 		});
 	};
 
-	useFileOpenBridge({ getActiveWorktreePath: gitOps.activeWorktreePath });
+	useFileOpenBridge();
 
 	/** Patterns in stderr that indicate the command needs interactive terminal input */
 	const NEEDS_TERMINAL_PATTERNS = [
@@ -826,7 +827,7 @@ const App: Component = () => {
 				}}
 				onRun={(shiftKey) => gitOps.handleRunCommand(shiftKey, () => setRunCommandDialogVisible(true))}
 				onReviewPr={gitOps.handleReviewPr}
-				onOpenSettings={() => setSettingsPanelVisible(true)}
+				onOpenSettings={() => openSettings("smart-prompts")}
 				onShowWhatsNew={(v) => setWhatsNewVersion(v)}
 			/>
 
@@ -997,10 +998,8 @@ const App: Component = () => {
 			{/* Prompt library drawer */}
 			<PromptDrawer />
 
-			{/* Command palette (Tauri only — many actions are Tauri-specific) */}
-			<Show when={isTauri()}>
-				<CommandPalette actions={actionEntries()} />
-			</Show>
+			{/* Browser mode uses the same palette with its HTTP-safe action subset. */}
+			<CommandPalette actions={actionEntries()} browserMode={!isTauri()} />
 
 			{/* Quick branch switcher */}
 			<BranchSwitcher
@@ -1042,55 +1041,92 @@ const App: Component = () => {
 			<ErrorLogPanel />
 
 			<ApplicationOverlays
-				settingsPanelVisible={settingsPanelVisible}
-				setSettingsPanelVisible={setSettingsPanelVisible}
-				settingsInitialTab={settingsInitialTab}
-				settingsContext={settingsContext}
-				taskQueueVisible={taskQueueVisible}
-				setTaskQueueVisible={setTaskQueueVisible}
+				panels={{
+					settingsVisible: settingsPanelVisible,
+					closeSettings: () => setSettingsPanelVisible(false),
+					settingsInitialTab,
+					settingsInitialSection,
+					settingsContext,
+					taskQueueVisible,
+					closeTaskQueue: () => setTaskQueueVisible(false),
+					helpVisible: helpPanelVisible,
+					closeHelp: () => setHelpPanelVisible(false),
+				}}
 				contextMenu={contextMenu}
 				getContextMenuItems={terminalContextMenus.getContextMenuItems}
-				renameBranchDialogVisible={renameBranchDialogVisible}
-				setRenameBranchDialogVisible={setRenameBranchDialogVisible}
-				createBranchDialogVisible={createBranchDialogVisible}
-				setCreateBranchDialogVisible={setCreateBranchDialogVisible}
-				cloneDialogVisible={cloneDialogVisible}
-				setCloneDialogVisible={setCloneDialogVisible}
-				importDialogVisible={importDialogVisible}
-				setImportDialogVisible={setImportDialogVisible}
-				runCommandDialogVisible={runCommandDialogVisible}
-				setRunCommandDialogVisible={setRunCommandDialogVisible}
-				termRenamePromptVisible={termRenamePromptVisible}
-				setTermRenamePromptVisible={setTermRenamePromptVisible}
-				termRenameDefault={termRenameDefault}
-				openPathPromptVisible={openPathPromptVisible}
-				resolveOpenPathPrompt={resolveOpenPathPrompt}
-				repoPathPromptVisible={repoPathPromptVisible}
-				resolveRepoPathPrompt={resolveRepoPathPrompt}
-				dialogs={dialogs}
-				pendingFolderDrop={pendingFolderDrop}
-				setPendingFolderDrop={setPendingFolderDrop}
-				showProcessManager={showProcessManager}
-				setShowProcessManager={setShowProcessManager}
-				showGenerators={showGenerators}
-				setShowGenerators={setShowGenerators}
-				showRemoteQr={showRemoteQr}
-				setShowRemoteQr={setShowRemoteQr}
-				whatsNewVersion={whatsNewVersion}
-				setWhatsNewVersion={setWhatsNewVersion}
-				gitOps={gitOps}
-				worktreeCleanupAction={worktreeCleanupAction}
-				setWorktreeCleanupAction={setWorktreeCleanupAction}
-				worktreeCleanupExecuting={worktreeCleanupExecuting}
-				worktreeCleanupStepStatuses={worktreeCleanupStepStatuses}
-				worktreeCleanupStepErrors={worktreeCleanupStepErrors}
-				worktreeCleanupStepNotes={worktreeCleanupStepNotes}
-				onWorktreeCleanupExecute={handleWorktreeCleanupExecute}
-				onWorktreeCleanupSkip={handleWorktreeCleanupSkip}
-				helpPanelVisible={helpPanelVisible}
-				setHelpPanelVisible={setHelpPanelVisible}
-				quitDialogVisible={quitDialogVisible}
-				setQuitDialogVisible={setQuitDialogVisible}
+				git={{
+					renameVisible: renameBranchDialogVisible,
+					closeRename: () => {
+						setRenameBranchDialogVisible(false);
+						gitOps.setBranchToRename(null);
+					},
+					branchToRename: gitOps.branchToRename,
+					onRename: gitOps.handleRenameBranch,
+					createVisible: createBranchDialogVisible,
+					closeCreate: () => {
+						setCreateBranchDialogVisible(false);
+						gitOps.setBranchToCreate(null);
+					},
+					branchToCreate: gitOps.branchToCreate,
+					onCreate: gitOps.handleCreateBranch,
+					worktreeState: gitOps.worktreeDialogState,
+					closeWorktree: () => gitOps.setWorktreeDialogState(null),
+					onGenerateWorktreeName: gitOps.generateWorktreeName,
+					onCreateWorktree: gitOps.confirmCreateWorktree,
+					runVisible: runCommandDialogVisible,
+					closeRun: () => setRunCommandDialogVisible(false),
+					activeRunCommand: gitOps.activeRunCommand,
+					onRun: gitOps.executeRunCommand,
+					cloneVisible: cloneDialogVisible,
+					closeClone: () => setCloneDialogVisible(false),
+					onCloned: (path) => void gitOps.addRepoFromPath(path),
+					importVisible: importDialogVisible,
+					closeImport: () => setImportDialogVisible(false),
+					onImport: async (selected, includeChats) => {
+						await gitOps.handleImportProjects(selected, includeChats);
+						setImportDialogVisible(false);
+					},
+				}}
+				prompts={{
+					terminalRenameVisible: termRenamePromptVisible,
+					closeTerminalRename: () => setTermRenamePromptVisible(false),
+					terminalRenameDefault: termRenameDefault,
+					openPathVisible: openPathPromptVisible,
+					resolveOpenPath: resolveOpenPathPrompt,
+					repoPathVisible: repoPathPromptVisible,
+					resolveRepoPath: resolveRepoPathPrompt,
+				}}
+				confirmations={{
+					dialogState: dialogs.dialogState,
+					onClose: dialogs.handleClose,
+					onConfirm: dialogs.handleConfirm,
+					onDiscard: dialogs.handleDiscard,
+					pendingFolderDrop,
+					setPendingFolderDrop,
+				}}
+				utilities={{
+					processManagerVisible: showProcessManager,
+					closeProcessManager: () => setShowProcessManager(false),
+					generatorsVisible: showGenerators,
+					closeGenerators: () => setShowGenerators(false),
+					remoteQrVisible: showRemoteQr,
+					closeRemoteQr: () => setShowRemoteQr(false),
+					whatsNewVersion,
+					setWhatsNewVersion,
+				}}
+				cleanup={{
+					context: gitOps.mergePendingCtx,
+					action: worktreeCleanupAction,
+					setAction: setWorktreeCleanupAction,
+					executing: worktreeCleanupExecuting,
+					stepStatuses: worktreeCleanupStepStatuses,
+					stepErrors: worktreeCleanupStepErrors,
+					stepNotes: worktreeCleanupStepNotes,
+					onExecute: handleWorktreeCleanupExecute,
+					onSkip: handleWorktreeCleanupSkip,
+				}}
+				quitVisible={quitDialogVisible}
+				setQuitVisible={setQuitDialogVisible}
 				forceQuit={forceQuit}
 			/>
 		</div>

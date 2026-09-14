@@ -68,6 +68,8 @@ interface TranscribeResponse {
 	text: string;
 	skip_reason: string | null;
 	duration_s: number;
+	/** Seconds of speech the recording cap dropped — 0 for an ordinary recording. */
+	truncated_s: number;
 }
 
 /** Audio device from Rust backend */

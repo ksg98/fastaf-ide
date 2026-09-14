@@ -26,10 +26,12 @@ function normalizePath(p: string): string {
  * Resolve a path (absolute or relative) to a repo + relative-path pair.
  *
  * - Absolute paths are matched against the known repo list (longest match wins).
- * - Relative paths are resolved against `activeRepoPath`.
+ * - Relative paths are resolved against `baseRepoPath` — the repo the ASKING
+ *   panel belongs to, not whichever repo happens to have focus. A panel showing
+ *   one repo's content must not resolve its own links into another repo.
  * - Path traversal (../) that escapes the repo root returns null.
  */
-export function resolveTuicPath(path: string, repoPaths: string[], activeRepoPath: string | null): ResolvedPath | null {
+export function resolveTuicPath(path: string, repoPaths: string[], baseRepoPath: string | null): ResolvedPath | null {
 	if (!path) return null;
 
 	if (isAbsolutePath(path)) {
@@ -39,14 +41,14 @@ export function resolveTuicPath(path: string, repoPaths: string[], activeRepoPat
 		return { repoPath: repo, relPath: pathStripPrefix(path, repo)! };
 	}
 
-	if (!activeRepoPath) return null;
+	if (!baseRepoPath) return null;
 
-	const absoluteResolved = normalizePath(joinPath(activeRepoPath, path));
+	const absoluteResolved = normalizePath(joinPath(baseRepoPath, path));
 
-	if (!pathStartsWith(absoluteResolved, activeRepoPath)) {
+	if (!pathStartsWith(absoluteResolved, baseRepoPath)) {
 		return null;
 	}
 
-	const relPath = pathStripPrefix(absoluteResolved, activeRepoPath)!;
-	return { repoPath: activeRepoPath, relPath };
+	const relPath = pathStripPrefix(absoluteResolved, baseRepoPath)!;
+	return { repoPath: baseRepoPath, relPath };
 }

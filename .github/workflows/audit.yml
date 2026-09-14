@@ -8,6 +8,11 @@ on:
 permissions:
   issues: write
 
+# RUST_VERSION pins the compiler; bump it in lockstep with ci.yml, release.yml and
+# nightly.yml — see the note in ci.yml and docs/guides/ci.md.
+env:
+  RUST_VERSION: "1.98.0"
+
 jobs:
   audit:
     name: Security audit
@@ -23,8 +28,10 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Install Rust stable
+      - name: Install Rust ${{ env.RUST_VERSION }}
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install cargo-audit
         run: cargo install cargo-audit

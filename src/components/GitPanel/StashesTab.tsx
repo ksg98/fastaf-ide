@@ -54,12 +54,14 @@ export const StashesTab: Component<StashesTabProps> = (props) => {
 		}
 	}
 
-	// Re-fetch when repo changes or revision bumps
+	// Re-fetch when the repo changes or its git state moves. The GIT revision,
+	// not the general one: a stash is a ref, and `git stash` writes
+	// `.git/refs/stash` — which the watcher reports as git-state.
 	createEffect(
 		on(
 			() => {
 				const repoPath = props.repoPath;
-				const rev = repoPath ? repositoriesStore.getRevision(repoPath) : 0;
+				const rev = repoPath ? repositoriesStore.getGitRevision(repoPath) : 0;
 				return `${repoPath ?? ""}:${rev}`;
 			},
 			() => {

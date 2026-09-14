@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AGENT_ENTER_GAP_MS } from "../../utils/sendCommand";
 import { SuggestChips } from "../components/SuggestChips";
 
 vi.mock("../../transport", () => ({
@@ -30,8 +31,10 @@ describe("SuggestChips", () => {
 		const { container } = render(() => <SuggestChips sessionId="s1" items={["Run tests"]} agentType="claude" />);
 		const button = container.querySelector("button")!;
 		await fireEvent.click(button);
-		// Flush the second await in sendCommand (writeFn("\r"))
-		await new Promise((r) => setTimeout(r, 0));
+		// Wait past AGENT_ENTER_GAP_MS: with an agent attached sendCommand holds
+		// the Enter back by a real elapsed gap so the PTY cannot coalesce it into
+		// the payload's read(). A microtask flush no longer reaches the 2nd write.
+		await new Promise((r) => setTimeout(r, AGENT_ENTER_GAP_MS + 20));
 		expect(rpc).toHaveBeenCalledTimes(2);
 		expect(rpc).toHaveBeenNthCalledWith(1, "write_pty", { sessionId: "s1", data: "\x15Run tests" });
 		expect(rpc).toHaveBeenNthCalledWith(2, "write_pty", { sessionId: "s1", data: "\r" });

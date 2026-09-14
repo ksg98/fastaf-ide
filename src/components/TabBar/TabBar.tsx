@@ -26,9 +26,8 @@ import { globalWorkspaceStore } from "../../stores/globalWorkspace";
 import { mdTabsStore, type PluginPanelTab } from "../../stores/mdTabs";
 import { multiviewStore } from "../../stores/multiview";
 import { paneLayoutStore } from "../../stores/paneLayout";
-import { repositoriesStore } from "../../stores/repositories";
+import { currentBranchKey, repositoriesStore } from "../../stores/repositories";
 import { settingsStore } from "../../stores/settings";
-import { makeBranchKey } from "../../stores/tabManager";
 import { tabOrderingStore } from "../../stores/tabOrdering";
 import { terminalsStore } from "../../stores/terminals";
 import { cx } from "../../utils";
@@ -37,7 +36,9 @@ import { keyFor } from "../../utils/hotkey";
 import { computeGrid } from "../../utils/multiviewGrid";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { computeLeafRects } from "../../utils/paneTreeGeometry";
+import { isPerfDebug } from "../../utils/perfDebug";
 import { fileContextSmartMenuItem } from "../../utils/promptContext";
+import { ptyCaptureStore } from "../../utils/ptyCapture";
 import { getRepoColor } from "../../utils/repoColor";
 import type { ContextMenuItem } from "../ContextMenu/ContextMenu";
 import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
@@ -315,6 +316,23 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				action: () => globalWorkspaceStore.togglePromote(id),
 			},
 		);
+		// Raw PTY capture — the evidence a state-detection bug needs has to be
+		// recorded BEFORE the reproduction, so it belongs one click from the tab
+		// that misbehaves. Gated on the same debug flag as the rest of the
+		// instrumentation: on in dev, wakeable in a release build.
+		const sessionId = term?.sessionId;
+		if (isPerfDebug() && sessionId) {
+			const recording = ptyCaptureStore.isRecording(sessionId);
+			items.push(
+				{ label: "", separator: true, action: () => {} },
+				{
+					label: recording
+						? t("tabBar.stopCapture", "Stop Capture Session")
+						: t("tabBar.captureSession", "Capture Session"),
+					action: () => void ptyCaptureStore.toggle(sessionId),
+				},
+			);
+		}
 		// Plugin-registered tab actions
 		const tabActions = contextMenuActionsStore.getContextActions("tab");
 		if (tabActions.length > 0) {
@@ -335,6 +353,9 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		e.preventDefault();
 		e.stopPropagation();
 		setContextTabId(id);
+		// The tap is one global switch that curl and other windows can also flip,
+		// so read it back rather than trusting the last value this window wrote.
+		if (isPerfDebug()) void ptyCaptureStore.refresh();
 		tabMenu.open(e);
 	};
 
@@ -405,14 +426,10 @@ export const TabBar: Component<TabBarProps> = (props) => {
 		return ordered;
 	};
 
-	// Branch key for filtering non-terminal tabs
-	const activeBranchKey = () => {
-		const repoPath = repositoriesStore.state.activeRepoPath;
-		if (!repoPath) return null;
-		const repo = repositoriesStore.state.repositories[repoPath];
-		if (!repo?.activeBranch) return null;
-		return makeBranchKey(repoPath, repo.activeBranch);
-	};
+	// Branch key for filtering non-terminal tabs. A legitimate use of focus: this
+	// asks "what should be on screen for the repo the user is looking at", not
+	// "which repo owns this tab".
+	const activeBranchKey = () => currentBranchKey() ?? null;
 
 	const visibleDiffIds = () => diffTabsStore.getVisibleIds(activeBranchKey());
 	const visibleMdIds = () => mdTabsStore.getVisibleIds(activeBranchKey());

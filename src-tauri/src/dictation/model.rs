@@ -275,7 +275,7 @@ mod tests {
     fn test_all_models_have_unique_names() {
         let names: Vec<&str> = WhisperModel::ALL.iter().map(|m| m.name()).collect();
         let mut dedup = names.clone();
-        dedup.sort();
+        dedup.sort_unstable();
         dedup.dedup();
         assert_eq!(names.len(), dedup.len());
     }
@@ -284,7 +284,7 @@ mod tests {
     fn test_all_models_have_unique_filenames() {
         let filenames: Vec<&str> = WhisperModel::ALL.iter().map(|m| m.filename()).collect();
         let mut dedup = filenames.clone();
-        dedup.sort();
+        dedup.sort_unstable();
         dedup.dedup();
         assert_eq!(filenames.len(), dedup.len());
     }
@@ -348,6 +348,11 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_model_is_ok() {
+        // Pin the config dir: without the override lock this would resolve
+        // `model_path` inside whatever directory a concurrent test has
+        // overridden, and delete that test's model file from under it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::config::set_config_dir_override(dir.path().to_path_buf());
         // Deleting a model that doesn't exist should be a no-op
         let result = delete_model(WhisperModel::Small);
         assert!(result.is_ok());

@@ -2,6 +2,7 @@ import { type Component, createEffect, createSignal, For, onCleanup, Show } from
 import { SMART_PROMPTS_BUILTIN, VARIABLE_DESCRIPTIONS } from "../../data/smartPromptsBuiltIn";
 import { useConfirmDialog } from "../../hooks/useConfirmDialog";
 import { usePty } from "../../hooks/usePty";
+import { shouldSubmitInjectPrompt } from "../../hooks/useSmartPrompts";
 import { t } from "../../i18n";
 import { appLogger } from "../../stores/appLogger";
 import {
@@ -49,16 +50,28 @@ export const PromptDrawer: Component<PromptDrawerProps> = (props) => {
 	const [showVariableDialog, setShowVariableDialog] = createSignal(false);
 	const [pendingPrompt, setPendingPrompt] = createSignal<SavedPrompt | null>(null);
 	const dialogs = useConfirmDialog();
+	let pendingPromptClick: ReturnType<typeof setTimeout> | null = null;
 
 	const pty = usePty();
 
 	const filteredPrompts = () => promptLibraryStore.getFilteredPrompts();
 	const isOpen = () => promptLibraryStore.state.drawerOpen;
+	const clearPendingPromptClick = () => {
+		if (pendingPromptClick !== null) {
+			clearTimeout(pendingPromptClick);
+			pendingPromptClick = null;
+		}
+	};
+	onCleanup(clearPendingPromptClick);
 
 	// Reset selection when prompts change
 	createEffect(() => {
 		filteredPrompts();
 		setSelectedIndex(0);
+	});
+
+	createEffect(() => {
+		if (!isOpen()) clearPendingPromptClick();
 	});
 
 	// Keyboard navigation
@@ -134,7 +147,7 @@ export const PromptDrawer: Component<PromptDrawerProps> = (props) => {
 	});
 
 	/** Inject prompt into active terminal */
-	const injectPrompt = async (prompt: SavedPrompt, executeImmediately: boolean = false) => {
+	const injectPrompt = async (prompt: SavedPrompt, submitOverride?: boolean) => {
 		if (prompt.enabled === false) return;
 
 		const variables = await promptLibraryStore.extractVariables(prompt.content);
@@ -152,28 +165,22 @@ export const PromptDrawer: Component<PromptDrawerProps> = (props) => {
 			return;
 		}
 
-		await doInject(prompt, {}, executeImmediately);
+		await doInject(prompt, {}, submitOverride);
 	};
 
-	const doInject = async (
-		prompt: SavedPrompt,
-		variables: Record<string, string>,
-		executeImmediately: boolean = false,
-	) => {
+	const doInject = async (prompt: SavedPrompt, variables: Record<string, string>, submitOverride?: boolean) => {
 		const activeTerminal = terminalsStore.getActive();
 		if (!activeTerminal?.sessionId) return;
 
 		const content = await promptLibraryStore.processContent(prompt, variables);
 
 		try {
-			// "compose" target routes through the compose panel for review;
-			// "terminal" writes straight to the PTY (defaults to compose).
 			const target = prompt.injectTarget ?? "compose";
-			if (target === "compose" && activeTerminal.ref?.openComposeWithText) {
+			const submit = shouldSubmitInjectPrompt(prompt, submitOverride);
+			if (!submit && target === "compose" && activeTerminal.ref?.openComposeWithText) {
 				activeTerminal.ref.openComposeWithText(content);
 			} else {
-				const toWrite = executeImmediately ? content + "\n" : content;
-				await pty.write(activeTerminal.sessionId, toWrite);
+				await pty.sendCommand(activeTerminal.sessionId, content, activeTerminal.agentType, submit);
 			}
 			promptLibraryStore.markAsUsed(prompt.id);
 			promptLibraryStore.closeDrawer();
@@ -181,6 +188,23 @@ export const PromptDrawer: Component<PromptDrawerProps> = (props) => {
 		} catch (err) {
 			appLogger.error("app", "Failed to inject prompt", err);
 		}
+	};
+
+	const handlePromptClick = (event: MouseEvent, prompt: SavedPrompt) => {
+		// A browser emits click, click, then dblclick. Delay the first click so a
+		// double-click can replace it instead of inserting once and submitting again.
+		if (event.detail > 1) return;
+		clearPendingPromptClick();
+		pendingPromptClick = setTimeout(() => {
+			pendingPromptClick = null;
+			void injectPrompt(prompt);
+		}, 200);
+	};
+
+	const handlePromptDoubleClick = (event: MouseEvent, prompt: SavedPrompt) => {
+		event.preventDefault();
+		clearPendingPromptClick();
+		void injectPrompt(prompt, true);
 	};
 
 	const handleVariableSubmit = (executeImmediately: boolean) => {
@@ -287,8 +311,8 @@ export const PromptDrawer: Component<PromptDrawerProps> = (props) => {
 													index() === selectedIndex() && s.selected,
 													isDisabled() && s.itemDisabled,
 												)}
-												onClick={() => injectPrompt(prompt)}
-												onDblClick={() => injectPrompt(prompt, true)}
+												onClick={(event) => handlePromptClick(event, prompt)}
+												onDblClick={(event) => handlePromptDoubleClick(event, prompt)}
 											>
 												<div class={s.itemContent}>
 													<div class={s.itemName}>
@@ -323,7 +347,7 @@ export const PromptDrawer: Component<PromptDrawerProps> = (props) => {
 														<div class={s.itemDescription}>{prompt.description}</div>
 													</Show>
 												</div>
-												<div class={s.itemActions}>
+												<div class={s.itemActions} onDblClick={(event) => event.stopPropagation()}>
 													<button
 														title={isDisabled() ? "Enable" : "Disable"}
 														onClick={(e) => toggleEnabled(e, prompt)}

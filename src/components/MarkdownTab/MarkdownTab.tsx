@@ -26,7 +26,7 @@ import type { SearchOptions } from "../shared/DomSearchEngine";
 import { DomSearchEngine } from "../shared/DomSearchEngine";
 import { DomSearchOverview } from "../shared/DomSearchOverview";
 import e from "../shared/editor-header.module.css";
-import { SearchBar } from "../shared/SearchBar";
+import { createSearchVisibility, SearchBar } from "../shared/SearchBar";
 import { ContentRenderer } from "../ui/ContentRenderer";
 import { CommentOverlay } from "./CommentOverlay";
 import s from "./MarkdownTab.module.css";
@@ -52,7 +52,12 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 	const [content, setContent] = createSignal("");
 	const [loading, setLoading] = createSignal(false);
 	const [error, setError] = createSignal<string | null>(null);
-	const [searchVisible, setSearchVisible] = createSignal(false);
+	const {
+		visible: searchVisible,
+		focusToken: searchFocusToken,
+		open: openSearchBar,
+		close: closeSearchBar,
+	} = createSearchVisibility();
 	const [matchIndex, setMatchIndex] = createSignal(-1);
 	const [matchCount, setMatchCount] = createSignal(0);
 	const [overviewFractions, setOverviewFractions] = createSignal<number[]>([]);
@@ -73,7 +78,7 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 	// Expose openSearch for external callers
 	const handle: MarkdownTabHandle = {
 		openSearch: () => {
-			setSearchVisible(true);
+			openSearchBar();
 		},
 	};
 
@@ -267,7 +272,7 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 
 	const handleSearchClose = () => {
 		engine?.clear();
-		setSearchVisible(false);
+		closeSearchBar();
 		setMatchCount(0);
 		setMatchIndex(-1);
 		setOverviewFractions([]);
@@ -338,8 +343,8 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 		}
 	};
 
-	const handleCheckboxToggle = async (sourceLine: number, mark: " " | "x" | "~") => {
-		const updated = toggleCheckbox(content(), sourceLine, mark);
+	const handleCheckboxToggle = async (sourceLine: number, mark: " " | "x" | "~", sourceCol?: number) => {
+		const updated = toggleCheckbox(content(), sourceLine, mark, sourceCol);
 		await writeTweakedSource(updated);
 	};
 
@@ -486,6 +491,7 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 
 			<SearchBar
 				visible={searchVisible()}
+				focusToken={searchFocusToken()}
 				onSearch={handleSearch}
 				onNext={handleSearchNext}
 				onPrev={handleSearchPrev}
@@ -505,8 +511,8 @@ export const MarkdownTab: Component<MarkdownTabProps> = (props) => {
 					content={content()}
 					baseDir={baseDir()}
 					onLinkClick={handleMdLink}
-					onCheckboxToggle={(idx, mark) => {
-						void handleCheckboxToggle(idx, mark);
+					onCheckboxToggle={(idx, mark, col) => {
+						void handleCheckboxToggle(idx, mark, col);
 					}}
 					contentRef={(el) => {
 						contentRef = el;

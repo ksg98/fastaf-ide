@@ -42,16 +42,30 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 	openUrl: vi.fn().mockResolvedValue(undefined),
 }));
 
+import { CommandPalette } from "../../components/CommandPalette/CommandPalette";
 import { Toolbar } from "../../components/Toolbar/Toolbar";
 import { activityStore } from "../../stores/activityStore";
+import { commandPaletteStore } from "../../stores/commandPalette";
 import { editorTabsStore } from "../../stores/editorTabs";
 import { prNotificationsStore } from "../../stores/prNotifications";
 import { repositoriesStore } from "../../stores/repositories";
 import { uiStore } from "../../stores/ui";
 
+function setTauriEnv(on: boolean) {
+	const global = globalThis as Record<string, unknown>;
+	if (on) {
+		global.__TAURI_INTERNALS__ = {};
+		delete global.__TAURI_SHIM__;
+	} else {
+		delete global.__TAURI_INTERNALS__;
+	}
+}
+
 describe("Toolbar", () => {
 	beforeEach(() => {
+		setTauriEnv(true);
 		localStorage.clear();
+		commandPaletteStore.close();
 		for (const path of repositoriesStore.getPaths()) {
 			repositoriesStore.remove(path);
 		}
@@ -63,8 +77,11 @@ describe("Toolbar", () => {
 	});
 
 	afterEach(() => {
+		setTauriEnv(true);
+		commandPaletteStore.close();
 		prNotificationsStore._testCancelPendingTimers();
 		repositoriesStore._testCancelPendingSave();
+		uiStore._testCancelPendingSave();
 	});
 
 	function addTestNotif(overrides: Partial<Parameters<typeof prNotificationsStore.add>[0]> = {}) {
@@ -109,6 +126,47 @@ describe("Toolbar", () => {
 		expect(container.querySelector(".left")).not.toBeNull();
 		expect(container.querySelector(".center")).not.toBeNull();
 		expect(container.querySelector(".right")).not.toBeNull();
+	});
+
+	it("browser toolbar button opens, closes, and reopens a focused palette", async () => {
+		setTauriEnv(false);
+		const actions = [
+			{
+				id: "search-files",
+				label: "Search Files",
+				category: "Search",
+				keybinding: "",
+				execute: vi.fn(),
+			},
+		];
+		const { container } = render(() => (
+			<>
+				<Toolbar />
+				<CommandPalette actions={actions} browserMode />
+			</>
+		));
+
+		const button = container.querySelector<HTMLButtonElement>('button[aria-controls="command-palette"]');
+		expect(button).not.toBeNull();
+		expect(button?.type).toBe("button");
+		expect(button?.getAttribute("aria-expanded")).toBe("false");
+
+		fireEvent.click(button!);
+		await waitFor(() => {
+			expect(container.querySelector('[role="dialog"][aria-label="Command palette"]')).not.toBeNull();
+			expect(document.activeElement).toBe(container.querySelector('[aria-label="Command palette search"]'));
+		});
+		expect(button?.getAttribute("aria-expanded")).toBe("true");
+
+		fireEvent.click(container.querySelector<HTMLElement>(".overlayTop")!);
+		await waitFor(() => expect(container.querySelector('[role="dialog"]')).toBeNull());
+		expect(button?.getAttribute("aria-expanded")).toBe("false");
+
+		fireEvent.click(button!);
+		await waitFor(() => {
+			expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+			expect(document.activeElement).toBe(container.querySelector('[aria-label="Command palette search"]'));
+		});
 	});
 
 	it("has data-tauri-drag-region attribute", () => {
@@ -313,6 +371,23 @@ describe("Toolbar", () => {
 			const { container } = render(() => <Toolbar />);
 			const count = container.querySelector(".notifCount");
 			expect(count?.textContent).toBe("3"); // 1 PR + 2 activity
+		});
+
+		it("counts the badge in one pass, without building a sorted list per section (613-00e8 F108)", () => {
+			for (const id of ["plan", "build", "review"]) {
+				activityStore.registerSection({ id, label: id.toUpperCase(), priority: 10, canDismissAll: false });
+				addTestActivityItem({ id: `${id}-1`, sectionId: id });
+				addTestActivityItem({ id: `${id}-2`, sectionId: id });
+			}
+			const forSection = vi.spyOn(activityStore, "getForSection");
+			const { container } = render(() => <Toolbar />);
+
+			expect(container.querySelector(".notifCount")?.textContent).toBe("6");
+			// The popover is closed, so nothing legitimately needs a section's list.
+			// A call here means the badge scanned and sorted the items once per section
+			// only to read a `.length` off the result.
+			expect(forSection).not.toHaveBeenCalled();
+			forSection.mockRestore();
 		});
 
 		it("clicking bell toggles popover open", () => {
@@ -551,6 +626,44 @@ describe("Toolbar", () => {
 			const { container } = render(() => <Toolbar />);
 			const btn = container.querySelector(".lastItemBtn");
 			expect(btn?.textContent).toContain("hotfix/critical");
+		});
+	});
+
+	// The app name used to be position:absolute at left:50% inside .left, so at a
+	// narrow sidebar it was painted straight over the right-aligned toggles.
+	describe("left region layout", () => {
+		// sidebarWidth is module-level state; don't leak a narrow width into later tests.
+		afterEach(() => uiStore.setSidebarWidth(300));
+
+		it("keeps the app name in the flex flow, never absolutely positioned", () => {
+			const { container } = render(() => <Toolbar />);
+			const left = container.querySelector(".left");
+			expect(left).not.toBeNull();
+			// Spacers on both sides make the name a shrinkable flex item that stays
+			// visually centred without being able to overlap the toggles.
+			expect(left?.querySelectorAll(".leftSpacer").length).toBe(2);
+			const name = left?.querySelector(".appName");
+			expect(name).not.toBeNull();
+			expect(name?.previousElementSibling?.classList.contains("leftSpacer")).toBe(true);
+		});
+
+		it("switches to the short wordmark only below the width where the full one fits", () => {
+			// 254 = 78 traffic-light inset + 110 wordmark + ~56 toggles + 10 padding.
+			uiStore.setSidebarWidth(254);
+			const wide = render(() => <Toolbar />);
+			expect(wide.container.querySelector(".left")?.classList.contains("narrowSidebar")).toBe(false);
+			wide.unmount();
+
+			uiStore.setSidebarWidth(253);
+			const narrow = render(() => <Toolbar />);
+			expect(narrow.container.querySelector(".left")?.classList.contains("narrowSidebar")).toBe(true);
+			narrow.unmount();
+		});
+
+		it("still marks narrow at the minimum sidebar width", () => {
+			uiStore.setSidebarWidth(200);
+			const { container } = render(() => <Toolbar />);
+			expect(container.querySelector(".left")?.classList.contains("narrowSidebar")).toBe(true);
 		});
 	});
 });

@@ -1,8 +1,45 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import ts from "@typescript/typescript6";
 
-const sourceRoot = path.resolve("src");
+const selfTest = process.argv.includes("--self-test");
+const sourceRootIndex = process.argv.indexOf("--source-root");
+const sourceRoot = path.resolve(sourceRootIndex >= 0 ? process.argv[sourceRootIndex + 1] : "src");
+
+if (sourceRootIndex >= 0 && !process.argv[sourceRootIndex + 1]) {
+	process.stderr.write("Usage: check-frontend-cycles.mjs [--source-root <directory>]\n");
+	process.exit(2);
+}
+
+if (selfTest) {
+	const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tuic-cycle-checker-"));
+	const checker = path.resolve("scripts/check-frontend-cycles.mjs");
+	const runChecker = () =>
+		spawnSync(process.execPath, [checker, "--source-root", fixtureRoot], {
+			encoding: "utf8",
+		});
+
+	try {
+		fs.writeFileSync(path.join(fixtureRoot, "a.ts"), 'import { b } from "./b";\nexport const a = b;\n');
+		fs.writeFileSync(path.join(fixtureRoot, "b.ts"), "export const b = 1;\n");
+		const acyclic = runChecker();
+		if (acyclic.status !== 0 || !/2 files, 0 cycles/.test(acyclic.stdout)) {
+			throw new Error(`acyclic fixture failed:\n${acyclic.stderr}`);
+		}
+
+		fs.writeFileSync(path.join(fixtureRoot, "b.ts"), 'import { a } from "./a";\nexport const b = a;\n');
+		const cyclic = runChecker();
+		if (cyclic.status !== 1 || !/Production runtime import cycles detected/.test(cyclic.stderr)) {
+			throw new Error(`cyclic fixture was not rejected:\n${cyclic.stdout}${cyclic.stderr}`);
+		}
+		process.stdout.write("Frontend cycle checker: acyclic graph passes, synthetic cycle fails\n");
+	} finally {
+		fs.rmSync(fixtureRoot, { recursive: true, force: true });
+	}
+	process.exit(0);
+}
 const sourceFiles = [];
 
 function collectSourceFiles(directory) {

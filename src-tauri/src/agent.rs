@@ -1,5 +1,5 @@
 use parking_lot::Mutex;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use std::process::Command;
 use std::sync::Arc;
@@ -105,15 +105,32 @@ pub(crate) fn open_in_app(
     line: Option<u32>,
     col: Option<u32>,
 ) -> Result<(), String> {
-    let mut cmd = match app.as_str() {
+    let mut cmd = build_open_in_app_command(&path, &app, line, col)?;
+
+    cmd.spawn()
+        .map_err(|e| format!("Failed to open in {app}: {e}"))?;
+
+    Ok(())
+}
+
+/// Build the platform command used by [`open_in_app`] without spawning it.
+/// Keeping command selection pure makes the compatibility matrix testable
+/// without launching an editor, terminal, or file manager on the test host.
+fn build_open_in_app_command(
+    path: &str,
+    app: &str,
+    line: Option<u32>,
+    col: Option<u32>,
+) -> Result<Command, String> {
+    let cmd = match app {
         // CLI-based editors with --goto support (cross-platform, with path resolution)
-        "vscode" => goto_editor_cmd("code", "Visual Studio Code", &path, line, col),
-        "cursor" => goto_editor_cmd("cursor", "Cursor", &path, line, col),
-        "windsurf" => goto_editor_cmd("windsurf", "Windsurf", &path, line, col),
+        "vscode" => goto_editor_cmd("code", "Visual Studio Code", path, line, col),
+        "cursor" => goto_editor_cmd("cursor", "Cursor", path, line, col),
+        "windsurf" => goto_editor_cmd("windsurf", "Windsurf", path, line, col),
         // Zed uses path:line natively
         "zed" => {
             let mut c = Command::new(resolve_cli("zed"));
-            c.arg(format_goto_arg(&path, line, col));
+            c.arg(format_goto_arg(path, line, col));
             c
         }
         // Neovim uses +line
@@ -122,43 +139,43 @@ pub(crate) fn open_in_app(
             if let Some(l) = line {
                 c.arg(format!("+{l}"));
             }
-            c.arg(&path);
+            c.arg(path);
             c
         }
         "smerge" => {
             let mut c = Command::new(resolve_cli("smerge"));
-            c.arg(&path);
+            c.arg(path);
             c
         }
 
         // JetBrains IDEs — CLI launchers with --line/--column, `open -a` fallback on macOS
-        "intellij" => jetbrains_cmd("idea", "IntelliJ IDEA", &path, line, col),
-        "pycharm" => jetbrains_cmd("pycharm", "PyCharm", &path, line, col),
-        "webstorm" => jetbrains_cmd("webstorm", "WebStorm", &path, line, col),
-        "goland" => jetbrains_cmd("goland", "GoLand", &path, line, col),
-        "clion" => jetbrains_cmd("clion", "CLion", &path, line, col),
-        "phpstorm" => jetbrains_cmd("phpstorm", "PhpStorm", &path, line, col),
-        "rubymine" => jetbrains_cmd("rubymine", "RubyMine", &path, line, col),
-        "rider" => jetbrains_cmd("rider", "Rider", &path, line, col),
-        "datagrip" => jetbrains_cmd("datagrip", "DataGrip", &path, line, col),
-        "rustrover" => jetbrains_cmd("rustrover", "RustRover", &path, line, col),
-        "android-studio" => jetbrains_cmd("studio", "Android Studio", &path, line, col),
-        "fleet" => jetbrains_cmd("fleet", "Fleet", &path, line, col),
+        "intellij" => jetbrains_cmd("idea", "IntelliJ IDEA", path, line, col),
+        "pycharm" => jetbrains_cmd("pycharm", "PyCharm", path, line, col),
+        "webstorm" => jetbrains_cmd("webstorm", "WebStorm", path, line, col),
+        "goland" => jetbrains_cmd("goland", "GoLand", path, line, col),
+        "clion" => jetbrains_cmd("clion", "CLion", path, line, col),
+        "phpstorm" => jetbrains_cmd("phpstorm", "PhpStorm", path, line, col),
+        "rubymine" => jetbrains_cmd("rubymine", "RubyMine", path, line, col),
+        "rider" => jetbrains_cmd("rider", "Rider", path, line, col),
+        "datagrip" => jetbrains_cmd("datagrip", "DataGrip", path, line, col),
+        "rustrover" => jetbrains_cmd("rustrover", "RustRover", path, line, col),
+        "android-studio" => jetbrains_cmd("studio", "Android Studio", path, line, col),
+        "fleet" => jetbrains_cmd("fleet", "Fleet", path, line, col),
 
         // Terminal emulators with CLI (cross-platform)
         "kitty" => {
             let mut c = Command::new(resolve_cli("kitty"));
-            c.arg("--directory").arg(&path);
+            c.arg("--directory").arg(path);
             c
         }
         "wezterm" if has_cli("wezterm") => {
             let mut c = Command::new(resolve_cli("wezterm"));
-            c.arg("start").arg("--cwd").arg(&path);
+            c.arg("start").arg("--cwd").arg(path);
             c
         }
         "alacritty" if has_cli("alacritty") => {
             let mut c = Command::new(resolve_cli("alacritty"));
-            c.arg("--working-directory").arg(&path);
+            c.arg("--working-directory").arg(path);
             c
         }
 
@@ -166,67 +183,67 @@ pub(crate) fn open_in_app(
         app_name if cfg!(target_os = "macos") => match app_name {
             "xcode" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Xcode").arg(&path);
+                c.arg("-a").arg("Xcode").arg(path);
                 c
             }
             "sourcetree" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Sourcetree").arg(&path);
+                c.arg("-a").arg("Sourcetree").arg(path);
                 c
             }
             "github-desktop" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("GitHub Desktop").arg(&path);
+                c.arg("-a").arg("GitHub Desktop").arg(path);
                 c
             }
             "fork" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Fork").arg(&path);
+                c.arg("-a").arg("Fork").arg(path);
                 c
             }
             "gitkraken" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("GitKraken").arg(&path);
+                c.arg("-a").arg("GitKraken").arg(path);
                 c
             }
             "ghostty" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Ghostty").arg(&path);
+                c.arg("-a").arg("Ghostty").arg(path);
                 c
             }
             "wezterm" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("WezTerm").arg(&path);
+                c.arg("-a").arg("WezTerm").arg(path);
                 c
             }
             "alacritty" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Alacritty").arg(&path);
+                c.arg("-a").arg("Alacritty").arg(path);
                 c
             }
             "warp" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Warp").arg(&path);
+                c.arg("-a").arg("Warp").arg(path);
                 c
             }
             "iterm2" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("iTerm").arg(&path);
+                c.arg("-a").arg("iTerm").arg(path);
                 c
             }
             "tower" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Tower").arg(&path);
+                c.arg("-a").arg("Tower").arg(path);
                 c
             }
             "terminal" => {
                 let mut c = Command::new("open");
-                c.arg("-a").arg("Terminal").arg(&path);
+                c.arg("-a").arg("Terminal").arg(path);
                 c
             }
             "finder" => {
                 let mut c = Command::new("open");
-                c.arg(&path);
+                c.arg(path);
                 c
             }
             "editor" => {
@@ -235,7 +252,7 @@ pub(crate) fn open_in_app(
                     if let Some(l) = line {
                         c.arg(format!("+{l}"));
                     }
-                    c.arg(&path);
+                    c.arg(path);
                     c
                 } else {
                     return Err("$EDITOR not set".to_string());
@@ -259,7 +276,7 @@ pub(crate) fn open_in_app(
             ];
             if let Some(term) = terminals.iter().find(|t| has_cli(t)) {
                 let mut c = Command::new(term);
-                c.arg(&path);
+                c.arg(path);
                 c
             } else {
                 return Err("No terminal emulator found".to_string());
@@ -268,7 +285,7 @@ pub(crate) fn open_in_app(
         #[cfg(target_os = "linux")]
         "finder" => {
             let mut c = Command::new("xdg-open");
-            c.arg(&path);
+            c.arg(path);
             c
         }
 
@@ -278,18 +295,18 @@ pub(crate) fn open_in_app(
             // Prefer Windows Terminal (wt.exe) over cmd.exe
             if has_cli("wt") {
                 let mut c = Command::new("wt");
-                c.args(["-d", &path]);
+                c.args(["-d", path]);
                 c
             } else {
                 let mut c = Command::new("cmd");
-                c.args(["/c", "start", "cmd", "/k", "cd", "/d", &path]);
+                c.args(["/c", "start", "cmd", "/k", "cd", "/d", path]);
                 c
             }
         }
         #[cfg(target_os = "windows")]
         "finder" => {
             let mut c = Command::new("explorer");
-            c.arg(&path);
+            c.arg(path);
             c
         }
         #[cfg(target_os = "windows")]
@@ -311,7 +328,7 @@ pub(crate) fn open_in_app(
             };
             if std::path::Path::new(&exe).exists() {
                 let mut c = Command::new(&exe);
-                c.arg(&path);
+                c.arg(path);
                 c
             } else {
                 return Err(format!("{app_name} not found at {exe}"));
@@ -320,11 +337,7 @@ pub(crate) fn open_in_app(
 
         _ => return Err(format!("Unknown app: {app}")),
     };
-
-    cmd.spawn()
-        .map_err(|e| format!("Failed to open in {app}: {e}"))?;
-
-    Ok(())
+    Ok(cmd)
 }
 
 /// Launch context for a custom tool: the paths and cursor position that feed
@@ -570,6 +583,23 @@ pub(crate) struct AgentBinaryDetection {
     pub(crate) version: Option<String>,
 }
 
+/// Agent binaries TUIC knows how to launch — the Rust-side mirror of `AGENTS` in
+/// `src/agents.ts`. The MCP/HTTP detect surface reports exactly this set; anything missing
+/// here is invisible to an orchestrator even when it is installed.
+pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "grok",
+    "opencode",
+    "aider",
+    "amp",
+    "cursor-agent",
+    "goose",
+    "droid",
+    "pi",
+];
+
 /// Detect any agent binary location
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub(crate) fn detect_agent_binary(binary: String) -> AgentBinaryDetection {
@@ -663,13 +693,14 @@ pub(crate) fn detect_agent_binary(binary: String) -> AgentBinaryDetection {
 /// Returns a map of binary name -> detection result.
 /// Skips version detection for speed; use detect_agent_binary for full info.
 #[cfg_attr(feature = "desktop", tauri::command)]
-pub(crate) fn detect_all_agent_binaries(
+pub(crate) async fn detect_all_agent_binaries(
     binaries: Vec<String>,
 ) -> std::collections::HashMap<String, AgentBinaryDetection> {
     let handles: Vec<_> = binaries
         .into_iter()
+        .filter(|binary| !binary.trim().is_empty())
         .map(|binary| {
-            std::thread::spawn(move || {
+            tokio::task::spawn_blocking(move || {
                 let detection = detect_binary_path_only(&binary);
                 (binary, detection)
             })
@@ -678,7 +709,7 @@ pub(crate) fn detect_all_agent_binaries(
 
     let mut results = std::collections::HashMap::new();
     for handle in handles {
-        if let Ok((binary, detection)) = handle.join() {
+        if let Ok((binary, detection)) = handle.await {
             results.insert(binary, detection);
         }
     }
@@ -889,61 +920,70 @@ pub(crate) async fn spawn_agent(
     };
 
     let session_id = Uuid::new_v4().to_string();
-    let pty_system = native_pty_system();
 
-    let pair = pty_system
-        .openpty(PtySize {
+    let spawn_binary_path = binary_path.clone();
+    let spawn_agent_config = agent_config.clone();
+    let spawn_pty_config = pty_config.clone();
+    let state_for_env = state.inner().clone();
+    let session_id_for_env = session_id.clone();
+    let spawn_tuic_session = pty_config.tuic_session.clone();
+    let (pair, child) = crate::pty::spawn_pty_pair_with_retry_async(
+        PtySize {
             rows: pty_config.rows,
             cols: pty_config.cols,
             pixel_width: 0,
             pixel_height: 0,
-        })
-        .map_err(|e| format!("Failed to open PTY: {e}"))?;
+        },
+        move || {
+            // Build agent command
+            let mut cmd = CommandBuilder::new(&spawn_binary_path);
+            crate::pty::sanitize_pty_parent_env(&mut cmd);
 
-    // Build agent command
-    let mut cmd = CommandBuilder::new(&binary_path);
-    crate::pty::sanitize_pty_parent_env(&mut cmd);
+            // If custom args are provided, use them directly
+            if let Some(ref args) = spawn_agent_config.args {
+                for arg in args {
+                    cmd.arg(arg);
+                }
+            } else {
+                // Default Claude-style args for backward compatibility
+                if spawn_agent_config.print_mode {
+                    cmd.arg("--print");
+                }
 
-    // If custom args are provided, use them directly
-    if let Some(ref args) = agent_config.args {
-        for arg in args {
-            cmd.arg(arg);
-        }
-    } else {
-        // Default Claude-style args for backward compatibility
-        if agent_config.print_mode {
-            cmd.arg("--print");
-        }
+                if let Some(ref format) = spawn_agent_config.output_format {
+                    cmd.arg("--output-format");
+                    cmd.arg(format);
+                }
 
-        if let Some(ref format) = agent_config.output_format {
-            cmd.arg("--output-format");
-            cmd.arg(format);
-        }
+                if let Some(ref model) = spawn_agent_config.model {
+                    cmd.arg("--model");
+                    cmd.arg(model);
+                }
 
-        if let Some(ref model) = agent_config.model {
-            cmd.arg("--model");
-            cmd.arg(model);
-        }
+                // Add prompt
+                cmd.arg(&spawn_agent_config.prompt);
+            }
 
-        // Add prompt
-        cmd.arg(&agent_config.prompt);
-    }
+            if let Some(ref cwd) = spawn_agent_config.cwd {
+                cmd.cwd(crate::cli::expand_tilde(cwd));
+            } else if let Some(ref cwd) = spawn_pty_config.cwd {
+                cmd.cwd(crate::cli::expand_tilde(cwd));
+            }
 
-    if let Some(ref cwd) = agent_config.cwd {
-        cmd.cwd(crate::cli::expand_tilde(cwd));
-    } else if let Some(ref cwd) = pty_config.cwd {
-        cmd.cwd(crate::cli::expand_tilde(cwd));
-    }
-
-    // Inject env flags (feature flags configured in Settings → Agents)
-    for (key, value) in &pty_config.env {
-        cmd.env(key, value);
-    }
-
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("Failed to spawn agent: {e}"))?;
+            crate::pty::bind_pty_identity(
+                &state_for_env,
+                &mut cmd,
+                &session_id_for_env,
+                spawn_tuic_session.as_deref(),
+            );
+            // Inject env flags (feature flags configured in Settings → Agents)
+            for (key, value) in &spawn_pty_config.env {
+                cmd.env(key, value);
+            }
+            cmd
+        },
+    )
+    .await?;
 
     let writer = pair
         .master
@@ -960,13 +1000,15 @@ pub(crate) async fn spawn_agent(
     state.sessions.insert(
         session_id.clone(),
         Mutex::new(PtySession {
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             master: pair.master,
             _child: child,
             paused: paused.clone(),
             worktree: None,
             cwd: agent_config.cwd.clone(),
             display_name: None,
+            display_name_is_custom: false,
+            is_remote: false,
             shell: binary_path.clone(),
         }),
     );
@@ -1005,6 +1047,43 @@ mod tests {
     use super::*;
 
     // resolve_cli and extra_bin_dirs tests are now in cli.rs
+
+    /// The MCP/HTTP detect surface reports KNOWN_AGENT_BINARIES verbatim, so an agent added to
+    /// the frontend registry but not here is installed-yet-invisible to an orchestrator.
+    /// `git` and the empty-binary `api` entry are not agent CLIs.
+    #[test]
+    fn known_agent_binaries_cover_the_frontend_registry() {
+        let agents_ts = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/agents.ts"),
+        )
+        .expect("read src/agents.ts");
+
+        let declared: Vec<&str> = agents_ts
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("binary: \""))
+            .filter_map(|rest| rest.split('"').next())
+            .filter(|b| !b.is_empty() && *b != "git")
+            .collect();
+
+        assert!(
+            !declared.is_empty(),
+            "parser found no binaries — did the shape of agents.ts change?"
+        );
+        for binary in declared {
+            assert!(
+                KNOWN_AGENT_BINARIES.contains(&binary),
+                "agents.ts declares '{binary}' but KNOWN_AGENT_BINARIES omits it, so `agent detect` will never report it"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_agent_detection_uses_async_runtime_and_skips_empty_names() {
+        let detections = detect_all_agent_binaries(vec![String::new(), "git".to_string()]).await;
+
+        assert!(!detections.contains_key(""));
+        assert!(detections.contains_key("git"));
+    }
 
     #[test]
     fn only_claude_accepts_a_bare_prompt() {
@@ -1178,6 +1257,45 @@ mod tests {
         let args = vec!["--wait".to_string(), "--reuse-window".to_string()];
         let out = expand_placeholders(&args, &ctx(Some("/x"), "/x", None, Some(3), Some(1)));
         assert_eq!(out, vec!["--wait", "--reuse-window"]);
+    }
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn open_in_app_builds_zed_location_without_spawning() {
+        let command = build_open_in_app_command("/repo/src/main.rs", "zed", Some(42), Some(7))
+            .expect("zed command");
+
+        assert_eq!(command_args(&command), ["/repo/src/main.rs:42:7"]);
+    }
+
+    #[test]
+    fn open_in_app_builds_neovim_line_without_column() {
+        let command = build_open_in_app_command("/repo/src/main.rs", "neovim", Some(42), Some(7))
+            .expect("neovim command");
+
+        assert_eq!(command_args(&command), ["+42", "/repo/src/main.rs"]);
+    }
+
+    #[test]
+    fn open_in_app_builds_kitty_working_directory() {
+        let command =
+            build_open_in_app_command("/repo", "kitty", None, None).expect("kitty command");
+
+        assert_eq!(command_args(&command), ["--directory", "/repo"]);
+    }
+
+    #[test]
+    fn open_in_app_rejects_unknown_application_before_spawning() {
+        let error = build_open_in_app_command("/repo", "not-a-real-app", None, None)
+            .expect_err("unknown applications must be rejected");
+
+        assert_eq!(error, "Unknown app: not-a-real-app");
     }
 
     #[test]

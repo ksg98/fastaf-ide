@@ -33,6 +33,7 @@ export interface CanvasSearchController {
 	readonly activeIndex: number;
 	replace: (matches: SearchMatch[], viewport?: SearchViewport) => SearchMatch | null;
 	clear: () => void;
+	dropRows: (rows: Set<number>) => boolean;
 	next: () => SearchMatch | null;
 	previous: () => SearchMatch | null;
 }
@@ -146,6 +147,18 @@ export function createCanvasSearchController(): CanvasSearchController {
 		clear() {
 			matches = [];
 			activeIndex = -1;
+		},
+		dropRows(rows) {
+			if (matches.length === 0 || rows.size === 0) return false;
+			const previouslyActive = active();
+			const kept = matches.filter((match) => !rows.has(match.row));
+			if (kept.length === matches.length) return false;
+			matches = kept;
+			// Keep the cursor on the same match when it survived, so a re-render
+			// mid-search doesn't teleport the user to a different hit.
+			const survivingIndex = previouslyActive ? kept.indexOf(previouslyActive) : -1;
+			activeIndex = survivingIndex >= 0 ? survivingIndex : kept.length > 0 ? 0 : -1;
+			return true;
 		},
 		next() {
 			if (matches.length === 0) return null;

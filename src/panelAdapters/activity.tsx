@@ -1,5 +1,10 @@
 import { type Component, createEffect, createSignal, onMount } from "solid-js";
-import { ActivityDashboard, statusClasses, type TerminalRow } from "../components/ActivityDashboard/ActivityDashboard";
+import {
+	ActivityDashboard,
+	reconcileTerminalRows,
+	statusClasses,
+	type TerminalRow,
+} from "../components/ActivityDashboard/ActivityDashboard";
 import { initPanelWindow } from "../hooks/initPanelWindow";
 import { invoke } from "../invoke";
 import type { PanelAdapter } from "../panelRouter";
@@ -16,33 +21,40 @@ import {
 import { navigateToTerminal } from "../utils/navigateToTerminal";
 import { createPanelSyncReceiver } from "../utils/panelSync";
 
-export function snapshotToRows(snap: ActivitySnapshot): TerminalRow[] {
-	return snap.terminals.map((t) => ({
-		id: t.id,
-		name: t.name,
-		project: projectName(t.cwd),
-		projectColor: undefined,
-		agent: t.agentType || "shell",
-		status: terminalStatusLabel(
-			t.shellState,
-			t.awaitingInput,
-			t.isRateLimited,
-			statusClasses,
-			t.agentState,
-			t.backgroundWork,
-		),
-		isWorking: isActivityWorking(
-			effectiveActivityState(t.shellState, t.awaitingInput, t.isRateLimited, t.agentState, t.backgroundWork),
-		),
-		lastDataAt: t.lastDataAt,
-		idleSince: t.idleSince,
-		lastPrompt: t.lastPrompt,
-		agentIntent: t.agentIntent,
-		currentTask: t.currentTask,
-		activeSubTasks: t.activeSubTasks,
-		isActive: t.isActive,
-		isPromoted: t.isPromoted,
-	}));
+/** The detached panel re-serializes this snapshot once a second and the payload
+ *  crosses a postMessage boundary, so every tick arrives as brand-new objects
+ *  even when nothing changed. Pass the rows from the previous tick so unchanged
+ *  ones keep their identity — see `reconcileTerminalRows`. */
+export function snapshotToRows(snap: ActivitySnapshot, prev?: readonly TerminalRow[]): TerminalRow[] {
+	const rows = snap.terminals.map(
+		(t): TerminalRow => ({
+			id: t.id,
+			name: t.name,
+			project: projectName(t.cwd),
+			projectColor: undefined,
+			agent: t.agentType || "shell",
+			status: terminalStatusLabel(
+				t.shellState,
+				t.awaitingInput,
+				t.isRateLimited,
+				statusClasses,
+				t.agentState,
+				t.backgroundWork,
+			),
+			isWorking: isActivityWorking(
+				effectiveActivityState(t.shellState, t.awaitingInput, t.isRateLimited, t.agentState, t.backgroundWork),
+			),
+			lastDataAt: t.lastDataAt,
+			idleSince: t.idleSince,
+			lastPrompt: t.lastPrompt,
+			agentIntent: t.agentIntent,
+			currentTask: t.currentTask,
+			activeSubTasks: t.activeSubTasks,
+			isActive: t.isActive,
+			isPromoted: t.isPromoted,
+		}),
+	);
+	return reconcileTerminalRows(rows, prev);
 }
 
 const DetachedActivityDashboard: Component<{ params: URLSearchParams }> = () => {
@@ -55,7 +67,7 @@ const DetachedActivityDashboard: Component<{ params: URLSearchParams }> = () => 
 
 	createEffect(() => {
 		const snap = state();
-		if (snap) setRows(snapshotToRows(snap));
+		if (snap) setRows((prev) => snapshotToRows(snap, prev));
 	});
 
 	return (

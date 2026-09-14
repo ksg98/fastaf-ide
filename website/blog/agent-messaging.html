@@ -76,19 +76,23 @@ agent({ action: "list_peers" })
 
 // Step 3: Send a message (max 64 KB)
 agent({ action: "send", to: "abc-123", message: "Tests pass. Proceed to auth module." })
-→ { ok: true, message_id: "msg-789", delivered_via_channel: true }
+→ { ok: true, accepted: true, message_id: "msg-789", buffered_in_inbox: true,
+     delivered: true, delivery_path: "sse_channel_and_inbox" }
 
-// Step 4: Check your inbox
-agent({ action: "inbox", limit: 10, since: 1747400000000 })
-→ [{ from_name: "orchestrator", content: "Review complete. Ship it.", timestamp: ... }]</code></pre>
+// Step 4: Check your inbox — omit `since` and the server resumes from your cursor
+agent({ action: "inbox", limit: 10 })
+→ { messages: [{ from_name: "orchestrator", content: "Review complete. Ship it.", timestamp: ... }],
+     count: 1, next_since: 1747400000123 }</code></pre>
 
-      <h3>Delivery: push first, queue always</h3>
-      <p>When you send a message, FastAF does two things:</p>
+      <h3>Delivery: queue always, surface if you can</h3>
+      <p>The inbox is always written first — a FIFO queue, 100 messages per agent, oldest evicted. Everything else is an attempt to surface the message sooner, tried in this order:</p>
       <ol>
-        <li><strong>Channel push</strong> — if the recipient has an active SSE stream (which Claude Code always does), the message is delivered instantly as a <code>notifications/claude/channel</code> event. It appears in the recipient's context immediately, as if the system injected a note mid-conversation.</li>
-        <li><strong>Inbox queue</strong> — the message is always stored in a FIFO queue (100 messages per agent, oldest evicted first). This handles cases where the push fails or the recipient reconnects later.</li>
+        <li><strong>Channel push</strong> — a <code>notifications/claude/channel</code> event, but only for an ordinary managed Claude Code recipient that is <em>mid-turn</em> and holds an SSE stream. It lands in its context immediately, as if the system slipped in a note. Registered orchestrators never receive peer payloads this way.</li>
+        <li><strong>PTY injection</strong> — for an idle or completed managed agent, the message is <em>typed into its terminal</em> so it submits a real next turn without polling. A busy recipient gets it on its next busy→idle transition. Bodies over 2 KB inject a pointer to <code>agent action=inbox</code> instead.</li>
+        <li><strong>Inbox poll</strong> — <code>agent action=inbox</code>, always the authoritative store.</li>
       </ol>
-      <p>The <code>delivered_via_channel: true</code> response tells you the message was pushed in real-time. If it's <code>false</code>, the recipient will see it on their next <code>inbox</code> poll — not a failure, just deferred delivery.</p>
+      <p>Two fields answer the sender's two real questions. <code>delivered</code> says whether <em>anything</em> will surface the message — a waiter took it, the channel pushed it, or the terminal typed it. <code>delivery_path</code> names which of those happened: <code>waiter_and_inbox</code>, <code>sse_channel_and_inbox</code>, <code>terminal_or_queued_and_inbox</code>, or <code>inbox_only</code>.</p>
+      <p>Only <code>inbox_only</code> means nothing will wake the recipient — the message sits unread until it polls, and the response carries an explicit <code>warning</code> saying so. Don't block on an answer in that case.</p>
     </div>
 
     <div class="blog-section">

@@ -39,6 +39,12 @@ function SoundPatternSvg(props: { sound: NotificationSound }) {
 			{ x: 30, y: 12 },
 		],
 		info: [{ x: 22, y: 4 }],
+		// Two quick low knocks followed by a higher callback.
+		attention: [
+			{ x: 8, y: 16 },
+			{ x: 22, y: 16 },
+			{ x: 36, y: 4 },
+		],
 	};
 
 	const colors: Record<NotificationSound, string> = {
@@ -47,11 +53,12 @@ function SoundPatternSvg(props: { sound: NotificationSound }) {
 		error: "var(--error)",
 		warning: "var(--accent)",
 		info: "var(--fg-muted)",
+		attention: "var(--error)",
 	};
 
 	const notes = patterns[props.sound];
 	const color = colors[props.sound];
-	const w = props.sound === "completion" ? 36 : props.sound === "info" ? 24 : 32;
+	const w = props.sound === "completion" || props.sound === "attention" ? 36 : props.sound === "info" ? 24 : 32;
 
 	return (
 		<svg viewBox={`0 0 ${w} 18`} width={w} height="14" style={{ "vertical-align": "middle", "flex-shrink": "0" }}>
@@ -85,6 +92,7 @@ export const NotificationsTab: Component = () => {
 		{ key: "completion", label: t("notifications.sound.completion", "Completion") },
 		{ key: "warning", label: t("notifications.sound.warning", "Warning") },
 		{ key: "info", label: t("notifications.sound.info", "Info") },
+		{ key: "attention", label: t("notifications.sound.attention", "Attention (agent needs you)") },
 	];
 
 	// Device enumeration is LAZY: on macOS, cpal's CoreAudio output-device scan
@@ -225,12 +233,50 @@ export const NotificationsTab: Component = () => {
 					</For>
 				</div>
 
+				<div class={s.group}>
+					<label>{t("notifications.label.orchestration", "Orchestration")}</label>
+					<div class={s.toggle}>
+						<input
+							type="checkbox"
+							checked={notificationsStore.state.config.silence_remote_completions}
+							onChange={(e) => notificationsStore.setSilenceRemoteCompletions(e.currentTarget.checked)}
+						/>
+						<span>{t("notifications.label.silenceRemoteCompletions", "Silence completions from MCP sessions")}</span>
+					</div>
+					<p class={s.hint} style={{ "margin-top": "6px" }}>
+						{t(
+							"notifications.hint.silenceRemoteCompletions",
+							"Sessions started by an agent orchestrator (session create, agent spawn) finish without a chime. They still appear in Activity and update the badge.",
+						)}
+					</p>
+				</div>
+
 				<div class={s.actions}>
 					<button onClick={() => notificationsStore.reset()}>
 						{t("notifications.btn.resetDefaults", "Reset Defaults")}
 					</button>
 				</div>
 			</Show>
+
+			{/* Outside the audio Show on purpose — the bell is visual, so the setting
+			    must stay reachable on a machine with no audio output. */}
+			<div class={s.group}>
+				<label>{t("notifications.label.toolbarBell", "Toolbar Bell")}</label>
+				<div class={s.toggle}>
+					<input
+						type="checkbox"
+						checked={notificationsStore.state.config.toasts_in_bell}
+						onChange={(e) => notificationsStore.setToastsInBell(e.currentTarget.checked)}
+					/>
+					<span>{t("notifications.toggle.toastsInBell", "Keep toasts in the bell")}</span>
+				</div>
+				<p class={s.hint} style={{ "margin-top": "6px" }}>
+					{t(
+						"notifications.hint.toastsInBell",
+						"Toasts fade on their own, often while you look at another window. Mirroring them into the bell keeps them readable afterwards. Turn this off to leave toasts transient.",
+					)}
+				</p>
+			</div>
 		</div>
 	);
 };

@@ -56,6 +56,29 @@ describe("SessionCard sub-rows", () => {
 		expect(taskRow!.textContent).toContain("Reading files");
 	});
 
+	it("hides a task row that only repeats the status badge", () => {
+		// The badge already says Idle/Activity; "Working" underneath it is a line
+		// of nothing on a screen that has none to spare.
+		const session = makeSession({ current_task: "Working", agent_type: "codex" });
+		const { container } = render(() => <SessionCard session={session} onSelect={() => {}} />);
+		expect(container.querySelector("[data-testid='task-row']")).toBeNull();
+	});
+
+	it("hides Claude's decorative spinner verbs", () => {
+		const session = makeSession({ current_task: "Undulating", agent_type: "claude" });
+		const { container } = render(() => <SessionCard session={session} onSelect={() => {}} />);
+		expect(container.querySelector("[data-testid='task-row']")).toBeNull();
+	});
+
+	it("still shows progress when the task text was suppressed", () => {
+		// Progress is a separate signal (OSC 9;4) and used to be nested inside the
+		// task row, so dropping the verb must not take the bar with it.
+		const session = makeSession({ current_task: "Working", agent_type: "codex", progress: 45 });
+		const { container } = render(() => <SessionCard session={session} onSelect={() => {}} />);
+		expect(container.querySelector("[data-testid='task-row']")).toBeNull();
+		expect(container.querySelector("[data-testid='progress-bar']")).not.toBeNull();
+	});
+
 	it("shows progress indicator when progress is set", () => {
 		const session = makeSession({ current_task: "Building", progress: 45 });
 		const { container } = render(() => <SessionCard session={session} onSelect={() => {}} />);
@@ -69,6 +92,26 @@ describe("SessionCard sub-rows", () => {
 		const usage = container.querySelector("[data-testid='usage-label']");
 		expect(usage).not.toBeNull();
 		expect(usage!.textContent).toContain("80%");
+	});
+
+	it("marks a plain shell with the terminal glyph", () => {
+		// Without an icon of its own a PTY card renders an empty square, which
+		// reads as an agent whose icon failed to load rather than as a shell.
+		const session = makeSession();
+		const { container } = render(() => <SessionCard session={session} onSelect={() => {}} />);
+		expect(container.querySelector("[data-testid='pty-icon']")).not.toBeNull();
+	});
+
+	it("marks a session whose agent this build no longer knows as a shell", () => {
+		const session = makeSession({ agent_type: "retired-agent" });
+		const { container } = render(() => <SessionCard session={session} onSelect={() => {}} />);
+		expect(container.querySelector("[data-testid='pty-icon']")).not.toBeNull();
+	});
+
+	it("keeps the agent icon for a known agent", () => {
+		const session = makeSession({ agent_type: "claude" });
+		const { container } = render(() => <SessionCard session={session} onSelect={() => {}} />);
+		expect(container.querySelector("[data-testid='pty-icon']")).toBeNull();
 	});
 
 	it("shows no sub-rows when state is minimal", () => {

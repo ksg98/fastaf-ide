@@ -1,11 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../mocks/tauri";
+
+const { mockRpc } = vi.hoisted(() => ({ mockRpc: vi.fn().mockResolvedValue(undefined) }));
+
+vi.mock("../../transport", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../transport")>()),
+	rpc: mockRpc,
+}));
+
 import { listen } from "@tauri-apps/api/event";
+import { handleIntentEvent, shouldApplyIntentTitle } from "../../components/Terminal/intentTitle";
 import { type AppInitDeps, browserCreatedSessions, initApp } from "../../hooks/useAppInit";
 import { mdTabsStore } from "../../stores/mdTabs";
+import { notificationsStore } from "../../stores/notifications";
 import { paneLayoutStore, resetGroupCounter } from "../../stores/paneLayout";
 import { repositoriesStore } from "../../stores/repositories";
 import { terminalsStore } from "../../stores/terminals";
+import { toastsStore } from "../../stores/toasts";
 import { makeTerminal } from "../helpers/store";
 import { mockInvoke } from "../mocks/tauri";
 
@@ -18,6 +29,11 @@ function resetStores() {
 	}
 	for (const id of mdTabsStore.getIds()) {
 		mdTabsStore.remove(id);
+	}
+	// Toasts dedup on title+message+level+repoPath, so one left behind by an
+	// earlier test silently suppresses the next test's identical toast.
+	for (const toast of [...toastsStore.toasts]) {
+		toastsStore.remove(toast.id);
 	}
 }
 
@@ -47,6 +63,7 @@ function createMockDeps(overrides: Partial<AppInitDeps> = {}): AppInitDeps {
 		},
 		applyPlatformClass: vi.fn().mockReturnValue("macos"),
 		onCloseRequested: vi.fn().mockResolvedValue(undefined),
+		registerRepo: vi.fn().mockResolvedValue(undefined),
 		...overrides,
 	};
 }
@@ -121,6 +138,58 @@ describe("initApp", () => {
 		expect(mdTabsStore.getVisibleIds(`${targetRepo}|main`)).toContain(activeTab!.id);
 	});
 
+	it("does not activate a background MCP file tab that belongs to another repo", async () => {
+		let uiTabCallback:
+			| ((event: {
+					payload: {
+						id: string;
+						title: string;
+						html: string;
+						pinned: boolean;
+						url: string;
+						focus: boolean;
+					};
+			  }) => void)
+			| null = null;
+		vi.mocked(listen).mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+			if (event === "ui-tab") uiTabCallback = handler as typeof uiTabCallback;
+			return Promise.resolve(vi.fn());
+		}) as unknown as typeof listen);
+
+		const sourceRepo = "/repos/investimenti";
+		const targetRepo = "/repos/aicheck";
+		for (const path of [sourceRepo, targetRepo]) {
+			repositoriesStore.add({ path, displayName: path.split("/").pop()! });
+			repositoriesStore.setBranch(path, "main", { name: "main", worktreePath: path });
+			repositoriesStore.setActiveBranch(path, "main");
+		}
+		repositoriesStore.setActive(sourceRepo);
+
+		const deps = createMockDeps();
+		await initApp(deps);
+		uiTabCallback!({
+			payload: {
+				id: "comparison",
+				title: "Comparison",
+				html: "",
+				pinned: false,
+				url: `tuic://open/${targetRepo}/reports/comparison.md`,
+				focus: false,
+			},
+		});
+
+		// `focus: false` deliberately does NOT switch repo, so activating the tab
+		// would leave its content on screen with its own tab button filtered out of
+		// the tab bar — the exact ghost the focused branch above exists to avoid.
+		expect(repositoriesStore.state.activeRepoPath).toBe(sourceRepo);
+		const tab = Object.values(mdTabsStore.state.tabs).find(
+			(t) => t.type === "file" && t.filePath === "reports/comparison.md",
+		);
+		expect(tab).toBeDefined();
+		expect(tab!.repoPath).toBe(targetRepo);
+		expect(mdTabsStore.getActive()?.id).not.toBe(tab!.id);
+	});
+
 	it("re-adopts surviving PTY sessions", async () => {
 		const deps = createMockDeps({
 			pty: {
@@ -141,12 +210,17 @@ describe("initApp", () => {
 		expect(terminalsStore.get(ids[0])?.nameIsCustom).toBe(false);
 	});
 
-	it("preserves a surviving session display name as custom", async () => {
+	it("preserves an explicitly customized surviving session name", async () => {
 		const deps = createMockDeps({
 			pty: {
-				listActiveSessions: vi
-					.fn()
-					.mockResolvedValue([{ session_id: "sess-named", cwd: "/repo", display_name: "linux-primary" }]),
+				listActiveSessions: vi.fn().mockResolvedValue([
+					{
+						session_id: "sess-named",
+						cwd: "/repo",
+						display_name: "linux-primary",
+						display_name_is_custom: true,
+					},
+				]),
 				close: vi.fn().mockResolvedValue(undefined),
 			},
 		});
@@ -156,6 +230,66 @@ describe("initApp", () => {
 		const terminal = terminalsStore.getIds().map((id) => terminalsStore.get(id))[0];
 		expect(terminal?.name).toBe("linux-primary");
 		expect(terminal?.nameIsCustom).toBe(true);
+	});
+
+	it("re-adopts a remote spawn name as an intent-replaceable base title", async () => {
+		let activeSessions = [
+			{
+				session_id: "remote-agent",
+				cwd: "/repo",
+				display_name: "repo-audit",
+				display_name_is_custom: false,
+				is_remote: true,
+			},
+		];
+		const deps = createMockDeps({
+			pty: {
+				listActiveSessions: vi.fn().mockImplementation(async () => activeSessions),
+				close: vi.fn().mockResolvedValue(undefined),
+			},
+		});
+
+		await initApp(deps);
+
+		const terminal = terminalsStore.getIds().map((id) => terminalsStore.get(id))[0];
+		expect(terminal).toMatchObject({ name: "repo-audit", nameIsCustom: false, isRemote: true });
+
+		const intentTitle = "Fresh audit";
+		expect(
+			shouldApplyIntentTitle({
+				title: intentTitle,
+				globalEnabled: true,
+				perAgentEnabled: true,
+				nameIsCustom: terminal!.nameIsCustom,
+			}),
+		).toBe(true);
+		mockRpc.mockClear();
+		handleIntentEvent({
+			terminalId: terminal!.id,
+			text: "Reviewing reconnect behavior",
+			title: intentTitle,
+			globalEnabled: true,
+			perAgentEnabled: true,
+		});
+		expect(mockRpc).toHaveBeenCalledWith("set_session_name", {
+			sessionId: "remote-agent",
+			name: intentTitle,
+			isCustom: false,
+		});
+
+		activeSessions = [{ ...activeSessions[0], display_name: intentTitle }];
+		terminalsStore.remove(terminal!.id);
+		await initApp(deps);
+		const reconnected = terminalsStore.getIds().map((id) => terminalsStore.get(id))[0];
+		expect(reconnected).toMatchObject({ name: intentTitle, nameIsCustom: false, isRemote: true });
+		expect(
+			shouldApplyIntentTitle({
+				title: "Next audit",
+				globalEnabled: true,
+				perAgentEnabled: true,
+				nameIsCustom: reconnected!.nameIsCustom,
+			}),
+		).toBe(true);
 	});
 
 	it("matches surviving sessions to repos by cwd", async () => {
@@ -525,6 +659,75 @@ describe("initApp", () => {
 		expect(deps.handleBranchSelect).not.toHaveBeenCalled();
 	});
 
+	describe("parked-tab toast registration", () => {
+		// A worktree of an unregistered repo: unregisteredRepoRootFor strips the
+		// `__wt/<branch>` suffix, so the root the user must register is /gits/ls/gate-os.
+		const PARKED_CWD = "/gits/ls/gate-os__wt/poc-0001-blade";
+		const DEDUCED_ROOT = "/gits/ls/gate-os";
+
+		function parkedSessionDeps(): AppInitDeps {
+			repositoriesStore.add({ path: "/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
+			repositoriesStore.setActiveBranch("/repo", "main");
+			repositoriesStore.setActive("/repo");
+			return createMockDeps({
+				pty: {
+					listActiveSessions: vi.fn().mockResolvedValue([{ session_id: "sess-parked", cwd: PARKED_CWD }]),
+					close: vi.fn().mockResolvedValue(undefined),
+				},
+			});
+		}
+
+		function parkedToast() {
+			return toastsStore.toasts.find((toast) => toast.title === "Tab parked in the wrong repo");
+		}
+
+		it("offers a register action naming the deduced repo root", async () => {
+			const deps = parkedSessionDeps();
+			await initApp(deps);
+
+			const toast = parkedToast();
+			expect(toast).toBeDefined();
+			expect(toast!.message).toContain(DEDUCED_ROOT);
+			expect(toast!.action?.label).toBe("Register");
+		});
+
+		// The whole reason auto-registration was rejected: addRepoByPath calls
+		// setActive(), so registering from a background reconnect would yank the
+		// focused repo out from under the user. Adoption must stay inert.
+		it("registers nothing while the action is not clicked", async () => {
+			const deps = parkedSessionDeps();
+			await initApp(deps);
+
+			expect(parkedToast()).toBeDefined();
+			expect(deps.registerRepo).not.toHaveBeenCalled();
+			expect(repositoriesStore.getPaths()).not.toContain(DEDUCED_ROOT);
+			// The tab is still parked in the focused repo, and the focus is untouched.
+			expect(repositoriesStore.get("/repo")?.branches["main"].terminals).toHaveLength(1);
+			expect(repositoriesStore.state.activeRepoPath).toBe("/repo");
+		});
+
+		it("registers the deduced root when the action is clicked", async () => {
+			const deps = parkedSessionDeps();
+			await initApp(deps);
+
+			parkedToast()!.action!.onClick();
+
+			expect(deps.registerRepo).toHaveBeenCalledTimes(1);
+			expect(deps.registerRepo).toHaveBeenCalledWith(DEDUCED_ROOT);
+		});
+
+		it("survives a failing registration without an unhandled rejection", async () => {
+			const deps = parkedSessionDeps();
+			deps.registerRepo = vi.fn().mockRejectedValue(new Error("not a directory"));
+			await initApp(deps);
+
+			expect(() => parkedToast()!.action!.onClick()).not.toThrow();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(deps.registerRepo).toHaveBeenCalledWith(DEDUCED_ROOT);
+		});
+	});
+
 	it("snapshots agentSessionId into savedTerminals on beforeunload", async () => {
 		repositoriesStore.add({ path: "/repo", displayName: "Repo" });
 		repositoriesStore.setBranch("/repo", "main", { worktreePath: "/repo" });
@@ -844,7 +1047,7 @@ describe("initApp", () => {
 	describe("scoped cache invalidation", () => {
 		function captureRepoAndHeadChanged() {
 			const listenMock = vi.mocked(listen);
-			let repoChangedCb: ((event: { payload: { repo_path: string } }) => void) | null = null;
+			let repoChangedCb: ((event: { payload: { repo_path: string; kind: string } }) => void) | null = null;
 			let headChangedCb: ((event: { payload: { repo_path: string; branch: string } }) => void) | null = null;
 			listenMock.mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
 				if (event === "repo-changed") repoChangedCb = handler as typeof repoChangedCb;
@@ -861,17 +1064,21 @@ describe("initApp", () => {
 			mockInvoke.mockClear();
 		});
 
-		it("repo-changed calls clear_repo_caches with repo path, not clear_caches", async () => {
+		// The backend already invalidated. Every producer of `repo-changed`
+		// (the watcher's git-state and working-tree emits, and worktree
+		// creation) calls `invalidate_repo_caches` before it sends the event,
+		// and `clear_repo_caches` does nothing else — so this round trip could
+		// only ever re-clear caches that were already empty, once per repo per
+		// event, on the IPC thread.
+		it("repo-changed does not re-invalidate caches the backend already cleared", async () => {
 			const { getRepoChanged } = captureRepoAndHeadChanged();
 			const deps = createMockDeps();
 			await initApp(deps);
 
 			mockInvoke.mockClear();
-			getRepoChanged()!({ payload: { repo_path: "/my/repo" } });
+			getRepoChanged()!({ payload: { repo_path: "/my/repo", kind: "git-state" } });
 
-			// Should call scoped invalidation
-			expect(mockInvoke).toHaveBeenCalledWith("clear_repo_caches", { path: "/my/repo" });
-			// Should NOT call the global clear_caches
+			expect(mockInvoke).not.toHaveBeenCalledWith("clear_repo_caches", { path: "/my/repo" });
 			expect(mockInvoke).not.toHaveBeenCalledWith("clear_caches");
 		});
 
@@ -891,18 +1098,66 @@ describe("initApp", () => {
 			expect(mockInvoke).not.toHaveBeenCalledWith("clear_caches");
 		});
 
-		it("repo-changed scopes invalidation to the specific repo that changed", async () => {
-			const { getRepoChanged } = captureRepoAndHeadChanged();
+		// head-changed keeps its call: `resolve_head_target` short-circuits the
+		// watcher's git-state emit when only HEAD moved, so nothing else
+		// invalidated for a plain branch switch.
+		it("repo-changed leaves the head-changed invalidation untouched", async () => {
+			const { getRepoChanged, getHeadChanged } = captureRepoAndHeadChanged();
+			repositoriesStore.add({ path: "/my/repo", displayName: "Repo" });
+			repositoriesStore.setBranch("/my/repo", "main", { worktreePath: null });
+			repositoriesStore.setActiveBranch("/my/repo", "main");
 			const deps = createMockDeps();
 			await initApp(deps);
 
 			mockInvoke.mockClear();
-			getRepoChanged()!({ payload: { repo_path: "/repo-a" } });
-			getRepoChanged()!({ payload: { repo_path: "/repo-b" } });
+			getRepoChanged()!({ payload: { repo_path: "/my/repo", kind: "git-state" } });
+			expect(mockInvoke).not.toHaveBeenCalledWith("clear_repo_caches", { path: "/my/repo" });
 
-			// Each repo gets its own scoped invalidation call
-			expect(mockInvoke).toHaveBeenCalledWith("clear_repo_caches", { path: "/repo-a" });
-			expect(mockInvoke).toHaveBeenCalledWith("clear_repo_caches", { path: "/repo-b" });
+			getHeadChanged()!({ payload: { repo_path: "/my/repo", branch: "feature" } });
+			expect(mockInvoke).toHaveBeenCalledWith("clear_repo_caches", { path: "/my/repo" });
+		});
+	});
+
+	// The narrowing is only safe because it is a strict subset: `getRevision`
+	// still moves on every event, so a panel that was never migrated cannot go
+	// stale. Only `getGitRevision` is held back on a working-tree change.
+	describe("repo-changed change kind", () => {
+		function captureRepoChanged() {
+			const listenMock = vi.mocked(listen);
+			let cb: ((event: { payload: { repo_path: string; kind: string } }) => void) | null = null;
+			listenMock.mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+				if (event === "repo-changed") cb = handler as typeof cb;
+				return Promise.resolve(vi.fn());
+			}) as unknown as typeof listen);
+			return () => cb;
+		}
+
+		it("a working-tree change bumps the general revision but not the git one", async () => {
+			const getCb = captureRepoChanged();
+			const deps = createMockDeps();
+			await initApp(deps);
+
+			const revision = repositoriesStore.getRevision("/repo");
+			const gitRevision = repositoriesStore.getGitRevision("/repo");
+			getCb()!({ payload: { repo_path: "/repo", kind: "working-tree" } });
+			await vi.advanceTimersByTimeAsync(20);
+
+			expect(repositoriesStore.getRevision("/repo")).toBe(revision + 1);
+			expect(repositoriesStore.getGitRevision("/repo")).toBe(gitRevision);
+		});
+
+		it("a git-state change bumps both", async () => {
+			const getCb = captureRepoChanged();
+			const deps = createMockDeps();
+			await initApp(deps);
+
+			const revision = repositoriesStore.getRevision("/repo");
+			const gitRevision = repositoriesStore.getGitRevision("/repo");
+			getCb()!({ payload: { repo_path: "/repo", kind: "git-state" } });
+			await vi.advanceTimersByTimeAsync(20);
+
+			expect(repositoriesStore.getRevision("/repo")).toBe(revision + 1);
+			expect(repositoriesStore.getGitRevision("/repo")).toBe(gitRevision + 1);
 		});
 	});
 
@@ -1069,6 +1324,8 @@ describe("initApp", () => {
 			const { getCallback } = captureSessionClosed();
 			const deps = createMockDeps();
 			await initApp(deps);
+			const playCompletion = vi.spyOn(notificationsStore, "playCompletion").mockResolvedValue(undefined);
+			notificationsStore.setSilenceRemoteCompletions(true);
 
 			const termId = terminalsStore.add({
 				sessionId: "remote-sess",
@@ -1086,6 +1343,11 @@ describe("initApp", () => {
 			expect(terminalsStore.get(termId)?.sessionId).toBeNull();
 			expect(terminalsStore.get(termId)?.agentState).toBeNull();
 			expect(terminalsStore.get(termId)?.backgroundWork).toBe(false);
+			expect(terminalsStore.get(termId)?.completionNotified).toBe(true);
+			expect(playCompletion).not.toHaveBeenCalled();
+
+			notificationsStore.setSilenceRemoteCompletions(false);
+			playCompletion.mockRestore();
 		});
 
 		it("does not set shellState when session_id has no matching terminal", async () => {
@@ -1214,6 +1476,105 @@ describe("initApp", () => {
 		});
 	});
 
+	describe("mcp-toast event (agent-raised attention)", () => {
+		type ToastPayload = {
+			title: string;
+			message: string | null;
+			level: string;
+			sound: string | null;
+			origin_repo_path?: string;
+			origin_session_id?: string;
+		};
+
+		function captureMcpToast() {
+			const listenMock = vi.mocked(listen);
+			let callback: ((event: { payload: ToastPayload }) => void) | null = null;
+			listenMock.mockImplementation(((event: string, handler: (event: { payload: unknown }) => void) => {
+				if (event === "mcp-toast") {
+					callback = handler as typeof callback;
+				}
+				return Promise.resolve(vi.fn());
+			}) as unknown as typeof listen);
+			return { getCallback: () => callback };
+		}
+
+		it("plays the named sound through the notification scheme, not the toast's own tone", async () => {
+			const { getCallback } = captureMcpToast();
+			const deps = createMockDeps();
+			await initApp(deps);
+			const play = vi.spyOn(notificationsStore, "play").mockResolvedValue(undefined);
+			const addToast = vi.spyOn(toastsStore, "add");
+
+			getCallback()!({
+				payload: { title: "need you", message: "which branch?", level: "warn", sound: "attention" },
+			});
+
+			expect(play).toHaveBeenCalledWith("attention");
+			// The toast store's own level-keyed tone would play a second, different
+			// sound over the buzzer and would ignore the user's volume/device/mutes.
+			expect(addToast).toHaveBeenCalledWith(
+				"need you",
+				"which branch?",
+				"warn",
+				false,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+			);
+			play.mockRestore();
+			addToast.mockRestore();
+		});
+
+		it("stays silent when no sound was requested or the name is unknown", async () => {
+			const { getCallback } = captureMcpToast();
+			const deps = createMockDeps();
+			await initApp(deps);
+			const play = vi.spyOn(notificationsStore, "play").mockResolvedValue(undefined);
+
+			getCallback()!({ payload: { title: "done", message: null, level: "info", sound: null } });
+			getCallback()!({ payload: { title: "done", message: null, level: "info", sound: "buzzer" } });
+
+			expect(play).not.toHaveBeenCalled();
+			play.mockRestore();
+		});
+
+		it("scopes the toast to the repository resolved from the caller cwd", async () => {
+			repositoriesStore.add({ path: "/Gits/personal/tuicommander", displayName: "FastAF" });
+			const { getCallback } = captureMcpToast();
+			const deps = createMockDeps();
+			await initApp(deps);
+			const addToast = vi.spyOn(toastsStore, "add");
+
+			getCallback()!({
+				payload: {
+					title: "Release published",
+					message: "v1.7.4",
+					level: "info",
+					sound: null,
+					origin_repo_path: "/Gits/personal/tuicommander/src-tauri",
+					origin_session_id: "sess-abc",
+				},
+			});
+
+			// The session id rides along with the repo path: the repo scopes the
+			// toast, the session is what a click on it navigates to. The repo name
+			// is NOT glued onto the message — ToastContainer renders it as its own
+			// badge, so prefixing here would print it twice.
+			expect(addToast).toHaveBeenCalledWith(
+				"Release published",
+				"v1.7.4",
+				"info",
+				false,
+				undefined,
+				undefined,
+				"/Gits/personal/tuicommander",
+				"sess-abc",
+			);
+			addToast.mockRestore();
+		});
+	});
+
 	describe("session-created event (agent tab activation)", () => {
 		type SessionCreatedPayload = {
 			session_id: string;
@@ -1276,7 +1637,7 @@ describe("initApp", () => {
 			expect(terminalsStore.get(newId!)?.nameIsCustom).toBe(false);
 		});
 
-		it("preserves a spawned agent display name as custom", async () => {
+		it("uses a spawned agent display name as an intent-replaceable base title", async () => {
 			const { getCallback } = captureSessionCreated();
 			const deps = createMockDeps();
 			await initApp(deps);
@@ -1292,7 +1653,7 @@ describe("initApp", () => {
 
 			const terminalId = terminalsStore.getIds().find((id) => terminalsStore.get(id)?.sessionId === "named-sess");
 			expect(terminalsStore.get(terminalId!)?.name).toBe("windows-primary");
-			expect(terminalsStore.get(terminalId!)?.nameIsCustom).toBe(true);
+			expect(terminalsStore.get(terminalId!)?.nameIsCustom).toBe(false);
 		});
 
 		it("setActiveGroup called with first leaf when split but no active group", async () => {

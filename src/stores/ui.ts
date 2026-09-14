@@ -10,11 +10,10 @@ const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 500;
 const SIDEBAR_DEFAULT_WIDTH = 300;
 
-const MARKDOWN_PANEL_DEFAULT_WIDTH = 400;
-const NOTES_PANEL_DEFAULT_WIDTH = 350;
-const GIT_PANEL_DEFAULT_WIDTH = 380;
-const AI_CHAT_PANEL_DEFAULT_WIDTH = 500;
 const SETTINGS_NAV_DEFAULT_WIDTH = 180;
+
+/** Debounce window for persisting UI prefs, matching settingsStore. */
+const SAVE_DEBOUNCE_MS = 500;
 
 /** Git panel tab names */
 export type GitPanelTab = "changes" | "log" | "stashes" | "branches";
@@ -57,6 +56,11 @@ interface UIStoreState {
 	aiTriagePanelVisible: boolean;
 	detachedPanels: Record<string, string>;
 
+	/** Collapsed state of the GitHub panel sections, keyed by section id
+	 *  (`my-prs`, `prs`, `issues`). A missing key means the section has never
+	 *  been toggled and keeps its own default. */
+	githubSectionCollapsed: Record<string, boolean>;
+
 	// Knowledge history overlay — ephemeral, not persisted. Full-screen modal
 	// opened from SessionKnowledgeBar's "History" button.
 	knowledgeHistoryOverlayVisible: boolean;
@@ -64,11 +68,9 @@ interface UIStoreState {
 	// Requested active tab for the git panel (set by external actions like toggle-branches-tab)
 	gitPanelRequestedTab: GitPanelTab | null;
 
-	// Resizable panel widths (persisted)
-	markdownPanelWidth: number;
-	notesPanelWidth: number;
-	gitPanelWidth: number;
-	aiChatPanelWidth: number;
+	// Resizable panel widths (persisted). The right-side panels are resized by
+	// PanelResizeHandle, which writes panel.style.width inline and keeps no
+	// store state — only the sidebar and the settings nav are tracked here.
 	settingsNavWidth: number;
 
 	// Diff viewer mode (persisted)
@@ -115,12 +117,9 @@ function createUIStore() {
 		aiChatPanelVisible: false,
 		aiTriagePanelVisible: false,
 		detachedPanels: {} as Record<string, string>,
+		githubSectionCollapsed: {} as Record<string, boolean>,
 		knowledgeHistoryOverlayVisible: false,
 		gitPanelRequestedTab: null,
-		markdownPanelWidth: MARKDOWN_PANEL_DEFAULT_WIDTH,
-		notesPanelWidth: NOTES_PANEL_DEFAULT_WIDTH,
-		gitPanelWidth: GIT_PANEL_DEFAULT_WIDTH,
-		aiChatPanelWidth: AI_CHAT_PANEL_DEFAULT_WIDTH,
 		settingsNavWidth: SETTINGS_NAV_DEFAULT_WIDTH,
 		diffViewMode: "split" as DiffViewMode,
 		fileBrowserViewMode: "tree" as "flat" | "tree",
@@ -131,8 +130,22 @@ function createUIStore() {
 		loadingMessage: "",
 	});
 
-	/** Persist all layout prefs to Rust backend (fire-and-forget) */
+	let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+	/** Debounced persist — coalesces a burst of panel toggles into one write.
+	 *  Each `save_ui_prefs` costs a config read, the global write lock and an
+	 *  atomic write on the Rust side, so `setExclusivePanel` must not pay one per
+	 *  mutation. Mirrors `settingsStore.save()` and `paneLayoutStore.scheduleSave()`. */
 	function saveUIPrefs(): void {
+		if (saveTimer) clearTimeout(saveTimer);
+		saveTimer = setTimeout(() => {
+			saveTimer = null;
+			writeUIPrefs();
+		}, SAVE_DEBOUNCE_MS);
+	}
+
+	/** Write the current prefs to the Rust backend (fire-and-forget) */
+	function writeUIPrefs(): void {
 		invoke("save_ui_prefs", {
 			config: {
 				sidebar_visible: state.sidebarVisible,
@@ -142,14 +155,11 @@ function createUIStore() {
 				file_browser_panel_visible: state.fileBrowserPanelVisible,
 				git_panel_visible: state.gitPanelVisible,
 				ai_chat_panel_visible: state.aiChatPanelVisible,
-				markdown_panel_width: state.markdownPanelWidth,
-				notes_panel_width: state.notesPanelWidth,
-				git_panel_width: state.gitPanelWidth,
-				ai_chat_panel_width: state.aiChatPanelWidth,
 				settings_nav_width: state.settingsNavWidth,
 				diff_view_mode: state.diffViewMode,
 				file_browser_view_mode: state.fileBrowserViewMode,
 				detached_panels: state.detachedPanels,
+				github_section_collapsed: state.githubSectionCollapsed,
 			},
 		}).catch((err) => appLogger.debug("store", "Failed to save UI prefs", err));
 	}
@@ -177,9 +187,6 @@ function createUIStore() {
 
 	/** Open one exclusive panel and close the others, or close all if `key` is already open (toggle). */
 	function setExclusivePanel(key: ExclusivePanel, visible: boolean): void {
-		if (key === "markdownPanelVisible" && visible) {
-			appLogger.warn("store", `MarkdownPanel OPEN triggered`, { stack: new Error().stack });
-		}
 		batch(() => {
 			setState(key, visible);
 			if (visible) {
@@ -217,14 +224,11 @@ function createUIStore() {
 					file_browser_panel_visible?: boolean;
 					git_panel_visible?: boolean;
 					ai_chat_panel_visible?: boolean;
-					markdown_panel_width?: number;
-					notes_panel_width?: number;
-					git_panel_width?: number;
-					ai_chat_panel_width?: number;
 					settings_nav_width?: number;
 					diff_view_mode?: string;
 					file_browser_view_mode?: string;
 					detached_panels?: Record<string, string>;
+					github_section_collapsed?: Record<string, boolean>;
 				}>("load_ui_prefs");
 				if (loaded) {
 					if (loaded.sidebar_visible !== undefined) {
@@ -234,8 +238,6 @@ function createUIStore() {
 						setState("sidebarWidth", clampWidth(loaded.sidebar_width));
 					}
 					if (loaded.markdown_panel_visible !== undefined) {
-						if (loaded.markdown_panel_visible)
-							appLogger.warn("store", "hydrate: markdown_panel_visible=true from disk");
 						setState("markdownPanelVisible", loaded.markdown_panel_visible);
 					}
 					if (loaded.notes_panel_visible !== undefined) {
@@ -249,18 +251,6 @@ function createUIStore() {
 					}
 					if (loaded.ai_chat_panel_visible !== undefined) {
 						setState("aiChatPanelVisible", loaded.ai_chat_panel_visible);
-					}
-					if (loaded.markdown_panel_width !== undefined) {
-						setState("markdownPanelWidth", loaded.markdown_panel_width);
-					}
-					if (loaded.notes_panel_width !== undefined) {
-						setState("notesPanelWidth", loaded.notes_panel_width);
-					}
-					if (loaded.git_panel_width !== undefined) {
-						setState("gitPanelWidth", loaded.git_panel_width);
-					}
-					if (loaded.ai_chat_panel_width !== undefined) {
-						setState("aiChatPanelWidth", loaded.ai_chat_panel_width);
 					}
 					if (loaded.settings_nav_width !== undefined) {
 						setState("settingsNavWidth", loaded.settings_nav_width);
@@ -277,6 +267,9 @@ function createUIStore() {
 					}
 					if (loaded.detached_panels && typeof loaded.detached_panels === "object") {
 						setState("detachedPanels", loaded.detached_panels);
+					}
+					if (loaded.github_section_collapsed && typeof loaded.github_section_collapsed === "object") {
+						setState("githubSectionCollapsed", loaded.github_section_collapsed);
 					}
 				}
 			} catch (err) {
@@ -380,11 +373,6 @@ function createUIStore() {
 			setExclusivePanel("aiChatPanelVisible", visible);
 		},
 
-		setAiChatPanelWidth(width: number): void {
-			setState("aiChatPanelWidth", width);
-			saveUIPrefs();
-		},
-
 		toggleAiTriagePanel(): void {
 			setExclusivePanel("aiTriagePanelVisible", !state.aiTriagePanelVisible);
 		},
@@ -406,6 +394,17 @@ function createUIStore() {
 
 		isDetached(panelId: string): boolean {
 			return panelId in state.detachedPanels;
+		},
+
+		/** Collapsed flag for a GitHub panel section, or undefined when the user
+		 *  has never toggled it — the caller then applies its own default. */
+		getGithubSectionCollapsed(sectionId: string): boolean | undefined {
+			return state.githubSectionCollapsed[sectionId];
+		},
+
+		setGithubSectionCollapsed(sectionId: string, collapsed: boolean): void {
+			setState("githubSectionCollapsed", sectionId, collapsed);
+			saveUIPrefs();
 		},
 
 		setKnowledgeHistoryOverlayVisible(visible: boolean): void {
@@ -469,22 +468,6 @@ function createUIStore() {
 			saveUIPrefs();
 		},
 
-		// Panel widths
-		setMarkdownPanelWidth(width: number): void {
-			setState("markdownPanelWidth", width);
-			saveUIPrefs();
-		},
-
-		setNotesPanelWidth(width: number): void {
-			setState("notesPanelWidth", width);
-			saveUIPrefs();
-		},
-
-		setGitPanelWidth(width: number): void {
-			setState("gitPanelWidth", width);
-			saveUIPrefs();
-		},
-
 		setSettingsNavWidth(width: number): void {
 			setState("settingsNavWidth", width);
 		},
@@ -498,10 +481,6 @@ function createUIStore() {
 		resetLayout(): void {
 			batch(() => {
 				setState("sidebarWidth", SIDEBAR_DEFAULT_WIDTH);
-				setState("markdownPanelWidth", MARKDOWN_PANEL_DEFAULT_WIDTH);
-				setState("notesPanelWidth", NOTES_PANEL_DEFAULT_WIDTH);
-				setState("gitPanelWidth", GIT_PANEL_DEFAULT_WIDTH);
-				setState("aiChatPanelWidth", AI_CHAT_PANEL_DEFAULT_WIDTH);
 				setState("settingsNavWidth", SETTINGS_NAV_DEFAULT_WIDTH);
 			});
 			saveUIPrefs();
@@ -516,7 +495,23 @@ function createUIStore() {
 		},
 	};
 
-	return { state, ...actions };
+	return {
+		state,
+		...actions,
+		/** Write a pending debounced save now — the app is going away. */
+		flushSave(): void {
+			if (!saveTimer) return;
+			clearTimeout(saveTimer);
+			saveTimer = null;
+			writeUIPrefs();
+		},
+		_testCancelPendingSave(): void {
+			if (saveTimer) {
+				clearTimeout(saveTimer);
+				saveTimer = null;
+			}
+		},
+	};
 }
 
 export const uiStore = createUIStore();

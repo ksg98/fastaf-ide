@@ -56,6 +56,9 @@ export function createCanvasLinkController(delayMs = 150): CanvasLinkController 
 			}, delayMs);
 		},
 		clearDetected() {
+			generation++;
+			if (verificationTimer !== undefined) clearTimeout(verificationTimer);
+			verificationTimer = undefined;
 			detectedSpans.clear();
 			wrappedSpans.clear();
 		},

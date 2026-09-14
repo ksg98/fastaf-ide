@@ -14,6 +14,9 @@ FastAF detects, monitors, and manages AI coding agents running in your terminals
 | Amp | `amp` | `amp threads continue` | — |
 | Cursor Agent | `cursor-agent` | `cursor-agent resume` | — |
 | Droid (Factory) | `droid` | — | — |
+| Goose | `goose` | `goose session --resume` | `goose session --resume --name $TUIC_SESSION` |
+| Grok | `grok` | `grok --continue` | `grok --resume <discovered id>` |
+| pi | `pi` | `pi --continue` | — |
 
 ## Agent Detection
 
@@ -61,6 +64,8 @@ Instead of inferring busy/idle/waiting from terminal output, FastAF can drive an
 
 When enabled, TUIC writes small shell hooks into the agent's settings file that emit `OSC 7770;state=…` on each lifecycle event (busy on prompt/tool start, `awaiting` on an approval/question prompt, idle on stop). The session state then follows the hooks precisely, and the heuristic question-detection above is suppressed for that agent (the silence-idle backstop stays on, so a crashed agent still recovers from "busy").
 
+For Claude, `awaiting` also covers **MCP elicitation** — the dialog an MCP server raises to ask you for input (`MCP server "…" requests your input`, with Accept/Decline). It arrives through Claude's `Elicitation` event and is retracted by `ElicitationResult`; no screen scraping is involved, because that dialog matches none of the question heuristics.
+
 **Ownership is safe and reversible.** Each managed hook carries a `# tuic-managed-hook` sentinel; enabling installs only TUIC's entries and disabling removes only them — your own (and wiz/mdkb) hooks in the same file are never touched. The toggle is the source of truth; the effect applies on the agent's **next launch** (hooks are read at startup).
 
 | Agent | Hooks | Status |
@@ -70,7 +75,7 @@ When enabled, TUIC writes small shell hooks into the agent's settings file that 
 | Codex | `~/.codex/hooks.json` + `~/.codex/config.toml` (`[features] hooks = true`) | Supported |
 | Grok | `~/.grok/hooks/tuic.json` (own file) | Supported |
 | OpenCode | `~/.config/opencode/plugin/tuic.ts` (Bun/TS plugin) | Supported |
-| Others (Aider, Amp, Cursor, Goose, Droid) | — | No hook system — stays heuristic |
+| Others (Aider, Amp, Cursor, Goose, Droid, pi) | — | No TUIC-managed hook system — stays heuristic |
 
 > **Platform note:** Hook instrumentation is **macOS/Linux only** — it resolves the controlling tty via `ps`/`/dev/tty`, which has no Windows equivalent. On Windows the toggle is hidden and agents keep heuristic detection (no regression).
 
@@ -161,8 +166,9 @@ echo "Last run: $(date)" > "/tmp/tuic-$TUIC_SESSION.log"
 
 When FastAF restores saved terminals after a restart, only tabs that had an active agent session (`agentType` set) are restored. Plain shell tabs are discarded and a fresh terminal is spawned instead. For agent tabs, FastAF checks whether the session file exists on disk before deciding the resume strategy:
 
-1. **Verified session** — If `$TUIC_SESSION` maps to an existing session file (e.g. `~/.claude/projects/…/<uuid>.jsonl`), the agent resumes with `--resume <uuid>`
-2. **No session file** — Falls back to the agent's default resume behavior (e.g. `claude --continue` for the last session)
+1. **Verified session** — If the terminal's saved agent session ID maps to an existing session file (e.g. `~/.claude/projects/…/<uuid>.jsonl`), the agent resumes with that agent's ID-specific command
+2. **No saved session ID** — Falls back to the agent's default resume behavior (e.g. `claude --continue` for the last session)
+3. **Saved ID no longer verifies** — Refuses automatic resume instead of opening an unrelated last session
 
 The resume command honours the agent's **default run config**: FastAF swaps the binary in the resume command (`claude`) for the run config's `command` (e.g. `c2`) and appends the run config's args after the resume flag. So a user with the default run config `c2 --model claude-opus-4-6` will resume with `c2 --resume <uuid> --model claude-opus-4-6`, not `claude --resume <uuid>`.
 

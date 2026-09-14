@@ -1,6 +1,42 @@
 {
   "posts": [
     {
+      "slug": "keyboard-shortcuts",
+      "title": "The shortcuts that matter when twelve agents are working",
+      "date": "2026-08-09",
+      "status": "published",
+      "feature": "Keyboard shortcuts — navigation-first bindings and keybindings.json customization",
+      "summary": "A shortcut list is usually a feature dump. These are the handful that changed how we work once the terminal stopped being where you type and became where you supervise: Cmd+U to reach the agent that is blocked, Cmd+Ctrl+Backspace to get back, Cmd+I to queue the next instruction without derailing the current one — plus the block, split and branch keys, and how to rebind all of it.",
+      "screenshots": []
+    },
+    {
+      "slug": "delivery-receipts",
+      "title": "\"ok\" was a lie",
+      "date": "2026-08-05",
+      "status": "published",
+      "feature": "Agent messaging correctness — delivery receipts, delivery_path, wake ownership",
+      "summary": "We shipped agent-to-agent messaging and it worked. Then an orchestrator reply vanished while both sides believed delivery had happened. A post-mortem on acknowledging a message whose recipient is an LLM in a terminal: why storage acknowledgement is not delivery acknowledgement, the field we had to delete twice, and why an ambiguous field is more dangerous when the client is a model.",
+      "screenshots": []
+    },
+    {
+      "slug": "ci-auto-heal",
+      "title": "When the PR goes red, the agent fixes it",
+      "date": "2026-07-30",
+      "status": "published",
+      "feature": "CI auto-heal — failing-job logs handed back to the agent on the branch",
+      "summary": "Auto-heal fetches the failing job logs and types them into the agent that wrote the code, capped at three real attempts. The part worth writing about is what those logs are: on a fork PR they are attacker-authored text going into an agent that holds a shell — and what we do about it, including the residual risk we accept on purpose.",
+      "screenshots": []
+    },
+    {
+      "slug": "agent-hooks",
+      "title": "We stopped guessing what the agent was doing",
+      "date": "2026-07-24",
+      "status": "published",
+      "feature": "Native agent hook instrumentation (Claude, Gemini, Grok, Codex, OpenCode) via OSC 7770",
+      "summary": "Reading an agent’s state off its terminal screen is a war you lose one redesign at a time — a rounded composer box left a tab busy 132 seconds after the turn finished, with green tests. So we install a hook into the agent’s own settings file and let it report busy, idle and awaiting directly.",
+      "screenshots": []
+    },
+    {
       "slug": "ipad-couch",
       "title": "Running your agents from the couch, on an iPad",
       "date": "2026-06-27",
@@ -55,6 +91,15 @@
       "screenshots": []
     },
     {
+      "slug": "agent-messaging",
+      "title": "Agent-to-agent messaging: from terminal scraping to structured channels",
+      "date": "2026-05-16",
+      "status": "published",
+      "feature": "Inter-agent messaging — peer inbox + MCP channels",
+      "summary": "AI agents working together shouldn’t have to read each other’s terminal output. FastAF provides two direct communication paths: peer messaging for structured coordination, and MCP channels for real-time event push. Here’s how they work and when to use each.",
+      "screenshots": []
+    },
+    {
       "slug": "beta-features",
       "title": "SSH tunnels, remote access, and the beta features you can try today",
       "date": "2026-05-10",
@@ -79,7 +124,10 @@
       "status": "published",
       "feature": "AI Diff Triage",
       "summary": "Every AI IDE can generate code. None of them review the diff before you commit. AI Triage classifies every changed file by risk, relevance, and category — streaming results as the LLM works through your changes.",
-      "screenshots": ["hero.png", "command-palette.png"]
+      "screenshots": [
+        "hero.png",
+        "command-palette.png"
+      ]
     },
     {
       "slug": "cross-agent-orchestration",
@@ -124,7 +172,10 @@
       "status": "published",
       "feature": "Global Workspace / Cross-repo terminal aggregation",
       "summary": "When you run agents across multiple repos, you lose track of who's doing what. Global Workspace pulls the terminals that matter into a single split-pane view — without moving them.",
-      "screenshots": ["activity-dashboard.png", "sidebar-entry.png"]
+      "screenshots": [
+        "activity-dashboard.png",
+        "sidebar-entry.png"
+      ]
     },
     {
       "slug": "integrated-viewers",
@@ -133,7 +184,11 @@
       "status": "published",
       "feature": "Markdown viewer / Code editor / Side-by-side diff / Clickable paths",
       "summary": "AI agents reference files constantly. Instead of alt-tabbing to an editor every time, we built markdown, code, and diff viewers right into the terminal workspace.",
-      "screenshots": ["markdown-viewer.png", "code-editor.png", "diff-viewer.png"]
+      "screenshots": [
+        "markdown-viewer.png",
+        "code-editor.png",
+        "diff-viewer.png"
+      ]
     },
     {
       "slug": "agent-observability",
@@ -142,7 +197,11 @@
       "status": "published",
       "feature": "Agent status detection / Sound notifications / Activity Dashboard",
       "summary": "When you run 5 agents in parallel, you can't watch every terminal. We built status detection, sound notifications, and an activity dashboard so you don't have to.",
-      "screenshots": ["status-legend.png", "activity-dashboard.png", "tab-status-dots.png"]
+      "screenshots": [
+        "status-legend.png",
+        "activity-dashboard.png",
+        "tab-status-dots.png"
+      ]
     },
     {
       "slug": "sidebar-workspace",
@@ -151,7 +210,9 @@
       "status": "published",
       "feature": "Sidebar / Multi-repo workspace / PR management",
       "summary": "When you work across 10+ repositories every day, you need a single place to see branches, worktrees, PRs, and diff stats — without switching tools.",
-      "screenshots": ["sidebar-pr.png"]
+      "screenshots": [
+        "sidebar-pr.png"
+      ]
     },
     {
       "slug": "remote-mobile",
@@ -160,7 +221,13 @@
       "status": "published",
       "feature": "Remote Access / PWA / Tailscale",
       "summary": "We wanted to check on AI agents without sitting at the desk. After trying session logs, remote proxies, and SSH, we ended up building a full mobile experience.",
-      "screenshots": ["pwa-sessions.png", "pwa-terminal.png", "settings.png", "desktop-remote.png", "pwa-activity.png"]
+      "screenshots": [
+        "pwa-sessions.png",
+        "pwa-terminal.png",
+        "settings.png",
+        "desktop-remote.png",
+        "pwa-activity.png"
+      ]
     },
     {
       "slug": "smart-prompts",
@@ -169,7 +236,11 @@
       "status": "published",
       "feature": "Smart Prompts",
       "summary": "We were copy-pasting the same instructions to AI agents every day. So we turned them into one-click actions that know your context.",
-      "screenshots": ["library.png", "editor.png", "git-panel.png"]
+      "screenshots": [
+        "library.png",
+        "editor.png",
+        "git-panel.png"
+      ]
     },
     {
       "slug": "terminal-power",
@@ -178,7 +249,11 @@
       "status": "published",
       "feature": "Split panes / Detach to window / Persistent sessions / Find / Tab management",
       "summary": "Split panes, detachable windows, persistent sessions, find in content, and up to 50 concurrent terminals. We built a terminal for people who live in it all day.",
-      "screenshots": ["multi-agent-tabs.png", "split-pane.png", "detached-window.png"]
+      "screenshots": [
+        "multi-agent-tabs.png",
+        "split-pane.png",
+        "detached-window.png"
+      ]
     },
     {
       "slug": "claude-usage",
@@ -187,7 +262,9 @@
       "status": "published",
       "feature": "Claude Usage Dashboard / Rate limits / Token tracking",
       "summary": "Running multiple AI agents burns through rate limits fast. We built a usage dashboard so you can see exactly where you stand — and plan your work accordingly.",
-      "screenshots": ["dashboard.png"]
+      "screenshots": [
+        "dashboard.png"
+      ]
     },
     {
       "slug": "performance",
@@ -205,7 +282,9 @@
       "status": "published",
       "feature": "Voice dictation / Whisper / Push-to-talk",
       "summary": "Hold a key, speak your instruction, release. The text appears in the terminal. No cloud service, no API key, no latency — Whisper runs locally on your machine.",
-      "screenshots": ["settings.png"]
+      "screenshots": [
+        "settings.png"
+      ]
     },
     {
       "slug": "plugin-system",
@@ -214,7 +293,9 @@
       "status": "published",
       "feature": "Plugin system / MCP / Sidebar panels / Context menus",
       "summary": "Every workflow is different. We built a plugin system so you can extend FastAF with custom panels, context menu actions, and MCP integrations.",
-      "screenshots": ["plugins-panel.png"]
+      "screenshots": [
+        "plugins-panel.png"
+      ]
     }
   ]
 }

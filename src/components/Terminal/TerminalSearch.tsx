@@ -5,6 +5,8 @@ import type { CanvasTerminalRef } from "./CanvasTerminal";
 
 export interface TerminalSearchProps {
 	visible: boolean;
+	/** Forwarded to <SearchBar> so a repeat Cmd+F re-focuses an already-open bar. */
+	focusToken?: number;
 	canvasRef?: CanvasTerminalRef | undefined;
 	onClose: () => void;
 }
@@ -76,6 +78,7 @@ export const TerminalSearch: Component<TerminalSearchProps> = (props) => {
 	return (
 		<SearchBar
 			visible={props.visible}
+			focusToken={props.focusToken}
 			onSearch={handleSearch}
 			onNext={handleNext}
 			onPrev={handlePrev}

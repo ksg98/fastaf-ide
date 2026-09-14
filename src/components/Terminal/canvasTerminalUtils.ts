@@ -16,9 +16,25 @@ export const ATTR_INVERSE = 0x20;
 export const ATTR_DEFAULT_FG = 0x40;
 export const ATTR_DEFAULT_BG = 0x80;
 
+/** Bit 15 of the wire `col_count`: this row continues onto the next display row.
+ *  Mirrors `ROW_WRAPPED_FLAG` in src-tauri/src/terminal_grid.rs — the grid is the
+ *  only place that knows a line wrapped, and the overlay needs it to mask a
+ *  wrapped `suggest:` block (#8fc7). */
+const ROW_WRAPPED_FLAG = 0x8000;
+
+/** Bit 14 of the wire `col_count`: this row carries only its damaged columns.
+ *  A `start_col: u16` follows the count and the payload is `count` cells from
+ *  that column; `decodeBinaryFrame` merges them into the row already on screen.
+ *  Mirrors `ROW_PARTIAL_FLAG` in src-tauri/src/terminal_grid.rs, which documents
+ *  why this is a flag and not a header version. A backend that predates it never
+ *  sets the bit, so this decoder keeps taking the whole-row path unchanged. */
+const ROW_PARTIAL_FLAG = 0x4000;
+
 export interface DecodedRow {
 	index: number;
 	count: number;
+	/** True when the line continues onto the next display row. */
+	wrapped: boolean;
 	/** Unicode codepoints; 0 = empty cell */
 	codepoints: Uint32Array;
 	/** Packed fg color: r<<16|g<<8|b (valid when ATTR_DEFAULT_FG not set) */
@@ -27,6 +43,31 @@ export interface DecodedRow {
 	bg: Uint32Array;
 	/** Per-cell ATTR_* bitmask */
 	attrs: Uint8Array;
+}
+
+/**
+ * Text of a decoded row, built at most once per row object.
+ *
+ * A single frame asks the same row for its text several times over — the
+ * dirty-row prefilter, the suggest-overlay scan, the file-link scan — and each
+ * ask concatenated the whole row character by character. `decodeBinaryFrame`
+ * allocates a fresh row (and fresh typed arrays) for every changed row and never
+ * mutates one in place, so object identity is a sound cache key: the same object
+ * always describes the same cells. A `WeakMap` means a row that scrolls out of
+ * the frame takes its entry with it — no eviction policy to get wrong.
+ */
+const rowTextCache = new WeakMap<DecodedRow, string>();
+
+export function rowText(row: DecodedRow): string {
+	const cached = rowTextCache.get(row);
+	if (cached !== undefined) return cached;
+	let text = "";
+	for (let ci = 0; ci < row.count; ci++) {
+		const cp = row.codepoints[ci];
+		text += cp === 0 ? " " : String.fromCodePoint(cp);
+	}
+	rowTextCache.set(row, text);
+	return text;
 }
 
 export interface DecodedFrame {
@@ -42,6 +83,10 @@ export interface DecodedFrame {
 	historyBase: number;
 	hasSelection: boolean;
 	keyboardFlags: number;
+	/** Alternate screen active. `historyBase` restarts from 0 on every alt
+	 *  enter/exit, so the absolute-row cache MUST be dropped when this flips —
+	 *  otherwise a primary-screen row can alias onto an alt row at the same key. */
+	altScreen: boolean;
 	bell: boolean;
 	mouseMode: 0 | 1 | 2 | 3;
 	sgrMouse: boolean;
@@ -50,6 +95,10 @@ export interface DecodedFrame {
 	screenRows: number;
 	screenCols: number;
 	rows: DecodedRow[];
+	/** A ROW_PARTIAL_FLAG row arrived with no row on screen to merge into, so its
+	 *  untouched columns are unknown and it was dropped. The caller must pull a
+	 *  full frame rather than paint a row with holes in it. */
+	needsFullFrame: boolean;
 }
 
 /** Previous frame geometry/scroll state needed to decide what a new frame implies. */
@@ -58,12 +107,15 @@ export interface FrameGridPrev {
 	lastScreenCols: number;
 	lastDisplayOffset: number;
 	lastHistorySize: number;
+	lastAltScreen: boolean;
 }
 
 /** What a newly-decoded frame means for the rowMap. */
 export interface FrameGridDecision {
 	geomChanged: boolean;
 	scrollChanged: boolean;
+	/** Primary/alternate grid swap: all absolute row state belongs to a new era. */
+	screenChanged: boolean;
 	/** The frame carries a full screen of rows → replace the rowMap wholesale. */
 	fullReplace: boolean;
 	/** Partial frame after a scroll → clear and wait for a full frame; do NOT merge. */
@@ -82,15 +134,18 @@ export interface FrameGridDecision {
 export function decideFrameGrid(prev: FrameGridPrev, frame: DecodedFrame, fallbackRows: number): FrameGridDecision {
 	const geomChanged = frame.screenRows !== prev.lastScreenRows || frame.screenCols !== prev.lastScreenCols;
 	const scrollChanged = frame.displayOffset !== prev.lastDisplayOffset || frame.historySize !== prev.lastHistorySize;
+	const screenChanged = frame.altScreen !== prev.lastAltScreen;
 	const screenRowCount = frame.screenRows || fallbackRows || 24;
 	const fullReplace = frame.rows.length >= screenRowCount;
-	const scrollWait = !fullReplace && scrollChanged && !geomChanged;
-	return { geomChanged, scrollChanged, fullReplace, scrollWait };
+	const scrollWait = !fullReplace && (screenChanged || (scrollChanged && !geomChanged));
+	return { geomChanged, scrollChanged, screenChanged, fullReplace, scrollWait };
 }
 
 /** Inputs to the reconcile-fire gate (see shouldFireReconcile). */
 export interface ReconcileGate {
 	alive: boolean;
+	/** Off-screen (background tab): nothing it pulls back can be seen. */
+	hidden: boolean;
 	isScrolling: boolean;
 	/** Smooth-scroll fractional position; null when at rest on a line. */
 	scrollPosF: number | null;
@@ -107,9 +162,110 @@ export interface ReconcileGate {
  * but ONLY when the terminal is at rest and following output (offset 0). Firing
  * mid-gesture or while scrolled back would fight the active render or yank the
  * view. Pure, so the gate is unit-testable away from the CanvasTerminal closure.
+ *
+ * `hidden` belongs here for cost, not correctness: a background tab is
+ * `display:none` and never unmounted, and its rowMap is cleared on hide, so every
+ * partial frame it receives schedules a reconcile. Each fire forces
+ * `grid_force_full_damage()` — the most expensive frame there is — to be built,
+ * shipped, decoded and dropped, once a second, per hidden tab. The show path
+ * requests a fresh full frame anyway, so nothing is lost by staying quiet.
  */
 export function shouldFireReconcile(g: ReconcileGate): boolean {
-	return g.alive && !g.isScrolling && g.scrollPosF == null && g.displayOffset === 0;
+	return g.alive && !g.hidden && !g.isScrolling && g.scrollPosF == null && g.displayOffset === 0;
+}
+
+/** Leading-edge throttle (see createLeadingThrottle). */
+export interface LeadingThrottle {
+	/** Something happened: run now, or once the current window closes. */
+	trigger(): void;
+	/** Drop a pending run (unmount, or the work stopped being wanted). */
+	cancel(): void;
+}
+
+/**
+ * Run `work` on the first trigger, then at most once per `intervalMs`.
+ *
+ * The search refresh used a trailing debounce, which reset its timer on every
+ * frame. A redrawing TUI emits frames far faster than the window, so the timer
+ * never expired and the search did not refresh at all while the screen was busy
+ * — precisely when its matches are going stale. Leading-edge inverts that: the
+ * first frame refreshes immediately, and a continuous stream still refreshes at
+ * a bounded rate instead of never.
+ *
+ * A trailing run fires only if something was triggered inside the window, so an
+ * idle terminal schedules nothing.
+ */
+export function createLeadingThrottle(work: () => void, intervalMs: number): LeadingThrottle {
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	let pending = false;
+
+	const closeWindow = () => {
+		timer = null;
+		if (!pending) return;
+		pending = false;
+		openWindow();
+		work();
+	};
+	const openWindow = () => {
+		timer = setTimeout(closeWindow, intervalMs);
+	};
+
+	return {
+		trigger() {
+			if (timer != null) {
+				pending = true;
+				return;
+			}
+			openWindow();
+			work();
+		},
+		cancel() {
+			if (timer != null) clearTimeout(timer);
+			timer = null;
+			pending = false;
+		},
+	};
+}
+
+/** Trailing ack scheduler for a hidden terminal (see createHiddenAckThrottle). */
+export interface HiddenAckThrottle {
+	/** A frame arrived while hidden: arm the trailing ack if it is not already armed. */
+	schedule(): void;
+	/** Drop a pending ack (unmount, resubscribe, or the terminal became visible). */
+	cancel(): void;
+}
+
+/**
+ * Acknowledge frames received while hidden — late, and at most once per interval.
+ *
+ * A hidden terminal decodes each frame (the bell rides in the header) but paints
+ * nothing, so acking per frame would reopen the delivery gate at full rate for a
+ * viewport nobody can see. Never acking is worse than it looks: the gate then
+ * stays closed until the backend ticker declares the frontend stuck, which costs
+ * a warning per output burst and pins the hidden tab to the 500 ms force-reset
+ * floor anyway.
+ *
+ * One trailing ack per interval gets both: the hidden tab keeps receiving frames
+ * at ~1/interval, and the "gate stuck" warning goes back to meaning what it says.
+ * Call with an interval BELOW the backend's MAX_IN_FLIGHT_MS so the gate reopens
+ * on its own before the ticker gives up on the frame.
+ */
+export function createHiddenAckThrottle(ack: () => void, intervalMs: number): HiddenAckThrottle {
+	let timer: ReturnType<typeof setTimeout> | null = null;
+	return {
+		schedule() {
+			if (timer != null) return;
+			timer = setTimeout(() => {
+				timer = null;
+				ack();
+			}, intervalMs);
+		},
+		cancel() {
+			if (timer == null) return;
+			clearTimeout(timer);
+			timer = null;
+		},
+	};
 }
 
 /**
@@ -169,8 +325,18 @@ export interface CellMetrics {
 	scaledCellHeight: number;
 }
 
-/** Decode a binary grid frame from the Rust backend into structured data. */
-export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame | null {
+/**
+ * Decode a binary grid frame from the Rust backend into structured data.
+ *
+ * `base` is the rows currently on screen, keyed by row index. It is only read for
+ * ROW_PARTIAL_FLAG rows, which carry just their damaged columns and need the rest
+ * of the line from somewhere. Every row this returns is full width, so callers
+ * downstream never learn that partial rows exist.
+ *
+ * Rows are rebuilt, never mutated: `rowTextCache` keys off row identity, and the
+ * row it is merging from may still be referenced by the scroll cache.
+ */
+export function decodeBinaryFrame(buffer: ArrayBuffer, base?: ReadonlyMap<number, DecodedRow>): DecodedFrame | null {
 	if (buffer.byteLength < HEADER_SIZE) return null;
 
 	const view = new DataView(buffer);
@@ -190,7 +356,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame | null {
 	offset += 4;
 	const hasSelection = view.getUint8(offset) !== 0;
 	offset += 1;
-	const keyboardFlags = view.getUint8(offset);
+	const rawKeyboardFlags = view.getUint8(offset);
 	offset += 1;
 	const frameFlags = view.getUint8(offset);
 	offset += 1;
@@ -200,6 +366,10 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame | null {
 	offset += 2;
 	const historyBase = view.getUint32(offset, true);
 	offset += 4;
+	// bit5 of keyboard_flags is the alt-screen state, not a keyboard flag — it
+	// rides there because frame_flags is full (see serialize_dirty_rows).
+	const altScreen = (rawKeyboardFlags & 0x20) !== 0;
+	const keyboardFlags = rawKeyboardFlags & 0x1f;
 	const bell = (frameFlags & 0x01) !== 0;
 	const cursorShapeRaw = (frameFlags >> 1) & 0x03;
 	const cursorShape: "block" | "underline" | "beam" =
@@ -209,22 +379,53 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame | null {
 	const focusReporting = (frameFlags & 0x40) !== 0;
 	const bracketedPaste = (frameFlags & 0x80) !== 0;
 
+	// DEFERRED (2026-08-20) — F29, pooling these four typed arrays across frames.
+	// It cannot be done as the audit describes: rows outlive the frame. They are
+	// retained by the scroll `rowCache` (bounded at ROW_CACHE_MAX) and used as
+	// `rowTextCache` WeakMap keys, so a reused buffer would alias a cached row onto
+	// a later frame's cells. The paint half of F29 is already done — gridRenderer
+	// batches font/fillStyle changes and caches every colour and font string — and
+	// its glyph-run batching was deliberately rejected there, because `cellWidth`
+	// is rounded and batched `fillText` runs accumulate sub-pixel cursor drift.
 	const rows: DecodedRow[] = [];
+	let needsFullFrame = false;
 	for (let r = 0; r < numRows; r++) {
 		if (offset + 4 > buffer.byteLength) break;
 		const rowIndex = view.getUint16(offset, true);
 		offset += 2;
-		const colCount = view.getUint16(offset, true);
+		const rawColCount = view.getUint16(offset, true);
 		offset += 2;
+		const wrapped = (rawColCount & ROW_WRAPPED_FLAG) !== 0;
+		const partial = (rawColCount & ROW_PARTIAL_FLAG) !== 0;
+		const colCount = rawColCount & ~(ROW_WRAPPED_FLAG | ROW_PARTIAL_FLAG);
+		let startCol = 0;
+		if (partial) {
+			if (offset + 2 > buffer.byteLength) break;
+			startCol = view.getUint16(offset, true);
+			offset += 2;
+		}
 
-		const codepoints = new Uint32Array(colCount);
-		const fg = new Uint32Array(colCount);
-		const bg = new Uint32Array(colCount);
-		const attrs = new Uint8Array(colCount);
+		// A partial row describes an edit to the line already on screen. Without
+		// that line the untouched columns are unknown, so drop the row and let the
+		// caller pull a full frame — painting a half-known row would leave holes
+		// that nothing repairs until the next reconcile.
+		const previous = partial ? base?.get(rowIndex) : undefined;
+		if (partial && !previous) {
+			needsFullFrame = true;
+			offset += colCount * CELL_SIZE;
+			continue;
+		}
 
-		for (let c = 0; c < colCount; c++) {
+		const width = previous ? previous.count : colCount;
+		const codepoints = previous ? new Uint32Array(previous.codepoints) : new Uint32Array(colCount);
+		const fg = previous ? new Uint32Array(previous.fg) : new Uint32Array(colCount);
+		const bg = previous ? new Uint32Array(previous.bg) : new Uint32Array(colCount);
+		const attrs = previous ? new Uint8Array(previous.attrs) : new Uint8Array(colCount);
+
+		for (let i = 0; i < colCount; i++) {
 			if (offset + CELL_SIZE > buffer.byteLength) break;
-			codepoints[c] = view.getUint32(offset, true);
+			const c = startCol + i;
+			const cp = view.getUint32(offset, true);
 			offset += 4;
 			const fgR = view.getUint8(offset++);
 			const fgG = view.getUint8(offset++);
@@ -232,12 +433,18 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame | null {
 			const bgR = view.getUint8(offset++);
 			const bgG = view.getUint8(offset++);
 			const bgB = view.getUint8(offset++);
-			attrs[c] = view.getUint8(offset++);
+			const a = view.getUint8(offset++);
+			// A resize can land a span past the row we are merging into. The next
+			// frame is full (geometry change forces full damage), so skipping is
+			// enough — but writing past the end would silently drop the cell.
+			if (c >= width) continue;
+			codepoints[c] = cp;
+			attrs[c] = a;
 			fg[c] = (fgR << 16) | (fgG << 8) | fgB;
 			bg[c] = (bgR << 16) | (bgG << 8) | bgB;
 		}
 
-		rows.push({ index: rowIndex, count: colCount, codepoints, fg, bg, attrs });
+		rows.push({ index: rowIndex, count: width, wrapped, codepoints, fg, bg, attrs });
 	}
 
 	return {
@@ -250,6 +457,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame | null {
 		historyBase,
 		hasSelection,
 		keyboardFlags,
+		altScreen,
 		bell,
 		mouseMode,
 		sgrMouse,
@@ -258,6 +466,7 @@ export function decodeBinaryFrame(buffer: ArrayBuffer): DecodedFrame | null {
 		screenRows,
 		screenCols,
 		rows,
+		needsFullFrame,
 	};
 }
 
@@ -299,8 +508,13 @@ export function decodeStyledRange(buffer: ArrayBuffer): StyledRange | null {
 		if (offset + 6 > buffer.byteLength) break;
 		const abs = view.getUint32(offset, true);
 		offset += 4;
-		const colCount = view.getUint16(offset, true);
+		const rawColCount = view.getUint16(offset, true);
 		offset += 2;
+		const wrapped = (rawColCount & ROW_WRAPPED_FLAG) !== 0;
+		// Scrollback rows are always whole (see `serialize_styled_range`), but the
+		// count field is shared with the dirty-row format, so mask both flags —
+		// masking one and not the other is how a flag becomes a width of 16384.
+		const colCount = rawColCount & ~(ROW_WRAPPED_FLAG | ROW_PARTIAL_FLAG);
 		const codepoints = new Uint32Array(colCount);
 		const fg = new Uint32Array(colCount);
 		const bg = new Uint32Array(colCount);
@@ -319,7 +533,7 @@ export function decodeStyledRange(buffer: ArrayBuffer): StyledRange | null {
 			fg[c] = (fgR << 16) | (fgG << 8) | fgB;
 			bg[c] = (bgR << 16) | (bgG << 8) | bgB;
 		}
-		rows.push({ abs, row: { index: 0, count: colCount, codepoints, fg, bg, attrs } });
+		rows.push({ abs, row: { index: 0, count: colCount, wrapped, codepoints, fg, bg, attrs } });
 	}
 	return { startAbs, historySize, cols, rows };
 }

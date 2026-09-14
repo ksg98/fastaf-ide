@@ -60,7 +60,7 @@ The search icon button to the left of the input toggles between **filename mode*
 
 ### Content Search
 
-Switch to content mode (magnifier icon) to search inside file contents across the repository. Results are grouped by file, showing the matching line number and a highlighted excerpt. Click any result to open the file in the editor, jumping to that line.
+Switch to content mode (magnifier icon) to search inside file contents across the repository. Results are grouped by file, showing the matching line number and a highlighted excerpt. Highlights remain aligned on lines containing accented text, symbols, or emoji. Click any result to open the file in the editor, jumping to that line.
 
 Content search options (shown when in content mode):
 

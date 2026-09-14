@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CODING_EXT, filePathRegex, fileUrlRegex } from "../../components/Terminal/linkProvider";
+import { CODING_EXT, filePathRegex, fileUrlRegex, matchWebUrls } from "../../components/Terminal/linkProvider";
 
 describe("linkProvider regexes", () => {
 	describe("filePathRegex", () => {
@@ -97,5 +97,62 @@ describe("linkProvider regexes", () => {
 				expect(CODING_EXT).toContain(ext);
 			}
 		});
+	});
+});
+
+describe("matchWebUrls", () => {
+	function urls(text: string): string[] {
+		return matchWebUrls(text).map((u) => u.text);
+	}
+
+	it("matches a bare URL", () => {
+		expect(urls("Running on http://192.168.0.165:5000")).toEqual(["http://192.168.0.165:5000"]);
+	});
+
+	it("drops the sentence comma that made the URL unopenable", () => {
+		// The greedy match swallowed the comma, `new URL()` rejected
+		// "http://192.168.0.165:5000," as malformed, and the click did nothing.
+		expect(urls("see http://192.168.0.165:5000, then reload")).toEqual(["http://192.168.0.165:5000"]);
+		for (const url of urls("see http://192.168.0.165:5000, then reload")) {
+			expect(() => new URL(url)).not.toThrow();
+		}
+	});
+
+	it("drops every other sentence tail", () => {
+		expect(urls("go to https://example.com.")).toEqual(["https://example.com"]);
+		expect(urls("go to https://example.com!")).toEqual(["https://example.com"]);
+		expect(urls("go to https://example.com?")).toEqual(["https://example.com"]);
+		expect(urls("go to https://example.com;")).toEqual(["https://example.com"]);
+		expect(urls("go to https://example.com:")).toEqual(["https://example.com"]);
+		expect(urls("go to https://example.com'")).toEqual(["https://example.com"]);
+	});
+
+	it("keeps a trailing slash and a query string", () => {
+		expect(urls("* Running on http://127.0.0.1:5000/ (Press CTRL+C)")).toEqual(["http://127.0.0.1:5000/"]);
+		expect(urls("open https://example.com/search?q=1&b=2")).toEqual(["https://example.com/search?q=1&b=2"]);
+	});
+
+	it("keeps a parenthesis the URL itself opened", () => {
+		expect(urls("https://en.wikipedia.org/wiki/Rust_(programming_language)")).toEqual([
+			"https://en.wikipedia.org/wiki/Rust_(programming_language)",
+		]);
+	});
+
+	it("drops a parenthesis the sentence opened", () => {
+		expect(urls("(see https://example.com/docs)")).toEqual(["https://example.com/docs"]);
+	});
+
+	it("reports the index of the untrimmed start", () => {
+		const [match] = matchWebUrls("see http://example.com, ok");
+		expect(match.index).toBe(4);
+		expect(match.text).toBe("http://example.com");
+	});
+
+	it("finds several URLs on one line", () => {
+		expect(urls("http://a.test, http://b.test.")).toEqual(["http://a.test", "http://b.test"]);
+	});
+
+	it("is not a link once trimming leaves a bare scheme", () => {
+		expect(urls("http://,")).toEqual([]);
 	});
 });

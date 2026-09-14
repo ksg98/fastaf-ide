@@ -281,43 +281,47 @@ pub(super) async fn poller_start(
 }
 
 pub(super) async fn poller_stop(State(state): State<Arc<AppState>>) -> Response {
-    let poller = state.github_poller.lock().take();
-    if let Some(p) = poller {
-        let _ = p.cmd_tx.send(PollerCmd::Stop).await;
+    poller_response(crate::github_poller::stop_poller(&state).await)
+}
+
+/// Shared shape for the poller control routes: `{"ok": true}` on delivery, a 500
+/// with `{"error": …}` when the command went nowhere. They used to answer
+/// `{"ok": true}` unconditionally, including when no poller was running.
+fn poller_response(result: Result<(), String>) -> Response {
+    match result {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => err_500(&e),
     }
-    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 pub(super) async fn poller_set_visibility(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SetVisibilityRequest>,
 ) -> Response {
-    if let Some(poller) = state.github_poller.lock().as_ref() {
-        let _ = poller
-            .cmd_tx
-            .try_send(PollerCmd::SetVisibility(body.visible));
-    }
-    Json(serde_json::json!({"ok": true})).into_response()
+    poller_response(crate::github_poller::send_poller_cmd(
+        &state,
+        PollerCmd::SetVisibility(body.visible),
+    ))
 }
 
 pub(super) async fn poller_poll_repo(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PollRepoRequest>,
 ) -> Response {
-    if let Some(poller) = state.github_poller.lock().as_ref() {
-        let _ = poller.cmd_tx.try_send(PollerCmd::PollRepo(body.path));
-    }
-    Json(serde_json::json!({"ok": true})).into_response()
+    poller_response(crate::github_poller::send_poller_cmd(
+        &state,
+        PollerCmd::PollRepo(body.path),
+    ))
 }
 
 pub(super) async fn poller_update_paths(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdatePathsRequest>,
 ) -> Response {
-    if let Some(poller) = state.github_poller.lock().as_ref() {
-        let _ = poller.cmd_tx.try_send(PollerCmd::UpdatePaths(body.paths));
-    }
-    Json(serde_json::json!({"ok": true})).into_response()
+    poller_response(crate::github_poller::send_poller_cmd(
+        &state,
+        PollerCmd::UpdatePaths(body.paths),
+    ))
 }
 
 pub(super) async fn api_debug_set(Json(body): Json<super::types::SetApiDebugRequest>) -> Response {
@@ -334,12 +338,10 @@ pub(super) async fn poller_set_issue_filter(
     State(state): State<Arc<AppState>>,
     Json(body): Json<super::types::SetIssueFilterRequest>,
 ) -> Response {
-    if let Some(poller) = state.github_poller.lock().as_ref() {
-        let _ = poller
-            .cmd_tx
-            .try_send(PollerCmd::SetIssueFilter(body.filter));
-    }
-    Json(serde_json::json!({"ok": true})).into_response()
+    poller_response(crate::github_poller::send_poller_cmd(
+        &state,
+        PollerCmd::SetIssueFilter(body.filter),
+    ))
 }
 
 pub(super) async fn github_viewer_login(State(state): State<Arc<AppState>>) -> Response {

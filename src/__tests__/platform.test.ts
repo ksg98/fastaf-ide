@@ -8,6 +8,7 @@ import {
 	isQuickSwitcherActive,
 	isQuickSwitcherRelease,
 	isWindows,
+	resetPlatformCache,
 } from "../platform";
 
 describe("platform detection", () => {
@@ -19,12 +20,35 @@ describe("platform detection", () => {
 			writable: true,
 			configurable: true,
 		});
+		resetPlatformCache();
 	}
 
 	afterEach(() => {
 		if (originalPlatform) {
 			Object.defineProperty(navigator, "platform", originalPlatform);
 		}
+		resetPlatformCache();
+	});
+
+	it("reads navigator.platform once however many callers ask", () => {
+		// Every keystroke path asks who we are. The answer cannot change while the
+		// app runs, so re-parsing the UA string per call is pure waste.
+		let reads = 0;
+		Object.defineProperty(navigator, "platform", {
+			get() {
+				reads++;
+				return "MacIntel";
+			},
+			configurable: true,
+		});
+		resetPlatformCache();
+
+		for (let i = 0; i < 50; i++) {
+			detectPlatform();
+			isMacOS();
+		}
+
+		expect(reads).toBe(1);
 	});
 
 	describe("detectPlatform", () => {

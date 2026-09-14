@@ -255,7 +255,7 @@ impl GitHubAccountRegistry {
 
     /// Persist the registry to disk atomically.
     pub(crate) fn save(&self) -> Result<(), String> {
-        crate::config::save_json_config(GITHUB_ACCOUNTS_FILE, self)
+        crate::config::ConfigFile::<Self>::new(GITHUB_ACCOUNTS_FILE).save(self)
     }
 
     pub(crate) fn list(&self) -> &[GitHubAccount] {
@@ -322,7 +322,7 @@ impl RepoBindingStore {
 
     /// Persist bindings to disk atomically.
     pub(crate) fn save(&self) -> Result<(), String> {
-        crate::config::save_json_config(GITHUB_BINDINGS_FILE, self)
+        crate::config::ConfigFile::<Self>::new(GITHUB_BINDINGS_FILE).save(self)
     }
 
     /// Canonical-root key for a repo path (worktree-aware).

@@ -115,15 +115,77 @@ export function spanStyle(span: LogSpan): Record<string, string> | undefined {
 	return hasStyle ? s : undefined;
 }
 
+/**
+ * Everything derived from a LogLine, memoized on the line object itself.
+ *
+ * A LogLine is final once `normalizeLogLine` has produced it, and the scrollback
+ * keeps the same objects across frames — only the screen rows are replaced.
+ * Deriving per frame therefore repeated identical work for every line on screen:
+ * the plain text (a `map` + `join`) on every keystroke of the filter, the
+ * box-drawing scan on every frame, and — worst — a fresh block wrapper per line,
+ * which handed Solid's reference-keyed `<For>` zero identity matches and made it
+ * rebuild the entire rendered DOM.
+ *
+ * Caching on the line keeps those wrappers stable, so unchanged lines keep their
+ * DOM nodes. A `WeakMap` means lines dropped from the scrollback take their
+ * cache with them.
+ */
+interface LineDerived {
+	text?: string;
+	textLower?: string;
+	boxDrawing?: boolean;
+	/** Wrapper handed to `<For>` when this line stands alone. */
+	textBlock?: LineBlock;
+	/** Wrapper handed to `<For>` when this line opens a table group. */
+	tableBlock?: { type: "table"; lines: LogLine[] };
+}
+
+const derivedCache = new WeakMap<LogLine, LineDerived>();
+
+function derived(line: LogLine): LineDerived {
+	let d = derivedCache.get(line);
+	if (!d) {
+		d = {};
+		derivedCache.set(line, d);
+	}
+	return d;
+}
+
 /** Whether a line contains Unicode box-drawing characters (U+2500–U+257F). */
 const BOX_DRAWING_RE = /[\u2500-\u257F]/;
 
 export function hasBoxDrawing(line: LogLine): boolean {
-	return line.spans.some((span) => BOX_DRAWING_RE.test(span.text));
+	const d = derived(line);
+	if (d.boxDrawing === undefined) {
+		d.boxDrawing = line.spans.some((span) => BOX_DRAWING_RE.test(span.text));
+	}
+	return d.boxDrawing;
 }
 
 /** A block of lines: either a single text line or consecutive box-drawing lines. */
 export type LineBlock = { type: "text"; line: LogLine } | { type: "table"; lines: LogLine[] };
+
+/** Stable wrapper for a standalone line. */
+function textBlockFor(line: LogLine): LineBlock {
+	const d = derived(line);
+	if (!d.textBlock) d.textBlock = { type: "text", line };
+	return d.textBlock;
+}
+
+/**
+ * Stable wrapper for a table group, keyed on the line that opens it. Reused only
+ * while the group holds exactly the same lines — a table that gained or lost a
+ * row is a different block and has to re-render.
+ */
+function tableBlockFor(lines: LogLine[]): LineBlock {
+	const d = derived(lines[0]);
+	const cached = d.tableBlock;
+	if (cached && cached.lines.length === lines.length && cached.lines.every((l, i) => l === lines[i])) {
+		return cached;
+	}
+	d.tableBlock = { type: "table", lines };
+	return d.tableBlock;
+}
 
 /** Group lines into blocks: consecutive box-drawing lines become one table block. */
 export function groupLineBlocks(lines: LogLine[]): LineBlock[] {
@@ -134,27 +196,74 @@ export function groupLineBlocks(lines: LogLine[]): LineBlock[] {
 			tableGroup.push(line);
 		} else {
 			if (tableGroup.length > 0) {
-				blocks.push({ type: "table", lines: tableGroup });
+				blocks.push(tableBlockFor(tableGroup));
 				tableGroup = [];
 			}
-			blocks.push({ type: "text", line });
+			blocks.push(textBlockFor(line));
 		}
 	}
 	if (tableGroup.length > 0) {
-		blocks.push({ type: "table", lines: tableGroup });
+		blocks.push(tableBlockFor(tableGroup));
 	}
 	return blocks;
 }
 
+function sameColor(a: LogColor | undefined, b: LogColor | undefined): boolean {
+	if (a === b) return true;
+	if (!a || !b) return false;
+	if (a.idx !== b.idx) return false;
+	if (a.rgb === b.rgb) return true;
+	if (!a.rgb || !b.rgb) return false;
+	return a.rgb[0] === b.rgb[0] && a.rgb[1] === b.rgb[1] && a.rgb[2] === b.rgb[2];
+}
+
+/**
+ * Whether two lines would render identically.
+ *
+ * The backend re-serializes the whole screen every frame, so a row that did not
+ * change still arrives as a freshly deserialized object. Comparing by value is
+ * what lets the view keep the previous frame's line — and with it the block
+ * wrapper `<For>` is keyed on, and the DOM nodes behind it.
+ */
+export function sameLine(a: LogLine, b: LogLine): boolean {
+	if (a === b) return true;
+	if (a.spans.length !== b.spans.length) return false;
+	for (let i = 0; i < a.spans.length; i++) {
+		const x = a.spans[i];
+		const y = b.spans[i];
+		if (x.text !== y.text) return false;
+		if (x.bold !== y.bold || x.italic !== y.italic || x.underline !== y.underline) return false;
+		if (!sameColor(x.fg, y.fg) || !sameColor(x.bg, y.bg)) return false;
+	}
+	return true;
+}
+
 /** Extract the plain text content of a log line (concatenated spans). */
 export function lineText(line: LogLine): string {
-	return line.spans.map((s) => s.text).join("");
+	const d = derived(line);
+	if (d.text === undefined) d.text = line.spans.map((s) => s.text).join("");
+	return d.text;
+}
+
+/** Lowercased plain text, cached so filtering costs one `includes` per line. */
+function lineTextLower(line: LogLine): string {
+	const d = derived(line);
+	if (d.textLower === undefined) d.textLower = lineText(line).toLowerCase();
+	return d.textLower;
+}
+
+/**
+ * Case-insensitive substring test against an already-lowercased needle. Callers
+ * that filter a whole screen lower the query once instead of once per line.
+ */
+export function lineMatchesNeedle(line: LogLine, needle: string): boolean {
+	if (!needle) return true;
+	return lineTextLower(line).includes(needle);
 }
 
 /** Check if a log line's text contains the query (case-insensitive). */
 export function lineMatchesQuery(line: LogLine, query: string): boolean {
-	if (!query) return true;
-	return lineText(line).toLowerCase().includes(query.toLowerCase());
+	return lineMatchesNeedle(line, query.toLowerCase());
 }
 
 /**
@@ -175,6 +284,15 @@ export function lineMatchesQuery(line: LogLine, query: string): boolean {
  * ◉ U+25C9  FISHEYE              — occasional indicator
  */
 const EMOJI_PRESENTATION_RE = /[●○⏺⏵•◦∴✢⚙✻◉]/g;
+
+// DEFERRED (2026-08-17) — this still runs for every screen row on every frame:
+// rows arrive freshly deserialized, so they have to be normalized before
+// `sameLine` can tell whether they changed. Moving the rewrite into the Rust log
+// serializer would take it off the main thread and make it truly once-per-row,
+// but it would also inject U+FE0E into the wire format every `format=log`
+// consumer sees, for a presentation concern only mobile browsers have. The cost
+// left here is a regex over a screen's worth of text — a few kilobytes — against
+// the thousands of DOM nodes the reuse now saves. Revisit if a profile disagrees.
 
 /** Append VS15 (U+FE0E) to characters that should render as text, not emoji. */
 function forceTextPresentation(text: string): string {
@@ -201,6 +319,9 @@ export function normalizeLogLine(raw: unknown): LogLine {
 		for (const span of raw.spans) {
 			span.text = forceTextPresentation(span.text);
 		}
+		// This rewrites the line in place, so anything derived from it before
+		// normalization describes the pre-VS15 text and has to be recomputed.
+		derivedCache.delete(raw);
 		return raw;
 	}
 	return { spans: [{ text: forceTextPresentation(String(raw)) }] };

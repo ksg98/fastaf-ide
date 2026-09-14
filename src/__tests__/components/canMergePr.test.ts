@@ -18,6 +18,7 @@ function makePr(overrides: Partial<BranchPrStatus> = {}): BranchPrStatus {
 		author: "dev",
 		commits: 1,
 		mergeable: "MERGEABLE",
+		conflict_state: "clear" as const,
 		merge_state_status: "CLEAN",
 		review_decision: "APPROVED",
 		viewer_did_approve: false,

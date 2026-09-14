@@ -120,10 +120,28 @@ Or Wiz HUD:
 
 Configured via `~/.claude/settings.json` → `statusLine`, but **rendered
 through the PTY** using ANSI cursor positioning. They appear as `changed_rows`
-and DO pass through `is_chrome_row`.
+and pass through `is_chrome_row`.
 
-**Bug**: These lines contain none of the 4 chrome markers (⏵, ›, ✻, •),
-so they are not classified as chrome.
+**Custom status lines are never a detection signal.** Their content is
+user-defined — the two blocks above are just two of countless possible layouts —
+so nothing in the state machine reads them: no model name, no context
+percentage, no cost, no usage counter is parsed from these rows. They matter in
+exactly one direction, getting classified as *chrome* so they do not reset the
+silence timer or stamp `last_output_ms`.
+
+Coverage today (`chrome.rs`, asserted by `status_line_not_chrome`,
+`cc_status_context_bar`, `cc_wiz_hud_line`):
+
+| Row | `is_chrome_row` | Why |
+|--------|--------|--------|
+| `  Context █░░░░░░░░░ 8% $0 (~$2.97) │ Usage ⚠ (429)` | yes | block glyphs `█` / `░` |
+| `  [Opus 4.6 (1M context) \| Max] │ repo git:(main*)` | no | carries no chrome glyph — known gap |
+| `  5h: 42% (3h) \| 7d: 27% (2d)` | no | same gap |
+
+A status line is also barred from proving the agent is *alive*: `is_spinner_row`
+requires the spinner glyph to **lead** the row, so a HUD progress bar that ticks
+every second cannot be read as a working spinner. That rule is the fix for the
+regression that pinned Claude BUSY forever under a wiz status bar (#446-596f).
 
 ---
 

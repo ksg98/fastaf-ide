@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type CompletionContext, getCompletionSuppression } from "../../components/Terminal/completionDecision";
+import {
+	type CompletionContext,
+	getCompletionSuppression,
+	shouldNotifyAgentExit,
+	shouldPlayCompletionSound,
+} from "../../components/Terminal/completionDecision";
 
 /** Helper: default context where completion SHOULD fire */
 function baseCtx(overrides: Partial<CompletionContext> = {}): CompletionContext {
@@ -123,6 +128,40 @@ describe("getCompletionSuppression", () => {
 					baseCtx({ isActiveTerminal: true, usesShellIntegration: true, ranCommandDuringBusy: false }),
 				),
 			).toBe("active-terminal");
+		});
+	});
+
+	describe("shouldPlayCompletionSound", () => {
+		it("mutes the chime for an orchestrated session when the setting is on", () => {
+			expect(shouldPlayCompletionSound({ isRemoteSession: true, silenceRemoteCompletions: true })).toBe(false);
+		});
+
+		it("keeps the chime for a locally-created session even when the setting is on", () => {
+			// The setting targets agent swarms, not the terminals the user opened.
+			expect(shouldPlayCompletionSound({ isRemoteSession: false, silenceRemoteCompletions: true })).toBe(true);
+		});
+
+		it("keeps the chime for an orchestrated session when the setting is off", () => {
+			expect(shouldPlayCompletionSound({ isRemoteSession: true, silenceRemoteCompletions: false })).toBe(true);
+		});
+
+		it("keeps the chime when neither applies", () => {
+			expect(shouldPlayCompletionSound({ isRemoteSession: false, silenceRemoteCompletions: false })).toBe(true);
+		});
+	});
+
+	describe("shouldNotifyAgentExit", () => {
+		it("uses exit as a fallback when the busy cycle was not notified", () => {
+			expect(shouldNotifyAgentExit({ hadAgent: true, isBackground: true, completionNotified: false })).toBe(true);
+		});
+
+		it("does not notify twice after BUSY to IDLE already completed the cycle", () => {
+			expect(shouldNotifyAgentExit({ hadAgent: true, isBackground: true, completionNotified: true })).toBe(false);
+		});
+
+		it("keeps active and plain-shell exits silent", () => {
+			expect(shouldNotifyAgentExit({ hadAgent: true, isBackground: false, completionNotified: false })).toBe(false);
+			expect(shouldNotifyAgentExit({ hadAgent: false, isBackground: true, completionNotified: false })).toBe(false);
 		});
 	});
 });

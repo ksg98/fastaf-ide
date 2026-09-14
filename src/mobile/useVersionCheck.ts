@@ -1,5 +1,6 @@
-import { createSignal, onCleanup } from "solid-js";
+import { createSignal } from "solid-js";
 import { appLogger } from "../stores/appLogger";
+import { createVisibilityInterval } from "./utils/visibilityInterval";
 
 const CHECK_INTERVAL_MS = 60_000;
 
@@ -49,8 +50,7 @@ export function useVersionCheck() {
 	}
 
 	check();
-	const timer = setInterval(check, CHECK_INTERVAL_MS);
-	onCleanup(() => clearInterval(timer));
+	createVisibilityInterval(check, CHECK_INTERVAL_MS);
 
 	function applyUpdate() {
 		// Cache-bust navigation for iOS standalone mode (location.reload() may serve from RAM cache)

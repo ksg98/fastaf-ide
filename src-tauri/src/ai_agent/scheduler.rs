@@ -199,12 +199,16 @@ impl Scheduler {
                     }
                     // Disable one-shot jobs after completion.
                     if one_shot {
-                        let mut cfg =
-                            crate::config::load_json_config::<SchedulerConfig>(CONFIG_FILE);
-                        if let Some(j) = cfg.jobs.iter_mut().find(|j| j.id == job_id) {
-                            j.enabled = false;
-                        }
-                        if let Err(e) = crate::config::save_json_config(CONFIG_FILE, &cfg) {
+                        let result = crate::config::ConfigFile::<SchedulerConfig>::new(CONFIG_FILE)
+                            .update(|cfg| {
+                                if let Some(j) = cfg.jobs.iter_mut().find(|j| j.id == job_id) {
+                                    j.enabled = false;
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                        if let Err(e) = result {
                             tracing::warn!(job_id = %job_id, "Failed to disable one-shot job: {e}");
                         }
                     }
@@ -250,7 +254,7 @@ pub(crate) fn save_config(config: &SchedulerConfig) -> Result<(), String> {
     for job in &config.jobs {
         job.parse_schedule()?;
     }
-    crate::config::save_json_config(CONFIG_FILE, config)
+    crate::config::ConfigFile::<SchedulerConfig>::new(CONFIG_FILE).save(config)
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -278,7 +282,7 @@ mod tests {
         let job = ScheduledJob {
             id: "bad".into(),
             cron_expr: "not a cron".into(),
-            goal: "".into(),
+            goal: String::new(),
             target_session: None,
             max_duration_secs: 300,
             enabled: true,

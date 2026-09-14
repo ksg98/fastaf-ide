@@ -7,6 +7,7 @@
 
 import { appLogger, previewLogPayload } from "../stores/appLogger";
 import { repositoriesStore } from "../stores/repositories";
+import type { RepoChangeKind } from "../types";
 
 /**
  * Start an SSE bridge to a remote daemon's /events endpoint.
@@ -36,9 +37,14 @@ export function startRemoteEventBridge(connectionId: string, baseUrl: string): (
 		// so we use addEventListener per event type — matching transport.ts subscribeEvents.
 		es.addEventListener("repo-changed", ((event: MessageEvent) => {
 			try {
-				const payload = JSON.parse(event.data) as { path?: string };
-				if (typeof payload.path === "string") {
-					repositoriesStore.bumpRevision(payload.path);
+				const payload = JSON.parse(event.data) as { repo_path?: string; kind?: RepoChangeKind };
+				if (typeof payload.repo_path === "string") {
+					// Narrow ONLY on an explicit "working-tree". A daemon older than
+					// the `kind` field sends no kind at all, and defaulting that to
+					// working-tree would silently freeze the committed-history
+					// panels on every remote commit. Unknown → assume the wider one.
+					if (payload.kind === "working-tree") repositoriesStore.bumpRevision(payload.repo_path);
+					else repositoriesStore.bumpGitRevision(payload.repo_path);
 				}
 			} catch {
 				appLogger.warn("network", "Failed to parse repo-changed SSE event", {

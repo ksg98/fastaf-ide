@@ -77,14 +77,14 @@ GitHub authentication and token management:
 
 Token priority: `GH_TOKEN` env → `GITHUB_TOKEN` env → OAuth keyring → `gh` CLI config → `gh auth token` subprocess.
 
-## Services Tab
+## Services & MCP Tab
 
 ### HTTP API Server
 
 Enable the HTTP API server for external tool integration:
 - Serves the REST API and MCP protocol for AI agents and automation tools
 - Local MCP connections use a Unix domain socket at `<config_dir>/mcp.sock` — no port configuration needed
-- AI agents connect via the `tuic-bridge` sidecar (auto-installed on first launch for Claude Code, Cursor, Windsurf, VS Code, Zed, Amp, Gemini)
+- AI agents connect via the `tuic-bridge` sidecar (auto-installed on first launch for every supported agent that is installed on the machine — see [MCP bridge auto-install](../backend/config.md#mcp-bridge-auto-install))
 - Shows server status (running/stopped) and active session count
 
 ### TUIC Tools
@@ -93,7 +93,7 @@ Native tools exposed to AI agents via MCP. Each tool can be individually enabled
 
 **Manual MCP configuration** (expandable) — shows the `tuic-bridge` binary path and a ready-to-paste JSON snippet for manually configuring MCP clients that aren't auto-installed. Click "Copy" to copy the snippet to clipboard.
 
-**Collapse tools** (checkbox) — when enabled, replaces the full tool list sent to AI agents with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`). Cuts the baseline MCP context cost from ~35k tokens to ~500 tokens per agent turn; the agent fetches schemas on demand via BM25-ranked search. Default: off. Toggling emits `notifications/tools/list_changed`; compatible clients refresh automatically, while clients that ignore the notification may require a reconnect.
+**Collapse tools** (checkbox) — when enabled, replaces the full tool list sent to AI agents with 3 lazy-discovery meta-tools (`search_tools`, `get_tool_schema`, `call_tool`). Cuts the baseline MCP context cost from ~35k tokens to ~500 tokens per agent turn; the agent fetches schemas on demand via BM25-ranked search. Native semantics do not change: a managed command is still one `call_tool` request for `session action=submit`, and its bounded receipt comes back in that response. Default: off. Grok sessions receive this compact surface automatically for compatibility with Grok's tool-name parser, without changing the checkbox or other clients. Toggling emits `notifications/tools/list_changed`; compatible clients refresh automatically, while clients that ignore the notification may require a reconnect.
 
 Tools:
 - **session** — PTY terminal session management
@@ -106,7 +106,8 @@ Tools:
 
 ### Upstream MCP Servers
 
-Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
+**Manage in Settings** in the MCP popup (**Cmd+Shift+I**) opens this tab scrolled to this block — the block sits below the fold, so a plain tab switch would look like nothing happened.
+
 OAuth upstreams show **Authorize** when consent is required. TUIC prepares the OAuth request, then displays a blocking in-app confirmation naming the authorization-server origin before opening the system browser. Cancelling that confirmation discards the pending request.
 
 Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name}__{tool}`:
@@ -114,7 +115,7 @@ Proxy external MCP servers through FastAF. Their tools appear prefixed as `{name
 - API keys for HTTP upstreams are stored in the OS keychain
 - Live status (connecting, ready, circuit open, failed) with tool count and call metrics
 - Reconnect and remove controls per upstream
-- Per-repo scoping: each repo can define an allowlist of active upstream servers via **Cmd+Shift+M** popup (or repo settings). Empty/null allowlist = all servers active
+- Per-repo scoping: each repo can define an allowlist of active upstream servers via **Cmd+Shift+I** popup (or repo settings). Empty/null allowlist = all servers active
 
 ### Remote Access
 
@@ -132,6 +133,7 @@ The keybinding UI lives in the **Help panel** (Help > Keyboard Shortcuts), not t
 - Click any action row and press a new key combination to rebind it
 - Custom bindings are stored in `keybindings.json` in the platform config directory
 - Auto-populated from the action registry — new actions appear automatically
+- The Help panel notes that most shortcuts are also listed in the native system menu bar (desktop app only — browser/PWA clients have no native menu)
 
 See [Keyboard Shortcuts](keyboard-shortcuts.md) for the full reference and customization guide.
 
@@ -141,6 +143,17 @@ Install, manage, and browse plugins. See [Plugins](plugins.md) for the full guid
 
 - **Installed** — List all plugins with enable/disable toggle, logs viewer, uninstall
 - **Browse** — Discover and install from the community registry
+
+## Smart Prompts Tab
+
+Manage the AI-powered actions surfaced in the toolbar, context menus, and command palette. Reachable from the nav or directly via "Manage Smart Prompts..." in the Smart Prompts drawer.
+
+- **Headless Agent** — default agent for headless prompts; individual prompts can override it
+- **Prompt list** — grouped by category, with enable/disable toggle and placement/mode badges
+- **Editor** (click a row) — name, description, content with variable insertion, placement checkboxes, Execution Mode, inject target, Auto-execute, output target, system prompt, keyboard shortcut
+- Built-in prompts show "Reset to Default" once overridden; custom prompts can be deleted
+
+See [Smart Prompts](smart-prompts.md) for the full guide.
 
 ## Repository Settings
 
@@ -179,5 +192,16 @@ User-specific settings (`promptOnCreate`, `autoFetchIntervalMinutes`) are intent
   - Error occurred
   - Task completed
   - Warning
+  - Info
+  - Attention (agent needs you)
 - **Test buttons** — Test each sound individually. The Test button bypasses the anti-spam rate limit, so rapid A/B volume comparisons always play.
+- **Silence orchestration completions** — Remote HTTP/MCP workers still appear in Activity and update their tab state, but do not play a completion chime. The remote classification survives frontend reloads, and each busy cycle can notify at most once even when idle and process exit arrive separately.
 - **Reset to Defaults** — Restore default notification settings
+- **Keep toasts in the bell** — Each toast is also written to a **MESSAGES** section in the toolbar bell, so a message that faded while you looked at another window stays readable afterwards. The bell entry keeps the toast level (info / warning / error) and its action, if it had one. Turn this off to leave toasts transient. This setting is outside the audio block: the bell is visual, so it stays reachable on a machine with no audio output.
+
+**Attention** is the distinct call-back-to-keyboard sound available to agent
+toasts. Native playback and the browser fallback share a triangular G4→G4→E5
+motif with two short knocks and a longer rise; each engine applies its own
+envelope. It remains subject
+to the master toggle, configured volume, and its own per-event toggle; native
+playback also uses the selected output device.

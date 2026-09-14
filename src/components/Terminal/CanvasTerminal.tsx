@@ -4,6 +4,7 @@ import { isMacOS, isWindows } from "../../platform";
 import { pluginRegistry } from "../../plugins/pluginRegistry";
 import { appLogger } from "../../stores/appLogger";
 import { settingsStore } from "../../stores/settings";
+import { reclaimParkedTerminal } from "../../stores/terminalOwnership";
 import { terminalsStore } from "../../stores/terminals";
 import { filterMatchesToBlock } from "../../utils/blockSearchFilter";
 import { writeClipboard } from "../../utils/clipboard";
@@ -12,17 +13,20 @@ import { ensureKeyboardViewportTracking, keyboardOcclusion } from "../../utils/k
 import { handleOpenUrl } from "../../utils/openUrl";
 import { isPerfDebug } from "../../utils/perfDebug";
 import { markPerf, noteFrameRequest } from "../../utils/perfTrace";
+import { applyPinchFontDelta } from "../../utils/terminalZoom";
 import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
 import { createCanvasTerminalBindings } from "./canvasTerminalBindings";
 import { createCanvasLinkController } from "./canvasTerminalLinks";
-import { createCanvasScrollController } from "./canvasTerminalScroll";
+import { createCanvasScrollController, ROW_CACHE_CHUNK } from "./canvasTerminalScroll";
 import { createCanvasSearchController, createCanvasSelectionController } from "./canvasTerminalSelection";
 import { installTouchHandlers } from "./canvasTerminalTouch";
-import { createTransport, type TerminalTransport } from "./canvasTerminalTransport";
+import { createTransport, type TerminalTransport, toBinaryPayload } from "./canvasTerminalTransport";
 import {
 	type CellMetrics,
 	type CursorShape,
 	computeCursorRect,
+	createHiddenAckThrottle,
+	createLeadingThrottle,
 	type DecodedFrame,
 	type DecodedRow,
 	decideFrameGrid,
@@ -31,6 +35,7 @@ import {
 	GUTTER_PX,
 	gridDimsForBox,
 	reconcileDelay,
+	rowText,
 	shouldFireReconcile,
 	snapLineHeight,
 } from "./canvasTerminalUtils";
@@ -38,15 +43,17 @@ import { installFrameTimingDebugHook, isFrameTimingEnabled, recordFrameTiming, r
 import { acquireCache, getSharedMetrics, invalidateGlyphCache, releaseCache } from "./glyphCache";
 import { createGridRenderer, type GridRenderer } from "./gridRenderer";
 import { kittySequenceForKey } from "./kittyKeyboard";
-import { filePathRegex, fileUrlRegex } from "./linkProvider";
+import { filePathRegex, fileUrlRegex, matchWebUrls } from "./linkProvider";
 import { createClickDragArbiter } from "./mouseGesture";
-import { continuationRowsAfterSuggest, isSuggestBlock } from "./suggestOverlay";
+import { INTENT_HIGHLIGHT_RE, planSuggestOverlay, SUGGEST_ANCHOR_RE } from "./suggestOverlay";
 import {
 	altSequenceFromCode,
 	cmdSequenceForKey,
 	createCompositionState,
+	isPointerInsideRect,
 	isSystemReservedKey,
 	keyToSequence,
+	shouldReportMouseUp,
 } from "./terminalInput";
 
 // Re-export for external consumers
@@ -84,8 +91,11 @@ export interface CanvasTerminalProps {
 	onBell?: () => void;
 }
 
-const SUGGEST_ANCHOR_RE = /^[\s●⏺]*suggest:\s+\S/;
-const INTENT_RE = /^[\s●⏺]*intent:\s+/;
+/** Shortest gap between two runs of the open search.
+ *  A redrawing TUI emits frames far faster than a regex sweep over the whole
+ *  scrollback is worth running, so the sweep is bounded to one per window —
+ *  bounded, not postponed: waiting for the frames to stop meant never running. */
+const SEARCH_REFRESH_THROTTLE_MS = 150;
 
 const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	let canvasRef!: HTMLCanvasElement;
@@ -119,8 +129,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	const scroll = createCanvasScrollController();
 	const rowCache = scroll.rowCache;
 	const requestedChunks = scroll.requestedChunks;
-	const ROW_CACHE_CHUNK = 64;
-	const ROW_CACHE_MAX = 6000;
 	// Base-grid renderer (the canvas2d paint implementation). Created in onMount
 	// once ctx exists.
 	let gridRenderer!: GridRenderer;
@@ -130,9 +138,30 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	const isTouchDevice = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
 	let currentFrame: DecodedFrame | null = null;
 	let lastDisplayOffset = -1;
+	let lastAltScreen = false;
+	let screenGeneration = 0;
 	let lastScreenRows = -1;
 	let lastScreenCols = -1;
 	const search = createCanvasSearchController();
+	// Live search query, kept so incoming frames can re-run it. Search matches are
+	// anchored to ABSOLUTE rows, but a TUI (ink agents, vim, lazygit) rewrites the
+	// live screen rows in place: the text under a highlight changes while the
+	// highlight stays pinned, painting an orange box over cells that no longer
+	// match. Rewritten rows drop their matches immediately; this re-search restores
+	// the ones that still hit.
+	let searchQuery = "";
+	let searchBlockScope = false;
+	/** Leading-edge, so a continuously redrawing TUI still refreshes the search.
+	 *  A trailing debounce reset its timer on every frame and so never fired. */
+	const searchRefresh = createLeadingThrottle(() => {
+		// Nobody awaits this one, so it needs its own catch: the backend read
+		// can reject (a closed session over HTTP, a failed blocking-pool task),
+		// and an unhandled rejection from a timer is invisible until it isn't.
+		// The matches simply stay as they were until the next frame retriggers.
+		runSearchQuery(false).catch((e) => {
+			appLogger.warn("terminal", "search refresh failed", { error: String(e) });
+		});
+	}, SEARCH_REFRESH_THROTTLE_MS);
 	let cursorBlinkOn = true;
 	let blinkInterval: ReturnType<typeof setInterval> | undefined;
 	let blinkResetAt = 0;
@@ -249,6 +278,20 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	let fullRepaintNeeded = true;
 	let hidden = false;
 	let lastHistorySize = -1;
+	// How many grid frames this transport has delivered. The ack echoes it so Rust
+	// can tell "the frontend caught up" from "a late ack for a frame the ticker
+	// already gave up on" — without an id, the second one reopened the gate and
+	// sent a burst at exactly the moment the frontend was behind. Reset with the
+	// channel: (re)subscribing gives Rust a fresh gate counting from zero.
+	let framesReceived = 0;
+
+	function ackFrame() {
+		transport?.ackFrame(framesReceived);
+	}
+
+	// Below the backend's MAX_IN_FLIGHT_MS (500 ms): the gate must reopen on this
+	// ack, not on the ticker deciding the frontend is stuck.
+	const hiddenAck = createHiddenAckThrottle(ackFrame, 400);
 
 	function writePtyNoScroll(data: string) {
 		invokeRef?.("write_pty", { sessionId: props.sessionId, data }).catch((e) => {
@@ -442,8 +485,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				octxOverscan.translate(GUTTER_PX, 0);
 				overscanRenderer.setTheme(cachedBgDefault, cachedFgDefault);
 			}
-			rowCache.clear();
-			requestedChunks.clear();
+			scroll.clearCache();
 		}
 		if (
 			cols > 0 &&
@@ -545,6 +587,68 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (delta !== 0) {
 			invokeRef("terminal_scroll", { sessionId: props.sessionId, delta }).catch(ipcErr("terminal_scroll"));
 		}
+	}
+
+	/** Run `searchQuery` against the backend grid and adopt the result.
+	 *
+	 *  Shared by the `searchFind` ref method and by the frame-driven refresh, so a
+	 *  live TUI redraw re-derives matches through exactly the same path as a fresh
+	 *  find — no second copy of the block-scope / viewport-anchoring rules. */
+	async function runSearchQuery(scrollToActive: boolean): Promise<{ index: number; count: number }> {
+		if (!searchQuery || !invokeRef) {
+			search.clear();
+			return { index: -1, count: 0 };
+		}
+		const generation = screenGeneration;
+		const query = searchQuery;
+		let matches = (await invokeRef("terminal_search", {
+			sessionId: props.sessionId,
+			query,
+		})) as { row: number; col_start: number; col_end: number }[];
+		// The query can be cleared or replaced while the sweep is in flight, and
+		// neither bumps `screenGeneration`. Cancelling the refresh throttle stops
+		// the timer, not a request already out — so without this the stale answer
+		// resurrects highlights the user just cleared, or overwrites the newer
+		// query's matches with the older query's.
+		if (generation !== screenGeneration || query !== searchQuery) return { index: -1, count: 0 };
+		if (searchBlockScope && currentFrame) {
+			const term = terminalsStore.get(props.terminalId);
+			if (term) {
+				const allBlocks = term.activeBlock ? [...term.commandBlocks, term.activeBlock] : term.commandBlocks;
+				const viewTop = currentFrame.historySize - currentFrame.displayOffset;
+				const viewCenter = viewTop + Math.floor(currentFrame.screenRows / 2);
+				matches = filterMatchesToBlock(matches, allBlocks, viewCenter);
+			}
+		}
+		const activeMatch = search.replace(
+			matches,
+			currentFrame
+				? {
+						historySize: currentFrame.historySize,
+						displayOffset: currentFrame.displayOffset,
+						screenRows: currentFrame.screenRows || lastResizeRows,
+					}
+				: undefined,
+		);
+		// Only a user-driven find/next/prev may move the viewport. A refresh triggered
+		// by the agent repainting must never yank the screen out from under the user.
+		if (scrollToActive && activeMatch) scrollToMatch(activeMatch);
+		const m = metrics();
+		if (currentFrame && m) paintFrame(currentFrame, m);
+		return { index: search.activeIndex, count: matches.length };
+	}
+
+	/** Coalesce the re-search: a redrawing TUI emits frames far faster than a
+	 *  regex sweep over the whole scrollback is worth running. */
+	function scheduleSearchRefresh(): void {
+		if (!searchQuery) return;
+		searchRefresh.trigger();
+	}
+
+	function clearSearchState(): void {
+		searchQuery = "";
+		searchRefresh.cancel();
+		search.clear();
 	}
 
 	function absRowToViewport(absRow: number): number | null {
@@ -831,14 +935,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 	// --- Suggest / Intent overlay ---
 
-	function rowToText(row: DecodedFrame["rows"][0]): string {
-		let text = "";
-		for (let ci = 0; ci < row.count; ci++) {
-			const cp = row.codepoints[ci];
-			text += cp === 0 ? " " : String.fromCodePoint(cp);
-		}
-		return text;
-	}
+	const rowToText = rowText;
 
 	function makeOverlayDiv(top: number, height: number, background: string): HTMLDivElement {
 		const div = document.createElement("div");
@@ -865,7 +962,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				const row = rowMap.get(idx);
 				if (!row) continue;
 				const text = rowToText(row);
-				if (SUGGEST_ANCHOR_RE.test(text) || INTENT_RE.test(text)) {
+				if (SUGGEST_ANCHOR_RE.test(text) || INTENT_HIGHLIGHT_RE.test(text)) {
 					hasSuggestContent = true;
 					break;
 				}
@@ -884,39 +981,20 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			((i: number) => {
 				const row = rowMap.get(i);
 				if (!row) return null;
-				return { text: rowToText(row), isWrapped: false };
+				return { text: rowToText(row), isWrapped: row.wrapped };
 			});
 
-		// Build new overlay key to detect changes
-		const parts: string[] = [];
-		const newChildren: HTMLDivElement[] = [];
-		for (let row = 0; row < numRows; row++) {
-			const snapshot = getRowSnapshot(row);
-			if (!snapshot) continue;
-			const text = snapshot.text;
-
-			if (SUGGEST_ANCHOR_RE.test(text) && isSuggestBlock(row, numRows, getRowSnapshot)) {
-				newChildren.push(makeOverlayDiv(row * m.cellHeight, m.cellHeight, bg));
-				parts.push(`s${row}`);
-				const hiddenRows = continuationRowsAfterSuggest(row, numRows, getRowSnapshot);
-				for (const contRow of hiddenRows) {
-					newChildren.push(makeOverlayDiv(contRow * m.cellHeight, m.cellHeight, bg));
-					parts.push(`c${contRow}`);
-				}
-				if (hiddenRows.length > 0) row = hiddenRows[hiddenRows.length - 1];
-			} else if (INTENT_RE.test(text)) {
-				newChildren.push(makeOverlayDiv(row * m.cellHeight, m.cellHeight, chromeTint(cachedWarningRgb, 0.12)));
-				parts.push(`i${row}`);
-			}
-		}
-
-		const newKey = parts.join(",");
-		if (newKey === lastSuggestOverlayKey) return;
-		lastSuggestOverlayKey = newKey;
+		// Decide what to mask before building anything: most repaints leave the
+		// plan untouched, and the elements were being created and dropped just to
+		// discover that.
+		const { key, blocks } = planSuggestOverlay(numRows, getRowSnapshot);
+		if (key === lastSuggestOverlayKey) return;
+		lastSuggestOverlayKey = key;
 
 		overlayRef.textContent = "";
-		for (const child of newChildren) {
-			overlayRef.appendChild(child);
+		for (const block of blocks) {
+			const background = block.kind === "intent" ? chromeTint(cachedWarningRgb, 0.12) : bg;
+			overlayRef.appendChild(makeOverlayDiv(block.row * m.cellHeight, m.cellHeight, background));
 		}
 	}
 
@@ -1032,6 +1110,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				const off = currentFrame?.displayOffset ?? -1;
 				const fire = shouldFireReconcile({
 					alive,
+					hidden,
 					isScrolling: scroll.scrolling,
 					scrollPosF: scroll.position,
 					displayOffset: off,
@@ -1111,7 +1190,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			updateSuggestOverlay(currentFrame, m, undefined, (i) => {
 				const cached = cacheRow(hist - intOffset + i);
 				if (!cached) return null;
-				return { text: rowToText(cached), isWrapped: false };
+				return { text: rowToText(cached), isWrapped: cached.wrapped };
 			});
 		}
 	}
@@ -1159,27 +1238,26 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	async function fetchChunk(chunk: number) {
 		if (!invokeRef) return;
 		const start = chunk * ROW_CACHE_CHUNK;
+		const cacheGeneration = scroll.cacheGeneration;
 		try {
-			const res = (await invokeRef("terminal_styled_rows", {
+			const res = await invokeRef("terminal_styled_rows", {
 				sessionId: props.sessionId,
 				start,
 				count: ROW_CACHE_CHUNK,
-			})) as number[] | undefined;
+			});
 			// Unmounted during the await: the row cache is released, so don't
 			// repopulate it or schedule a render against it.
-			if (!alive) return;
-			// Guard the shape, not just falsiness: a wrong-typed/object response
-			// would throw in the Uint8Array constructor if the command ever changes.
-			if (!Array.isArray(res)) return;
-			const decoded = decodeStyledRange(new Uint8Array(res).buffer);
+			if (!alive || !scroll.isCacheGenerationCurrent(cacheGeneration)) return;
+			// Both transports deliver raw bytes; the shape still gets checked so a
+			// non-binary answer is dropped rather than decoded as an empty chunk.
+			const buffer = toBinaryPayload(res);
+			if (!buffer) return;
+			const decoded = decodeStyledRange(buffer);
 			if (!decoded) return;
-			for (const { abs, row } of decoded.rows) rowCache.set(abs, row);
-			if (rowCache.size > ROW_CACHE_MAX) {
-				rowCache.clear();
-				requestedChunks.clear();
-			}
+			scroll.cacheRows(decoded.rows);
 			if (scroll.position != null) scheduleSmoothRender();
 		} catch (e) {
+			if (!scroll.isCacheGenerationCurrent(cacheGeneration)) return;
 			requestedChunks.delete(chunk);
 			ipcErr("terminal_styled_rows")(e);
 		}
@@ -1222,8 +1300,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	// Cancel an in-flight smooth gesture and restore the resting state. Self-contained:
 	// also cancels the wheel gesture-end timer so a late resetScrollGesture can't fire
 	// after we've handed control to another scroll path (scrollbar, programmatic jump).
-	function resetSmoothScroll() {
+	function resetSmoothScroll(repaint = true) {
 		clearTimeout(scrollGestureEndTimer);
+		if (scrollRafId) {
+			cancelAnimationFrame(scrollRafId);
+			scrollRafId = 0;
+		}
 		if (smoothRafId) {
 			cancelAnimationFrame(smoothRafId);
 			smoothRafId = 0;
@@ -1231,7 +1313,13 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const hadSmoothPosition = scroll.position != null;
 		clearSettlePending();
 		scroll.cancel();
-		if (hadSmoothPosition) endSmoothScroll();
+		if (hadSmoothPosition && repaint) {
+			endSmoothScroll();
+		} else if (!repaint) {
+			setScrollOverlaysHidden(false);
+			if (stageRef) stageRef.style.transform = "";
+			clearOverscan();
+		}
 	}
 
 	// Seed the cache with the current viewport's rows so the first frame of a gesture
@@ -1239,7 +1327,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	function seedCacheFromCurrentFrame() {
 		if (!currentFrame) return;
 		const base = currentFrame.historyBase + currentFrame.historySize - currentFrame.displayOffset;
-		for (const [r, row] of rowMap) rowCache.set(base + r, row);
+		scroll.cacheRows(Array.from(rowMap, ([r, row]) => ({ abs: base + r, row })));
 	}
 
 	function applySmoothScroll(deltaLines: number) {
@@ -1304,31 +1392,87 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		applySmoothScroll((dy * factor) / ch);
 	}
 
-	function onFrame(data: ArrayBuffer | number[]) {
+	// The transport normalizes every payload shape (see toBinaryPayload) and drops
+	// the ones that are not binary, so a frame arrives here as bytes or not at all.
+	function onFrame(buffer: ArrayBuffer) {
 		// Freeze-investigation: a frame storm starving the rAF loop breadcrumbs here.
 		markPerf("term.onFrame");
-		const buffer = data instanceof ArrayBuffer ? data : new Uint8Array(data).buffer;
 
-		// Frame receipt ordering: ack FIRST (the ack only clears the in-flight flag;
+		// Frame receipt ordering: ack FIRST (the ack only reopens the delivery gate;
 		// the ticker sends the next frame on its own schedule, so ack must never wait
 		// on decode/paint), then decode (cheap) which keeps rowMap + currentFrame alive
 		// for the overlay (cursor/selection/links/search/scrollbar) and input semantics.
-		invokeRef?.("ack_terminal_frame", { sessionId: props.sessionId }).catch(ipcErr("ack_terminal_frame"));
+		//
+		// A hidden terminal acks late instead of per frame. That is the whole of the
+		// flow control this observer promises: a background tab is display:none and
+		// never unmounted, so Rust keeps a producer running for it, and acking at
+		// once reopens the gate at full rate for a frame nobody can see. The trailing
+		// ack drops it to ~2 frames/s while still clearing the gate itself — staying
+		// silent would leave that to the ticker's stuck-frontend path, which is a
+		// warning per output burst for a tab that is merely in the background.
+		framesReceived++;
+		if (hidden) hiddenAck.schedule();
+		else ackFrame();
 		const timing = isFrameTimingEnabled();
 		const decodeT0 = timing ? performance.now() : 0;
-		const frame = decodeBinaryFrame(buffer);
+		// rowMap is the merge base for partial rows (see ROW_PARTIAL_FLAG): they
+		// carry only their damaged columns and take the rest of the line from what
+		// is already on screen.
+		const frame = decodeBinaryFrame(buffer, rowMap);
 		if (timing) recordFrameTiming(props.sessionId, "decode", performance.now() - decodeT0);
-		if (!frame) return;
+		if (!frame) {
+			// The only way to land here is a buffer shorter than the 26-byte header:
+			// truncated row data decodes into the rows that did survive. The backend
+			// never sends one, so this is a wire-format bug and must not be silent.
+			// DEFERRED (2026-08-18) — no resync request on this path. The rows of a
+			// dropped frame are gone (damage was consumed backend-side), but asking
+			// for a full frame on a stream that is producing malformed buffers turns
+			// one bad frame into a request loop at IPC rate. Revisit if this log is
+			// ever seen in the wild — then we know the real failure mode.
+			appLogger.error("terminal", "grid frame too short to decode", {
+				sessionId: props.sessionId,
+				byteLength: buffer.byteLength,
+			});
+			return;
+		}
 
+		// Decoded even while hidden: the bell rides in the frame header and a
+		// background tab is exactly where it needs to reach the user.
 		if (frame.bell) props.onBell?.();
+		// Everything below paints, scans links or fills the scroll cache for a
+		// viewport that is not on screen.
+		if (hidden) return;
 
 		// Grid decision: geom/scroll/full-replace/scroll-wait for the rowMap.
 		const decision = decideFrameGrid(
-			{ lastScreenRows, lastScreenCols, lastDisplayOffset, lastHistorySize },
+			{ lastScreenRows, lastScreenCols, lastDisplayOffset, lastHistorySize, lastAltScreen },
 			frame,
 			lastResizeRows,
 		);
-		const { geomChanged, scrollChanged } = decision;
+		const { geomChanged, scrollChanged, screenChanged } = decision;
+
+		// A primary/alternate swap replaces the entire absolute-row universe. Reset
+		// every stateful consumer as one transaction, and never repaint the old smooth
+		// frame while adopting the new one.
+		if (screenChanged) {
+			screenGeneration++;
+			resetSmoothScroll(false);
+			scroll.clearCache();
+			selection.clear();
+			stopSelectionScroll();
+			clearSearchState();
+			rowMap.clear();
+			pendingDirtyRows.clear();
+			clearDetectedLinks();
+			linkMenu.close();
+			hoveredLink = null;
+			canvasRef.style.cursor = "text";
+			if (reconcileTimer) clearTimeout(reconcileTimer);
+			reconcileTimer = undefined;
+			reconcileBurstStart = null;
+			reconcileHealPending = false;
+			fullRepaintNeeded = true;
+		}
 
 		// When geometry changes, viewport is entirely different — must clear and repaint
 		if (geomChanged) {
@@ -1338,11 +1482,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			fullRepaintNeeded = true;
 		}
 
-		if (scrollChanged || geomChanged) {
+		if (scrollChanged || geomChanged || screenChanged) {
 			lastDisplayOffset = frame.displayOffset;
 			lastHistorySize = frame.historySize;
 			lastScreenRows = frame.screenRows;
 			lastScreenCols = frame.screenCols;
+			lastAltScreen = frame.altScreen;
 			if (hoveredLink) {
 				hoveredLink = null;
 				canvasRef.style.cursor = "text";
@@ -1383,6 +1528,30 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			rowMap.set(row.index, row);
 			pendingDirtyRows.add(row.index);
 			scanRowForLinks(row.index);
+		}
+
+		// A partial row arrived for a line we do not hold — it was dropped rather
+		// than painted with holes, so pull the whole screen back. Self-limiting:
+		// terminal_request_frame forces full damage, and a full frame repopulates
+		// every row, so the next frame cannot land here again for the same reason.
+		if (frame.needsFullFrame) {
+			fullRepaintNeeded = true;
+			invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
+		}
+
+		// Every row in this frame just had its text replaced. A search match anchored
+		// to one of those absolute rows describes text that no longer exists, so drop
+		// it now rather than painting a highlight over whatever the TUI wrote there
+		// (ink agents repaint their bottom rows continuously). The debounced re-search
+		// then re-establishes the matches that still hit.
+		if (searchQuery && frame.rows.length > 0) {
+			const viewportTop = frame.historySize - frame.displayOffset;
+			const rewritten = new Set<number>();
+			for (const row of frame.rows) rewritten.add(viewportTop + row.index);
+			// No repaint flag needed: repaintOverlay() clears and redraws the overlay
+			// canvas (where highlights live) on every frame.
+			search.dropRows(rewritten);
+			scheduleSearchRefresh();
 		}
 
 		// [dup] desync detector: diff the pre-heal snapshot against the now-authoritative
@@ -1432,9 +1601,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// (brief flicker / wrong overscan). Only seed when at rest or when the backend
 		// has caught up to our integer offset.
 		if (scroll.position == null || frame.displayOffset === Math.floor(scroll.position)) {
-			for (const row of frame.rows) {
-				rowCache.set(frame.historyBase + frame.historySize - frame.displayOffset + row.index, row);
-			}
+			const base = frame.historyBase + frame.historySize - frame.displayOffset;
+			scroll.cacheRows(frame.rows.map((row) => ({ abs: base + row.index, row })));
 		}
 		if (scroll.acceptSettledFrame(frame.displayOffset)) {
 			// Backend reached the snapped line — hand off to normal rendering
@@ -1464,16 +1632,12 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			if (nowText !== selection.cachedText) selection.clear();
 		}
 
-		if (hidden) {
-			return;
-		}
 		scheduleRepaint();
 		scheduleFileLinkVerification();
 	}
 
 	// --- Link detection ---
 
-	const WEB_URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g;
 	const FILE_PATH_RE = filePathRegex();
 	const FILE_URL_RE = fileUrlRegex();
 
@@ -1490,11 +1654,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 		const text = rowToText(row);
 		const spans: { colStart: number; colEnd: number }[] = [];
-		let match: RegExpExecArray | null;
 
-		WEB_URL_RE.lastIndex = 0;
-		while ((match = WEB_URL_RE.exec(text)) !== null) {
-			spans.push({ colStart: match.index, colEnd: match.index + match[0].length });
+		for (const url of matchWebUrls(text)) {
+			spans.push({ colStart: url.index, colEnd: url.index + url.text.length });
 		}
 
 		// File paths: only underline if previously verified to exist
@@ -1520,6 +1682,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 	async function verifyVisibleFileLinks() {
 		const ref = invokeRef;
 		if (!ref || !alive) return;
+		const generation = screenGeneration;
 		const maxRow = currentFrame?.screenRows || lastResizeRows;
 		const cols = lastScreenCols > 0 ? lastScreenCols : currentFrame?.screenCols || 80;
 		const now = Date.now();
@@ -1556,29 +1719,36 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		let anyFound = false;
 
 		// Single-row verification
-		for (const item of toCheck) {
-			if (!alive) return;
-			const resolved = await Promise.all(
-				item.candidates.map(async (c) => {
-					try {
-						const r = (await ref("resolve_terminal_path", { cwd, candidate: c.raw })) as {
-							absolute_path: string;
-							is_directory: boolean;
-						} | null;
-						return r ? { colStart: c.colStart, colEnd: c.colEnd } : null;
-					} catch (e) {
-						appLogger.debug("terminal", "resolve_terminal_path failed", { candidate: c.raw, error: e });
-						return null;
-					}
-				}),
-			);
-			const verified = resolved.filter((r): r is { colStart: number; colEnd: number } => r !== null);
-			if (fileLinkCache.size >= FILE_LINK_CACHE_MAX) {
-				const oldest = fileLinkCache.keys().next().value;
-				if (oldest !== undefined) fileLinkCache.delete(oldest);
+		// One call for the whole screen. This used to be one IPC per candidate,
+		// awaited row by row, so a screen with links on twenty rows cost twenty
+		// serial round trips — each one a filesystem-resolving hop for a single
+		// string. The backend answers positionally, so the flat result is sliced
+		// back onto the rows it came from.
+		if (toCheck.length > 0) {
+			const flat = toCheck.flatMap((item) => item.candidates.map((c) => c.raw));
+			let resolved: (unknown | null)[];
+			try {
+				resolved = (await ref("resolve_terminal_paths", { cwd, candidates: flat })) as (unknown | null)[];
+			} catch (e) {
+				appLogger.debug("terminal", "resolve_terminal_paths failed", { count: flat.length, error: e });
+				resolved = [];
 			}
-			fileLinkCache.set(item.text, { spans: verified.length > 0 ? verified : null, ts: Date.now() });
-			if (verified.length > 0) anyFound = true;
+			if (!alive || generation !== screenGeneration) return;
+
+			let at = 0;
+			for (const item of toCheck) {
+				const verified: { colStart: number; colEnd: number }[] = [];
+				for (const c of item.candidates) {
+					if (resolved[at]) verified.push({ colStart: c.colStart, colEnd: c.colEnd });
+					at++;
+				}
+				if (fileLinkCache.size >= FILE_LINK_CACHE_MAX) {
+					const oldest = fileLinkCache.keys().next().value;
+					if (oldest !== undefined) fileLinkCache.delete(oldest);
+				}
+				fileLinkCache.set(item.text, { spans: verified.length > 0 ? verified : null, ts: Date.now() });
+				if (verified.length > 0) anyFound = true;
+			}
 		}
 
 		// Multi-row pass: detect web (http/https) + file:// URLs spanning
@@ -1618,18 +1788,16 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					sessionId: props.sessionId,
 					row: i,
 				})) as [number, string];
-				if (!alive) return;
+				if (!alive || generation !== screenGeneration) return;
 				if (startRow === i && logicalText === text) continue; // single row
 				if (checkedLogicalStarts.has(startRow)) continue;
 				checkedLogicalStarts.add(startRow);
 
 				// Web URLs — no path resolution needed.
-				WEB_URL_RE.lastIndex = 0;
-				let wm: RegExpExecArray | null;
-				while ((wm = WEB_URL_RE.exec(logicalText)) !== null) {
-					const matchEnd = wm.index + wm[0].length;
-					if (!spansMultipleRows(wm.index, matchEnd)) continue;
-					recordWrappedSpans(startRow, wm.index, matchEnd);
+				for (const url of matchWebUrls(logicalText)) {
+					const matchEnd = url.index + url.text.length;
+					if (!spansMultipleRows(url.index, matchEnd)) continue;
+					recordWrappedSpans(startRow, url.index, matchEnd);
 					anyFound = true;
 				}
 
@@ -1644,6 +1812,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 							absolute_path: string;
 							is_directory: boolean;
 						} | null;
+						if (!alive || generation !== screenGeneration) return;
 						if (!r) continue;
 						recordWrappedSpans(startRow, m.index, matchEnd);
 						anyFound = true;
@@ -1658,6 +1827,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 
 		if (anyFound) {
+			if (generation !== screenGeneration) return;
 			for (let i = 0; i < maxRow; i++) scanRowForLinks(i);
 			scheduleRepaint();
 		}
@@ -1725,7 +1895,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		if (links === undefined) {
 			const fpRe = FILE_PATH_RE;
 			const fuRe = FILE_URL_RE;
-			const webUrlRe = WEB_URL_RE;
 			const fileMatches: { text: string; candidate: string; index: number }[] = [];
 			const urlMatches: { text: string; path: string; index: number }[] = [];
 			let match: RegExpExecArray | null;
@@ -1735,10 +1904,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			// logical-line pass below so the FULL url is captured, not the
 			// truncated single-row prefix (e.g. http://127.0.0.1:8090 wrapping to
 			// ".../8" + "090" must not open as http://127.0.0.1:8).
-			webUrlRe.lastIndex = 0;
-			while ((match = webUrlRe.exec(rowText)) !== null) {
-				if (match.index + match[0].length >= rowText.length) continue;
-				urlMatches.push({ text: match[0], path: match[0], index: match.index });
+			for (const url of matchWebUrls(rowText)) {
+				if (url.index + url.text.length >= rowText.length) continue;
+				urlMatches.push({ text: url.text, path: url.text, index: url.index });
 			}
 
 			// File paths
@@ -1818,17 +1986,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		// A web URL that reaches the row's right edge was deferred above (it may be
 		// soft-wrapped); force the logical-line pass so it's re-detected on the
 		// joined line even when the row happens not to be wrapped.
-		let rowHasEdgeUrl = false;
-		{
-			WEB_URL_RE.lastIndex = 0;
-			let em: RegExpExecArray | null;
-			while ((em = WEB_URL_RE.exec(rowText)) !== null) {
-				if (em.index + em[0].length >= rowText.length) {
-					rowHasEdgeUrl = true;
-					break;
-				}
-			}
-		}
+		const rowHasEdgeUrl = matchWebUrls(rowText).some((url) => url.index + url.text.length >= rowText.length);
 
 		// If no single-row link found, try logical line (joins soft-wrapped rows)
 		if (!hoveredLink && ref) {
@@ -1844,7 +2002,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					const logicalCol = colOffset + col;
 					const fuRe = FILE_URL_RE;
 					const fpRe = FILE_PATH_RE;
-					const webRe = WEB_URL_RE;
 					const logicalMatches: { text: string; candidate: string; index: number; isUrl: boolean }[] = [];
 
 					fuRe.lastIndex = 0;
@@ -1857,9 +2014,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 						const idx = logicalText.indexOf(m[1], m.index);
 						logicalMatches.push({ text: m[1], candidate: m[1], index: idx, isUrl: false });
 					}
-					webRe.lastIndex = 0;
-					while ((m = webRe.exec(logicalText)) !== null) {
-						logicalMatches.push({ text: m[0], candidate: m[0], index: m.index, isUrl: true });
+					for (const url of matchWebUrls(logicalText)) {
+						logicalMatches.push({ text: url.text, candidate: url.text, index: url.index, isUrl: true });
 					}
 
 					for (const lm of logicalMatches) {
@@ -1934,13 +2090,70 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		});
 		installFrameTimingDebugHook();
 		acquireCache();
+
+		// Session events FIRST — before the font load below, not after the whole
+		// setup. These are fire-and-forget pushes: an OSC 133 prompt marker or a
+		// watcher line that lands while its listener is missing is gone, and the
+		// shell prints its first prompt as soon as the PTY spawns, while
+		// `document.fonts.load` may still have a cold-cache round trip to make.
+		// The grid subscription stays below: frames replay on subscribe.
+		transport = createTransport(props.sessionId);
+		invokeRef = (cmd, args) => transport!.invoke(cmd, args);
+		// Teardown covering what exists right now: unmounting during the font load
+		// below must not leave these listeners attached. Widened to the DOM
+		// listeners further down, once those exist.
+		unsubscribe = () => transport?.unsubscribe();
+		try {
+			// One shape on both transports: the Tauri event and the WS frame both
+			// carry `{ cwd }`, so there is nothing to normalise here.
+			await transport.onEvent("cwd", (payload) => {
+				const { cwd } = payload as { cwd: string };
+				terminalsStore.update(props.terminalId, { cwd });
+				// A cd does NOT re-home an owned tab — it stays in the repo it was
+				// opened in. This only settles a tab still parked with no owner.
+				reclaimParkedTerminal(props.terminalId);
+				props.onCwdChange?.(props.terminalId, cwd);
+			});
+			await transport.onEvent("osc133", (payload) => {
+				const { marker, line, exit_code } = payload as { marker: string; line: number; exit_code: number | null };
+				terminalsStore.handleOsc133(props.terminalId, marker, line, exit_code ?? undefined);
+			});
+			// Lines assembled by the Rust reader, carrying the ids it already
+			// matched. No raw stream is scanned here any more.
+			await transport.onEvent("watcher-lines", (payload) => {
+				const { lines } = payload as { lines: Array<{ text: string; matched_ids: string[] }> };
+				pluginRegistry.handleWatcherLines(props.sessionId, lines);
+			});
+		} catch (e) {
+			appLogger.error("terminal", "Failed to subscribe to terminal session events", {
+				sessionId: props.sessionId,
+				error: e,
+			});
+		}
+		if (!alive) {
+			transport.unsubscribe();
+			return;
+		}
+
 		const fontFamily = settingsStore.getFontFamily();
 		const fontSize = settingsStore.state.defaultFontSize;
 		const fontWeight = settingsStore.state.fontWeight;
 		await Promise.all([
 			document.fonts.load(`${fontWeight} ${fontSize}px ${fontFamily}`, "M"),
-			document.fonts.load(`400 ${fontSize}px "Symbols Nerd Font Mono"`, ""),
+			// The 2nd arg is not decorative: fonts.load() only schedules the faces
+			// covering the characters in it — "" matches nothing and downloads
+			// nothing. Canvas 2D never pulls a webfont in by itself, so without a
+			// real powerline glyph here U+E0B0 & co. render with a system fallback.
+			document.fonts.load(`400 ${fontSize}px "Symbols Nerd Font Mono"`, "\ue0b0"),
 		]).catch(() => document.fonts.ready);
+		// Unmounted while the fonts were loading. onCleanup has already run — it
+		// tore down the transport, the only thing installed at that point — and
+		// everything below installs observers and document listeners, then
+		// overwrites `unsubscribe` with a disposer nobody will call again. Without
+		// this the disposed component is retained for the page lifetime and its
+		// callbacks keep firing. Font loading is exactly the window a repo switch
+		// or a fast tab close lands in.
+		if (!alive) return;
 		remeasure();
 
 		resizeObserver = new ResizeObserver(() => {
@@ -1949,12 +2162,16 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		});
 		resizeObserver.observe(containerRef);
 
-		// Flow control: stop acking frames when hidden, request full frame on show
+		// Flow control: ack on a trailing timer when hidden, request full frame on show
 		visibilityObserver = new IntersectionObserver(
 			(entries) => {
 				const isVisible = entries[0]?.isIntersecting ?? false;
 				if (isVisible && hidden) {
 					hidden = false;
+					// Back to full rate: clear the gate now instead of waiting out the
+					// hidden interval, so the frame requested below is not queued behind it.
+					hiddenAck.cancel();
+					ackFrame();
 					fullRepaintNeeded = true;
 					lastDisplayOffset = -1;
 					// Freeze-investigation: hidden→visible is the repo-switch show path.
@@ -2486,6 +2703,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			fullRepaintNeeded = true;
 			scheduleRepaint();
 		};
+		/** Buttons this canvas reported down, so their release is owed to the app. */
+		const reportedDown = new Set<number>();
 
 		bindings.listen(canvasRef, "mousedown", (e: MouseEvent) => {
 			keyInputRef.focus({ preventScroll: true });
@@ -2529,6 +2748,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				}
 				if (currentFrame.sgrMouse) {
 					writePtyNoScroll(sgrMouseSequence(e.button, pos.col, pos.row, true, e));
+					reportedDown.add(e.button);
 				}
 				e.preventDefault();
 				return;
@@ -2619,6 +2839,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		};
 
 		const onMouseMove = (e: MouseEvent) => {
+			// The listener is on document, so this fires for every terminal on every
+			// move. A hidden one has a 1x1 canvas and canvasToGrid clamps, so without
+			// this it reported cell (0,0) into a PTY the pointer never touched.
+			if (hidden) return;
 			if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) {
 				const st = gestureArbiter.onMove(e.clientX, e.clientY);
 				if (st === "pending") return; // undecided — forward nothing yet
@@ -2635,11 +2859,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					scheduleRepaint();
 					// fall through to the selection-extend block below
 				} else if (st === "idle") {
+					// The listener is on document: a move over another terminal (or over
+					// nothing) must not report a clamped cell into this PTY.
+					const rect = canvasRef.getBoundingClientRect();
+					if (!isPointerInsideRect(e, rect)) return;
 					if (currentFrame.mouseMode >= 3) {
-						const pos = canvasToGrid(e);
+						const pos = canvasToGrid(e, rect);
 						writePtyNoScroll(sgrMouseSequence(35, pos.col, pos.row, true, e));
 					} else if (currentFrame.mouseMode >= 2 && e.buttons > 0) {
-						const pos = canvasToGrid(e);
+						const pos = canvasToGrid(e, rect);
 						const btn = e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : 2;
 						writePtyNoScroll(sgrMouseSequence(32 + btn, pos.col, pos.row, true, e));
 					}
@@ -2667,6 +2895,13 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		};
 
 		const onMouseUp = (e: MouseEvent) => {
+			// A release we owe the application outlives the reasons to stay quiet:
+			// hiding the terminal or dragging off it mid-gesture would otherwise
+			// leave the button logically held with nothing left to retract it.
+			const rect = canvasRef.getBoundingClientRect();
+			const reportUp = shouldReportMouseUp(reportedDown, e.button, isPointerInsideRect(e, rect));
+			const owed = reportedDown.delete(e.button);
+			if (hidden && !owed) return;
 			if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) {
 				const up = gestureArbiter.onUp();
 				if (up.kind === "click") {
@@ -2681,7 +2916,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					return;
 				}
 				if (up.kind === "idle") {
-					const pos = canvasToGrid(e);
+					if (!reportUp) return;
+					// canvasToGrid clamps to the grid, so a release outside the canvas
+					// reports the edge cell — what a terminal does for a drag-out.
+					const pos = canvasToGrid(e, rect);
 					if (currentFrame.sgrMouse) {
 						writePtyNoScroll(sgrMouseSequence(e.button, pos.col, pos.row, false, e));
 					}
@@ -2842,10 +3080,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		bindings.listen(document, "mousemove", onScrollDragMove);
 		bindings.listen(document, "mouseup", onScrollDragUp);
 
-		// Assign the DOM-listener cleanup NOW, before the transport.subscribe() await
-		// below. If the component unmounts mid-await, onCleanup runs while `unsubscribe`
-		// would otherwise still be undefined — leaking all four document listeners for
-		// the page lifetime. The success path augments this with transport.unsubscribe().
+		// Widen the cleanup NOW, before the transport.subscribe() await below. If the
+		// component unmounts mid-await, onCleanup runs while `unsubscribe` would
+		// otherwise still cover only the transport — leaking all four document
+		// listeners for the page lifetime.
 		const detachDomListeners = () => {
 			bindings.dispose();
 			if (scrollRafId) cancelAnimationFrame(scrollRafId);
@@ -2853,7 +3091,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			resetSmoothScroll();
 			stopSelectionScroll();
 		};
-		unsubscribe = detachDomListeners;
+		unsubscribe = () => {
+			detachDomListeners();
+			transport?.unsubscribe();
+		};
 
 		// Touch input (mobile/tablet)
 		cleanupTouch = installTouchHandlers(canvasRef, touchTextareaRef, {
@@ -2873,31 +3114,32 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				props.onFocus?.();
 			},
 			onFontSizeChange: (delta) => {
-				const cur = settingsStore.state.defaultFontSize;
-				const next = Math.round(cur + delta);
-				if (next !== cur) settingsStore.setDefaultFontSize(next);
+				// Per-terminal, like every keyboard/menu/palette zoom: the global
+				// default is persisted config, and the renderer reads the terminal's
+				// own size first, so writing the default changed everything except
+				// the terminal being pinched.
+				applyPinchFontDelta(props.terminalId, delta, settingsStore.state.defaultFontSize);
 			},
 			onSelectionMode: () => {
 				/* future: enter selection UI */
 			},
 		});
 
-		// Subscribe to grid channel via transport abstraction
+		// Subscribe to the grid channel. The transport and its session-event
+		// listeners already exist — installed before the font load above.
 		try {
-			transport = createTransport(props.sessionId);
-			invokeRef = (cmd, args) => transport!.invoke(cmd, args);
+			// Rust installs a fresh delivery gate on subscribe, so the echoed receipt
+			// count has to start from zero with it.
+			hiddenAck.cancel();
+			framesReceived = 0;
 			await transport.subscribe((data) => onFrame(data));
 			if (!alive) {
 				// Unmounted while subscribe() was in flight. onCleanup already ran and
-				// invoked the DOM-only unsubscribe assigned before the await — but the
-				// transport subscription is now live and would leak. Tear it down here.
+				// tore down what existed then — but the grid subscription only became
+				// live on the line above and would leak. Tear it down here.
 				transport.unsubscribe();
 				return;
 			}
-			unsubscribe = () => {
-				detachDomListeners();
-				transport?.unsubscribe();
-			};
 			// Paint the current grid now. The browser-mode WS subscribe (unlike the
 			// Tauri event channel) does not replay the current frame, so an idle
 			// session with no pending output would render nothing and leave the
@@ -2910,24 +3152,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				sessionId: props.sessionId,
 				error: e,
 			});
-			// `unsubscribe` is already detachDomListeners (assigned before the await).
-		}
-
-		// Listen for session events via transport
-		if (transport) {
-			await transport.onEvent("cwd", (payload) => {
-				const cwd = (payload as { cwd: string }).cwd ?? (payload as string);
-				terminalsStore.update(props.terminalId, { cwd });
-				props.onCwdChange?.(props.terminalId, cwd);
-			});
-			await transport.onEvent("osc133", (payload) => {
-				const { marker, line, exit_code } = payload as { marker: string; line: number; exit_code: number | null };
-				terminalsStore.handleOsc133(props.terminalId, marker, line, exit_code ?? undefined);
-			});
-			await transport.onEvent("output", (payload) => {
-				const { data } = payload as { data: string };
-				pluginRegistry.processRawOutput(data, props.sessionId);
-			});
+			// `unsubscribe` already covers this on unmount; drop the session-event
+			// listeners now rather than keeping them alive on a terminal that will
+			// never paint.
+			transport?.unsubscribe();
 		}
 
 		props.onRef?.({
@@ -2946,42 +3174,22 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				invokeRef?.("terminal_request_frame", { sessionId: props.sessionId }).catch(ipcErr("terminal_request_frame"));
 			},
 			resubscribe: async () => {
+				// A pending hidden ack would report the old channel's receipt count
+				// against the fresh gate Rust installs on resubscribe.
+				hiddenAck.cancel();
+				framesReceived = 0;
 				await transport?.resubscribe();
 			},
 			searchFind: async (query: string, blockScope?: boolean) => {
 				if (!query || !invokeRef) {
-					search.clear();
+					clearSearchState();
 					const m = metrics();
 					if (currentFrame && m) paintFrame(currentFrame, m);
 					return { index: -1, count: 0 };
 				}
-				let matches = (await invokeRef("terminal_search", {
-					sessionId: props.sessionId,
-					query,
-				})) as { row: number; col_start: number; col_end: number }[];
-				if (blockScope && currentFrame) {
-					const term = terminalsStore.get(props.terminalId);
-					if (term) {
-						const allBlocks = term.activeBlock ? [...term.commandBlocks, term.activeBlock] : term.commandBlocks;
-						const viewTop = currentFrame.historySize - currentFrame.displayOffset;
-						const viewCenter = viewTop + Math.floor(currentFrame.screenRows / 2);
-						matches = filterMatchesToBlock(matches, allBlocks, viewCenter);
-					}
-				}
-				const activeMatch = search.replace(
-					matches,
-					currentFrame
-						? {
-								historySize: currentFrame.historySize,
-								displayOffset: currentFrame.displayOffset,
-								screenRows: currentFrame.screenRows || lastResizeRows,
-							}
-						: undefined,
-				);
-				if (activeMatch) scrollToMatch(activeMatch);
-				const m = metrics();
-				if (currentFrame && m) paintFrame(currentFrame, m);
-				return { index: search.activeIndex, count: matches.length };
+				searchQuery = query;
+				searchBlockScope = blockScope ?? false;
+				return runSearchQuery(true);
 			},
 			searchNext: () => {
 				const match = search.next();
@@ -3000,7 +3208,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				return { index: search.activeIndex, count: search.matches.length };
 			},
 			searchClear: () => {
-				search.clear();
+				clearSearchState();
 				const m = metrics();
 				if (currentFrame && m) paintFrame(currentFrame, m);
 			},
@@ -3160,6 +3368,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			smoothRafId = 0;
 		}
 		clearSettlePending();
+		hiddenAck.cancel();
 		if (reconcileTimer) clearTimeout(reconcileTimer);
 		clearTimeout(resizeDebounce);
 		resizeObserver?.disconnect();
@@ -3169,6 +3378,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		cleanupTouch?.();
 		clearTimeout(linkThrottle);
 		clearTimeout(scrollGestureEndTimer);
+		searchRefresh.cancel();
 		linkController.dispose();
 		resetFrameTiming(props.sessionId);
 		rowMap.clear();
