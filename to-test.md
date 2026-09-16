@@ -32,6 +32,26 @@ no items left goes too. What stays open must carry its own stated reason.
 > WebView gets the same change over Vite HMR. If a browser check of a frontend fix
 > shows nothing, check `dist/index.html`'s mtime before blaming the code.
 
+## Sign in with ChatGPT (2026-09-16, **Rust change — needs a rebuild**)
+
+A `chat_gpt` provider signs in with Codex's OAuth and serves the subscription on a
+loopback OpenAI-compatible endpoint. The translation, both sign-in flows (against a
+fake issuer), refresh rotation and genai streaming/tool calls through the endpoint
+are covered by `cargo test --lib chatgpt`; what no test can do is sign a real
+ChatGPT account in. `[HUMAN]` — needs your OpenAI login in a browser.
+
+- [ ] Settings › Providers › + Add › **ChatGPT (sign in)** › Add. Click **Sign in
+  with ChatGPT**. On this Mac port 1455 is held by the cli-proxy-api container, so
+  expect the **device code** (already copied) and the `auth.openai.com/codex/device`
+  page; enter it and approve. Within a few seconds the card reads *Signed in as
+  <email> · <plan>* and the header shows ✓ signed in.
+- [ ] **+ Add model** lists your plan's models with their reasoning levels. Add one,
+  assign it to Main, press **Test**: "Connection successful — model replied: OK".
+- [ ] AI Chat answers streamed, and an agent turn that calls a tool completes.
+- [ ] Quit and relaunch: still signed in, and chat still works (tokens come back
+  from the keychain). **Sign out** returns the card to the sign-in button; a chat
+  then fails with "Not signed in with ChatGPT — sign in under Settings › Providers".
+
 ## A backend-created worktree offers itself as a toast, not a modal (2026-08-30, frontend only — HMR)
 
 The "Switch to new worktree?" confirm was a blocking modal with a ten-second

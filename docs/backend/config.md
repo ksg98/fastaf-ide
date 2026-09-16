@@ -333,6 +333,16 @@ work starts.
 
 **Commands:** `load_ai_chat_config()`, `save_ai_chat_config(config)`
 
+### Provider Registry (`providers.json`)
+
+**Type:** `ProviderRegistry` (`provider_registry.rs`, schema version 3) — `providers`, `models`, `slots` (`main` / `triage` / `headless` → model id), `phase_overrides`.
+
+A provider entry is `{ id, type, label, base_url? }`. `type` is one of `anthropic`, `open_ai`, `chat_gpt`, `gemini`, `deep_seek`, `mistral`, `fireworks`, `samba_nova`, `moonshot`, `xai`, `zai`, `open_router`, `requesty`, `lite_llm`, `ollama`, `lm_studio`, `bedrock`, `vertex`, `custom`. API keys never live in the file: they are in the OS keyring under `provider/<id>`.
+
+`chat_gpt` has no key and ignores `base_url`. It resolves to the loopback endpoint in `chatgpt::door` (`http://127.0.0.1:<random>/v1/`, per-process key), backed by the "Sign in with ChatGPT" tokens stored once — not per provider — under the keyring entry `chatgpt/auth`.
+
+**Commands:** `load_provider_registry()`, `save_provider_registry(registry)`, `save_provider_api_key(providerId, key)`, `delete_provider_api_key(providerId)`, `fetch_provider_models(providerId)`, `test_slot_connection(slot)`, `chatgpt_auth_status()`, `chatgpt_start_login()`, `chatgpt_cancel_login()`, `chatgpt_logout()`
+
 ### Cron Scheduler Config (`ai-cron.json`)
 
 **Type:** `SchedulerConfig`

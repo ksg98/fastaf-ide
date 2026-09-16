@@ -802,8 +802,9 @@ Every terminal tab has a stable UUID (`tuicSession`) injected as the `TUIC_SESSI
 
 ### 6.16 Provider Registry
 - Centralized multi-provider configuration replacing per-feature provider settings
-- Supported provider types: **Anthropic**, **OpenAI**, **OpenRouter**, **Ollama** (local, auto-detected), custom OpenAI-compatible endpoints
+- Supported provider types: **Anthropic**, **OpenAI**, **ChatGPT (sign in)**, **OpenRouter**, **Ollama** (local, auto-detected), custom OpenAI-compatible endpoints
 - Per-provider API keys stored in OS keyring via `Credential::Provider` variant
+- **Sign in with ChatGPT** — a `chat_gpt` provider uses a ChatGPT Plus/Pro/Team subscription instead of an API key. The card's *Sign in with ChatGPT* button runs Codex's OAuth sign-in: the browser flow when `localhost:1455` is free, else a device code to type at `auth.openai.com/codex/device` (remote clients always get the code). Tokens live in the OS keyring under `chatgpt/auth`; the access token refreshes itself and the rotated refresh token is saved. The provider resolves to a loopback OpenAI-compatible endpoint (`chatgpt::door`, `127.0.0.1:<random port>`, per-process key) that turns chat completions into turns on `chatgpt.com/backend-api/codex`, so AI Chat, agents, triage, Smart Prompts, the dictation rewrite and model discovery all work unchanged. Models are listed live from the subscription, with their reasoning levels. Codex CLI's own `~/.codex/auth.json` is deliberately not imported — refreshing it here would sign the CLI out. Commands: `chatgpt_auth_status`, `chatgpt_start_login`, `chatgpt_cancel_login`, `chatgpt_logout`
 - Per-provider model lists with add/remove/reorder
 - **Slot resolver** — logical slots (`headless`, `chat`, `triage`) map to concrete provider+model pairs with a configurable fallback chain
 - **Legacy migration** — existing `ai-chat-config.json` provider/model/API key settings auto-migrated to `providers.json` on first load

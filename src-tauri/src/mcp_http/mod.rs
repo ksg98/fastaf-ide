@@ -1300,6 +1300,22 @@ pub fn build_router(state: Arc<AppState>, remote_auth: bool, mcp_enabled: bool) 
             post(config_routes::fetch_provider_models_http),
         )
         .route(
+            "/config/chatgpt/status",
+            get(config_routes::chatgpt_auth_status_http),
+        )
+        .route(
+            "/config/chatgpt/login",
+            post(config_routes::chatgpt_start_login_http),
+        )
+        .route(
+            "/config/chatgpt/login/cancel",
+            post(config_routes::chatgpt_cancel_login_http),
+        )
+        .route(
+            "/config/chatgpt/logout",
+            post(config_routes::chatgpt_logout_http),
+        )
+        .route(
             "/config/remote-connections",
             get(config_routes::get_remote_connections).put(config_routes::put_remote_connection),
         )

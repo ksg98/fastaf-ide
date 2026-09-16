@@ -1001,6 +1001,24 @@ POST   /config/slot-test       { slot }              -> string    (connection te
 POST   /config/ollama-models   { providerId }        -> string[]  (discovered model ids)
 ```
 
+### Sign in with ChatGPT
+
+HTTP twins of the `chatgpt_*` commands, same payloads. All four carry the
+`require_local_or_auth` guard (the status names the account). A non-loopback
+caller always gets the **device-code** flow: its browser could not reach this
+host's `localhost:1455` callback.
+
+```
+GET  /config/chatgpt/status        -> { signed_in, email, plan, pending, error }
+POST /config/chatgpt/login         -> same   (pending = { mode: "browser"|"device", url, code })
+POST /config/chatgpt/login/cancel  -> same
+POST /config/chatgpt/logout        -> same
+```
+
+Poll `status` every ~2 s while `pending` is set. The loopback model endpoint a
+`chat_gpt` provider resolves to (`chatgpt::door`) is not part of this API: it
+binds its own random port and answers only FastAF's per-process key.
+
 The OAuth upstream flow (`start_mcp_upstream_oauth` / `cancel_mcp_upstream_oauth`) is
 **not** mapped: `start` binds a loopback callback server and opens the OS browser, so
 the redirect can't return to a remote/PWA client. Desktop drives it over IPC; browser

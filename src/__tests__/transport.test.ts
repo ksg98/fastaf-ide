@@ -1494,6 +1494,24 @@ describe("transport", () => {
 			expect(ollama.body).toEqual({ providerId: "ollama-local" });
 		});
 
+		it("maps the ChatGPT sign-in commands to the /config/chatgpt routes", () => {
+			const status = mapCommandToHttp("chatgpt_auth_status", {});
+			expect(status.method).toBe("GET");
+			expect(status.path).toBe("/config/chatgpt/status");
+
+			const start = mapCommandToHttp("chatgpt_start_login", {});
+			expect(start.method).toBe("POST");
+			expect(start.path).toBe("/config/chatgpt/login");
+
+			const cancel = mapCommandToHttp("chatgpt_cancel_login", {});
+			expect(cancel.method).toBe("POST");
+			expect(cancel.path).toBe("/config/chatgpt/login/cancel");
+
+			const logout = mapCommandToHttp("chatgpt_logout", {});
+			expect(logout.method).toBe("POST");
+			expect(logout.path).toBe("/config/chatgpt/logout");
+		});
+
 		it("maps agent detection and spawn aliases to HTTP", () => {
 			const detectClaude = mapCommandToHttp("detect_claude_binary", {});
 			expect(detectClaude.method).toBe("GET");

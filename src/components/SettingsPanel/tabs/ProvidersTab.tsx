@@ -4,6 +4,7 @@ import { useAgentDetection } from "../../../hooks/useAgentDetection";
 import { invoke } from "../../../invoke";
 import { agentConfigsStore } from "../../../stores/agentConfigs";
 import { appLogger } from "../../../stores/appLogger";
+import { chatgptAuthStore } from "../../../stores/chatgptAuth";
 import {
 	type DiscoveredModel,
 	ENCODABLE_EFFORT_LEVELS,
@@ -14,6 +15,7 @@ import {
 	type SlotName,
 } from "../../../stores/providerRegistry";
 import s from "../Settings.module.css";
+import { ChatGptSignIn } from "./ChatGptSignIn";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -22,6 +24,7 @@ import s from "../Settings.module.css";
 const PROVIDER_TYPES: { value: ProviderType; label: string; comingSoon?: boolean }[] = [
 	{ value: "anthropic", label: "Anthropic" },
 	{ value: "open_ai", label: "OpenAI" },
+	{ value: "chat_gpt", label: "ChatGPT (sign in)" },
 	{ value: "gemini", label: "Google Gemini" },
 	{ value: "deep_seek", label: "DeepSeek" },
 	{ value: "mistral", label: "Mistral" },
@@ -56,15 +59,25 @@ const SLOT_NAMES: SlotName[] = ["main", "triage"];
 
 const LOCAL_PROVIDER_TYPES: ProviderType[] = ["ollama", "lm_studio", "lite_llm"];
 
+/** Providers reached through a sign-in rather than a key. */
+function isSignIn(type: ProviderType): boolean {
+	return type === "chat_gpt";
+}
+
 function needsApiKey(type: ProviderType): boolean {
-	return !LOCAL_PROVIDER_TYPES.includes(type);
+	return !LOCAL_PROVIDER_TYPES.includes(type) && !isSignIn(type);
 }
 
 /** First-party SDK providers whose endpoint is fixed — no base URL, nothing to probe. */
 const FIXED_ENDPOINT_TYPES: ProviderType[] = ["anthropic", "open_ai", "gemini"];
 
 function supportsBaseUrl(type: ProviderType): boolean {
-	return !FIXED_ENDPOINT_TYPES.includes(type);
+	return !FIXED_ENDPOINT_TYPES.includes(type) && !isSignIn(type);
+}
+
+/** Whether the provider can list its models live — every base-URL provider, plus a sign-in. */
+function supportsDiscovery(type: ProviderType): boolean {
+	return supportsBaseUrl(type) || isSignIn(type);
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +133,15 @@ const AddProviderForm: Component<{ onAdd: (e: ProviderEntry) => void; onCancel: 
 			<h3>Add Provider</h3>
 			<div class={s.group}>
 				<label>Type</label>
-				<select value={type()} onChange={(e) => setType(e.currentTarget.value as ProviderType)}>
+				<select
+					data-testid="provider-type-select"
+					value={type()}
+					onChange={(e) => {
+						const next = e.currentTarget.value as ProviderType;
+						setType(next);
+						if (isSignIn(next) && !label().trim()) setLabel("ChatGPT");
+					}}
+				>
 					<For each={PROVIDER_TYPES}>
 						{(p) => (
 							<option value={p.value}>
@@ -133,6 +154,12 @@ const AddProviderForm: Component<{ onAdd: (e: ProviderEntry) => void; onCancel: 
 			</div>
 			<Show when={selectedDef()?.comingSoon}>
 				<p class={s.hint}>Bedrock and Vertex require additional SDK integration — coming soon.</p>
+			</Show>
+			<Show when={isSignIn(type())}>
+				<p class={s.hint}>
+					No API key: add it, then sign in with your ChatGPT Plus, Pro or Team account on its card. Every AI feature can
+					then use that plan's models.
+				</p>
 			</Show>
 			<div class={s.group}>
 				<label>Label</label>
@@ -203,7 +230,7 @@ const AddModelForm: Component<{
 	const [effort, setEffort] = createSignal("");
 
 	async function discover() {
-		if (!supportsBaseUrl(props.provider.type)) return;
+		if (!supportsDiscovery(props.provider.type)) return;
 		setDiscovering(true);
 		setDiscoveryError("");
 		try {
@@ -317,8 +344,8 @@ const AddModelForm: Component<{
 				</div>
 			</Show>
 
-			{/* Discovery status — only meaningful for providers with a base URL */}
-			<Show when={supportsBaseUrl(props.provider.type)}>
+			{/* Discovery status — only meaningful for providers that can list models */}
+			<Show when={supportsDiscovery(props.provider.type)}>
 				<div class={s.hint}>
 					<Show when={discovering()}>Discovering models…</Show>
 					<Show when={!discovering() && showPicker()}>
@@ -387,6 +414,8 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 	);
 
 	const hasKey = createMemo(() => providerRegistryStore.state.keyStatus[props.provider.id] ?? false);
+	/** A key, or for a sign-in provider, a signed-in account. */
+	const hasCredential = () => (isSignIn(props.provider.type) ? chatgptAuthStore.state.status.signed_in : hasKey());
 
 	const isOllama = () => props.provider.type === "ollama";
 
@@ -443,11 +472,19 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 						({PROVIDER_TYPES.find((p) => p.value === props.provider.type)?.label ?? props.provider.type})
 					</span>{" "}
 					<span
-						style={{ color: hasKey() ? "var(--success)" : undefined }}
-						class={!hasKey() ? s.hintInline : undefined}
+						style={{ color: hasCredential() ? "var(--success)" : undefined }}
+						class={!hasCredential() ? s.hintInline : undefined}
 						data-testid={`key-status-${props.provider.id}`}
 					>
-						{needsApiKey(props.provider.type) ? (hasKey() ? "✓ key" : "no key") : "no key needed"}
+						{isSignIn(props.provider.type)
+							? chatgptAuthStore.state.status.signed_in
+								? "✓ signed in"
+								: "not signed in"
+							: needsApiKey(props.provider.type)
+								? hasKey()
+									? "✓ key"
+									: "no key"
+								: "no key needed"}
 					</span>
 				</div>
 				<button
@@ -537,6 +574,11 @@ const ProviderCard: Component<{ provider: ProviderEntry }> = (props) => {
 					/>
 				</Show>
 			</div>
+
+			{/* Account — a sign-in provider has one instead of a key */}
+			<Show when={isSignIn(props.provider.type)}>
+				<ChatGptSignIn />
+			</Show>
 
 			{/* API Key management */}
 			<Show when={needsApiKey(props.provider.type)}>

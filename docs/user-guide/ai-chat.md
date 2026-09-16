@@ -50,6 +50,7 @@ AI Chat speaks to four provider families plus a custom endpoint. Switch in `Sett
 | **Ollama** (local) | `http://localhost:11434/v1/` | Auto-detected — the settings tab shows live status and the model list pulled from `GET /api/tags`. No API key required. |
 | **Anthropic** | `https://api.anthropic.com` | Direct Messages API. API key from Anthropic console. |
 | **OpenAI** | `https://api.openai.com/v1` | Chat Completions. |
+| **ChatGPT (sign in)** | *(none — loopback)* | Your ChatGPT Plus/Pro/Team plan instead of an API key. See [Sign in with ChatGPT](#sign-in-with-chatgpt). |
 | **OpenRouter** | `https://openrouter.ai/api/v1` | Single key, many models. |
 | **Custom** | *(editable)* | Any OpenAI-compatible endpoint. |
 
@@ -63,6 +64,17 @@ AI Chat speaks to four provider families plus a custom endpoint. Switch in `Sett
 | Agent loop (tool calling) | DeepSeek R1 32B, Qwen 27B | Sonnet, Opus |
 
 API keys are stored in the OS keyring under service `tuicommander-ai-chat` — never written to disk in plaintext.
+
+### Sign in with ChatGPT
+
+1. `Settings > Providers > + Add`, type **ChatGPT (sign in)**, then **Add**.
+2. On the new card, click **Sign in with ChatGPT**. Your browser opens OpenAI's sign-in page. If another program (a Codex login, a local proxy) already holds port 1455, the card shows a code instead — it is copied for you; paste it on the page that opens.
+3. When the card reads *Signed in as …*, click **+ Add model**. The list comes live from your plan, with the reasoning levels each model offers.
+4. Assign the model to a slot (Main for AI Chat and agents, Triage, or Headless for Smart Prompts in External API mode).
+
+The tokens are kept in the OS keychain and refresh themselves. **Sign out** on the card forgets them. Usage counts against your ChatGPT plan's limits, and a limit reached shows up as the model's error message. This rides the same sign-in Codex uses; OpenAI can change or stop third-party access, so keep an API-key provider if you depend on it.
+
+FastAF signs in on its own and never reads Codex CLI's `~/.codex/auth.json`: each refresh replaces the refresh token, so two programs sharing one login would sign each other out.
 
 ### Local MLX models (Apple Silicon)
 

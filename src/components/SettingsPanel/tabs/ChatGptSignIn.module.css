@@ -1,0 +1,37 @@
+.account {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.who {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-md);
+  color: var(--fg-primary);
+}
+
+.label {
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+}
+
+.code {
+  margin: 4px 0 8px;
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  color: var(--fg-primary);
+  user-select: all;
+}
+
+.error {
+  font-size: var(--font-sm);
+  color: var(--error);
+  line-height: 1.4;
+}
