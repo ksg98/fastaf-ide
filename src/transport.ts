@@ -651,6 +651,11 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	fetch_provider_models: {
 		map: (args) => ({ method: "POST", path: "/config/provider-models", body: { providerId: args.providerId } }),
 	},
+	// --- Sign in with ChatGPT ---
+	chatgpt_auth_status: { map: () => ({ method: "GET", path: "/config/chatgpt/status" }) },
+	chatgpt_start_login: { map: () => ({ method: "POST", path: "/config/chatgpt/login" }) },
+	chatgpt_cancel_login: { map: () => ({ method: "POST", path: "/config/chatgpt/login/cancel" }) },
+	chatgpt_logout: { map: () => ({ method: "POST", path: "/config/chatgpt/logout" }) },
 
 	// --- Git/GitHub ---
 	get_repo_info: {

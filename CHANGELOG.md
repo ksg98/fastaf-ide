@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Sign in with ChatGPT.** Add a *ChatGPT (sign in)* provider under Settings › Providers and click *Sign in with ChatGPT*: your Plus, Pro or Team plan then drives AI Chat, agents, diff triage, Smart Prompts and the dictation rewrite, with no API key. The sign-in is the one Codex uses — a browser page, or a code to type when something else already holds the callback port — and the models come live from your plan, reasoning levels included. Calls count against that plan's limits, and OpenAI can change or stop third-party access at any time, so an API-key provider stays the dependable option. Codex CLI's own login is left alone: FastAF signs in separately, because refreshing the CLI's token here would sign the CLI out.
+
 ### Changed
 
 - **The command-line companion is now `fastaf`** — the `tuic` sidecar, its Settings installer and the first-run prompt all use the new name (`fastaf .`, `fastaf ls`, `fastaf agent send …`, `/usr/local/bin/fastaf`). The `tuic-bridge` MCP sidecar, the `tuic://` deep-link scheme, `TUIC_*` environment variables and `.tuic.json` are unchanged, so existing agent configurations keep working. An older `tmux → tuic` alias is still recognised by `fastaf alias --remove`.

@@ -364,7 +364,7 @@ Some frontend-only stores persist to localStorage:
 - [x] Notes/Ideas: image paste support (Ctrl+V), thumbnails, send absolute paths to terminal
 - [x] Inter-Agent Messaging (`messaging` MCP tool: register, list_peers, send, inbox with channel push + polling fallback)
 - [x] Smart Prompts (29 built-in AI prompts with context variable resolution, inject/headless/API execution, toolbar dropdown, SmartButtonStrip, Command Palette integration, direct LLM API mode via genai crate)
-- [x] AI Chat panel (`Cmd+Alt+A`) — streaming conversational AI with terminal context injection, multi-provider (Ollama/Anthropic/OpenAI/OpenRouter), conversation persistence, OS-keyring API keys
+- [x] AI Chat panel (`Cmd+Alt+A`) — streaming conversational AI with terminal context injection, multi-provider (Ollama/Anthropic/OpenAI/OpenRouter/ChatGPT sign-in), conversation persistence, OS-keyring API keys
 - [x] AI Agent loop (ReAct) — terminal observe/act, filesystem, search, drive_agent, and reactive watch tools; pause/resume, destructive-command approval gate, tool-call cards
 - [x] Session knowledge store — per-session command outcomes, error→fix pairs, CWD history, TUI apps seen; fed by OSC 133 with silence-timer fallback; persisted with 2s debounce
 - [x] TUI app detection — alternate-screen tracking classifies terminal as Shell or FullscreenTui with app hint (vim/htop/lazygit/…)

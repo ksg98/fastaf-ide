@@ -15,6 +15,10 @@ const SCHEMA_VERSION: u32 = 3;
 pub(crate) enum ProviderType {
     Anthropic,
     OpenAi,
+    /// A ChatGPT Plus/Pro/Team subscription, signed in with the Codex OAuth
+    /// client instead of an API key. Resolves to the loopback endpoint in
+    /// `chatgpt::door`, so callers see an ordinary OpenAI-compatible provider.
+    ChatGpt,
     Gemini,
     DeepSeek,
     Mistral,
@@ -50,6 +54,7 @@ impl ProviderType {
             Self::LiteLlm => Some("http://localhost:4000/v1/"),
             Self::Anthropic
             | Self::OpenAi
+            | Self::ChatGpt
             | Self::Gemini
             | Self::Bedrock
             | Self::Vertex
@@ -58,12 +63,15 @@ impl ProviderType {
     }
 
     pub(crate) fn needs_api_key(&self) -> bool {
-        !matches!(self, Self::Ollama | Self::LmStudio | Self::LiteLlm)
+        !matches!(
+            self,
+            Self::Ollama | Self::LmStudio | Self::LiteLlm | Self::ChatGpt
+        )
     }
 
     #[allow(dead_code)] // Wired in story 1481 (Ollama detection + Tauri commands)
     pub(crate) fn uses_custom_url_routing(&self) -> bool {
-        self.default_base_url().is_some() || matches!(self, Self::Custom)
+        self.default_base_url().is_some() || matches!(self, Self::Custom | Self::ChatGpt)
     }
 }
 
@@ -437,6 +445,16 @@ pub(crate) struct ResolvedSlot {
     pub provider_type: ProviderType,
 }
 
+/// The loopback endpoint a ChatGPT sign-in provider resolves to; `None` for
+/// every other provider type. A sign-in has no URL or key of its own — the
+/// door translates for it, whatever `base_url` the entry happens to carry.
+fn chatgpt_door(provider: &ProviderEntry) -> Result<Option<crate::chatgpt::door::Door>, String> {
+    if provider.provider_type != ProviderType::ChatGpt {
+        return Ok(None);
+    }
+    crate::chatgpt::door::ensure().map(Some)
+}
+
 /// The reasoning effort configured on the model a slot points at, if any.
 /// Sits between an explicit per-call effort and the global AI-chat setting.
 pub(crate) fn slot_model_effort(slot: SlotName) -> Option<String> {
@@ -474,6 +492,10 @@ pub(crate) fn resolve_provider(
         .find(|p| p.id == provider_id)
         .ok_or_else(|| format!("Provider '{provider_id}' not found in registry"))?;
 
+    if let Some(door) = chatgpt_door(provider)? {
+        return Ok((Some(door.base_url()), door.key));
+    }
+
     let base_url = provider
         .base_url
         .clone()
@@ -510,20 +532,26 @@ pub(crate) fn resolve_model(
             )
         })?;
 
-    let base_url = provider
-        .base_url
-        .clone()
-        .or_else(|| provider.provider_type.default_base_url().map(String::from));
-    let base_url = base_url.map(|u| if u.ends_with('/') { u } else { format!("{u}/") });
+    let (base_url, api_key) = if let Some(door) = chatgpt_door(provider)? {
+        (Some(door.base_url()), door.key)
+    } else {
+        let base_url = provider
+            .base_url
+            .clone()
+            .or_else(|| provider.provider_type.default_base_url().map(String::from));
+        let base_url = base_url.map(|u| if u.ends_with('/') { u } else { format!("{u}/") });
 
-    let api_key = crate::credentials::get(crate::credentials::Credential::Provider(&provider.id))?
-        .unwrap_or_else(|| {
-            if provider.provider_type.needs_api_key() {
-                String::new()
-            } else {
-                "local".into()
-            }
-        });
+        let api_key =
+            crate::credentials::get(crate::credentials::Credential::Provider(&provider.id))?
+                .unwrap_or_else(|| {
+                    if provider.provider_type.needs_api_key() {
+                        String::new()
+                    } else {
+                        "local".into()
+                    }
+                });
+        (base_url, api_key)
+    };
 
     Ok(ResolvedSlot {
         config: crate::llm_api::LlmApiConfig {
@@ -734,6 +762,10 @@ pub(crate) async fn fetch_provider_models(
         .find(|p| p.id == provider_id)
         .ok_or_else(|| format!("Unknown provider: {provider_id}"))?;
 
+    if let Some(door) = chatgpt_door(provider)? {
+        return fetch_models_from(&door.base_url(), Some(door.key)).await;
+    }
+
     let base = provider
         .base_url
         .as_deref()
@@ -747,13 +779,21 @@ pub(crate) async fn fetch_provider_models(
         .unwrap_or(None)
         .filter(|k| !k.is_empty());
 
+    fetch_models_from(&base, api_key).await
+}
+
+/// `GET {base}/models` (then `{base}/v1/models` on a 404), parsed.
+async fn fetch_models_from(
+    base: &str,
+    api_key: Option<String>,
+) -> Result<Vec<DiscoveredModel>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
     let mut last_err = String::new();
-    for url in models_url_candidates(&base) {
+    for url in models_url_candidates(base) {
         let mut req = client.get(&url);
         if let Some(key) = &api_key {
             req = req.bearer_auth(key);
@@ -776,7 +816,13 @@ pub(crate) async fn fetch_provider_models(
             return Ok(parse_discovered_models(&json));
         }
 
-        last_err = format!("{url} → HTTP {status}");
+        // An OpenAI-style error body says why (e.g. "Not signed in with ChatGPT").
+        let detail = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.pointer("/error/message")?.as_str().map(String::from))
+            .map(|m| format!(" — {m}"))
+            .unwrap_or_default();
+        last_err = format!("{url} → HTTP {status}{detail}");
         // Only a 404 is worth retrying against the /v1-prefixed path; 401/500
         // mean we found the route and it rejected us.
         if status != reqwest::StatusCode::NOT_FOUND {
@@ -903,6 +949,7 @@ mod tests {
         let variants = [
             (ProviderType::Anthropic, "anthropic"),
             (ProviderType::OpenAi, "open_ai"),
+            (ProviderType::ChatGpt, "chat_gpt"),
             (ProviderType::Gemini, "gemini"),
             (ProviderType::DeepSeek, "deep_seek"),
             (ProviderType::Mistral, "mistral"),
@@ -920,7 +967,7 @@ mod tests {
             (ProviderType::Vertex, "vertex"),
             (ProviderType::Custom, "custom"),
         ];
-        assert_eq!(variants.len(), 18, "All 18 provider types must be covered");
+        assert_eq!(variants.len(), 19, "All 19 provider types must be covered");
 
         for (variant, expected_str) in &variants {
             let json = serde_json::to_string(variant).unwrap();
@@ -991,6 +1038,10 @@ mod tests {
         assert!(ProviderType::Bedrock.default_base_url().is_none());
         assert!(ProviderType::Vertex.default_base_url().is_none());
         assert!(ProviderType::Custom.default_base_url().is_none());
+        assert!(
+            ProviderType::ChatGpt.default_base_url().is_none(),
+            "a ChatGPT sign-in resolves to the loopback door, never a fixed URL"
+        );
     }
 
     #[test]
@@ -998,6 +1049,10 @@ mod tests {
         assert!(!ProviderType::Ollama.needs_api_key());
         assert!(!ProviderType::LmStudio.needs_api_key());
         assert!(!ProviderType::LiteLlm.needs_api_key());
+        assert!(
+            !ProviderType::ChatGpt.needs_api_key(),
+            "signed in, not keyed"
+        );
         assert!(ProviderType::Anthropic.needs_api_key());
         assert!(ProviderType::OpenAi.needs_api_key());
         assert!(ProviderType::Gemini.needs_api_key());
@@ -1012,6 +1067,7 @@ mod tests {
         assert!(ProviderType::LmStudio.uses_custom_url_routing());
         assert!(ProviderType::OpenRouter.uses_custom_url_routing());
         assert!(ProviderType::Custom.uses_custom_url_routing());
+        assert!(ProviderType::ChatGpt.uses_custom_url_routing());
         assert!(!ProviderType::Anthropic.uses_custom_url_routing());
         assert!(!ProviderType::OpenAi.uses_custom_url_routing());
         assert!(!ProviderType::Gemini.uses_custom_url_routing());
@@ -1214,6 +1270,39 @@ mod tests {
         assert_eq!(resolved.api_key, "sk-ant-test");
         assert_eq!(resolved.provider_type, ProviderType::Anthropic);
         assert!(resolved.config.base_url.is_none());
+    }
+
+    #[test]
+    fn chatgpt_provider_resolves_to_the_loopback_door() {
+        let mut reg = test_registry();
+        reg.providers.push(ProviderEntry {
+            id: "chatgpt-1".to_string(),
+            provider_type: ProviderType::ChatGpt,
+            label: "ChatGPT".to_string(),
+            // Ignored: the door is the only way in.
+            base_url: Some("https://example.invalid/v1".to_string()),
+        });
+        reg.models.push(ModelEntry {
+            id: "gpt-sub".to_string(),
+            provider_id: "chatgpt-1".to_string(),
+            model_name: "gpt-5.6-terra".to_string(),
+            tier: ModelTier::Standard,
+            effort: None,
+        });
+        reg.slots.insert(SlotName::Triage, "gpt-sub".to_string());
+
+        let door = crate::chatgpt::door::ensure().unwrap();
+        let resolved = resolve_slot(&reg, SlotName::Triage).unwrap();
+        assert_eq!(resolved.config.model, "gpt-5.6-terra");
+        assert_eq!(resolved.config.base_url, Some(door.base_url()));
+        assert!(door.base_url().starts_with("http://127.0.0.1:"));
+        assert_eq!(resolved.api_key, door.key);
+        assert_eq!(resolved.provider_type, ProviderType::ChatGpt);
+
+        assert_eq!(
+            resolve_provider(&reg, "chatgpt-1").unwrap(),
+            (Some(door.base_url()), door.key.clone())
+        );
     }
 
     #[test]

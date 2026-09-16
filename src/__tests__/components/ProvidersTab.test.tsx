@@ -17,6 +17,13 @@ const custom = {
 	base_url: "http://localhost:8317",
 };
 
+const chatgpt = {
+	id: "chat_gpt-1",
+	type: "chat_gpt" as const,
+	label: "ChatGPT",
+	base_url: null,
+};
+
 const sonnet = {
 	id: "model-sonnet",
 	provider_id: "anthropic-main",
@@ -28,7 +35,7 @@ const mockStore = vi.hoisted(() => ({
 	state: {
 		registry: {
 			schema_version: 1,
-			providers: [] as (typeof anthropic | typeof custom)[],
+			providers: [] as (typeof anthropic | typeof custom | typeof chatgpt)[],
 			models: [] as (typeof sonnet)[],
 			slots: {} as Record<string, string>,
 			features: {},
@@ -155,6 +162,51 @@ describe("ProvidersTab", () => {
 		const { getByTestId } = render(() => <ProvidersTab />);
 		fireEvent.click(getByTestId("add-model-btn-anthropic-main"));
 		expect(getByTestId("add-model-form")).toBeTruthy();
+	});
+
+	// -- ChatGPT sign-in provider --
+
+	it("a ChatGPT provider shows the sign-in instead of a key or base URL", async () => {
+		mockStore.state.registry.providers = [chatgpt];
+		mockInvoke.mockResolvedValue({ signed_in: false, email: null, plan: null, pending: null, error: null });
+		const { findByTestId, queryByTestId, getByTestId } = render(() => <ProvidersTab />);
+		expect(await findByTestId("chatgpt-sign-in-btn")).toBeTruthy();
+		expect(queryByTestId("key-input-chat_gpt-1")).toBeNull();
+		expect(queryByTestId("base-url-chat_gpt-1")).toBeNull();
+		expect(getByTestId("key-status-chat_gpt-1").textContent).toContain("not signed in");
+	});
+
+	it("a signed-in ChatGPT provider reads as signed in", async () => {
+		mockStore.state.registry.providers = [chatgpt];
+		mockInvoke.mockResolvedValue({ signed_in: true, email: "me@example.com", plan: "pro", pending: null, error: null });
+		const { findByTestId, getByTestId } = render(() => <ProvidersTab />);
+		await findByTestId("chatgpt-account");
+		expect(getByTestId("key-status-chat_gpt-1").textContent).toContain("✓ signed in");
+	});
+
+	it("a ChatGPT provider discovers its models live", async () => {
+		mockStore.state.registry.providers = [chatgpt];
+		mockInvoke.mockImplementation(async (cmd: string) =>
+			cmd === "fetch_provider_models"
+				? [{ id: "gpt-6-astra", supports_reasoning: true, effort_options: ["low", "high"], default_effort: "low" }]
+				: { signed_in: true, email: null, plan: null, pending: null, error: null },
+		);
+		const { getByTestId, findByTestId } = render(() => <ProvidersTab />);
+		fireEvent.click(getByTestId("add-model-btn-chat_gpt-1"));
+		const select = (await findByTestId("model-select")) as HTMLSelectElement;
+		expect([...select.options].map((o) => o.value)).toEqual(["", "gpt-6-astra"]);
+		expect(mockInvoke).toHaveBeenCalledWith("fetch_provider_models", { providerId: "chat_gpt-1" });
+	});
+
+	it("choosing ChatGPT in the add form needs no key and names the provider", () => {
+		const { getByTestId, getByPlaceholderText, queryByPlaceholderText, getByText } = render(() => <ProvidersTab />);
+		fireEvent.click(getByTestId("add-provider-btn"));
+		fireEvent.change(getByTestId("provider-type-select"), { target: { value: "chat_gpt" } });
+		expect((getByPlaceholderText("e.g. Anthropic (personal)") as HTMLInputElement).value).toBe("ChatGPT");
+		expect(queryByPlaceholderText("sk-…")).toBeNull();
+		expect(queryByPlaceholderText("Leave blank to use default")).toBeNull();
+		fireEvent.click(getByText("Add"));
+		expect(mockStore.saveKey).not.toHaveBeenCalled();
 	});
 
 	// -- Model discovery (custom / OpenAI-compatible providers) --

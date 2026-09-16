@@ -443,4 +443,10 @@ export const TIPS: Tip[] = [
 			"Let Claude or Gemini report status through their own hooks for precise busy/idle/waiting state — enable per agent in Settings → Agents. TUIC installs and removes the hooks cleanly and never touches your own.",
 		shortcut: null,
 	},
+	{
+		feature: "Sign in with ChatGPT",
+		description:
+			"Use your ChatGPT Plus, Pro or Team plan for AI Chat and agents, no API key: Settings › Providers › Add › ChatGPT (sign in).",
+		shortcut: null,
+	},
 ];

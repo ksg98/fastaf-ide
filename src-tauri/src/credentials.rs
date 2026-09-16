@@ -88,6 +88,8 @@ pub(crate) enum Credential<'a> {
     Provider(&'a str),
     /// Per-provider API key for cloud speech-to-text (e.g. "groq", "openai").
     DictationSttApiKey(&'a str),
+    /// "Sign in with ChatGPT" tokens (JSON: access, refresh, id token + labels).
+    ChatGptAuth,
 }
 
 impl Credential<'_> {
@@ -103,6 +105,7 @@ impl Credential<'_> {
             Self::McpUpstream(name) => format!("mcp/{name}"),
             Self::Provider(id) => format!("provider/{id}"),
             Self::DictationSttApiKey(provider) => format!("dictation/stt-api-key/{provider}"),
+            Self::ChatGptAuth => "chatgpt/auth".into(),
         }
     }
 
@@ -117,7 +120,8 @@ impl Credential<'_> {
             | Self::PushVapidPrivateKey
             | Self::GithubToken(_)
             | Self::Provider(_)
-            | Self::DictationSttApiKey(_) => None,
+            | Self::DictationSttApiKey(_)
+            | Self::ChatGptAuth => None,
         }
     }
 }
@@ -570,6 +574,8 @@ mod tests {
         );
         assert_eq!(Credential::McpUpstream("foo").vault_key(), "mcp/foo");
         assert_eq!(Credential::Provider("my-id").vault_key(), "provider/my-id");
+        assert_eq!(Credential::ChatGptAuth.vault_key(), "chatgpt/auth");
+        assert!(Credential::ChatGptAuth.legacy_entry().is_none());
         assert_eq!(
             Credential::DictationSttApiKey("groq").vault_key(),
             "dictation/stt-api-key/groq"

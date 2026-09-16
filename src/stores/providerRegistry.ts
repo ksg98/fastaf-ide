@@ -9,6 +9,7 @@ import { appLogger } from "./appLogger";
 export type ProviderType =
 	| "anthropic"
 	| "open_ai"
+	| "chat_gpt"
 	| "gemini"
 	| "deep_seek"
 	| "mistral"

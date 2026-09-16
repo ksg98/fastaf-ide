@@ -16,6 +16,7 @@ pub(crate) mod ai_chat;
 pub(crate) mod ai_chat_registry;
 pub(crate) mod app_logger;
 pub(crate) mod changelog;
+pub(crate) mod chatgpt;
 pub(crate) mod chrome;
 pub(crate) mod claude_usage;
 pub(crate) mod cli;
@@ -1948,6 +1949,10 @@ pub fn run() {
             provider_registry::test_slot_connection,
             provider_registry::check_ollama_models,
             provider_registry::fetch_provider_models,
+            chatgpt::chatgpt_auth_status,
+            chatgpt::chatgpt_start_login,
+            chatgpt::chatgpt_cancel_login,
+            chatgpt::chatgpt_logout,
             llm_api::execute_api_prompt,
             ai_chat::load_ai_chat_config,
             ai_chat::save_ai_chat_config,

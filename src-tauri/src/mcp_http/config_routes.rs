@@ -555,6 +555,50 @@ pub(super) async fn fetch_provider_models_http(Json(b): Json<ProviderIdRef>) -> 
     json_result(crate::provider_registry::fetch_provider_models(b.provider_id).await)
 }
 
+// --- Sign in with ChatGPT (same shapes as the chatgpt_* IPC commands) ---
+// Guarded like the provider-key routes: the status names the account, and the
+// rest sign this host in or out of it.
+
+pub(super) async fn chatgpt_auth_status_http(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    auth: Option<Extension<Authenticated>>,
+) -> Response {
+    if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
+        return resp.into_response();
+    }
+    Json(crate::chatgpt::chatgpt_auth_status().await).into_response()
+}
+
+pub(super) async fn chatgpt_start_login_http(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    auth: Option<Extension<Authenticated>>,
+) -> Response {
+    if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
+        return resp.into_response();
+    }
+    json_result(crate::chatgpt::chatgpt_start_login_from(addr.ip().is_loopback()).await)
+}
+
+pub(super) async fn chatgpt_cancel_login_http(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    auth: Option<Extension<Authenticated>>,
+) -> Response {
+    if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
+        return resp.into_response();
+    }
+    Json(crate::chatgpt::chatgpt_cancel_login().await).into_response()
+}
+
+pub(super) async fn chatgpt_logout_http(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    auth: Option<Extension<Authenticated>>,
+) -> Response {
+    if let Err(resp) = require_local_or_auth(&addr, auth.is_some()) {
+        return resp.into_response();
+    }
+    json_result(crate::chatgpt::chatgpt_logout().await)
+}
+
 // --- MCP Status ---
 
 pub(super) async fn get_mcp_status_http(State(state): State<Arc<AppState>>) -> impl IntoResponse {
