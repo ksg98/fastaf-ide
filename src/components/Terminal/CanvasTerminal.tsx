@@ -1942,7 +1942,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 							if (!r) return null;
 							let line: number | undefined;
 							let col: number | undefined;
-							const lc = m.candidate.match(/:(\d+)(?::(\d+))?$/);
+							// `:line`, `:line:col`, or `:start-end` (opens at the start).
+							const lc = m.candidate.match(/:(\d+)(?::(\d+)|-\d+)?$/);
 							if (lc) {
 								line = parseInt(lc[1], 10);
 								if (lc[2]) col = parseInt(lc[2], 10);

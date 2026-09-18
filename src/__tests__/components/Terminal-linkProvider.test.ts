@@ -39,6 +39,25 @@ describe("linkProvider regexes", () => {
 			expect(matchAll("/src/index.ts:10:5 error")).toEqual(["/src/index.ts:10:5"]);
 		});
 
+		it("matches a :start-end line range as one link", () => {
+			expect(matchAll("See src/utils/filePreview.ts:96-150 for the split")).toEqual([
+				"src/utils/filePreview.ts:96-150",
+			]);
+		});
+
+		it("matches the shapes Claude Code prints", () => {
+			expect(matchAll("● Update(src/components/Terminal/CanvasTerminal.tsx)")).toEqual([
+				"src/components/Terminal/CanvasTerminal.tsx",
+			]);
+			expect(matchAll("  ⎿  Updated src/App.tsx with 12 additions and 3 removals")).toEqual(["src/App.tsx"]);
+			expect(matchAll("The bug is in `src/stores/editorTabs.ts:88` where")).toEqual(["src/stores/editorTabs.ts:88"]);
+			expect(matchAll("Wrote 42 lines to /Users/me/Desktop/app/docs/notes.md")).toEqual([
+				"/Users/me/Desktop/app/docs/notes.md",
+			]);
+			expect(matchAll("- src-tauri/src/chatgpt/auth.rs — sign-in")).toEqual(["src-tauri/src/chatgpt/auth.rs"]);
+			expect(matchAll("I updated `README.md` and `CHANGELOG.md`.")).toEqual(["README.md", "CHANGELOG.md"]);
+		});
+
 		it("matches multiple paths in one line", () => {
 			expect(matchAll("/a/b.rs and ./c/d.py")).toEqual(["/a/b.rs", "./c/d.py"]);
 		});

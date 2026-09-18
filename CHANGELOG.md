@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Paths an agent prints in the terminal are clickable again, and open beside it.** FastAF refused to even check a path under `~/Desktop`, `~/Documents` or `~/Downloads` (checking can raise a macOS permission prompt), so for anyone whose repositories live there, every path Claude printed stayed plain text. A terminal already working inside one of those folders now resolves paths in that same folder — FastAF already holds that permission, so nothing can prompt. A click opens the file in a pane to the right of the terminal at the cited line (`file.ts:42`, `file.ts:42:7`, and now `file.ts:96-150`), and a file outside every registered repo opens read-only instead of being ignored.
+
 ### Added
 
 - **Whisper Medium and quantized models for local dictation.** Settings › Dictation now offers Medium (and its English-only build) plus whisper.cpp's Q5 and Q8 quantized builds of Medium and Large V3 Turbo. Large V3 Turbo Q5 is 574 MB instead of 1.6 GB — faster to download, load and run for a small accuracy cost; Q8 stays close to the full model.

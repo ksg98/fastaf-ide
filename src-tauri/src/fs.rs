@@ -1834,6 +1834,17 @@ pub struct ResolvedFilePath {
 /// Strip trailing `:line` or `:line:col` suffix from a path candidate.
 /// Returns the path portion only.
 pub fn strip_line_col_suffix(candidate: &str) -> &str {
+    // A `:start-end` line range, as agents cite code (`file.ts:96-150`).
+    if let Some(colon_pos) = candidate.rfind(':')
+        && let Some((start, end)) = candidate[colon_pos + 1..].split_once('-')
+        && !start.is_empty()
+        && !end.is_empty()
+        && start.chars().all(|c| c.is_ascii_digit())
+        && end.chars().all(|c| c.is_ascii_digit())
+    {
+        return &candidate[..colon_pos];
+    }
+
     // Match `:digits` or `:digits:digits` at the end
     let bytes = candidate.as_bytes();
     let mut end = bytes.len();
@@ -1874,23 +1885,36 @@ const TCC_PROTECTED_DIRS: &[&str] = &[
     "Photos Library.photoslibrary",
 ];
 
+/// The TCC-protected folder under `home` that `path` falls in (`"Desktop"`…).
+fn tcc_protected_root_in(path: &std::path::Path, home: &std::path::Path) -> Option<&'static str> {
+    let first = path.strip_prefix(home).ok()?.components().next()?;
+    let name = first.as_os_str().to_string_lossy();
+    TCC_PROTECTED_DIRS
+        .iter()
+        .copied()
+        .find(|d| d.eq_ignore_ascii_case(&name))
+}
+
 /// Returns true if `path` falls under a macOS TCC-protected directory.
 fn is_tcc_protected_path(path: &std::path::Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
-        return false;
-    };
-    if !path.starts_with(&home) {
-        return false;
+    dirs::home_dir().is_some_and(|home| tcc_protected_root_in(path, &home).is_some())
+}
+
+/// Whether a terminal whose shell sits in `cwd` may probe `path` without risking
+/// a permission dialog. Outside the protected folders, always. Inside one, only
+/// when `cwd` is in that same folder: FastAF's own shell already lives there, so
+/// macOS has already granted FastAF that folder and a probe cannot prompt.
+///
+/// Refusing outright made every path under `~/Desktop` unclickable for anyone
+/// whose repositories live there — the path a coding agent printed was never
+/// even checked, so it never became a link.
+fn terminal_may_probe(path: &std::path::Path, cwd: &str, home: &std::path::Path) -> bool {
+    match tcc_protected_root_in(path, home) {
+        None => true,
+        Some(root) => {
+            !cwd.is_empty() && tcc_protected_root_in(std::path::Path::new(cwd), home) == Some(root)
+        }
     }
-    if let Ok(rel) = path.strip_prefix(&home)
-        && let Some(first) = rel.components().next()
-    {
-        let name = first.as_os_str().to_string_lossy();
-        return TCC_PROTECTED_DIRS
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(&name));
-    }
-    false
 }
 
 /// Validate a path candidate from terminal output against the filesystem.
@@ -1898,7 +1922,8 @@ fn is_tcc_protected_path(path: &std::path::Path) -> bool {
 /// and checks existence.
 ///
 /// SAFETY: Refuses to probe macOS TCC-protected directories to avoid
-/// triggering system permission dialogs.
+/// triggering system permission dialogs — unless the terminal's own `cwd` is
+/// already inside the same one (see [`terminal_may_probe`]).
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub fn resolve_terminal_path(cwd: String, candidate: String) -> Option<ResolvedFilePath> {
     let path_str = strip_line_col_suffix(&candidate);
@@ -1921,8 +1946,10 @@ pub fn resolve_terminal_path(cwd: String, candidate: String) -> Option<ResolvedF
         PathBuf::from(&cwd).join(&path)
     };
 
-    // Never probe TCC-protected directories
-    if is_tcc_protected_path(&absolute) {
+    // Never probe a TCC-protected directory the terminal is not already in.
+    if let Some(home) = dirs::home_dir()
+        && !terminal_may_probe(&absolute, &cwd, &home)
+    {
         return None;
     }
 
@@ -3351,6 +3378,20 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_with_line_range_suffix() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+
+        let result = resolve_terminal_path(
+            dir.path().to_string_lossy().to_string(),
+            "main.rs:96-150".to_string(),
+        );
+        assert!(result.unwrap().absolute_path.ends_with("main.rs"));
+        assert_eq!(strip_line_col_suffix("a-b.rs:3-9"), "a-b.rs");
+        assert_eq!(strip_line_col_suffix("a.rs:3-"), "a.rs:3-");
+    }
+
+    #[test]
     fn test_resolve_nonexistent_returns_none() {
         let dir = TempDir::new().unwrap();
         let result = resolve_terminal_path(
@@ -3369,6 +3410,45 @@ mod tests {
             resolve_terminal_path(dir.path().to_string_lossy().to_string(), "src".to_string());
         assert!(result.is_some());
         assert!(result.unwrap().is_directory);
+    }
+
+    /// A terminal already working inside a protected folder may resolve paths
+    /// in that same folder — its repos live there and FastAF already holds the
+    /// permission. Anything else protected stays refused, and an unknown cwd
+    /// is never taken as permission.
+    #[test]
+    fn a_terminal_may_probe_only_the_protected_folder_it_is_already_in() {
+        let home = std::path::Path::new("/Users/someone");
+        let desktop_file = home.join("Desktop/code/app/src/main.rs");
+        let documents_file = home.join("Documents/notes.md");
+        let in_desktop = "/Users/someone/Desktop/code/app";
+
+        assert!(terminal_may_probe(&desktop_file, in_desktop, home));
+        assert!(terminal_may_probe(
+            &home.join("Desktop/other-repo/README.md"),
+            in_desktop,
+            home
+        ));
+        assert!(!terminal_may_probe(&documents_file, in_desktop, home));
+        assert!(!terminal_may_probe(
+            &desktop_file,
+            "/Users/someone/projects",
+            home
+        ));
+        assert!(!terminal_may_probe(&desktop_file, "", home));
+        // Not protected at all: always.
+        assert!(terminal_may_probe(&home.join("projects/a.rs"), "", home));
+        assert!(terminal_may_probe(
+            std::path::Path::new("/tmp/x.log"),
+            "",
+            home
+        ));
+        // Case-insensitive, like the volume.
+        assert!(terminal_may_probe(
+            &home.join("desktop/app/a.rs"),
+            "/Users/someone/Desktop/app",
+            home
+        ));
     }
 
     // ----- validate_external_write_path (story 1273-c95e) -----
