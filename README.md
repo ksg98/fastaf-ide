@@ -162,7 +162,7 @@ On-device speech-to-text powered by whisper-rs. No cloud service, no API keys, n
 
 - GPU-accelerated on macOS (Metal) and Windows (Vulkan), CPU on Linux (optional CUDA/Vulkan)
 - Push-to-talk hotkey — text injected into the active terminal
-- 4 model sizes from Small (488 MB) to Large V2 (3 GB), incl. large-v3-turbo (1.6 GB)
+- 10 local models from Small (488 MB) to Large V2 (3 GB): Medium, Large V3 Turbo (1.6 GB), and Q5/Q8 quantized builds of both (Turbo Q5 is 574 MB)
 
 ### Extend everything
 

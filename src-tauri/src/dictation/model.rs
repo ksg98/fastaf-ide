@@ -3,29 +3,53 @@ use std::path::PathBuf;
 const MODEL_BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 /// Supported Whisper GGML model variants.
+///
+/// The quantized builds (`-q5_0`, `-q8_0`) are whisper.cpp's own conversions of
+/// the same weights: a third to a half of the size and faster to load and run,
+/// for a small accuracy cost (Q8 is close to the full model, Q5 a little
+/// further). Sizes are the files' real sizes on Hugging Face (2026-09-17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WhisperModel {
     Small,
     SmallEn,
+    Medium,
+    MediumEn,
+    MediumQ5,
+    MediumQ8,
     LargeV2,
     LargeV3Turbo,
+    LargeV3TurboQ5,
+    LargeV3TurboQ8,
 }
 
 impl WhisperModel {
-    /// All available model variants.
-    pub const ALL: [WhisperModel; 4] = [
+    /// All available model variants, in the order Settings lists them:
+    /// by family, smallest first, the full model after its quantized builds.
+    pub const ALL: [WhisperModel; 10] = [
         Self::Small,
         Self::SmallEn,
-        Self::LargeV2,
+        Self::MediumQ5,
+        Self::MediumQ8,
+        Self::Medium,
+        Self::MediumEn,
+        Self::LargeV3TurboQ5,
+        Self::LargeV3TurboQ8,
         Self::LargeV3Turbo,
+        Self::LargeV2,
     ];
 
     pub const fn filename(&self) -> &'static str {
         match self {
             Self::Small => "ggml-small.bin",
             Self::SmallEn => "ggml-small.en.bin",
+            Self::Medium => "ggml-medium.bin",
+            Self::MediumEn => "ggml-medium.en.bin",
+            Self::MediumQ5 => "ggml-medium-q5_0.bin",
+            Self::MediumQ8 => "ggml-medium-q8_0.bin",
             Self::LargeV2 => "ggml-large-v2.bin",
             Self::LargeV3Turbo => "ggml-large-v3-turbo.bin",
+            Self::LargeV3TurboQ5 => "ggml-large-v3-turbo-q5_0.bin",
+            Self::LargeV3TurboQ8 => "ggml-large-v3-turbo-q8_0.bin",
         }
     }
 
@@ -37,8 +61,14 @@ impl WhisperModel {
         match self {
             Self::Small => "Whisper Small",
             Self::SmallEn => "Whisper Small (English)",
+            Self::Medium => "Whisper Medium",
+            Self::MediumEn => "Whisper Medium (English)",
+            Self::MediumQ5 => "Whisper Medium · Q5 quantized",
+            Self::MediumQ8 => "Whisper Medium · Q8 quantized",
             Self::LargeV2 => "Whisper Large V2",
             Self::LargeV3Turbo => "Whisper Large V3 Turbo",
+            Self::LargeV3TurboQ5 => "Whisper Large V3 Turbo · Q5 quantized",
+            Self::LargeV3TurboQ8 => "Whisper Large V3 Turbo · Q8 quantized",
         }
     }
 
@@ -46,8 +76,14 @@ impl WhisperModel {
         match self {
             Self::Small => 488,
             Self::SmallEn => 488,
+            Self::Medium => 1534,
+            Self::MediumEn => 1534,
+            Self::MediumQ5 => 539,
+            Self::MediumQ8 => 823,
             Self::LargeV2 => 3090,
             Self::LargeV3Turbo => 1620,
+            Self::LargeV3TurboQ5 => 574,
+            Self::LargeV3TurboQ8 => 874,
         }
     }
 
@@ -55,8 +91,14 @@ impl WhisperModel {
         match name {
             "small" => Some(Self::Small),
             "small-en" | "small.en" => Some(Self::SmallEn),
+            "medium" => Some(Self::Medium),
+            "medium-en" | "medium.en" => Some(Self::MediumEn),
+            "medium-q5" | "medium-q5_0" => Some(Self::MediumQ5),
+            "medium-q8" | "medium-q8_0" => Some(Self::MediumQ8),
             "large-v2" => Some(Self::LargeV2),
             "large-v3-turbo" => Some(Self::LargeV3Turbo),
+            "large-v3-turbo-q5" | "large-v3-turbo-q5_0" => Some(Self::LargeV3TurboQ5),
+            "large-v3-turbo-q8" | "large-v3-turbo-q8_0" => Some(Self::LargeV3TurboQ8),
             _ => None,
         }
     }
@@ -65,8 +107,14 @@ impl WhisperModel {
         match self {
             Self::Small => "small",
             Self::SmallEn => "small-en",
+            Self::Medium => "medium",
+            Self::MediumEn => "medium-en",
+            Self::MediumQ5 => "medium-q5",
+            Self::MediumQ8 => "medium-q8",
             Self::LargeV2 => "large-v2",
             Self::LargeV3Turbo => "large-v3-turbo",
+            Self::LargeV3TurboQ5 => "large-v3-turbo-q5",
+            Self::LargeV3TurboQ8 => "large-v3-turbo-q8",
         }
     }
 }
@@ -145,9 +193,8 @@ pub async fn download_file(
 
     // With a resumed response the true size is the `/total` of Content-Range;
     // otherwise it is simply the body length.
-    let total_size = content_range_total(&resp).unwrap_or_else(|| {
-        resp.content_length().map_or(0, |len| len + offset)
-    });
+    let total_size = content_range_total(&resp)
+        .unwrap_or_else(|| resp.content_length().map_or(0, |len| len + offset));
 
     let mut file = if offset > 0 {
         tracing::info!(
@@ -325,6 +372,20 @@ mod tests {
             WhisperModel::LargeV3Turbo.filename(),
             "ggml-large-v3-turbo.bin"
         );
+        // These must match whisper.cpp's Hugging Face files exactly, or the
+        // download 404s.
+        assert_eq!(WhisperModel::Medium.filename(), "ggml-medium.bin");
+        assert_eq!(WhisperModel::MediumEn.filename(), "ggml-medium.en.bin");
+        assert_eq!(WhisperModel::MediumQ5.filename(), "ggml-medium-q5_0.bin");
+        assert_eq!(WhisperModel::MediumQ8.filename(), "ggml-medium-q8_0.bin");
+        assert_eq!(
+            WhisperModel::LargeV3TurboQ5.filename(),
+            "ggml-large-v3-turbo-q5_0.bin"
+        );
+        assert_eq!(
+            WhisperModel::LargeV3TurboQ8.filename(),
+            "ggml-large-v3-turbo-q8_0.bin"
+        );
     }
 
     #[test]
@@ -333,6 +394,39 @@ mod tests {
         assert_eq!(WhisperModel::SmallEn.size_hint_mb(), 488);
         assert_eq!(WhisperModel::LargeV2.size_hint_mb(), 3090);
         assert_eq!(WhisperModel::LargeV3Turbo.size_hint_mb(), 1620);
+        assert_eq!(WhisperModel::Medium.size_hint_mb(), 1534);
+        assert_eq!(WhisperModel::MediumQ5.size_hint_mb(), 539);
+        assert_eq!(WhisperModel::LargeV3TurboQ5.size_hint_mb(), 574);
+        assert_eq!(WhisperModel::LargeV3TurboQ8.size_hint_mb(), 874);
+    }
+
+    #[test]
+    fn quantized_builds_are_smaller_than_their_full_model() {
+        for (quantized, full) in [
+            (WhisperModel::MediumQ5, WhisperModel::Medium),
+            (WhisperModel::MediumQ8, WhisperModel::Medium),
+            (WhisperModel::LargeV3TurboQ5, WhisperModel::LargeV3Turbo),
+            (WhisperModel::LargeV3TurboQ8, WhisperModel::LargeV3Turbo),
+        ] {
+            assert!(quantized.size_hint_mb() < full.size_hint_mb());
+            assert!(quantized.display_name().contains("quantized"));
+        }
+    }
+
+    #[test]
+    fn test_from_name_accepts_whisper_cpp_spellings() {
+        assert_eq!(
+            WhisperModel::from_name("medium.en"),
+            Some(WhisperModel::MediumEn)
+        );
+        assert_eq!(
+            WhisperModel::from_name("medium-q5_0"),
+            Some(WhisperModel::MediumQ5)
+        );
+        assert_eq!(
+            WhisperModel::from_name("large-v3-turbo-q8_0"),
+            Some(WhisperModel::LargeV3TurboQ8)
+        );
     }
 
     #[test]
@@ -408,16 +502,28 @@ mod tests {
 
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen_cb = seen.clone();
-        download_file(&format!("{}/m.bin", server.url()), dest.clone(), move |d, t| {
-            seen_cb.lock().unwrap().push((d, t));
-        })
+        download_file(
+            &format!("{}/m.bin", server.url()),
+            dest.clone(),
+            move |d, t| {
+                seen_cb.lock().unwrap().push((d, t));
+            },
+        )
         .await
         .unwrap();
 
         mock.assert_async().await;
-        assert_eq!(std::fs::read(&dest).unwrap(), data, "partial + remainder = original");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            data,
+            "partial + remainder = original"
+        );
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.first(), Some(&(cut as u64, data.len() as u64)), "progress starts at the partial size");
+        assert_eq!(
+            seen.first(),
+            Some(&(cut as u64, data.len() as u64)),
+            "progress starts at the partial size"
+        );
         assert_eq!(seen.last(), Some(&(data.len() as u64, data.len() as u64)));
     }
 
@@ -439,7 +545,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(std::fs::read(&dest).unwrap(), data, "not appended onto the partial");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            data,
+            "not appended onto the partial"
+        );
     }
 
     #[tokio::test]
