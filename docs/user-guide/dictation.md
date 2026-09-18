@@ -27,8 +27,16 @@ The hotkey works globally — even when FastAF is not focused.
 |-------|------|---------|
 | small | ~488 MB | Good |
 | small.en | ~488 MB | Good (English-only) |
+| medium-q5 | ~539 MB | Better — Medium quantized to Q5 |
+| medium-q8 | ~823 MB | Better — Medium quantized to Q8, close to the full model |
+| medium | ~1.5 GB | Better |
+| medium.en | ~1.5 GB | Better (English-only) |
+| large-v3-turbo-q5 | ~574 MB | Best quality per MB — Turbo quantized to Q5 |
+| large-v3-turbo-q8 | ~874 MB | Turbo quantized to Q8, close to the full model |
 | large-v2 | ~3.0 GB | Highest accuracy (slow) |
 | **large-v3-turbo** | **~1.6 GB** | **Best (recommended, default)** |
+
+The `-q5` / `-q8` models are whisper.cpp's own quantized conversions of the same weights: a third to a half of the download and memory, faster to load and run, for a small accuracy cost (Q8 is nearly indistinguishable from the full model, Q5 slightly less accurate).
 
 Models are downloaded to `<config_dir>/models/` and cached between sessions.
 

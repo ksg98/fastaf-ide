@@ -391,4 +391,50 @@ mod tests {
         assert_eq!(first.text, second.text, "reused state leaked between runs");
         assert_eq!(first.skip_reason, second.skip_reason);
     }
+
+    /// Any GGML model — full or whisper.cpp-quantized (`-q5_0`, `-q8_0`) —
+    /// loads and transcribes real speech with this whisper-rs build.
+    ///
+    /// Ignored by default: it needs a model file and a recording. Point it at
+    /// them and run it on its own:
+    /// `FASTAF_WHISPER_TEST_MODEL=…/ggml-tiny.en-q8_0.bin
+    ///  FASTAF_WHISPER_TEST_WAV=…/speech.wav   # 16 kHz mono 16-bit
+    ///  FASTAF_WHISPER_TEST_EXPECT="login bug"
+    ///  cargo test --lib a_ggml_model_transcribes_real_speech -- --ignored`
+    #[test]
+    #[ignore = "requires FASTAF_WHISPER_TEST_MODEL and FASTAF_WHISPER_TEST_WAV"]
+    fn a_ggml_model_transcribes_real_speech() {
+        let model = std::env::var("FASTAF_WHISPER_TEST_MODEL").expect("FASTAF_WHISPER_TEST_MODEL");
+        let wav = std::fs::read(
+            std::env::var("FASTAF_WHISPER_TEST_WAV").expect("FASTAF_WHISPER_TEST_WAV"),
+        )
+        .expect("read wav");
+        // The samples are the `data` chunk: 16-bit little-endian PCM.
+        let data_at = wav
+            .windows(4)
+            .position(|w| w == b"data")
+            .expect("wav data chunk")
+            + 8;
+        let audio: Vec<f32> = wav[data_at..]
+            .chunks_exact(2)
+            .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32_768.0)
+            .collect();
+
+        let transcriber =
+            WhisperTranscriber::load(std::path::Path::new(&model)).expect("model load");
+        let result = transcriber
+            .transcribe(&audio, Some("en"))
+            .expect("transcribe");
+        eprintln!("{model}: {:?}", result.text);
+        if let Ok(expected) = std::env::var("FASTAF_WHISPER_TEST_EXPECT") {
+            assert!(
+                result
+                    .text
+                    .to_lowercase()
+                    .contains(&expected.to_lowercase()),
+                "expected {expected:?} in {:?}",
+                result.text
+            );
+        }
+    }
 }

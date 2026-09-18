@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Whisper Medium and quantized models for local dictation.** Settings › Dictation now offers Medium (and its English-only build) plus whisper.cpp's Q5 and Q8 quantized builds of Medium and Large V3 Turbo. Large V3 Turbo Q5 is 574 MB instead of 1.6 GB — faster to download, load and run for a small accuracy cost; Q8 stays close to the full model.
+
 - **Sign in with ChatGPT.** Add a *ChatGPT (sign in)* provider under Settings › Providers and click *Sign in with ChatGPT*: your Plus, Pro or Team plan then drives AI Chat, agents, diff triage, Smart Prompts and the dictation rewrite, with no API key. The sign-in is the one Codex uses — a browser page, or a code to type when something else already holds the callback port — and the models come live from your plan, reasoning levels included. Calls count against that plan's limits, and OpenAI can change or stop third-party access at any time, so an API-key provider stays the dependable option. Codex CLI's own login is left alone: FastAF signs in separately, because refreshing the CLI's token here would sign the CLI out.
 
 ### Changed

@@ -214,8 +214,16 @@ Available models (GGML format):
 |-------|------|---------|
 | `small` | ~488 MB | Good |
 | `small.en` | ~488 MB | Good (English-only) |
+| `medium-q5` | ~539 MB | Better — `ggml-medium-q5_0.bin` |
+| `medium-q8` | ~823 MB | Better — `ggml-medium-q8_0.bin` |
+| `medium` | ~1.5 GB | Better |
+| `medium.en` | ~1.5 GB | Better (English-only) |
+| `large-v3-turbo-q5` | ~574 MB | `ggml-large-v3-turbo-q5_0.bin` |
+| `large-v3-turbo-q8` | ~874 MB | `ggml-large-v3-turbo-q8_0.bin` |
 | `large-v2` | ~3.0 GB | Highest accuracy (slow) |
 | `large-v3-turbo` | ~1.6 GB | Best (recommended, default) |
+
+Quantized names also accept whisper.cpp's own spelling (`medium-q5_0`, `large-v3-turbo-q8_0`), as `small.en` / `medium.en` do. whisper-rs 0.16 loads the quantized GGML files as is.
 
 ## Text Corrections
 
