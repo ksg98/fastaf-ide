@@ -10,7 +10,8 @@ export function filePathRegex(): RegExp {
 			`[\\w./@-]*` +
 			`|[\\w@.-]+)` +
 			`\\.(?:${CODING_EXT})` +
-			`(?::\\d+(?::\\d+)?)?)` +
+			// `:line`, `:line:col`, or a `:start-end` line range (agents cite ranges).
+			`(?::\\d+(?::\\d+|-\\d+)?)?)` +
 			`(?=[\\s"'\`),;.!?:\\]}>]|$)`,
 		"g",
 	);

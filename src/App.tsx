@@ -503,15 +503,27 @@ const App: Component = () => {
 		uiStore.setFileBrowserPanelVisible(true);
 	};
 
-	/** Open a file path from terminal output — .md/.mdx in MD viewer, others in internal editor */
-	const handleOpenFilePath = (absolutePath: string, _line?: number, _col?: number) => {
+	/** Open an absolute file path (Open File, New File, Open Path) — .md/.mdx in the
+	 *  MD viewer, others in the internal editor. */
+	const handleOpenFilePath = (absolutePath: string, line?: number, _col?: number) => {
 		// Scoped to the repo that owns the PATH. It used to relativize against the
 		// active worktree, so a path printed by an agent working in another repo
 		// opened as a tab filed under whichever repo the user happened to be on.
+		// A path no registered repo owns opens as an external file (repo ""),
+		// which the editor and viewers read by absolute path — it used to be dropped
+		// without a word.
 		const { repoPath, fsRoot, filePath } = locateFile(absolutePath);
-		if (!repoPath) return;
+		openFileAction(filePath, repoPath, fsRoot || undefined, line, (tabId) => {
+			terminalLifecycle.handleTerminalSelect(tabId);
+		});
+	};
 
-		openFileAction(filePath, repoPath, fsRoot, undefined, (tabId) => {
+	/** A path clicked in terminal output: opens in a pane beside that terminal
+	 *  (right side), at the printed line, so the agent's output stays in view.
+	 *  Honours "Open Files Beside Terminal"; with it off, opens full view. */
+	const handleOpenTerminalPath = (absolutePath: string, line?: number, _col?: number) => {
+		const { repoPath, fsRoot, filePath } = locateFile(absolutePath);
+		openFileBesideTerminal(filePath, repoPath, fsRoot || undefined, line, (tabId) => {
 			terminalLifecycle.handleTerminalSelect(tabId);
 		});
 	};
@@ -791,7 +803,7 @@ const App: Component = () => {
 						<TerminalArea
 							onTerminalFocus={terminalLifecycle.handleTerminalFocus}
 							onCloseTab={terminalLifecycle.closeTerminal}
-							onOpenFilePath={handleOpenFilePath}
+							onOpenFilePath={handleOpenTerminalPath}
 							onContextMenu={contextMenu.open}
 							onCwdChange={gitOps.handleTerminalCwdChange}
 							onNewTerminal={(groupId) => {
@@ -920,7 +932,7 @@ const App: Component = () => {
 					<TerminalArea
 						onTerminalFocus={terminalLifecycle.handleTerminalFocus}
 						onCloseTab={terminalLifecycle.closeTerminal}
-						onOpenFilePath={handleOpenFilePath}
+						onOpenFilePath={handleOpenTerminalPath}
 						onContextMenu={contextMenu.open}
 						onCwdChange={gitOps.handleTerminalCwdChange}
 						onNewTerminal={(groupId) => {

@@ -96,11 +96,12 @@
 
 ### 1.7 Clickable File Paths
 - File paths in terminal output are auto-detected and become clickable links
-- Paths validated against filesystem before activation (Rust `resolve_terminal_path`)
+- Paths validated against filesystem before activation (Rust `resolve_terminal_path`). macOS-protected folders (`~/Desktop`, `~/Documents`, `~/Downloads`, …) are never probed from a terminal outside them — that would raise a permission dialog — but a terminal already working inside one resolves paths in that same folder, since FastAF already holds its permission. (Before this, every path under `~/Desktop` stayed plain text for anyone whose repos live there.)
+- A clicked path opens in a pane **beside the terminal** (right side, VSCode-style) at the printed line, so the agent's output stays in view — the same placement the File Browser uses, honouring *Open Files Beside Terminal* (off → full view). A path outside every registered repo opens as an external file (read-only until unlocked) instead of doing nothing
 - `.md`/`.mdx` → opens in Markdown panel; preview-capable files (HTML, PDF, images, video, audio, plain text/data) → open in the Preview tab (section 3.15); all other code files → open in the built-in code editor
 - `file://` URLs are recognized in addition to plain paths — the prefix is stripped and the path resolved like any other
 - OSC 8 hyperlinks: programs that emit hyperlink escape sequences (e.g. Claude Code, modern `ls`) produce clickable links; hover underline spans the full link text (via `terminal_hyperlink_span` backend API)
-- Supports `:line` and `:line:col` suffixes for precise navigation
+- Supports `:line`, `:line:col` and `:start-end` (line range — opens at the start) suffixes for precise navigation
 - Single left-click opens the link instantly (UI-first — opening is a primary action, not gated behind a modifier); drag-select over a link still copies text without opening
 - Right-click on a link shows a context menu with **Open** and **Copy link** (copy the resolved path/URL without opening). Right-clicking elsewhere shows the standard terminal context menu
 - Recognized extensions: rs, ts, tsx, js, jsx, py, go, java, kt, swift, c, cpp, cs, rb, php, lua, zig, css, scss, html, vue, svelte, json, yaml, toml, sql, graphql, tf, sh, dockerfile, and more
