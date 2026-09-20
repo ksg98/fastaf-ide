@@ -230,5 +230,12 @@
       "Installing the MCP bridge preserves your editor's existing settings file, comments and formatting included."
     ],
     "date": "2026-09-19"
+  },
+  "1.8.3": {
+    "highlights": [
+      "Fixed a freeze on Macs with Apple Intelligence enabled, where the window could lock up for minutes while FastAF sat idle.",
+      "Dialogs like the orphaned-worktrees prompt no longer risk pinning the renderer at 100% CPU when they appear."
+    ],
+    "date": "2026-09-20"
   }
 }

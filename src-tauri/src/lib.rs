@@ -85,6 +85,7 @@ pub(crate) mod plugin_pty;
 pub(crate) mod plugins;
 #[cfg(feature = "desktop")]
 mod press_and_hold;
+#[cfg(feature = "desktop")]
 mod text_extraction;
 pub(crate) mod process_env;
 pub(crate) mod prompt;
