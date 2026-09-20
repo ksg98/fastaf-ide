@@ -85,6 +85,7 @@ pub(crate) mod plugin_pty;
 pub(crate) mod plugins;
 #[cfg(feature = "desktop")]
 mod press_and_hold;
+mod text_extraction;
 pub(crate) mod process_env;
 pub(crate) mod prompt;
 pub(crate) mod provider_registry;
@@ -1414,6 +1415,12 @@ pub fn run() {
                     true
                 })
                 .on_page_load(|webview, payload| {
+                    // Every window's webview passes through here, so this covers
+                    // main, secondary and detached panels alike. See the module
+                    // docs: Apple Intelligence froze the renderer on 8 GB Macs.
+                    if payload.event() == tauri::webview::PageLoadEvent::Started {
+                        text_extraction::disable(webview);
+                    }
                     // WebKit WebContent process crashes leave the WebView on about:blank.
                     // Detect this and force-reload the embedded app page.
                     if payload.event() == tauri::webview::PageLoadEvent::Finished
