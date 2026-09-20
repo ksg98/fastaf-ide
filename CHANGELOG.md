@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.4] - 2026-09-20
+
 ### Fixed
 
 - **Quitting FastAF now actually stops the agents it started.** It never did. An agent runs in its own process group inside the terminal, so nothing signalled it when the app went away — it was handed to the system and kept running, holding its memory and its API session until the machine rebooted, along with the helper process each agent spawns. They accumulated with every quit, which is punishing on an 8 GB Mac: this machine was holding 5.5 GB across 24 such leftovers, some 22 hours old. Quitting now closes every session first. Force-quitting still cannot clean up — nothing runs after a force quit — so prefer Quit.
