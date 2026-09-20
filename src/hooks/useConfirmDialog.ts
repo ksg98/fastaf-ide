@@ -210,6 +210,9 @@ export function useConfirmDialog() {
 			okLabel: "Remove",
 			cancelLabel: "Keep",
 			kind: "warning",
+			// Destructive, and raised from a background refresh rather than a user
+			// gesture — it can appear mid-typing, so a stray Enter must keep.
+			defaultButton: "cancel",
 		});
 	}
 

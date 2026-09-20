@@ -32,6 +32,26 @@ no items left goes too. What stays open must carry its own stated reason.
 > WebView gets the same change over Vite HMR. If a browser check of a frontend fix
 > shows nothing, check `dist/index.html`'s mtime before blaming the code.
 
+## Removing worktrees no longer freezes the window (2026-09-19, **Rust change — needs a rebuild**)
+
+`remove_orphan_worktree`, `finalize_merged_worktree` and `merge_and_archive_worktree`
+ran `git worktree remove --force` on the macOS main thread. Open because the stall
+needs a large worktree on a machine with a cold page cache — it is not reproducible
+over HTTP, whose routes were already on the blocking pool.
+
+**Not the Apple Intelligence freeze.** A spindump from the 8 GB Mac showed that one in
+the WebContent renderer (`TextExtraction::extractRecursive` at 100%) with FastAF's own
+process idle. These checks are for this bug only; they will not settle that one.
+
+- [ ] With an orphan worktree containing `node_modules/` or `target/`, click **Remove**.
+  The window stays live (tabs switch, terminals scroll) and the status bar reads
+  "Removing orphaned worktree 1 of N…" until it finishes.
+- [ ] `autoArchiveMerged` on with a merged worktree present: the background refresh
+  archives it without a stall.
+- [ ] Post-merge cleanup dialog → Delete worktree → Execute: no stall.
+- [ ] Pressing Enter on the orphan dialog **keeps** the worktrees (it used to confirm the delete).
+- [ ] While the orphan dialog is open, sidebar diff stats keep updating.
+
 ## Sign in with ChatGPT (2026-09-16, **Rust change — needs a rebuild**)
 
 A `chat_gpt` provider signs in with Codex's OAuth and serves the subscription on a

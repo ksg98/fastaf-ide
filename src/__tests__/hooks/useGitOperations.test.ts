@@ -2821,7 +2821,37 @@ describe("useGitOperations", () => {
 			await askGitOps.refreshAllBranchStats();
 
 			expect(confirmOrphanCleanup).toHaveBeenCalledWith(["/wt/detached-1"]);
-			expect(mockRepo.removeOrphanWorktree).toHaveBeenCalledWith("/repo", "/wt/detached-1");
+			// The dialog + removal run detached from the refresh — wait for them.
+			await vi.waitFor(() => expect(mockRepo.removeOrphanWorktree).toHaveBeenCalledWith("/repo", "/wt/detached-1"));
+		});
+
+		it("does not park the refresh while the orphan dialog waits for an answer", async () => {
+			let answer: (v: boolean) => void = () => {};
+			const confirmOrphanCleanup = vi.fn(() => new Promise<boolean>((resolve) => (answer = resolve)));
+			const askGitOps = useGitOperations({
+				repo: mockRepo,
+				pty: mockPty,
+				dialogs: { ...mockDialogs, confirmOrphanCleanup },
+				closeTerminal: mockCloseTerminal,
+				createNewTerminal: mockCreateNewTerminal,
+				setStatusInfo: mockSetStatusInfo,
+				getDefaultFontSize: () => 14,
+				getMaxTabNameLength: () => 25,
+			});
+			mockRepo.detectOrphanWorktrees.mockResolvedValue(["/wt/detached-1"]);
+
+			// Resolves with the dialog still open; Phase 2 stats ran past it.
+			await askGitOps.refreshAllBranchStats();
+			expect(confirmOrphanCleanup).toHaveBeenCalledTimes(1);
+			expect(mockRepo.getRepoDiffStats).toHaveBeenCalled();
+			expect(mockRepo.removeOrphanWorktree).not.toHaveBeenCalled();
+
+			// A second refresh while the dialog is open must not stack another dialog.
+			await askGitOps.refreshAllBranchStats();
+			expect(confirmOrphanCleanup).toHaveBeenCalledTimes(1);
+
+			answer(true);
+			await vi.waitFor(() => expect(mockRepo.removeOrphanWorktree).toHaveBeenCalledWith("/repo", "/wt/detached-1"));
 		});
 
 		it("closes terminals in orphan worktree before removing when user confirms (orphanCleanup=ask)", async () => {
@@ -2843,6 +2873,7 @@ describe("useGitOperations", () => {
 
 			await askGitOps.refreshAllBranchStats();
 
+			await vi.waitFor(() => expect(mockRepo.removeOrphanWorktree).toHaveBeenCalled());
 			expect(mockCloseTerminal).toHaveBeenCalledWith(termInOrphan, true);
 			expect(mockCloseTerminal).not.toHaveBeenCalledWith(termElsewhere, true);
 			const closeOrder = mockCloseTerminal.mock.invocationCallOrder[0];

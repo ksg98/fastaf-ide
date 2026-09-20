@@ -1265,29 +1265,46 @@ pub(crate) async fn detect_orphan_worktrees(repo_path: String) -> Result<Vec<Str
 ///
 /// Safety: `worktree_path` is validated against the repo's actual worktree list to prevent
 /// arbitrary directory deletion via a crafted path.
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub(crate) fn remove_orphan_worktree(
-    state: State<'_, Arc<AppState>>,
-    repo_path: String,
-    worktree_path: String,
+///
+/// Blocking — two or three git subprocesses plus a recursive delete of the working
+/// tree. Both transports wrap it in `spawn_blocking`; see `docs/backend/command-threading.md`.
+pub(crate) fn remove_orphan_worktree_impl(
+    state: &Arc<AppState>,
+    repo_path: &str,
+    worktree_path: &str,
 ) -> Result<(), String> {
-    validate_worktree_path(&repo_path, &worktree_path)?;
+    validate_worktree_path(repo_path, worktree_path)?;
 
-    let base_repo = PathBuf::from(&repo_path);
-    let path = PathBuf::from(&worktree_path);
+    let path = PathBuf::from(worktree_path);
     let worktree = WorktreeInfo {
         name: path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| worktree_path.clone()),
+            .unwrap_or_else(|| worktree_path.to_string()),
         path,
         branch: None,
-        base_repo,
+        base_repo: PathBuf::from(repo_path),
     };
     remove_worktree_internal(&worktree, false)?;
-    state.invalidate_repo_caches(&repo_path);
+    state.invalidate_repo_caches(repo_path);
     Ok(())
+}
+
+/// Remove an orphan worktree (Tauri command). Async + `spawn_blocking`: as a plain
+/// `fn` this ran the whole deletion on the macOS main thread and froze the window.
+#[cfg(feature = "desktop")]
+#[tauri::command]
+pub(crate) async fn remove_orphan_worktree(
+    state: State<'_, Arc<AppState>>,
+    repo_path: String,
+    worktree_path: String,
+) -> Result<(), String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        remove_orphan_worktree_impl(&state, &repo_path, &worktree_path)
+    })
+    .await
+    .map_err(|e| format!("orphan worktree removal task failed: {e}"))?
 }
 
 /// Validate that `worktree_path` is a known worktree of the given repo by checking it against
@@ -1892,20 +1909,26 @@ pub(crate) fn finalize_merged_worktree_impl(
 /// Finalize a pending merge by archiving/deleting the worktree (Tauri command).
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub(crate) fn finalize_merged_worktree(
+pub(crate) async fn finalize_merged_worktree(
     state: State<'_, Arc<AppState>>,
     repo_path: String,
     branch_name: String,
     action: String,
     force: Option<bool>,
 ) -> Result<MergeArchiveResult, String> {
-    finalize_merged_worktree_impl(
-        state.inner(),
-        repo_path,
-        branch_name,
-        action,
-        force.unwrap_or(false),
-    )
+    // Off the IPC thread: the impl shells out to git and removes/moves a working tree.
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        finalize_merged_worktree_impl(
+            &state,
+            repo_path,
+            branch_name,
+            action,
+            force.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("finalize merged worktree task failed: {e}"))?
 }
 
 /// Merge a worktree branch into a target branch, then archive or delete the worktree.
@@ -2013,7 +2036,7 @@ pub(crate) fn merge_and_archive_worktree_impl(
 /// commits while its worktree is dirty. The frontend sets it after the user confirms.
 #[cfg(feature = "desktop")]
 #[tauri::command]
-pub(crate) fn merge_and_archive_worktree(
+pub(crate) async fn merge_and_archive_worktree(
     state: State<'_, Arc<AppState>>,
     repo_path: String,
     branch_name: String,
@@ -2021,14 +2044,20 @@ pub(crate) fn merge_and_archive_worktree(
     after_merge: String,
     force: Option<bool>,
 ) -> Result<MergeArchiveResult, String> {
-    merge_and_archive_worktree_impl(
-        state.inner(),
-        repo_path,
-        branch_name,
-        target_branch,
-        after_merge,
-        force.unwrap_or(false),
-    )
+    // Off the IPC thread: checkout + merge + worktree removal are all blocking.
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        merge_and_archive_worktree_impl(
+            &state,
+            repo_path,
+            branch_name,
+            target_branch,
+            after_merge,
+            force.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("merge and archive task failed: {e}"))?
 }
 
 /// Archive a worktree: move its directory to `{worktrees_dir}/__archived/{branch_name}/`
@@ -3439,6 +3468,46 @@ branch refs/heads/feat
             .expect("detect orphan worktrees");
 
         assert!(orphans.is_empty());
+    }
+
+    /// The shared impl behind both transports: removes a real detached worktree and
+    /// refuses a path that is not one of the repo's worktrees.
+    #[test]
+    fn remove_orphan_worktree_impl_removes_detached_and_refuses_unknown() {
+        let root = TempDir::new().expect("temp root");
+        let repo = root.path().join("repo");
+        let git = |cwd: &Path, args: &[&str]| {
+            let ok = Command::new("git")
+                .current_dir(cwd)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .expect("run git")
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "init"]);
+        let wt = root.path().join("wt");
+        git(&repo, &["worktree", "add", "--quiet", "--detach", wt.to_str().unwrap()]);
+        std::fs::write(wt.join("untracked.txt"), "x").expect("untracked file");
+
+        let state = Arc::new(crate::state::tests_support::make_test_app_state());
+        let repo_str = repo.display().to_string();
+        // `git worktree list` prints canonical paths (/private/var on macOS).
+        let wt_str = std::fs::canonicalize(&wt).unwrap().display().to_string();
+
+        let bogus = root.path().join("not-a-worktree");
+        std::fs::create_dir_all(&bogus).unwrap();
+        let err = super::remove_orphan_worktree_impl(&state, &repo_str, &bogus.display().to_string())
+            .expect_err("unknown path must be refused");
+        assert!(err.contains("Refused"), "unexpected error: {err}");
+        assert!(bogus.exists());
+
+        super::remove_orphan_worktree_impl(&state, &repo_str, &wt_str).expect("remove orphan");
+        assert!(!wt.exists(), "worktree directory should be gone");
     }
 
     /// Build a linked-worktree fixture: `<root>/wt` with a `.git` file pointing at

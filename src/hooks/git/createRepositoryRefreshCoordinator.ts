@@ -483,6 +483,28 @@ export function createRepositoryRefreshCoordinator(deps: RepositoryRefreshCoordi
 		await refreshReposCapped(paths, 4);
 	};
 
+	/** Remove orphan worktrees one at a time. Removals in one repo contend on git's
+	 *  worktree lock, so fanning them out buys nothing; sequential also lets the
+	 *  status line say what is happening while a large tree is being deleted. */
+	const removeOrphans = async (repoPath: string, paths: string[]) => {
+		let removed = 0;
+		for (const wtPath of paths) {
+			deps.setStatusInfo(`Removing orphaned worktree ${removed + 1} of ${paths.length}…`);
+			try {
+				await deps.closeTerminalsInWorktree(wtPath);
+				await deps.repo.removeOrphanWorktree(repoPath, wtPath);
+				removed++;
+			} catch (err) {
+				appLogger.warn("git", `Failed to remove orphan worktree ${wtPath}`, err);
+			}
+		}
+		deps.setStatusInfo(
+			removed === paths.length
+				? `Removed ${removed} orphaned worktree(s)`
+				: `Removed ${removed} of ${paths.length} orphaned worktree(s) — see logs`,
+		);
+	};
+
 	/** Detect orphaned linked worktrees and act based on the orphanCleanup setting. */
 	let orphanDialogOpen = false;
 	// Orphans the user chose to "Keep" this session — don't nag about them again
@@ -502,17 +524,7 @@ export function createRepositoryRefreshCoordinator(deps: RepositoryRefreshCoordi
 
 		if (orphanCleanup === "on") {
 			// Auto-remove silently
-			await Promise.allSettled(
-				orphanPaths.map(async (wtPath) => {
-					try {
-						await deps.closeTerminalsInWorktree(wtPath);
-						await deps.repo.removeOrphanWorktree(repoPath, wtPath);
-					} catch (err) {
-						appLogger.warn("git", `Failed to auto-remove orphan worktree ${wtPath}`, err);
-					}
-				}),
-			);
-			deps.setStatusInfo(`Removed ${orphanPaths.length} orphaned worktree(s)`);
+			await removeOrphans(repoPath, orphanPaths);
 			return;
 		}
 
@@ -524,29 +536,23 @@ export function createRepositoryRefreshCoordinator(deps: RepositoryRefreshCoordi
 
 		if (orphanDialogOpen) return; // Prevent duplicate dialogs from concurrent refreshes
 		orphanDialogOpen = true;
-		let confirmed: boolean;
-		try {
-			confirmed = (await deps.dialogs.confirmOrphanCleanup?.(pending)) ?? false;
-		} finally {
-			orphanDialogOpen = false;
-		}
-		if (!confirmed) {
-			// User chose "Keep" — remember these so we don't prompt again this session.
-			for (const p of pending) keptOrphans.add(p);
-			return;
-		}
-
-		await Promise.allSettled(
-			pending.map(async (wtPath) => {
-				try {
-					await deps.closeTerminalsInWorktree(wtPath);
-					await deps.repo.removeOrphanWorktree(repoPath, wtPath);
-				} catch (err) {
-					appLogger.warn("git", `Failed to remove orphan worktree ${wtPath}`, err);
-				}
-			}),
-		);
-		deps.setStatusInfo(`Removed ${pending.length} orphaned worktree(s)`);
+		// Detached on purpose: a modal waiting on a human must not park this repo's
+		// single-flight refresh (and every caller queued behind it) until they answer.
+		// The removal changes `.git/worktrees`, so the watcher schedules the follow-up refresh.
+		void (async () => {
+			let confirmed: boolean;
+			try {
+				confirmed = (await deps.dialogs.confirmOrphanCleanup?.(pending)) ?? false;
+			} finally {
+				orphanDialogOpen = false;
+			}
+			if (!confirmed) {
+				// User chose "Keep" — remember these so we don't prompt again this session.
+				for (const p of pending) keptOrphans.add(p);
+				return;
+			}
+			await removeOrphans(repoPath, pending);
+		})().catch((err) => appLogger.warn("git", `Orphan worktree cleanup failed for ${repoPath}`, err));
 	};
 
 	/** Archive all merged linked worktrees when the autoArchiveMerged setting is enabled. */
