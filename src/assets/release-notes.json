@@ -256,5 +256,13 @@
       "Documents and chat prose keep full kerning, so reading-oriented text is unchanged."
     ],
     "date": "2026-09-20"
+  },
+  "1.8.6": {
+    "highlights": [
+      "Long AI chats no longer slow down the whole window; off-screen turns are skipped, cutting layout time from 51 ms to 6 ms.",
+      "Background terminals now release their largest drawing surface, freeing roughly 16 MB per hidden tab on Retina displays.",
+      "Sessions left open for hours stay responsive instead of gradually getting slower as chat history grows."
+    ],
+    "date": "2026-09-20"
   }
 }
