@@ -237,5 +237,16 @@
       "Dialogs like the orphaned-worktrees prompt no longer risk pinning the renderer at 100% CPU when they appear."
     ],
     "date": "2026-09-20"
+  },
+  "1.8.4": {
+    "highlights": [
+      "Quitting FastAF now stops every agent it started, so leftover processes no longer pile up and hold memory.",
+      "Closing the app ends each agent's helper process and API session too, instead of leaving them until reboot.",
+      "Force-quitting still cannot clean up running agents, so use Quit whenever you can.",
+      "The installer no longer claims FastAF is running after you have quit, so updates are not blocked forever.",
+      "The installer now detects a genuinely running app correctly by checking its executable path.",
+      "Leftover helper processes are cleared automatically during install instead of blocking the update."
+    ],
+    "date": "2026-09-20"
   }
 }
