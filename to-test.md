@@ -32,6 +32,22 @@ no items left goes too. What stays open must carry its own stated reason.
 > WebView gets the same change over Vite HMR. If a browser check of a frontend fix
 > shows nothing, check `dist/index.html`'s mtime before blaming the code.
 
+
+## Apple Intelligence text extraction freeze (8 GB Mac)
+
+A spindump from the 8 GB Mac showed the WebContent renderer at 100% inside
+`TextExtraction::extractRecursive`, FastAF's own process idle. `text_extraction.rs`
+now sets `WKPreferences._setTextExtractionEnabled:NO` on every webview at page-load start.
+
+- [x] The private setter exists and the request path honours it _(verified: standalone
+  WKWebView probe on macOS 26 — `_requestTextExtraction:` took 10,983 ms on a 40k-row DOM
+  with the preference on, 0.0 ms and an empty result after flipping it through
+  `configuration.preferences`, the same route `text_extraction.rs` takes)_
+- [HUMAN] On the 8 GB Mac with Apple Intelligence on: install this build, trigger the
+  "orphaned worktrees found" dialog — the window stays live. `GET :9876/logs?source=webview`
+  shows "WebKit text extraction disabled" for `main`. Needs that machine: this Mac has
+  Apple Intelligence opted out, so `intelligenceflowd` never issues the request here.
+
 ## Removing worktrees no longer freezes the window (2026-09-19, **Rust change — needs a rebuild**)
 
 `remove_orphan_worktree`, `finalize_merged_worktree` and `merge_and_archive_worktree`
@@ -39,9 +55,7 @@ ran `git worktree remove --force` on the macOS main thread. Open because the sta
 needs a large worktree on a machine with a cold page cache — it is not reproducible
 over HTTP, whose routes were already on the blocking pool.
 
-**Not the Apple Intelligence freeze.** A spindump from the 8 GB Mac showed that one in
-the WebContent renderer (`TextExtraction::extractRecursive` at 100%) with FastAF's own
-process idle. These checks are for this bug only; they will not settle that one.
+**Not the Apple Intelligence freeze** — that one is the next section.
 
 - [ ] With an orphan worktree containing `node_modules/` or `target/`, click **Remove**.
   The window stays live (tabs switch, terminals scroll) and the status bar reads

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **FastAF no longer freezes on Macs with Apple Intelligence turned on.** With Apple Intelligence enabled, macOS asks every web view for the text on screen, and WebKit answers by walking the whole page inside FastAF's renderer. On FastAF's interface that walk could pin the renderer at 100% for minutes — longest on an 8 GB Mac — and it struck most reliably the moment a dialog appeared, such as "orphaned worktrees found": the window went dead while FastAF itself sat idle, so no log ever showed it. FastAF now switches that text extraction off for all of its windows. Measured on a 40,000-row page: 11 seconds of blocked renderer with it on, zero with it off.
+
 ## [1.8.2] - 2026-09-19
 
 ### Fixed
