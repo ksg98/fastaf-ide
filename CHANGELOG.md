@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Quitting FastAF now actually stops the agents it started.** It never did. An agent runs in its own process group inside the terminal, so nothing signalled it when the app went away — it was handed to the system and kept running, holding its memory and its API session until the machine rebooted, along with the helper process each agent spawns. They accumulated with every quit, which is punishing on an 8 GB Mac: this machine was holding 5.5 GB across 24 such leftovers, some 22 hours old. Quitting now closes every session first. Force-quitting still cannot clean up — nothing runs after a force quit — so prefer Quit.
+
+- **The installer no longer claims FastAF is running after you have quit it.** Two separate faults, both fixed. It matched every binary inside the app, so a single leftover helper made it refuse to update forever. And its check could never see the app itself — `pgrep` does not report FastAF's own process, so a genuinely running app went undetected. It now identifies the app by its executable path, and clears leftover helpers instead of blocking on them.
+
 ## [1.8.3] - 2026-09-20
 
 ### Fixed

@@ -9565,6 +9565,39 @@ pub(crate) fn kill_pty_core(state: &AppState, session_id: &str) -> bool {
     true
 }
 
+/// SIGKILL every live session's process group, for app shutdown.
+///
+/// Quitting used to leave every agent running. An agent sits in its own
+/// foreground process group inside the PTY, so nothing signals it when the app
+/// goes away: it is reparented to launchd and keeps its RAM, its API session
+/// and the `tuic-bridge` it spawned, for as long as the machine stays up. They
+/// accumulate across quits — a leftover bridge also makes `install.sh` report
+/// "FastAF is running" long after it is gone.
+///
+/// Deliberately skips `close_pty_core`'s Ctrl-C and its two 100 ms waits: at
+/// exit nothing reads the tombstone, and those waits are per session, on the
+/// main thread, while macOS is waiting to terminate us. The session cannot
+/// outlive the app usefully anyway — its PTY master dies with the process.
+pub(crate) fn kill_all_sessions_on_exit(state: &AppState) {
+    let ids: Vec<String> = state.sessions.iter().map(|e| e.key().clone()).collect();
+    let mut killed = 0usize;
+    for id in ids {
+        let Some((_, session_mutex)) = state.sessions.remove(&id) else {
+            continue;
+        };
+        let mut session = session_mutex.into_inner();
+        // The shell is the session leader in its own group; the agent is a
+        // grandchild in the foreground group. Both have to be signalled.
+        #[cfg(unix)]
+        kill_foreground_process_group(&session, &id);
+        let _ = session._child.kill();
+        killed += 1;
+    }
+    if killed > 0 {
+        tracing::info!(source = "pty", killed, "Killed live sessions on exit");
+    }
+}
+
 /// Close a PTY session with graceful shutdown and optional worktree cleanup.
 /// Sends Ctrl-C (0x03) and waits briefly for the process to exit cleanly
 /// before forcibly dropping handles.
@@ -22243,6 +22276,115 @@ mod tests {
         assert!(
             dead,
             "grandchild {grandchild} survived tab close — orphaned process tree"
+        );
+    }
+
+    /// Quitting the app must not leave agents behind. Two sessions, each with a
+    /// grandchild that ignores every catchable signal — the same shape as an
+    /// agent under job control, which is what used to survive a quit and keep
+    /// running (with its tuic-bridge) until the machine rebooted.
+    #[cfg(unix)]
+    #[test]
+    fn kill_all_sessions_on_exit_kills_every_agent() {
+        use std::time::{Duration, Instant};
+
+        let state = crate::state::tests_support::make_test_app_state();
+        let pid_alive = |pid: libc::pid_t| unsafe { libc::kill(pid, 0) } == 0;
+        let mut pidfiles = Vec::new();
+        let mut grandchildren = Vec::new();
+
+        for n in 0..2 {
+            let pidfile = std::env::temp_dir()
+                .join(format!("tuic_exitkill_{}_{n}.pid", std::process::id()));
+            let _ = std::fs::remove_file(&pidfile);
+
+            let pty = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect("openpty");
+            let script = format!(
+                "trap '' INT TERM HUP; sh -c 'trap \"\" INT TERM HUP; sleep 30' & echo $! > {}; wait",
+                pidfile.display()
+            );
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.args(["-c", &script]);
+            let child = pty.slave.spawn_command(cmd).expect("spawn shell");
+            let master = pty.master;
+            let writer = master.take_writer().expect("writer");
+
+            state
+                .metrics
+                .active_sessions
+                .fetch_add(1, Ordering::Relaxed);
+            state.sessions.insert(
+                format!("exit-kill-{n}"),
+                Mutex::new(PtySession {
+                    writer: Arc::new(Mutex::new(writer)),
+                    master,
+                    _child: child,
+                    paused: Arc::new(AtomicBool::new(false)),
+                    worktree: None,
+                    cwd: None,
+                    display_name: None,
+                    display_name_is_custom: false,
+                    is_remote: false,
+                    shell: "/bin/sh".to_string(),
+                }),
+            );
+            pidfiles.push(pidfile);
+        }
+
+        // Wait for both grandchildren to record their PIDs.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while grandchildren.len() < pidfiles.len() && Instant::now() < deadline {
+            grandchildren = pidfiles
+                .iter()
+                .filter_map(|f| {
+                    std::fs::read_to_string(f)
+                        .ok()
+                        .and_then(|s| s.trim().parse::<libc::pid_t>().ok())
+                })
+                .collect();
+            if grandchildren.len() < pidfiles.len() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert_eq!(
+            grandchildren.len(),
+            pidfiles.len(),
+            "both grandchildren should have started"
+        );
+
+        kill_all_sessions_on_exit(&state);
+
+        assert!(
+            state.sessions.is_empty(),
+            "every session must be drained from the map"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut survivors: Vec<libc::pid_t> = Vec::new();
+        while Instant::now() < deadline {
+            survivors = grandchildren
+                .iter()
+                .copied()
+                .filter(|p| pid_alive(*p))
+                .collect();
+            if survivors.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for f in &pidfiles {
+            let _ = std::fs::remove_file(f);
+        }
+        assert!(
+            survivors.is_empty(),
+            "agents {survivors:?} survived app exit — orphaned process tree"
         );
     }
 

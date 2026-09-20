@@ -107,7 +107,31 @@ fi
 # ── Refuse to clobber a running app ──────────────────────────────────────────
 # Replacing a live bundle corrupts the running process's own code pages; every
 # open PTY and agent session in it dies with it.
-running_pid() { pgrep -f "$INSTALL_DIR/$APP_NAME/Contents/MacOS/" 2>/dev/null | head -1; }
+#
+# Matching is on the executable path (ps `comm`), not the command line, and via
+# ps rather than pgrep. Both details are load-bearing:
+#
+#   * `pgrep -f` cannot see the app at all. It matches nothing for the real
+#     binary while `ps` lists it plainly — so the old check never actually
+#     caught a running FastAF, it only ever caught helpers.
+#   * The old pattern ended in `Contents/MacOS/`, matching every binary in the
+#     bundle. A leftover `tuic-bridge` therefore read as "FastAF is running"
+#     forever after the app had quit, and blocked the update.
+#   * A command-line match would also hit this script's own shell, whose
+#     argv contains these very paths.
+APP_BIN="$INSTALL_DIR/$APP_NAME/Contents/MacOS/FastAF"
+running_pid() {
+  ps -Ao pid=,comm= | awk -v bin="$APP_BIN" \
+    '{ pid=$1; sub(/^ *[0-9]+ +/, ""); if ($0 == bin) { print pid; exit } }'
+}
+# Helpers (tuic-bridge) are spawned by the agents inside FastAF's terminals, not
+# by FastAF, so they are grandchildren that outlive it. Before 1.8.4 the app
+# never killed its sessions on quit, so these pile up across quits. They hold no
+# lock on the bundle — never block an install on one.
+stale_helper_pids() {
+  ps -Ao pid=,comm= | awk -v dir="$INSTALL_DIR/$APP_NAME/Contents/MacOS/" -v bin="$APP_BIN" \
+    '{ pid=$1; sub(/^ *[0-9]+ +/, ""); if (index($0, dir) == 1 && $0 != bin) print pid }'
+}
 if [[ -n "$(running_pid)" ]]; then
   if [[ $DO_QUIT -eq 1 ]]; then
     note "Asking FastAF to quit…"
@@ -118,6 +142,12 @@ if [[ -n "$(running_pid)" ]]; then
     die "FastAF is running. Quit it first (its terminal sessions will end), then re-run.
      Or re-run with --quit to have this script ask it to quit."
   fi
+fi
+STALE="$(stale_helper_pids | tr '\n' ' ')"
+if [[ -n "${STALE// /}" ]]; then
+  note "Cleaning up leftover helper processes from a previous run: ${STALE% }"
+  # shellcheck disable=SC2086
+  kill $STALE 2>/dev/null || true
 fi
 
 # ── Download ─────────────────────────────────────────────────────────────────

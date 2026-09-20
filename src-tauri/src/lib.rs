@@ -2135,8 +2135,12 @@ pub fn run() {
                     if let Some(dictation) = app_handle.try_state::<dictation::DictationState>() {
                         dictation.shutdown();
                     }
-                    // Kill all SSH tunnel processes so ports are freed for restart
                     if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                        // Before anything else: an agent left running outlives the
+                        // app entirely (see kill_all_sessions_on_exit), so it holds
+                        // its RAM until the machine reboots.
+                        crate::pty::kill_all_sessions_on_exit(state.inner());
+                        // Kill all SSH tunnel processes so ports are freed for restart
                         state.tunnel_manager.shutdown_all();
                         crate::ai_agent::knowledge::flush_dirty(state.inner());
                     }
