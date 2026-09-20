@@ -112,6 +112,15 @@ describe("useConfirmDialog", () => {
 			expect(dialog.dialogState()).toBe(null);
 		});
 
+		it("orphan cleanup defaults Enter to the safe button", async () => {
+			// Raised from a background refresh, so it can appear mid-typing — a stray
+			// Enter must keep the worktrees, not delete them.
+			const pending = dialog.confirmOrphanCleanup(["/wt/a"]);
+			expect(dialog.dialogState()?.defaultButton).toBe("cancel");
+			dialog.handleClose();
+			expect(await pending).toBe(false);
+		});
+
 		it("does not orphan the first promise when a second confirm arrives", async () => {
 			// Regression: the old single-slot pendingResolve was overwritten by the
 			// second confirm(), so the first promise never settled. If that bug

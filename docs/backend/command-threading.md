@@ -123,6 +123,16 @@ pool. Its HTTP route now awaits the command directly, so both transports share
 the placement. The startup CLI version probes and atomic replacement also run in
 a detached blocking task instead of inside Tauri `setup`.
 
+The worktree removal commands followed after a reported freeze: `remove_orphan_worktree`,
+`finalize_merged_worktree` and `merge_and_archive_worktree` each end in
+`git worktree remove --force` — which deletes the whole working tree, `node_modules/`
+and `target/` included — and ran it as plain `fn`s on the macOS main thread. On a
+memory-constrained machine with a cold page cache that is tens of seconds of dead
+window per worktree, and `finalize_merged_worktree` fires from the background
+auto-archive sweep with no user gesture at all. All three are now `async fn` +
+`spawn_blocking` around a shared `*_impl` that their HTTP routes call too
+(`remove_orphan_worktree_impl` is new; the route used to carry its own copy of the body).
+
 ### Known gaps, with reasons
 
 | Command | Why it is still where it is |
@@ -132,7 +142,7 @@ a detached blocking task instead of inside Tauri `setup`.
 | `warm_content_index` (`fs.rs`) | `ensure_index` is a map entry plus a spawn — the build itself already runs in the background. |
 | `set_ansi_colors` (`pty.rs`) | Locks *every* vt buffer in a loop on the IPC thread, so the stall grows with session count. Same reordering objection as the row below, and it fires once, when the user picks a theme. |
 | Terminal grid *mutations* (`pty.rs`) | `terminal_scroll`, `terminal_scroll_to`, `terminal_request_frame`, `terminal_exit_alt_screen` still take the vt lock inline. Same stall as the reads, but not the same safety: two `spawn_blocking` hops for one session can run in either order, and `terminal_scroll_to(line)` is absolute, so reordering lands the viewport on the wrong line. They need the coalescing `terminal_scroll_to_offset` already has — which is also why they are the cold path, since the wheel and the scrollbar drag go through the offset command and never touch this lock. |
-| Remaining commands in `worktree.rs`, `tuic_cli.rs`, `tunnels/`, `dictation/`, `plugins.rs`, `agent.rs` | Sync commands still run git subprocesses, keyring calls, hardware enumeration and recursive deletes. `detect_orphan_worktrees` and `detect_all_agent_binaries` are no longer in this set; the other commands remain a starting list for the next sweep. |
+| Remaining commands in `worktree.rs`, `tuic_cli.rs`, `tunnels/`, `dictation/`, `plugins.rs`, `agent.rs` | Sync commands still run git subprocesses, keyring calls, hardware enumeration and recursive deletes. `detect_orphan_worktrees`, `remove_orphan_worktree`, `finalize_merged_worktree`, `merge_and_archive_worktree` and `detect_all_agent_binaries` are no longer in this set; the other commands remain a starting list for the next sweep. |
 
 ### Comments that asserted a cost the code did not have
 
