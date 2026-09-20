@@ -248,5 +248,13 @@
       "Leftover helper processes are cleared automatically during install instead of blocking the update."
     ],
     "date": "2026-09-20"
+  },
+  "1.8.5": {
+    "highlights": [
+      "Fixed a WebKit layout loop that pinned CPU and repeatedly crashed the window on memory-constrained Macs.",
+      "Interface text now renders with kerning off, cutting layout time per pass from 112 ms to 38 ms with no visible difference at UI sizes.",
+      "Documents and chat prose keep full kerning, so reading-oriented text is unchanged."
+    ],
+    "date": "2026-09-20"
   }
 }
