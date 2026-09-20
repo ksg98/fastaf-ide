@@ -34,6 +34,34 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+
+## Renderer layout freeze on memory-tight Macs (1.8.5)
+
+A sample from the 8 GB Mac: FastAF's process idle at 0%, one WebContent renderer
+pinned at 95-107% inside `RenderFlexibleBox::layoutBlock` →
+`updateScrollInfoAfterLayout` → back into flex layout, with
+`truncate` → `breakWord` → `widthForSimpleTextSlow` → `CTFontShapeGlyphs` beneath
+it. Top of stack was `OTL::Coverage::SearchFmt2Binary` (282),
+`RenderFlexibleBox::layoutBlock` (216), `PairSet::ValuePair` (118),
+`ItemVariationStore` (115) — i.e. kerning and variable-font axis math. RSS climbed
+to 1.34 GB and jetsam recycled the renderer about every 2 minutes.
+
+- [x] Kerning is the dominant cost and turning it off fixes that _(verified in a
+  standalone WKWebView on this Mac, 120-row list, 40 relayouts, 3 runs each:
+  kerning on 110-116 ms, off 37-38 ms. `text-rendering: optimizeLegibility` vs
+  `auto` made no difference — macOS kerns under `auto` too — so `font-kerning` is
+  the lever. Guarded by `src/__tests__/textShapingCost.test.ts`.)_
+- [HUMAN] **Does this actually stop the freeze on the 8 GB Mac?** Unproven. 3x less
+  layout work may not be enough if that machine is far more than 3x too slow; the
+  memory pressure (swap 3050/4096 MB) is untouched by this change. Install 1.8.5
+  there, reproduce, and if it still hangs re-run `sample <WebContent pid> 5` — if
+  the GPOS/ItemVariationStore frames are gone but it still spins, the remaining
+  cost is the layout loop itself and the next move is `scrollbar-gutter: stable`
+  on the scrollable flex containers (the app styles `::-webkit-scrollbar`
+  globally, so its scrollbars consume layout width rather than overlaying).
+- [HUMAN] Typography check: chrome text (sidebar rows, tabs, dialogs) should look
+  unchanged at a glance; documents and AI chat prose must still kern normally.
+
 ## Agents surviving quit (1.8.4)
 
 `RunEvent::Exit` tore down voice, dictation and tunnels but never PTY sessions, so

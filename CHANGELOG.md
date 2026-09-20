@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pinned renderer that froze the window on memory-tight Macs.** With Apple Intelligence ruled out, a sample from an 8 GB Mac showed the window was never the problem: FastAF's own process sat idle at 0% while the WebKit renderer burned 100% inside a layout loop, growing to 1.34 GB until macOS killed and restarted it, roughly every two minutes. The hot frames were all font shaping. macOS's UI font is a variable font, so each text width WebKit cannot serve from cache is re-shaped through CoreText — kerning-pair lookups plus variation-axis math — and under memory pressure those caches are evicted continuously, so the slow path becomes the only path. FastAF now turns kerning off for its chrome, which is scanned rather than read; documents and chat prose keep it. Measured in a standalone WebKit view over a 120-row list: 112 ms of layout per pass before, 38 ms after. At interface sizes the difference is sub-pixel.
+
 ## [1.8.4] - 2026-09-20
 
 ### Fixed
