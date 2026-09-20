@@ -2,9 +2,13 @@
    Global selectors required — CSS modules don't apply to innerHTML. */
 
 #markdown-content {
-  /* Prose is read, not scanned: keep proper kerning here. The chrome-wide
-     `font-kerning: none` in global.css exists for dense, constantly-relaid-out
-     rows, which a document is not. */
+  /* Prose is read, not scanned, so it keeps proper kerning. This is measured,
+     not assumed: on a 400-message chat shape with this rule's own
+     `word-break: break-word`, kerning on vs off was 50-51 ms vs 51-53 ms —
+     no difference. Kerning only costs in `white-space: nowrap` + ellipsis
+     chrome rows (110 -> 38 ms there), which is what global.css turns it off
+     for. What actually dominates a long conversation is laying out every
+     message at all; see `content-visibility` in AIChatPanel.module.css. */
   font-kerning: normal;
   min-width: 0;
   padding: 16px;

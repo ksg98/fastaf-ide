@@ -35,6 +35,43 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+
+## Renderer freeze, round 2 (1.8.6)
+
+1.8.5's `font-kerning: none` did not fix the 8 GB Mac. Re-measuring on a *chat-shaped*
+list (400 messages, `word-break: break-word`, long unbreakable paths, 12 relayouts)
+showed why: kerning on 50-51 ms vs off 51-53 ms — **no difference in wrapping prose**.
+The 3x kerning win is real but applies only to `white-space: nowrap` + ellipsis chrome
+rows. What dominates a long conversation is laying out every message at all.
+
+- [x] `content-visibility: auto` on chat turns is the real lever _(same harness:
+  51 ms -> 6 ms, 8.5x, two runs each. `AIChatPanel.module.css` .userMsg/.assistantMsg)_
+- [x] The overscan canvas was never released for hidden terminals _(CanvasTerminal.tsx
+  hide path shrank `canvasRef` and `overlayCanvasRef` but not `overscanCanvasRef`, which
+  is the tallest of the three at `logicalH + 2*cellHeight`. `scheduleRepaint` returns
+  early while hidden, so those pixels could never be painted. `remeasure()` on show
+  re-sizes all three unconditionally, so nothing needs restoring by hand.)_
+- [x] Kerning does NOT matter for prose, so `#markdown-content` keeps `font-kerning:
+  normal` _(reverted a 1.8.6 change that removed it: measured no gain, real typography
+  cost)_
+- [HUMAN] **Scroll behaviour in AI chat.** `content-visibility: auto` estimates the
+  height of off-screen turns. `contain-intrinsic-size: auto` makes WebKit remember each
+  turn's last rendered height, which should keep the scrollbar steady — but verify:
+  scroll a long conversation up and down fast, check the thumb does not jump or the
+  view jitter, and that auto-scroll-to-bottom on a new reply still lands correctly.
+  Also check Cmd+F / find-in-page still matches text in off-screen turns.
+- [HUMAN] **Does the 8 GB Mac actually recover?** Still unproven. If it still hangs,
+  re-run `sample <WebContent pid> 5`. Neither this session nor a Codex review could
+  reproduce a *non-converging* layout loop on a healthy machine — both harnesses
+  measure per-pass cost, not convergence — so it remains open whether that Mac has a
+  true loop or merely layout made unaffordable by swap-driven cache eviction.
+
+**Ruled out** (do not re-litigate): CSS container queries. The only two in the app
+(`Sidebar.module.css` 647/1067) toggle horizontal-only content inside fixed-height
+rows, so they cannot change the content height that decides whether the scrollbar
+exists — no feedback loop is possible. `scrollbar-gutter: stable` also measured as
+noise (126 vs 128 ms).
+
 ## Renderer layout freeze on memory-tight Macs (1.8.5)
 
 A sample from the 8 GB Mac: FastAF's process idle at 0%, one WebContent renderer

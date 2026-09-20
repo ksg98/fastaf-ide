@@ -191,7 +191,23 @@
 }
 
 /* The user's turn: a quiet block on the right, no bubble tail. */
+/* Off-screen turns are skipped during layout.
+   A conversation is rendered in full — `<For each={conversationStore.messages()}>`
+   with no windowing — so without this, every layout in the whole document walks
+   every message ever sent, and a long session gets permanently slower. That is
+   the cost the freeze report caught: a renderer pinned in layout while the app
+   process sat idle, RSS climbing until macOS recycled it.
+
+   Measured in a standalone WKWebView, 400 messages of agent prose with long
+   unbreakable paths, 12 relayouts: 51 ms without, 6 ms with — 8.5x. The same
+   test showed kerning makes no difference for wrapping prose, so this, not
+   font shaping, is what dominates a long conversation.
+
+   `auto` in contain-intrinsic-size makes the browser remember each turn's last
+   rendered height, so the scrollbar does not jump as turns scroll out. */
 .userMsg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 80px;
   align-self: flex-end;
   max-width: 88%;
   background: var(--wash-1);
@@ -207,6 +223,8 @@
 
 /* The assistant's turn sits flat on the panel — the panel is its bubble. */
 .assistantMsg {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
   align-self: flex-start;
   width: 100%;
   font-size: var(--font-md);
