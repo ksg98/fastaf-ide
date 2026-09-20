@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.6] - 2026-09-20
+
 ### Fixed
 
 - **A long AI chat no longer makes the whole window slower, permanently.** The panel renders every turn of a conversation as live elements with no windowing, so each layout anywhere in the app walked the entire history — and a session that had been open a while never got that time back. Off-screen turns are now skipped. Measured on a 400-message conversation of agent prose full of long file paths: 51 ms of layout per pass before, 6 ms after.
