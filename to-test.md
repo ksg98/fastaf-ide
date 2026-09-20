@@ -33,6 +33,34 @@ no items left goes too. What stays open must carry its own stated reason.
 > shows nothing, check `dist/index.html`'s mtime before blaming the code.
 
 
+
+## Agents surviving quit (1.8.4)
+
+`RunEvent::Exit` tore down voice, dictation and tunnels but never PTY sessions, so
+every agent — and the `tuic-bridge` it spawns — outlived the app, reparented to
+launchd. `pty::kill_all_sessions_on_exit` now killpg's each session's foreground
+group at exit. Rust change: needs a rebuild to load.
+
+- [x] The kill reaches the agent, not just the shell _(verified: `kill_all_sessions_on_exit_kills_every_agent`
+  in pty.rs — two sessions whose grandchildren trap INT/TERM/HUP; both are gone after
+  the call and the session map is drained. Mutation-checked: removing the killpg call
+  fails the test with "agents [...] survived app exit")_
+- [HUMAN] Quit FastAF with agents running, then check nothing is left:
+  `ps -Ao pid=,comm= | grep FastAF.app` prints nothing, and no `claude`/`codex` from
+  those tabs survives. Needs a real quit of a real build.
+- [HUMAN] Confirm the intended loss is acceptable: a running agent is killed on quit,
+  as it already is when you close its tab. Resume still works (agents resume by session
+  id from disk), but anything unsaved in-flight is lost.
+
+## Installer app-detection (1.8.4)
+
+- [x] Detects the running app; ignores leftover helpers _(verified live: the new
+  `ps`/`comm` detector returned the real app pid 48195 and exactly the 7 stale
+  `tuic-bridge` pids, while the old `pgrep -f .../Contents/MacOS/` returned a *helper*
+  and never the app)_
+- [HUMAN] With FastAF running, `install.sh` refuses with "FastAF is running"; after a
+  clean quit it proceeds and reports any helpers it cleaned.
+
 ## Apple Intelligence text extraction freeze (8 GB Mac)
 
 A spindump from the 8 GB Mac showed the WebContent renderer at 100% inside
