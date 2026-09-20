@@ -294,12 +294,55 @@ pnpm test               # Run tests
 
 See [docs/guides/development-setup.md](docs/guides/development-setup.md) for platform-specific instructions.
 
-## Installation (unsigned build)
+## Installation
 
-FastAF builds are not code-signed or notarized (we don't pay for an Apple Developer account), so macOS Gatekeeper quarantines the app and will report it as "damaged" on first launch. After copying FastAF.app to /Applications, remove the quarantine attribute BEFORE the first launch:
+### macOS (Apple Silicon)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/scripts/install.sh | bash
+```
+
+Downloads the latest release `.dmg`, installs it to `/Applications`, and clears the
+quarantine attribute for you. Run the same line again to update — it skips the
+download when you are already on the latest version and only re-clears quarantine.
+
+Options, when piping, go after `-s --`:
+
+```bash
+# a specific release, the nightly pre-release, or somewhere other than /Applications
+curl -fsSL .../install.sh | bash -s -- --version v1.8.1
+curl -fsSL .../install.sh | bash -s -- --nightly
+curl -fsSL .../install.sh | bash -s -- --to ~/Applications
+
+# FastAF is running: ask it to quit first (this ends its terminal sessions)
+curl -fsSL .../install.sh | bash -s -- --quit
+```
+
+The installer refuses to overwrite a running FastAF unless you pass `--quit`.
+Replacing a live bundle corrupts the running process and kills every open PTY and
+agent session in it.
+
+### Other platforms
+
+Grab the `.deb`, `.rpm`, `.AppImage` or `.exe` from
+[Releases](https://github.com/ksg98/fastaf-ide/releases). There is currently no
+macOS Intel (x86_64) build — on an Intel Mac, build from source.
+
+### Installing by hand (unsigned build)
+
+FastAF builds are not code-signed or notarized (we don't pay for an Apple Developer
+account), so macOS Gatekeeper quarantines the app and will report it as "damaged" on
+first launch. After copying FastAF.app to /Applications, remove the quarantine
+attribute BEFORE the first launch:
 
 ```bash
 xattr -cr /Applications/FastAF.app
+```
+
+If it still refuses to open, the bundle's signature did not survive the download:
+
+```bash
+codesign --force --deep --sign - /Applications/FastAF.app
 ```
 
 ## Plugins

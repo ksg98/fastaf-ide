@@ -52,6 +52,7 @@ scripts/*
 !scripts/dev-install.sh
 !scripts/dev-server.mjs
 !scripts/generate-release-notes.sh
+!scripts/install.sh
 !scripts/report-frontend-bundles.mjs
 !scripts/check-frontend-cycles.mjs
 !scripts/hooks/
