@@ -2,6 +2,10 @@
    Global selectors required — CSS modules don't apply to innerHTML. */
 
 #markdown-content {
+  /* Prose is read, not scanned: keep proper kerning here. The chrome-wide
+     `font-kerning: none` in global.css exists for dense, constantly-relaid-out
+     rows, which a document is not. */
+  font-kerning: normal;
   min-width: 0;
   padding: 16px;
   font-family: var(--font-ui);

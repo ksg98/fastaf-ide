@@ -406,6 +406,21 @@ html, body {
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* Kerning off for chrome — it is the most expensive part of laying this UI out.
+     -apple-system resolves to SF Pro, a *variable* font, so any width measurement
+     WebKit cannot serve from cache re-shapes the run through CoreText: GPOS pair
+     lookups plus variation-axis math. A sample from a memory-pressured 8 GB Mac
+     caught exactly that — OTL::Coverage::SearchFmt2Binary and
+     ItemVariationStore::ComputeScalar on top of a pinned renderer, inside a
+     relayout loop that never converged. Under that pressure the shaping caches
+     are being evicted constantly, so the slow path is the *only* path.
+
+     Measured in a standalone WKWebView, 120-row list, 40 relayouts, 3 runs each:
+     kerning on 110-116 ms, off 37-38 ms. `text-rendering` does not move it —
+     macOS kerns under `auto` too — so font-kerning is the lever, and it is the
+     surgical one (optimizeSpeed scores the same but also drops ligatures).
+     At 13px chrome the difference is sub-pixel; prose opts back in below. */
+  font-kerning: none;
   /* Dark app: make native controls (number-input spinners, selects, pickers)
      render their affordances light instead of the default black-on-dark. */
   color-scheme: dark;
