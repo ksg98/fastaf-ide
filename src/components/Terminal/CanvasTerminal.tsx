@@ -2205,11 +2205,20 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				} else if (!isVisible && !hidden) {
 					hidden = true;
 					stopBlink();
-					// Shrink to free the backing store while hidden.
+					// Shrink to free the backing store while hidden. All THREE canvases:
+					// the overscan one is the tallest (logicalH + 2 cell rows) and was
+					// being left at full size, so every background tab kept ~16 MB of
+					// pixels it can never paint — `scheduleRepaint` returns early while
+					// hidden. `remeasure()` on the show path re-sizes all three
+					// unconditionally, so there is nothing to restore by hand.
 					canvasRef.width = 1;
 					canvasRef.height = 1;
 					overlayCanvasRef.width = 1;
 					overlayCanvasRef.height = 1;
+					if (overscanCanvasRef) {
+						overscanCanvasRef.width = 1;
+						overscanCanvasRef.height = 1;
+					}
 					rowMap.clear();
 					fileLinkCache.clear();
 				}

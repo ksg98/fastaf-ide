@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A long AI chat no longer makes the whole window slower, permanently.** The panel renders every turn of a conversation as live elements with no windowing, so each layout anywhere in the app walked the entire history — and a session that had been open a while never got that time back. Off-screen turns are now skipped. Measured on a 400-message conversation of agent prose full of long file paths: 51 ms of layout per pass before, 6 ms after.
+
+- **Background terminals no longer hold a full screen of pixels they cannot draw.** Switching away from a terminal released two of its three drawing surfaces; the third, and the largest, stayed at full size for as long as the app ran. A hidden terminal never paints, so that memory was pure waste — roughly 16 MB per background tab on a Retina display, which on a machine already swapping is the difference between working and thrashing.
+
 ## [1.8.5] - 2026-09-20
 
 ### Fixed
