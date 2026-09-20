@@ -16,7 +16,7 @@
 
 /// Disable text extraction on `webview`. Safe to call repeatedly; the
 /// preference lives on the `WKPreferences` shared by the view's configuration.
-#[cfg(all(target_os = "macos", feature = "desktop"))]
+#[cfg(target_os = "macos")]
 pub fn disable<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
     use objc2::runtime::{AnyObject, Bool};
     use objc2::{msg_send, sel};
@@ -60,5 +60,5 @@ pub fn disable<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
 }
 
 /// No-op elsewhere — text extraction is a WKWebView / Apple Intelligence concern.
-#[cfg(not(all(target_os = "macos", feature = "desktop")))]
+#[cfg(not(target_os = "macos"))]
 pub fn disable<R: tauri::Runtime>(_webview: &tauri::Webview<R>) {}
