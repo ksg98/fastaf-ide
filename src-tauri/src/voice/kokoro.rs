@@ -61,9 +61,14 @@ impl Voice {
                 assets::VOICE_BYTES
             ));
         }
+        // `as_chunks` over `chunks_exact`: it yields `[u8; 4]` directly, which is
+        // what `from_le_bytes` wants, and clippy 1.98 denies the latter for a
+        // constant chunk size. The length check above makes the remainder empty.
         let rows = raw
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         Ok(Self {
             id: id.to_string(),
