@@ -6,7 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-09-19
+
 ### Fixed
+
+- **Removing a worktree no longer freezes the window.** Deleting an orphaned worktree, archiving a merged one, or finishing a post-merge cleanup ran `git worktree remove --force` on the macOS main thread — and that command deletes the whole working tree, `node_modules/` and `target/` included. On a machine whose disk cache had gone cold that was tens of seconds with the window dead, cursor and all, and the auto-archive sweep could trigger it with nothing clicked. All three now run off the UI thread. Removals also report progress in the status bar instead of finishing in silence, and Enter on the "orphaned worktrees found" prompt now keeps them — it used to confirm the delete, on a dialog that appears unbidden while you may be typing.
 
 - **Paths an agent prints in the terminal are clickable again, and open beside it.** FastAF refused to even check a path under `~/Desktop`, `~/Documents` or `~/Downloads` (checking can raise a macOS permission prompt), so for anyone whose repositories live there, every path Claude printed stayed plain text. A terminal already working inside one of those folders now resolves paths in that same folder — FastAF already holds that permission, so nothing can prompt. A click opens the file in a pane to the right of the terminal at the cited line (`file.ts:42`, `file.ts:42:7`, and now `file.ts:96-150`), and a file outside every registered repo opens read-only instead of being ignored.
 

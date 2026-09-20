@@ -217,5 +217,18 @@
       "Worktrees created by an agent now offer a Switch toast that waits in the bell instead of a blocking modal."
     ],
     "date": "2026-09-02"
+  },
+  "1.8.2": {
+    "highlights": [
+      "Removing or archiving a worktree no longer freezes the window, and removals now report progress in the status bar.",
+      "Paths an agent prints in the terminal are clickable again and open beside it at the cited line or line range.",
+      "Whisper Medium plus Q5/Q8 quantized models are now available for local dictation, with much smaller downloads.",
+      "Sign in with ChatGPT to drive AI Chat, agents and rewrites from your Plus, Pro or Team plan with no API key.",
+      "The command-line companion is now named fastaf; existing TUIC_* vars, deep links and MCP configs keep working.",
+      "Agent tabs track busy, idle and awaiting-input far more reliably across Claude, Codex, Grok, pi and plain shells.",
+      "Repository lists, per-repo settings and AI chat history now stay in sync across desktop, browser and phone.",
+      "Installing the MCP bridge preserves your editor's existing settings file, comments and formatting included."
+    ],
+    "date": "2026-09-19"
   }
 }
