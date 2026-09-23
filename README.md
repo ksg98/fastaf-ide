@@ -5,10 +5,12 @@
 <h1 align="center">FastAF</h1>
 
 <p align="center">
-  <strong>The multi-terminal, AI-native IDE that doesn't eat your RAM.<br>Watch up to 9 agents at once in one auto-adjusting 3&times;3 grid.</strong>
+  <strong>Voice to action. The voice-first Agentic Development Environment.<br>Talk to every Claude Code and Codex session at once. A local AI writes the prompts, drives the agents, and tells you when they're done.</strong>
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/voice--first-ADE-a78bfa?style=flat-square" alt="Voice-first ADE">
+  <img src="https://img.shields.io/badge/voice-on--device-f472b6?style=flat-square" alt="On-device voice">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/rust-backend-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust">
@@ -17,6 +19,7 @@
 </p>
 
 <p align="center">
+  <a href="#-voice-to-action"><strong>Voice to action</strong></a> &bull;
   <a href="docs/FEATURES.md"><strong>All Features</strong></a> &bull;
   <a href="#-why-fastaf">Why FastAF</a> &bull;
   <a href="docs/plugins.md"><strong>Plugin API</strong></a> &bull;
@@ -30,6 +33,28 @@
 </p>
 
 ---
+
+## 🎤 Voice to action
+
+Stop typing prompts into five terminals. **Say what you want.** FastAF's voice agent hears you, writes the prompt, hands it to Claude Code, Codex or whichever agent fits the job, and tells you out loud when the work is done.
+
+```
+  you speak ──► Whisper, on-device ──► your AI model (local Ollama, or any provider)
+                                          │  writes the prompt, picks the terminal
+                                          ▼
+                    Claude Code · Codex · any agent, in every terminal you run
+                                          │  waits until each one goes idle
+                                          ▼
+                     answers out loud (Kokoro, on-device) + tab badge + notification
+```
+
+- **Talk to your Claude Code session.** Tap the voice orb in the AI Chat panel and just talk. No push-to-talk, no typing, no copy-paste between windows.
+- **A local model runs the show.** Point the agent at Ollama and the whole loop runs on your machine: speech in, reasoning, speech out. Or plug in Anthropic, OpenAI, OpenRouter or any compatible endpoint.
+- **Many terminals, one conversation.** The agent sees every live session, spawns new ones, sends each one its prompt and reads back the result, across repos and branches.
+- **It writes the prompts.** Describe the goal in plain speech. The agent turns it into a precise prompt for Claude Code or Codex.
+- **Get told when it's done.** The agent waits for each coding agent to go idle, then speaks the answer. Tab badges, sounds and desktop notifications flag finished, waiting and rate-limited sessions even when you aren't listening.
+- **Hands-free and interruptible.** Voice-activity turn detection, barge-in to cut the agent off mid-sentence, OS echo cancellation on macOS, and mute without ending the session.
+- **Or just dictate.** A push-to-talk hotkey types straight into the focused terminal or input field.
 
 ## ⚡ Why FastAF?
 
@@ -65,9 +90,9 @@ The more sessions you run, the worse it gets. The tooling doesn't understand wha
 
 ## The solution
 
-**FastAF is an AI-native IDE** — designed from the ground up for multi-agent development. Agents, code, diffs, PRs, CI status, and usage analytics live in one window. No context switching. No lost threads.
+**FastAF is a voice-first Agentic Development Environment (ADE)**, not an IDE with a chat box bolted on. You direct the work by voice; agents do it. Agents, code, diffs, PRs, CI status, and usage analytics live in one window. No context switching. No lost threads.
 
-AI-native means the agents are not an afterthought. Rate limit detection, question recognition, session-aware resume, and usage tracking are core — not plugins.
+Agent-native means the agents are not an afterthought. Voice control, rate limit detection, question recognition, session-aware resume, and usage tracking are core — not plugins.
 
 ---
 
@@ -117,9 +142,11 @@ The feedback loop happens in the same window:
 
 ### Built-in AI Chat & autonomous agent
 
-A conversational AI companion that sees your terminal as you see it. Ask about errors, get code suggestions, or let the autonomous agent take the wheel and drive your terminal directly.
+A conversational AI companion that sees your terminal as you see it. Speak or type. Ask about errors, get code suggestions, or let the autonomous agent take the wheel and drive your terminals directly.
 
+- Voice orb: talk to it hands-free and hear it answer ([Voice to action](#-voice-to-action))
 - Multi-provider: Ollama (local, free), Anthropic, OpenAI, OpenRouter, or any compatible endpoint
+- Cross-session orchestration: list, spawn and drive other terminals, wait for an agent to go idle, read the result
 - Autonomous AI Agent (ReAct loop) with 30+ tools: read screen, send input, edit files, search code, run commands
 - Session knowledge: the agent learns from your terminal history — commands, errors, fix patterns
 - Live cost tracking: prompt/completion tokens and estimated cost per turn
@@ -156,12 +183,15 @@ A **mobile companion PWA** lets you monitor agents from your phone, answer quest
 - 35 context variables auto-resolved from git, GitHub, terminal, and file context
 - Create your own prompts with the same variable system
 
-### Talk to your agents
+### Talk to your agents: on-device voice
 
-On-device speech-to-text powered by whisper-rs. No cloud service, no API keys, no data leaving your machine.
+Voice is the front door to FastAF, and all of it runs on your machine: speech-to-text, turn detection and the spoken reply. No cloud speech service and no API keys. Pair it with a local Ollama model and no data leaves your machine.
 
-- GPU-accelerated on macOS (Metal) and Windows (Vulkan), CPU on Linux (optional CUDA/Vulkan)
-- Push-to-talk hotkey — text injected into the active terminal
+- **Speech in:** whisper-rs, GPU-accelerated on macOS (Metal) and Windows (Vulkan), CPU on Linux (optional CUDA/Vulkan)
+- **Speech out:** Kokoro text-to-speech with selectable voices and speed
+- **Turn-taking:** Silero voice-activity detection, barge-in, echo cancellation, mute without hanging up
+- **Voice agent:** hands-free conversation with the AI agent, which drives your terminals ([Voice to action](#-voice-to-action))
+- **Dictation:** push-to-talk hotkey, text injected into the active terminal or focused input
 - 10 local models from Small (488 MB) to Large V2 (3 GB): Medium, Large V3 Turbo (1.6 GB), and Q5/Q8 quantized builds of both (Turbo Q5 is 574 MB)
 
 ### Extend everything
@@ -193,6 +223,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 
 | Capability | Ghostty / Kitty | Warp | Cursor IDE | Claude Desktop | FastAF |
 |---|---|---|---|---|---|
+| Voice to action (speak, agents act) | No | No | No | No | **Voice agent drives your terminals** |
 | Idle memory | ~50–150 MB | ~300–600 MB | 2–3 GB | 1–2 GB | **~300 MB** |
 | Terminal sessions | Yes | Yes | Yes | No | Yes (50) |
 | Multi-terminal grid view | No | No | No | No | **Multiview — 3×3, all repos at once** |
@@ -203,7 +234,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 | Global Workspace | No | No | Yes | No | Multi-repo |
 | Usage dashboard | No | No | No | Basic | Full (heatmap, per-project) |
 | Remote access (phone/tablet) | No | No | No | Mobile app | PWA + E2E relay |
-| Voice dictation | No | No | Extension | Built-in | Local Whisper |
+| Voice dictation | No | No | Extension | Built-in | Local Whisper + Kokoro |
 | MCP Proxy Hub | No | No | No | No | Built-in |
 | Plugin system | No | No | Extensions | No | Hot reload + SDK |
 | GitHub Issues & PR management | No | No | Extension | No | Built-in |
@@ -257,6 +288,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 - Prompt library (`Cmd+K`): saved prompts with variable substitution
 - IDE launchers: open in VS Code, Cursor, Zed, JetBrains, iTerm2, Tower, or any detected tool — plus user-defined custom launchers with `{file}`/`{repo}`/`{line}`/`{column}` tokens
 - Ideas panel (`Cmd+Alt+N`): quick notes with image paste and send-to-terminal
+- Voice agent: hands-free talk with the AI agent, spoken replies, barge-in (see [Voice to action](#-voice-to-action))
 - Voice dictation: streaming on-device Whisper with partial results
 - Focus mode (`Cmd+Alt+Enter`): maximize active tab, hide sidebar and panels
 </details>
@@ -357,7 +389,7 @@ Note: the upstream project's `plugins` git submodule was removed from this repo;
 
 ## Built with
 
-Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI, native terminal via [alacritty_terminal](https://crates.io/crates/alacritty_terminal) + canvas rendering, [whisper-rs](https://github.com/tazz4843/whisper-rs) dictation, [Vite](https://vite.dev) + LightningCSS build. ~300 MB idle RAM with several repos/sessions open — no bundled Chromium.
+Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI, native terminal via [alacritty_terminal](https://crates.io/crates/alacritty_terminal) + canvas rendering, [whisper-rs](https://github.com/tazz4843/whisper-rs) speech-to-text, [Kokoro](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) text-to-speech and Silero VAD on [ONNX Runtime](https://onnxruntime.ai), [Vite](https://vite.dev) + LightningCSS build. ~300 MB idle RAM with several repos/sessions open — no bundled Chromium.
 
 ## Documentation
 
@@ -379,7 +411,7 @@ Rust + [Tauri v2](https://tauri.app) backend, [SolidJS](https://solidjs.com) UI,
 
 ## Acknowledgements
 
-FastAF is based on [FastAF](https://github.com/sstraus/tuicommander) by sstraus — all credit for the core architecture to that project.
+FastAF is based on [TUICommander](https://github.com/sstraus/tuicommander) by sstraus — all credit for the core architecture to that project.
 
 ## License
 
