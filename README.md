@@ -335,7 +335,7 @@ curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/scripts/insta
 ```
 
 Downloads the latest release `.dmg`, installs it to `/Applications`, and clears the
-quarantine attribute for you. Run the same line again to update — it skips the
+quarantine attribute (needed only for the unsigned v1.8.6 and earlier). Run the same line again to update — it skips the
 download when you are already on the latest version and only re-clears quarantine.
 
 Options, when piping, go after `-s --`:
@@ -360,12 +360,14 @@ Grab the `.deb`, `.rpm`, `.AppImage` or `.exe` from
 [Releases](https://github.com/ksg98/fastaf-ide/releases). There is currently no
 macOS Intel (x86_64) build — on an Intel Mac, build from source.
 
-### Installing by hand (unsigned build)
+### Installing by hand
 
-FastAF builds are not code-signed or notarized (we don't pay for an Apple Developer
-account), so macOS Gatekeeper quarantines the app and will report it as "damaged" on
-first launch. After copying FastAF.app to /Applications, remove the quarantine
-attribute BEFORE the first launch:
+From v1.8.7 on, macOS builds are signed with a Developer ID and notarized by Apple:
+open the `.dmg` and drag FastAF.app to /Applications, nothing else needed.
+
+v1.8.6 and earlier are unsigned, so macOS Gatekeeper quarantines the app and will
+report it as "damaged" on first launch. After copying one of those to /Applications,
+remove the quarantine attribute BEFORE the first launch:
 
 ```bash
 xattr -cr /Applications/FastAF.app

@@ -117,71 +117,18 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # Signing is best-effort: a missing or invalid certificate secret must not
-      # fail the release — warn and fall through to an unsigned bundle instead.
-      # MACOS_SIGNING gates the signing/notarization env passed to tauri-action.
-      - name: Import macOS signing certificate
+      # fail the release — the action warns and falls through to an unsigned
+      # bundle. It exports MACOS_SIGNING / MACOS_NOTARIZING and, only when they
+      # carry a value, the APPLE_* env that tauri-action reads.
+      - name: Configure macOS signing
         if: startsWith(matrix.platform, 'macos-')
-        env:
-          DEVELOPER_ID_CERT_BASE64: ${{ secrets.DEVELOPER_ID_CERT_BASE64 }}
-          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
-        run: |
-          echo "MACOS_SIGNING=false" >> "$GITHUB_ENV"
-
-          if [ -z "$DEVELOPER_ID_CERT_BASE64" ]; then
-            echo "::warning::DEVELOPER_ID_CERT_BASE64 secret not set — building unsigned macOS bundle"
-            exit 0
-          fi
-
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          CERT_PATH=$RUNNER_TEMP/cert.p12
-          echo "$DEVELOPER_ID_CERT_BASE64" | base64 --decode > "$CERT_PATH"
-          if ! security import "$CERT_PATH" \
-            -k "$KEYCHAIN_PATH" \
-            -P "$DEVELOPER_ID_CERT_PASSWORD" \
-            -T /usr/bin/codesign; then
-            echo "::warning::Certificate import failed (invalid p12 or wrong password) — building unsigned macOS bundle"
-            rm -f "$CERT_PATH"
-            security delete-keychain "$KEYCHAIN_PATH" || true
-            exit 0
-          fi
-          rm -f "$CERT_PATH"
-
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
-
-          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application:" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
-          if [ -z "$IDENTITY" ]; then
-            echo "::warning::No Developer ID Application identity in imported certificate — building unsigned macOS bundle"
-            security delete-keychain "$KEYCHAIN_PATH" || true
-            exit 0
-          fi
-          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-          echo "MACOS_SIGNING=true" >> "$GITHUB_ENV"
-
-      - name: Write Apple API key file for notarization
-        if: startsWith(matrix.platform, 'macos-') && env.MACOS_SIGNING == 'true'
-        env:
-          NOTARIZE_KEY_BASE64: ${{ secrets.NOTARIZE_KEY_BASE64 }}
-          NOTARIZE_KEY_ID: ${{ secrets.NOTARIZE_KEY_ID }}
-          NOTARIZE_ISSUER_ID: ${{ secrets.NOTARIZE_ISSUER_ID }}
-        run: |
-          if [ -z "$NOTARIZE_KEY_BASE64" ] || [ -z "$NOTARIZE_KEY_ID" ]; then
-            echo "::warning::Notarization secrets not set — skipping notarization"
-            exit 0
-          fi
-          KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARIZE_KEY_ID}.p8"
-          echo "$NOTARIZE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
-          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
-          echo "APPLE_API_ISSUER=$NOTARIZE_ISSUER_ID" >> "$GITHUB_ENV"
-          echo "APPLE_API_KEY=$NOTARIZE_KEY_ID" >> "$GITHUB_ENV"
+        uses: ./.github/actions/macos-signing
+        with:
+          cert-base64: ${{ secrets.DEVELOPER_ID_CERT_BASE64 }}
+          cert-password: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+          notarize-key-base64: ${{ secrets.NOTARIZE_KEY_BASE64 }}
+          notarize-key-id: ${{ secrets.NOTARIZE_KEY_ID }}
+          notarize-issuer-id: ${{ secrets.NOTARIZE_ISSUER_ID }}
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -195,8 +142,8 @@ jobs:
           # mold linker on Linux
           RUSTFLAGS: ${{ matrix.label == 'Linux-x64' && '-C link-arg=-fuse-ld=mold' || '' }}
           # macOS signing/notarization env (APPLE_SIGNING_IDENTITY, KEYCHAIN_PATH,
-          # APPLE_API_*) is exported via GITHUB_ENV by the import/notarization
-          # steps ONLY when signing is available. The tauri bundler treats even
+          # APPLE_API_*) is exported via
+          # GITHUB_ENV by the macos-signing action ONLY when signing is available. The tauri bundler treats even
           # an empty APPLE_* variable as "signing requested", so the variables
           # must be entirely absent for an unsigned build — never set them here.
           # Updater artifact signing
@@ -217,6 +164,19 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+      # finalize-release words the macOS install note from this: a signed and
+      # notarized DMG opens normally, an unsigned one needs the quarantine
+      # workaround.
+      - name: Record macOS signing state
+        if: startsWith(matrix.platform, 'macos-')
+        run: echo "signing=${MACOS_SIGNING} notarizing=${MACOS_NOTARIZING}" > macos-signing-state
+
+      - uses: actions/upload-artifact@v7
+        if: startsWith(matrix.platform, 'macos-')
+        with:
+          name: macos-signing-state
+          path: macos-signing-state
 
       - name: Cleanup macOS keychain
         if: always() && startsWith(matrix.platform, 'macos-')
@@ -373,6 +333,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: macos-signing-state
+
       - name: Build release notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -426,6 +391,16 @@ jobs:
 
           ---
 
+          FOOTER
+            # The macOS build job records whether it signed and notarized.
+            if grep -q "signing=true notarizing=true" macos-signing-state 2>/dev/null; then
+              cat <<'INSTALL'
+          💻 **Install**
+
+          The macOS build is signed with a Developer ID and notarized by Apple — open the DMG and drag FastAF.app to /Applications.
+          INSTALL
+            else
+              cat <<'INSTALL'
           💻 **Install** (unsigned build)
 
           macOS quarantines unsigned apps — after copying FastAF.app to /Applications, run before first launch:
@@ -433,7 +408,8 @@ jobs:
           ```bash
           xattr -cr /Applications/FastAF.app
           ```
-          FOOTER
+          INSTALL
+            fi
           } > /tmp/release-body.md
 
           gh release edit "${TAG}" --notes-file /tmp/release-body.md --draft=false
