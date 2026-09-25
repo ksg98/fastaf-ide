@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **macOS builds are signed and notarized.** Releases and nightlies are now signed with a Developer ID and notarized by Apple, so the DMG opens like any other app. The `xattr -cr` quarantine workaround is only needed for v1.8.6 and earlier. The first launch after updating from an unsigned build asks again for microphone and other permissions, because macOS ties those grants to the app's signature.
+
 ## [1.8.6] - 2026-09-20
 
 ### Fixed

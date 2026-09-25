@@ -11,10 +11,11 @@
 #   --quit             ask a running FastAF to quit, then wait for it
 #   --keep-backup      keep the replaced .app as <name>.bak-<version>-<date>
 #
-# FastAF is not code-signed or notarized, so macOS quarantines anything
-# downloaded from a release and reports it as "damaged" on first launch. This
-# script clears that attribute on every install — which is exactly what makes it
-# worth running for updates too, not only the first time.
+# FastAF v1.8.6 and earlier are not code-signed or notarized, so macOS
+# quarantines them and reports them as "damaged" on first launch. This script
+# clears that attribute on every install, which keeps --version installs of old
+# releases working. v1.8.7+ are signed and notarized, where clearing it is a
+# harmless no-op.
 
 set -euo pipefail
 
@@ -189,9 +190,9 @@ fi
 note "Clearing the quarantine attribute (xattr -cr)"
 xattr -cr "$STAGED" || true
 
-# Gatekeeper also rejects a bundle whose signature is missing or broken. Release
-# builds are ad-hoc signed; re-sign only if verification actually fails, so a
-# good signature is never replaced with a weaker one.
+# Gatekeeper also rejects a bundle whose signature is missing or broken. Old
+# releases are ad-hoc signed; re-sign only if verification actually fails, so a
+# Developer ID signature is never replaced with a weaker one.
 if ! codesign --verify --no-strict "$STAGED" >/dev/null 2>&1; then
   note "Signature did not verify — applying an ad-hoc signature"
   codesign --force --deep --sign - "$STAGED" >/dev/null 2>&1 \

@@ -1,0 +1,118 @@
+name: macOS signing
+description: >
+  Import the Developer ID certificate into a throwaway keychain and export the
+  signing + notarization env that the tauri bundler reads. Best-effort: a
+  missing or invalid secret warns and leaves every APPLE_* variable unset, so
+  the build falls through to an unsigned bundle instead of failing.
+
+  Exports via GITHUB_ENV:
+    MACOS_SIGNING     true when a Developer ID identity was imported
+    MACOS_NOTARIZING  true when notarization credentials were exported too
+    APPLE_SIGNING_IDENTITY, KEYCHAIN_PATH                     (signing)
+    APPLE_API_KEY_PATH, APPLE_API_ISSUER, APPLE_API_KEY       (notarization)
+
+  Notarization uses an App Store Connect Team API key, never an Apple ID: the
+  key is not tied to a personal login or 2FA, survives a password change, and
+  is revocable on its own.
+
+  The tauri bundler treats even an EMPTY APPLE_* variable as "signing
+  requested", so callers must not set those variables on tauri-action
+  themselves — they are exported here only when they carry a value.
+
+inputs:
+  cert-base64:
+    description: Base64 of the Developer ID Application .p12
+    required: false
+  cert-password:
+    description: Password of the .p12
+    required: false
+  notarize-key-base64:
+    description: Base64 of an App Store Connect Team API key (.p8)
+    required: false
+  notarize-key-id:
+    description: App Store Connect API key id
+    required: false
+  notarize-issuer-id:
+    description: App Store Connect API issuer id
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Import Developer ID certificate
+      shell: bash
+      env:
+        CERT_BASE64: ${{ inputs.cert-base64 }}
+        CERT_PASSWORD: ${{ inputs.cert-password }}
+      run: |
+        echo "MACOS_SIGNING=false" >> "$GITHUB_ENV"
+        echo "MACOS_NOTARIZING=false" >> "$GITHUB_ENV"
+
+        if [ -z "$CERT_BASE64" ]; then
+          echo "::warning::DEVELOPER_ID_CERT_BASE64 secret not set — building unsigned macOS bundle"
+          exit 0
+        fi
+
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+        KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+        CERT_PATH=$RUNNER_TEMP/cert.p12
+        echo "$CERT_BASE64" | base64 --decode > "$CERT_PATH"
+        if ! security import "$CERT_PATH" \
+          -k "$KEYCHAIN_PATH" \
+          -P "$CERT_PASSWORD" \
+          -T /usr/bin/codesign; then
+          echo "::warning::Certificate import failed (invalid p12 or wrong password) — building unsigned macOS bundle"
+          rm -f "$CERT_PATH"
+          security delete-keychain "$KEYCHAIN_PATH" || true
+          exit 0
+        fi
+        rm -f "$CERT_PATH"
+
+        # A fresh runner may lack Apple's Developer ID G2 intermediate. Without
+        # it `find-identity -v` calls the identity invalid and the build quietly
+        # ships unsigned, so import it next to the certificate.
+        G2_PATH=$RUNNER_TEMP/DeveloperIDG2CA.cer
+        if curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$G2_PATH"; then
+          security import "$G2_PATH" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+          rm -f "$G2_PATH"
+        else
+          echo "::warning::Could not download the Developer ID G2 intermediate"
+        fi
+
+        security set-key-partition-list -S apple-tool:,apple:,codesign: \
+          -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+        IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application:" | head -1 | sed 's/.*"\(.*\)".*/\1/' || true)
+        if [ -z "$IDENTITY" ]; then
+          echo "::warning::No Developer ID Application identity in imported certificate — building unsigned macOS bundle"
+          security delete-keychain "$KEYCHAIN_PATH" || true
+          exit 0
+        fi
+        echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+        echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+        echo "MACOS_SIGNING=true" >> "$GITHUB_ENV"
+
+    - name: Configure notarization
+      if: env.MACOS_SIGNING == 'true'
+      shell: bash
+      env:
+        NOTARIZE_KEY_BASE64: ${{ inputs.notarize-key-base64 }}
+        NOTARIZE_KEY_ID: ${{ inputs.notarize-key-id }}
+        NOTARIZE_ISSUER_ID: ${{ inputs.notarize-issuer-id }}
+      run: |
+        if [ -z "$NOTARIZE_KEY_BASE64" ] || [ -z "$NOTARIZE_KEY_ID" ] || [ -z "$NOTARIZE_ISSUER_ID" ]; then
+          echo "::warning::NOTARIZE_KEY_BASE64 / NOTARIZE_KEY_ID / NOTARIZE_ISSUER_ID not set — signed but NOT notarized"
+          exit 0
+        fi
+        KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARIZE_KEY_ID}.p8"
+        echo "$NOTARIZE_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+        echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+        echo "APPLE_API_ISSUER=$NOTARIZE_ISSUER_ID" >> "$GITHUB_ENV"
+        echo "APPLE_API_KEY=$NOTARIZE_KEY_ID" >> "$GITHUB_ENV"
+        echo "MACOS_NOTARIZING=true" >> "$GITHUB_ENV"
