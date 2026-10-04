@@ -264,5 +264,18 @@
       "Sessions left open for hours stay responsive instead of gradually getting slower as chat history grows."
     ],
     "date": "2026-09-20"
+  },
+  "1.9.0": {
+    "highlights": [
+      "The window follows Codex's layout: tabs and panel toggles live in one title bar, and the status bar is gone",
+      "The sidebar opens with New terminal and Search, lists repos as folders, and shows one state dot per branch",
+      "Speak or type to the agent from a bar under its terminal, with your words and a live waveform as you talk",
+      "An empty window asks what to build and starts Claude Code or Codex CLI on your words",
+      "New Codex Dark theme: charcoal tones and hairline dividers that match OpenAI's Codex app",
+      "Select several files in the file browser with Cmd or Shift+click, then copy, cut or paste them together",
+      "Pastes land in the folder you clicked and never overwrite, and browser file operations work again"
+    ],
+    "contributions": [],
+    "date": "2026-10-03"
   }
 }
