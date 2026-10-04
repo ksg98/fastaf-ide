@@ -265,7 +265,7 @@
     ],
     "date": "2026-09-20"
   },
-  "1.9.0": {
+  "2.0.0": {
     "highlights": [
       "The window follows Codex's layout: tabs and panel toggles live in one title bar, and the status bar is gone",
       "The sidebar opens with New terminal and Search, lists repos as folders, and shows one state dot per branch",
