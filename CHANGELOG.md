@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-04
+
 ### Changed
 
 - **New installs open in Codex Dark.** The default theme is now Codex Dark, the charcoal look that matches OpenAI's Codex app. A theme you already use is kept: every existing install has its theme saved, so updating changes nothing, and Cursor Dark and the rest stay in Settings › Appearance › Theme. A theme name the app does not know now falls back to Codex Dark as well.
