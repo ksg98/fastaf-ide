@@ -49,6 +49,9 @@ Usage/Stories ticker differs); Cursor Dark's composer card measures a #363636 ri
   top-down sheen), and the Ask / Effort chips are filled pills.
 - [ ] Switch to Codex Dark in Settings › Appearance: composer, chips and selected branch go flat and
   grey again, with no rim light anywhere.
+- [ ] Codex Dark is the default (2.0.1, `settings.ts` + `config.rs`): a fresh profile
+  (`HOME=<scratch>` with no `config.json`) opens in Codex Dark; an existing install keeps the theme
+  saved in its `config.json` after the update.
 
 ## Codex-style window: title bar, sidebar, panels, icons (2026-10-03)
 

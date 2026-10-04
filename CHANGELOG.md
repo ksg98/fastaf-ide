@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **New installs open in Codex Dark.** The default theme is now Codex Dark, the charcoal look that matches OpenAI's Codex app. A theme you already use is kept: every existing install has its theme saved, so updating changes nothing, and Cursor Dark and the rest stay in Settings › Appearance › Theme. A theme name the app does not know now falls back to Codex Dark as well.
+
 - **Cursor Dark is glossy again.** 2.0 drew the composer cards, the chat chips and the selected sidebar row flat in every theme, so jet black lost the glass it had in 1.8. In a flat one-black theme such as Cursor Dark they are glass again: a sheen and a 1px rim light on the composer cards, filled chips with a rim light, and the selected branch washed in the accent. Codex Dark is unchanged — the two themes now differ in material as well as colour.
 
 ## [2.0.0] - 2026-10-03

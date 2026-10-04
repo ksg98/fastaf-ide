@@ -164,8 +164,9 @@ const FALLBACK_TERMINAL: TerminalTheme = {
 	cursor: "#e4e4e7",
 };
 
-// Mirrors cursor-dark.json / the :root seed, so the rare no-theme-loaded path
-// looks like the default instead of a ghost of the pre-restyle palette.
+// Mirrors cursor-dark.json / the :root seed (the first-paint palette), so the
+// rare no-theme-loaded path looks like a real theme instead of a ghost of the
+// pre-restyle palette.
 const FALLBACK_APP: IAppTheme = {
 	bgPrimary: "#050505",
 	bgSecondary: "#050505",
@@ -213,20 +214,22 @@ export async function listenForThemeChanges(): Promise<void> {
 	});
 }
 
-/** Get a terminal theme by key, falling back to cursor-dark, then vscode-dark */
+/** Get a terminal theme by key, falling back to the default (codex-dark), then cursor-dark, then vscode-dark */
 export function getTerminalTheme(key: string): TerminalTheme {
 	return (
 		themes.get(key)?.terminal ??
+		themes.get("codex-dark")?.terminal ??
 		themes.get("cursor-dark")?.terminal ??
 		themes.get("vscode-dark")?.terminal ??
 		FALLBACK_TERMINAL
 	);
 }
 
-/** Get an app theme by key, falling back to cursor-dark, then vscode-dark */
+/** Get an app theme by key, falling back to the default (codex-dark), then cursor-dark, then vscode-dark */
 export function getAppTheme(key: string): IAppTheme {
 	return (
 		themes.get(key)?.appChrome ??
+		themes.get("codex-dark")?.appChrome ??
 		themes.get("cursor-dark")?.appChrome ??
 		themes.get("vscode-dark")?.appChrome ??
 		FALLBACK_APP
@@ -322,7 +325,7 @@ export { themeGeneration };
 export function applyAppTheme(key: string): void {
 	const appTheme = themes.get(key);
 	if (!appTheme) {
-		appLogger.warn("app", `Unknown theme "${key}", falling back to cursor-dark`);
+		appLogger.warn("app", `Unknown theme "${key}", falling back to codex-dark`);
 	}
 	const theme = getAppTheme(key);
 	const root = document.documentElement.style;
