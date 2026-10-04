@@ -905,22 +905,23 @@
 }
 
 /* ── Composer — the same card as the compose dock (ComposeDock.module.css):
-   one raised tone, no border, 18px radius, 28px round controls. ── */
+   one raised tone, no border, 18px radius, 28px round controls; glass (sheen
+   and rim light) in a flat theme, plain in a tonal one. ── */
 .inputArea {
   margin: 8px 12px 12px;
   padding: 12px 10px 10px 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: var(--surface-composer);
+  background: var(--sheen), var(--surface-composer);
   border: none;
   border-radius: 18px;
-  box-shadow: none;
+  box-shadow: var(--rim);
   transition: box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .inputArea:focus-within {
-  box-shadow: 0 0 0 1px var(--border-strong);
+  box-shadow: var(--rim), 0 0 0 1px var(--border-strong);
 }
 
 .inputAreaFrozen {
@@ -988,7 +989,7 @@
   height: 28px;
   padding: 0 8px;
   border-radius: var(--radius-pill);
-  background: transparent;
+  background: var(--chip-fill);
   color: var(--fg-secondary);
   font-family: inherit;
   font-size: var(--font-md);
@@ -996,13 +997,13 @@
   white-space: nowrap;
   cursor: pointer;
   border: none;
-  box-shadow: none;
+  box-shadow: var(--rim);
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 .chip:hover {
-  background: var(--wash-1);
+  background: var(--chip-fill-hover);
   color: var(--fg-primary);
 }
 
@@ -1012,12 +1013,12 @@
 }
 
 .chipAccent {
-  background: transparent;
+  background: var(--chip-accent-fill);
   color: var(--accent);
 }
 
 .chipAccent:hover {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: var(--chip-accent-fill-hover);
   color: var(--accent);
 }
 
@@ -1078,7 +1079,7 @@
 }
 
 .chip:focus-within {
-  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.35);
+  box-shadow: var(--rim), 0 0 0 2px rgba(var(--accent-rgb), 0.35);
 }
 
 .stepInput {
