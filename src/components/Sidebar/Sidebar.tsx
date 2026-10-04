@@ -11,8 +11,24 @@ import { tunnelPanelStore } from "../../stores/tunnelPanel";
 import { tunnelsStore } from "../../stores/tunnels";
 import { uiStore } from "../../stores/ui";
 import { isTauri } from "../../transport";
+import { cx } from "../../utils";
+import { keyFor } from "../../utils/hotkey";
 import { getRepoColor } from "../../utils/repoColor";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu";
+import {
+	IconArchive,
+	IconArrowDownLine,
+	IconArrowUpLine,
+	IconCompose,
+	IconFunnel,
+	IconHelp,
+	IconLayers,
+	IconPlus,
+	IconRefresh,
+	IconSearch,
+	IconSettings,
+	IconShield,
+} from "../icons";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
 import { PromptDialog } from "../PromptDialog";
 import { ColorPickerDialog } from "../shared/ColorPickerDialog";
@@ -101,6 +117,19 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		const all = remoteConnectionsStore.getConnections();
 		return Object.values(all).filter((c) => c.status === "connected");
 	});
+
+	/** Where "New terminal" opens one: the active repo's active (or first) branch. */
+	const newTerminalTarget = () => {
+		const repo = repositoriesStore.getActive();
+		if (!repo) return null;
+		const branch = repo.activeBranch ?? Object.keys(repo.branches ?? {})[0];
+		return branch ? { repoPath: repo.path, branch } : null;
+	};
+
+	const handleNewTerminal = () => {
+		const target = newTerminalTarget();
+		if (target) props.onAddTerminal(target.repoPath, target.branch);
+	};
 
 	const handleAddRepoClick = (e: MouseEvent) => {
 		// Only the local entry → skip the menu and add directly
@@ -423,23 +452,68 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 		<aside id="sidebar" class={s.sidebar} data-testid="sidebar">
 			{/* Content */}
 			<div class={s.content}>
-				{/* Repo search box — Enter activates the first match, Esc clears */}
-				<Show when={hasVisibleRepos()}>
-					<div class={s.searchBox}>
-						<input
-							class={s.searchInput}
-							type="text"
-							placeholder={t("sidebar.searchProjects", "Search projects…")}
-							value={uiStore.state.repoSearchQuery}
-							onInput={(e) => uiStore.setRepoSearchQuery(e.currentTarget.value)}
-							onKeyDown={handleSearchKeyDown}
-							data-testid="sidebar-search"
-						/>
+				{/* Actions first, the way Codex opens its sidebar with New chat + Search:
+				    a new terminal in the active branch, and the project filter. */}
+				<div class={s.actionRows}>
+					<button
+						type="button"
+						class={s.actionRow}
+						onClick={handleNewTerminal}
+						disabled={!newTerminalTarget()}
+						title={`${t("sidebar.newTerminal", "New terminal")} (${keyFor("new-terminal")})`}
+						data-testid="sidebar-new-terminal"
+					>
+						<IconCompose size={16} />
+						<span class={s.actionLabel}>{t("sidebar.newTerminal", "New terminal")}</span>
+					</button>
+					{/* Repo search — Enter activates the first match, Esc clears */}
+					<Show when={hasVisibleRepos()}>
+						<label class={cx(s.actionRow, s.searchBox)}>
+							<IconSearch size={16} />
+							<input
+								class={s.searchInput}
+								type="text"
+								placeholder={t("sidebar.searchProjects", "Search projects")}
+								value={uiStore.state.repoSearchQuery}
+								onInput={(e) => uiStore.setRepoSearchQuery(e.currentTarget.value)}
+								onKeyDown={handleSearchKeyDown}
+								data-testid="sidebar-search"
+							/>
+						</label>
+					</Show>
+				</div>
+
+				<div class={s.sectionHeader}>
+					<span class={s.sectionLabel}>{t("sidebar.projects", "Projects")}</span>
+					<div class={s.sectionActions}>
+						<Show when={hasVisibleRepos()}>
+							<button
+								type="button"
+								class={cx(s.sectionAction, uiStore.state.repoFilterActiveOnly && s.sectionActionActive)}
+								onClick={() => uiStore.toggleRepoFilter()}
+								title={
+									uiStore.state.repoFilterActiveOnly
+										? t("toolbar.filterActiveOn", "Showing active repos only — click to show all")
+										: t("toolbar.filterActiveOff", "Show only repos with open terminals")
+								}
+								data-testid="sidebar-filter-active"
+							>
+								<IconFunnel size={14} />
+							</button>
+						</Show>
+						<button
+							type="button"
+							class={cx(s.sectionAction, s.addRepo)}
+							onClick={handleAddRepoClick}
+							title={t("sidebar.addRepository", "Add Repository")}
+						>
+							<IconPlus size={16} />
+						</button>
 					</div>
-				</Show>
+				</div>
 
 				{/* Repo filter status — only rendered while the "active only" filter is
-				    engaged (toggled from the toolbar icon). Keeps it unmistakable that
+				    engaged (toggled from the Projects header). Keeps it unmistakable that
 				    repos are hidden, so nobody panics, while taking zero space at rest. */}
 				<Show when={hasVisibleRepos() && uiStore.state.repoFilterActiveOnly}>
 					<button
@@ -447,14 +521,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 						onClick={() => uiStore.setRepoFilterActiveOnly(false)}
 						title={t("sidebar.filterShowAll", "Show all")}
 					>
-						<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-							<path
-								d="M1.5 2.5h13l-5 6v5l-3 1.5v-6.5l-5-6Z"
-								stroke="currentColor"
-								stroke-width="1.3"
-								stroke-linejoin="round"
-							/>
-						</svg>
+						<IconFunnel size={13} />
 						<span>
 							{t("sidebar.filterActiveOnly", "Active only")} · {shownRepoCount()}/{totalRepoCount()}
 						</span>
@@ -551,169 +618,83 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 
 			<GlobalWorkspaceEntry />
 
-			{/* Git Quick Actions (Story 050) */}
-			<Show when={repositoriesStore.getActive()}>
-				<div class={s.gitQuickActions}>
-					<svg
-						class={s.gitQuickLabel}
-						width="10"
-						height="28"
-						viewBox="0 0 10 28"
-						aria-hidden="true"
-						onClick={() => uiStore.toggleGitPanelOnTab("branches")}
-						style={{ cursor: "pointer" }}
-					>
-						<text
-							x="5"
-							y="14"
-							transform="rotate(-90 5 14)"
-							text-anchor="middle"
-							dominant-baseline="central"
-							fill="currentColor"
-							font-size="8.5"
-							font-weight="700"
-							letter-spacing="0.12em"
-							font-family="system-ui,-apple-system,sans-serif"
-						>
-							GIT
-						</text>
-					</svg>
-					<div class={s.gitQuickBtns}>
-						<button
-							class={s.gitQuickBtn}
-							classList={{ [s.loading]: props.runningGitOps?.has("pull") }}
-							disabled={props.runningGitOps?.has("pull")}
-							onClick={() => {
-								const repo = repositoriesStore.getActive();
-								if (repo) props.onBackgroundGit?.(repo.path, "pull", ["pull"]);
-							}}
-							title={t("sidebar.gitPull", "Pull latest changes")}
-						>
-							<span class={s.gitQuickIcon}>
-								{/* arrow-down-to-line */}
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-									<path
-										d="M8 2v9M4 8l4 4 4-4M2 14h12"
-										stroke="currentColor"
-										stroke-width="1.4"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									/>
-								</svg>
-							</span>
-							<span class={s.gitQuickText}>{t("sidebar.gitPullLabel", "Pull")}</span>
-						</button>
-						<button
-							class={s.gitQuickBtn}
-							classList={{ [s.loading]: props.runningGitOps?.has("push") }}
-							disabled={props.runningGitOps?.has("push")}
-							onClick={() => {
-								const repo = repositoriesStore.getActive();
-								if (repo) props.onBackgroundGit?.(repo.path, "push", ["push"]);
-							}}
-							title={t("sidebar.gitPush", "Push commits")}
-						>
-							<span class={s.gitQuickIcon}>
-								{/* arrow-up-from-line */}
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-									<path
-										d="M8 14V5M4 8l4-4 4 4M2 2h12"
-										stroke="currentColor"
-										stroke-width="1.4"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									/>
-								</svg>
-							</span>
-							<span class={s.gitQuickText}>{t("sidebar.gitPushLabel", "Push")}</span>
-						</button>
-						<button
-							class={s.gitQuickBtn}
-							classList={{ [s.loading]: props.runningGitOps?.has("fetch") }}
-							disabled={props.runningGitOps?.has("fetch")}
-							onClick={() => {
-								const repo = repositoriesStore.getActive();
-								if (repo) props.onBackgroundGit?.(repo.path, "fetch", ["fetch", "--all"]);
-							}}
-							title={t("sidebar.gitFetch", "Fetch from all remotes")}
-						>
-							<span class={s.gitQuickIcon}>
-								{/* refresh-cw */}
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-									<path
-										d="M1 4s.5-1 3-2.5A7 7 0 0 1 15 8"
-										stroke="currentColor"
-										stroke-width="1.4"
-										stroke-linecap="round"
-									/>
-									<path
-										d="M15 12s-.5 1-3 2.5A7 7 0 0 1 1 8"
-										stroke="currentColor"
-										stroke-width="1.4"
-										stroke-linecap="round"
-									/>
-									<path
-										d="M1 1v3h3M15 15v-3h-3"
-										stroke="currentColor"
-										stroke-width="1.4"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-									/>
-								</svg>
-							</span>
-							<span class={s.gitQuickText}>{t("sidebar.gitFetchLabel", "Fetch")}</span>
-						</button>
-						<button
-							class={s.gitQuickBtn}
-							classList={{ [s.loading]: props.runningGitOps?.has("stash") }}
-							disabled={props.runningGitOps?.has("stash")}
-							onClick={() => {
-								const repo = repositoriesStore.getActive();
-								if (repo) props.onBackgroundGit?.(repo.path, "stash", ["stash"]);
-							}}
-							title={t("sidebar.gitStash", "Stash changes")}
-						>
-							<span class={s.gitQuickIcon}>
-								{/* layers/stash */}
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-									<path
-										d="M1.5 6 8 9.5 14.5 6M1.5 10 8 13.5 14.5 10M8 2.5 14.5 6 8 9.5 1.5 6 8 2.5Z"
-										stroke="currentColor"
-										stroke-width="1.3"
-										stroke-linejoin="round"
-									/>
-								</svg>
-							</span>
-							<span class={s.gitQuickText}>{t("sidebar.gitStashLabel", "Stash")}</span>
-						</button>
-					</div>
-				</div>
-			</Show>
-
-			{/* Footer */}
+			{/* Footer — one row: the active repo's git sync (icons; the Git panel has the
+			    full set) on the left, workspace/help/settings on the right. */}
 			<div class={s.footer}>
-				<button class={s.addRepo} onClick={handleAddRepoClick} title={t("sidebar.addRepository", "Add Repository")}>
-					<svg class={s.addRepoIcon} width="14" height="14" viewBox="0 0 16 16" fill="none">
-						<path
-							d="M1.5 2A1.5 1.5 0 0 1 3 .5h3.379a1.5 1.5 0 0 1 1.06.44l1.122 1.12H13A1.5 1.5 0 0 1 14.5 3.5v9a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 12.5V2Z"
-							stroke="currentColor"
-							stroke-width="1.2"
-						/>
-					</svg>
-					<span class={s.addRepoLabel}>{t("sidebar.addRepository", "Add Repository")}</span>
-				</button>
+				<Show when={repositoriesStore.getActive()}>
+					<div class={s.gitQuickActions}>
+						<div class={s.gitQuickBtns}>
+							<button
+								class={s.gitQuickBtn}
+								classList={{ [s.loading]: props.runningGitOps?.has("pull") }}
+								disabled={props.runningGitOps?.has("pull")}
+								onClick={() => {
+									const repo = repositoriesStore.getActive();
+									if (repo) props.onBackgroundGit?.(repo.path, "pull", ["pull"]);
+								}}
+								title={t("sidebar.gitPull", "Pull latest changes")}
+							>
+								<span class={s.gitQuickIcon}>
+									<IconArrowDownLine size={16} />
+								</span>
+								<span class={s.gitQuickText}>{t("sidebar.gitPullLabel", "Pull")}</span>
+							</button>
+							<button
+								class={s.gitQuickBtn}
+								classList={{ [s.loading]: props.runningGitOps?.has("push") }}
+								disabled={props.runningGitOps?.has("push")}
+								onClick={() => {
+									const repo = repositoriesStore.getActive();
+									if (repo) props.onBackgroundGit?.(repo.path, "push", ["push"]);
+								}}
+								title={t("sidebar.gitPush", "Push commits")}
+							>
+								<span class={s.gitQuickIcon}>
+									<IconArrowUpLine size={16} />
+								</span>
+								<span class={s.gitQuickText}>{t("sidebar.gitPushLabel", "Push")}</span>
+							</button>
+							<button
+								class={s.gitQuickBtn}
+								classList={{ [s.loading]: props.runningGitOps?.has("fetch") }}
+								disabled={props.runningGitOps?.has("fetch")}
+								onClick={() => {
+									const repo = repositoriesStore.getActive();
+									if (repo) props.onBackgroundGit?.(repo.path, "fetch", ["fetch", "--all"]);
+								}}
+								title={t("sidebar.gitFetch", "Fetch from all remotes")}
+							>
+								<span class={s.gitQuickIcon}>
+									<IconRefresh size={15} />
+								</span>
+								<span class={s.gitQuickText}>{t("sidebar.gitFetchLabel", "Fetch")}</span>
+							</button>
+							<button
+								class={s.gitQuickBtn}
+								classList={{ [s.loading]: props.runningGitOps?.has("stash") }}
+								disabled={props.runningGitOps?.has("stash")}
+								onClick={() => {
+									const repo = repositoriesStore.getActive();
+									if (repo) props.onBackgroundGit?.(repo.path, "stash", ["stash"]);
+								}}
+								title={t("sidebar.gitStash", "Stash changes")}
+							>
+								<span class={s.gitQuickIcon}>
+									<IconArchive size={16} />
+								</span>
+								<span class={s.gitQuickText}>{t("sidebar.gitStashLabel", "Stash")}</span>
+							</button>
+						</div>
+					</div>
+				</Show>
+				<span class={s.footerSpacer} />
 				<div class={s.footerIcons}>
 					<button
 						class={s.footerAction}
 						onClick={(e) => workspaceMenu.open(e)}
 						title={t("sidebar.workspacesAndSort", "Workspaces & sorting")}
 					>
-						{/* stacked panes / workspace switcher */}
-						<svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-							<rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2" />
-							<path d="M1.5 6h13" stroke="currentColor" stroke-width="1.2" />
-							<path d="M4 9h5M4 11h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
-						</svg>
+						<IconLayers size={16} />
 					</button>
 					<Show when={parkedCount() > 0}>
 						<button
@@ -722,10 +703,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 							title={t("sidebar.parkedRepos", "Parked repositories")}
 							style={{ position: "relative" }}
 						>
-							<svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-								<path d="M2 3h12v2H2zM3 5v8h10V5" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
-								<path d="M5 8h6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
-							</svg>
+							<IconArchive size={16} />
 							<span class={s.parkedBadge}>{parkedCount()}</span>
 						</button>
 					</Show>
@@ -740,9 +718,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 									title={`SSH Tunnels (${connectedCount()} connected)`}
 									style={{ position: "relative", color: connectedCount() > 0 ? undefined : "var(--fg-muted)" }}
 								>
-									<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
-										<path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z" />
-									</svg>
+									<IconShield size={16} />
 									<Show when={connectedCount() > 0}>
 										<span class={s.parkedBadge} style={{ background: "var(--accent-green, #22c55e)", color: "#000" }}>
 											{connectedCount()}
@@ -753,16 +729,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 						})()}
 					</Show>
 					<button class={s.footerAction} onClick={props.onOpenHelp} title={t("sidebar.help", "Help")}>
-						<svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-							<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2" />
-							<path
-								d="M6 6.2a2 2 0 0 1 3.9.6c0 1.2-1.9 1.2-1.9 2.2"
-								stroke="currentColor"
-								stroke-width="1.2"
-								stroke-linecap="round"
-							/>
-							<circle cx="8" cy="11.5" r="0.7" fill="currentColor" />
-						</svg>
+						<IconHelp size={16} />
 					</button>
 					<button
 						class={s.footerAction}
@@ -770,15 +737,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 						title={t("sidebar.settings", "Settings")}
 						data-coach="settings"
 					>
-						<svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-							<path
-								d="M6.5 1.5h3l.4 1.8a5 5 0 011.2.7l1.7-.6 1.5 2.6-1.3 1.2a5 5 0 010 1.4l1.3 1.2-1.5 2.6-1.7-.6a5 5 0 01-1.2.7l-.4 1.8h-3l-.4-1.8a5 5 0 01-1.2-.7l-1.7.6-1.5-2.6 1.3-1.2a5 5 0 010-1.4L1.7 5.7l1.5-2.6 1.7.6a5 5 0 011.2-.7z"
-								stroke="currentColor"
-								stroke-width="1.2"
-								stroke-linejoin="round"
-							/>
-							<circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.2" />
-						</svg>
+						<IconSettings size={16} />
 					</button>
 				</div>
 			</div>

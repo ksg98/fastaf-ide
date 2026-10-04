@@ -9,25 +9,25 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: none;
+  border-radius: 8px;
   color: var(--fg-secondary);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
 .trigger:hover {
-  background: var(--bg-tertiary);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
 .triggerActive {
-  background: var(--bg-highlight);
-  color: var(--accent);
-  border-color: var(--accent);
+  background: var(--row-selected);
+  color: var(--fg-primary);
 }
 
 .overlay {

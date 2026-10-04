@@ -334,8 +334,21 @@ export function applyAppTheme(key: string): void {
 	// Gloss borders/washes need polarity flipped on light themes (dark borders
 	// on light surfaces, white sheen stronger to stay visible).
 	const light = relativeLuminance(theme.bgPrimary) > 0.5;
-	root.setProperty("--border-subtle", light ? "rgba(0, 0, 0, 0.08)" : "rgba(255, 255, 255, 0.08)");
-	root.setProperty("--border-strong", light ? "rgba(0, 0, 0, 0.16)" : "rgba(255, 255, 255, 0.16)");
+	// A tonal theme steps its surfaces (frame ≠ well) the way Codex does: the
+	// frame goes opaque and region dividers become half-pixel light lines
+	// (html.tonal in global.css). A flat theme — one black, Cursor Dark — keeps
+	// its 1px hairlines, which are all the structure it has.
+	const tonal = theme.bgPrimary.toLowerCase() !== theme.bgSecondary.toLowerCase();
+	document.documentElement.classList.toggle("tonal", tonal);
+	document.documentElement.classList.toggle("theme-light", light);
+	root.setProperty(
+		"--border-subtle",
+		light ? "rgba(0, 0, 0, 0.08)" : tonal ? "rgba(255, 255, 255, 0.06)" : "rgba(255, 255, 255, 0.08)",
+	);
+	root.setProperty(
+		"--border-strong",
+		light ? "rgba(0, 0, 0, 0.16)" : tonal ? "rgba(255, 255, 255, 0.12)" : "rgba(255, 255, 255, 0.16)",
+	);
 	root.setProperty("--surface-hover", light ? "rgba(0, 0, 0, 0.05)" : "rgba(255, 255, 255, 0.07)");
 	root.setProperty(
 		"--highlight-inset",

@@ -29,6 +29,7 @@ import { cx } from "../../utils";
 import { writeClipboard } from "../../utils/clipboard";
 import { keyFor } from "../../utils/hotkey";
 import { activePrStatus } from "../../utils/mergedPrGrace";
+import { IconAlert, IconChat, IconDocument, IconFiles, IconGit, IconLightbulb } from "../icons";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
 import { AgentIcon } from "../ui/AgentIcon";
 import { CiBadge, PrBadge } from "../ui/StatusBadge";
@@ -54,9 +55,18 @@ export interface StatusBarProps {
 	repoRoot?: string;
 	onBranchRenamed?: (oldName: string, newName: string) => void;
 	onReviewPr?: (repoPath: string, branchName: string, command: string) => void;
+	/**
+	 * "bar" (default): its own strip at the bottom of the window.
+	 * "toolbar": a cluster inside the title bar — the controls sit at its right
+	 * end, usage/PR/status flow before the notifications, and the bits that only
+	 * make sense in a strip (cwd, a permanent 100% zoom, the hold-to-talk mic,
+	 * which the compose dock's Speak replaces) stay out.
+	 */
+	placement?: "bar" | "toolbar";
 }
 
 export const StatusBar: Component<StatusBarProps> = (props) => {
+	const inline = () => props.placement === "toolbar";
 	const [showPrDetailPopover, setShowPrDetailPopover] = createSignal(false);
 	const [cwdCopied, setCwdCopied] = createSignal(false);
 
@@ -225,10 +235,12 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 	};
 
 	return (
-		<div id="status-bar" class={s.bar}>
+		<div id="status-bar" class={inline() ? s.inline : s.bar}>
 			{/* Left section */}
 			<div class={s.section}>
-				<ZoomIndicator level={props.zoomLevel} />
+				<Show when={!inline() || Math.round(props.zoomLevel * 100) !== 100}>
+					<ZoomIndicator level={props.zoomLevel} />
+				</Show>
 				<Show when={props.statusInfo}>
 					<span
 						class={cx(s.info, infoPulse() && s.infoPulse)}
@@ -248,7 +260,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						<div class={s.infoBalloon}>{props.statusInfo}</div>
 					</Show>
 				</Show>
-				<Show when={cwdParts()}>
+				<Show when={!inline() && cwdParts()}>
 					<span
 						class={s.cwd}
 						title={`${t("statusBar.clickCopy", "Click to copy:")} ${props.cwd}`}
@@ -372,9 +384,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						title={`Error Log (${keyFor("toggle-error-log")})`}
 						style={{ position: "relative" }}
 					>
-						<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-							<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
-						</svg>
+						<IconAlert size={16} />
 						<span class={s.toggleBadge} style={{ background: "var(--error)", color: "#000" }}>
 							{appLogger.unseenErrorCount()}
 						</span>
@@ -387,9 +397,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 					title={`${t("statusBar.toggleNotes", "Toggle Ideas Panel")} (${keyFor("toggle-notes")})`}
 					style={{ position: "relative" }}
 				>
-					<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-						<path d="M9 21c0 .5.4 1 1 1h4c.6 0 1-.5 1-1v-1H9v1zm3-19C8.1 2 5 5.1 5 9c0 2.4 1.2 4.5 3 5.7V17c0 .5.4 1 1 1h6c.6 0 1-.5 1-1v-2.3c1.8-1.3 3-3.4 3-5.7 0-3.9-3.1-7-7-7z" />
-					</svg>
+					<IconLightbulb size={16} />
 					<Show when={notesBadgeCount() > 0}>
 						<span class={s.toggleBadge}>{notesBadgeCount()}</span>
 					</Show>
@@ -401,9 +409,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 					title={`${t("statusBar.fileBrowser", "File Browser")} (${keyFor("toggle-file-browser")})`}
 					style={{ position: "relative" }}
 				>
-					<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-						<path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
-					</svg>
+					<IconFiles size={16} />
 				</button>
 				<button
 					class={s.toggleBtn}
@@ -412,10 +418,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 					title={`${t("statusBar.markdown", "Markdown")} (${keyFor("toggle-markdown")})`}
 					style={{ position: "relative" }}
 				>
-					<svg viewBox="0 0 208 128" width="16" height="10" fill="currentColor">
-						<rect x="5" y="5" width="198" height="118" rx="12" fill="none" stroke="currentColor" stroke-width="12" />
-						<path d="M30 98V30h20l20 25 20-25h20v68h-20V59L70 84 50 59v39H30zm125 0l-30-33h20V30h20v35h20l-30 33z" />
-					</svg>
+					<IconDocument size={16} />
 				</button>
 				<button
 					class={s.toggleBtn}
@@ -424,9 +427,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 					title={`${t("statusBar.git", "Git")} (${keyFor("toggle-git-ops")})`}
 					style={{ position: "relative" }}
 				>
-					<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-						<path d="M9 7H7v2H5v2h2v2h2v-2h2V9H9V7zm7 2h4v2h-4V9zm0 4h4v2h-4v-2zM5 19h14v2H5v-2zM5 3h14v2H5V3z" />
-					</svg>
+					<IconGit size={16} />
 					<Show when={changesCount() > 0}>
 						<span class={s.toggleBadge}>{changesCount()}</span>
 					</Show>
@@ -441,9 +442,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 						data-coach="ai-chat"
 						style={{ position: "relative" }}
 					>
-						<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
-							<path d="M3 2a2 2 0 00-2 2v6a2 2 0 002 2h1v2.5L7.5 12H13a2 2 0 002-2V4a2 2 0 00-2-2H3z" />
-						</svg>
+						<IconChat size={16} />
 					</button>
 				</Show>
 
@@ -465,8 +464,9 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 					</button>
 				</Show>
 
-				{/* Mic button - hold to talk (rightmost) */}
-				<Show when={dictationStore.state.enabled}>
+				{/* Mic button - hold to talk (rightmost). In the title bar the compose
+				    dock's Speak button is the way to dictate, so it stays out. */}
+				<Show when={!inline() && dictationStore.state.enabled}>
 					<button
 						class={cx(
 							s.toggleBtn,
@@ -500,6 +500,7 @@ export const StatusBar: Component<StatusBarProps> = (props) => {
 				<PrDetailPopover
 					repoPath={props.currentRepoPath || ""}
 					branch={github.status()?.current_branch || ""}
+					anchor={inline() ? "top" : undefined}
 					onClose={() => setShowPrDetailPopover(false)}
 					onReview={props.onReviewPr}
 				/>

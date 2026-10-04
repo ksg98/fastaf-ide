@@ -50,8 +50,8 @@
 }
 
 .label {
-  color: var(--fg-secondary);
-  font-weight: 500;
+  color: var(--fg-muted);
+  font-weight: 400;
 }
 
 .count {

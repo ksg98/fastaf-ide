@@ -3,17 +3,17 @@
   50% { opacity: 1; }
 }
 
-/* TabBar — flat text tabs the full height of the strip, like an editor's.
-   Type is carried by the leading icon colour, state by the dot; the active
-   tab is a slightly lighter block with brighter text — no pill, no underline,
-   no coloured bar. */
+/* TabBar — pill tabs inside the title bar, the way Codex draws its pane tabs:
+   28px pills with an 8px radius, the active one a step lighter
+   (--row-selected), text 13px. State is the leading 6px dot, kind its colour;
+   the close button appears on hover and on the active tab. */
 .tabBarWrapper {
   display: flex;
   flex: 1;
   align-items: center;
   min-width: 0;
   height: 100%;
-  gap: 4px;
+  gap: 2px;
 }
 
 /* File drag-over highlight (applied by dragDrop.ts via global class) */
@@ -27,7 +27,7 @@
 /* Scroll region — contains arrows, fades, and the scrollable tab list */
 .scrollRegion {
   display: flex;
-  flex: 1;
+  flex: 0 1 auto;
   align-items: center;
   position: relative;
   overflow: hidden;
@@ -39,7 +39,7 @@
 .tabs {
   display: flex;
   flex: 1;
-  gap: 0;
+  gap: 2px;
   overflow-x: auto;
   align-items: center;
   height: 100%;
@@ -61,7 +61,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-secondary);
+  background: var(--bg-chrome);
   border: none;
   color: var(--fg-muted);
   cursor: pointer;
@@ -108,25 +108,25 @@
 
 .fadeLeft {
   left: 24px;
-  background: linear-gradient(to right, var(--bg-secondary), rgba(var(--bg-secondary-rgb), 0));
+  background: linear-gradient(to right, var(--bg-chrome), transparent);
 }
 
 .fadeRight {
   right: 24px;
-  background: linear-gradient(to left, var(--bg-secondary), rgba(var(--bg-secondary-rgb), 0));
+  background: linear-gradient(to left, var(--bg-chrome), transparent);
 }
 
 .tab {
   display: flex;
   align-items: center;
-  gap: 7px;
-  height: 100%;
-  padding: 0 12px;
-  min-width: 56px;
-  max-width: 220px;
+  gap: 8px;
+  height: 28px;
+  padding: 0 6px 0 10px;
+  min-width: 64px;
+  max-width: 240px;
   flex-shrink: 0;
   background: transparent;
-  border-radius: 0;
+  border-radius: 8px;
   color: var(--fg-muted);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
@@ -138,7 +138,7 @@
 
 @media (hover: hover) {
   .tab:hover {
-    background: var(--surface-hover);
+    background: var(--wash-0);
   }
   .tab:hover .tabName {
     color: var(--fg-primary);
@@ -148,7 +148,7 @@
 /* Active tab — a flat, slightly lighter block. The leading icon colour
    already says what kind of tab this is. */
 .tab.active {
-  background: var(--wash-1);
+  background: var(--row-selected);
   box-shadow: none;
 }
 
@@ -156,22 +156,26 @@
   content: none;
 }
 
+/* State dot — drawn as a disc (the ● glyph inside is hidden), so it is the same
+   6px everywhere regardless of font metrics. Colour comes from the state rules
+   below via currentColor. */
 .tabIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 12px;
-  height: 12px;
-  font-size: 7px;
-  line-height: 1;
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  font-size: 0;
+  line-height: 0;
   color: var(--fg-muted);
   flex-shrink: 0;
-  opacity: 0.35;
+  opacity: 0.5;
 }
 
 .tabName {
   font-size: var(--font-md);
   font-weight: 400;
+  letter-spacing: -0.003em;
   color: var(--fg-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -208,15 +212,16 @@
   background: none;
   border: none;
   color: var(--fg-muted);
-  font-size: var(--font-lg);
+  font-size: 15px;
   line-height: 1;
   cursor: pointer;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
+  padding: 0 0 1px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-sm);
+  border-radius: 5px;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
   opacity: 0;
@@ -230,6 +235,10 @@
   }
 }
 
+.tab.active .tabClose {
+  opacity: 0.7;
+}
+
 @media (hover: hover) {
   .tabClose:hover {
     background: var(--wash-2);
@@ -239,17 +248,17 @@
 
 /* New-tab / multiview buttons — icon-button vocabulary at the tab height. */
 .newBtn {
-  width: 26px;
-  min-width: 26px;
-  height: 26px;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-muted);
+  border-radius: 8px;
+  color: var(--fg-secondary);
   font-size: var(--font-lg);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
@@ -258,14 +267,14 @@
 }
 
 .newBtn:hover {
-  background: var(--surface-hover);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
 /* Multiview toggle + hover preview */
 .mvBtnActive {
-  color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--fg-primary);
+  background: var(--row-selected);
 }
 
 /* Glass popover recipe — surface-overlay + overlay blur + subtle border +
@@ -375,8 +384,8 @@
 }
 
 .tab.shellIdle .tabIcon {
-  color: var(--success);
-  opacity: 1;
+  color: var(--fg-muted);
+  opacity: 0.8;
 }
 
 .tab.shellUnseen .tabIcon {

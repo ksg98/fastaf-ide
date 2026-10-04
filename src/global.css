@@ -351,8 +351,15 @@
   --shadow-2xl: 0 28px 70px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.35);
 
   --sidebar-width: 300px;
-  --toolbar-height: 36px;
+  --toolbar-height: 38px;
   --tab-bar-height: 34px;
+  /* Shell tones. Flat themes keep one frame colour; tonal themes (html.tonal,
+     below) step them the way Codex does: title bar > sidebar > content. */
+  --bg-chrome: var(--bg-secondary);          /* title bar */
+  --surface-composer: var(--bg-tertiary);    /* the composer card */
+  --row-selected: var(--wash-1);             /* selected sidebar row, active tab */
+  --hairline-w: 1px;                         /* width of region dividers */
+  --hairline: var(--border-subtle);          /* colour of region dividers */
   --status-height: 26px;
   --font-mono: "JetBrains Mono", "Fira Code", "Hack", "Cascadia Code", "Source Code Pro", "DejaVu Sans Mono", monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Liberation Sans", sans-serif;
@@ -382,6 +389,37 @@ html.vibrancy {
   --surface-overlay: var(--sheen), rgba(var(--bg-tertiary-rgb), 0.78);
   --blur-glass: blur(28px) saturate(1.4);
   --blur-overlay: blur(22px) saturate(1.4);
+}
+
+/* A tonal theme (applyAppTheme sets html.tonal when frame ≠ well) is drawn the
+   way Codex draws its window: opaque, flat, three grey steps (title bar >
+   sidebar > content) and half-pixel light dividers where regions meet. */
+html.tonal,
+html.vibrancy.tonal {
+  --app-gloss: none;
+  --sheen: none;
+  --sheen-strong: none;
+  --bg-app: var(--bg-secondary);
+  --surface-glass: var(--bg-secondary);
+  --surface-overlay: var(--bg-tertiary);
+  --blur-glass: none;
+  --blur-overlay: blur(22px) saturate(1.4);
+  --bg-chrome: color-mix(in srgb, var(--bg-secondary) 55%, var(--bg-tertiary));
+  --surface-composer: color-mix(in srgb, var(--bg-tertiary) 45%, var(--bg-highlight));
+  --row-selected: rgba(255, 255, 255, 0.08);
+  --hairline-w: 0.5px;
+  --hairline: rgba(255, 255, 255, 0.09);
+}
+
+/* Flat themes under macOS vibrancy: the title bar stays see-through like the
+   rest of the frame, as it was before it had a tone of its own. */
+html.vibrancy:not(.tonal) {
+  --bg-chrome: transparent;
+}
+
+html.tonal.theme-light {
+  --row-selected: rgba(0, 0, 0, 0.06);
+  --hairline: rgba(0, 0, 0, 0.14);
 }
 
 /* OS-level "reduce transparency": collapse every pane to opaque, in-app

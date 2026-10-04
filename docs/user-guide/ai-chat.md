@@ -14,7 +14,7 @@ The same panel switches modes — no separate UI.
 ## Opening the panel
 
 - **Hotkey:** `Cmd+Alt+A` (macOS) / `Ctrl+Alt+A` (others) — toggle.
-- **Toolbar:** chat icon in the right section of the toolbar.
+- **Title bar:** chat icon at the right end of the title bar.
 - **Context menu:** right-click a terminal → *Send selection to AI Chat* or *Explain this error*.
 
 The panel docks on the right. Drag its left edge to resize it; the width applies

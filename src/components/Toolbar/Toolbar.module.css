@@ -1,19 +1,22 @@
-/* Toolbar
+/* Toolbar — the title bar.
  *
- * Part of the frame: paints nothing of its own (the frame surface shows
- * through); one hairline underneath separates it from the sidebar and tab
- * strip. Every control is a 26px icon button or a quiet chip.
+ * One 38px row across the whole window, the way Codex draws its title bar:
+ * traffic lights and the sidebar toggle over the sidebar column, the tab strip
+ * over the content, notifications and panel toggles at the right. It is the
+ * chrome tone (--bg-chrome: a step lighter than the sidebar in tonal themes)
+ * with one divider underneath. Every control is a 28px icon button with a
+ * 16px stroke icon from components/icons.
  *
  * The 78px macOS traffic-light inset and every -webkit-app-region rule are
  * load-bearing (Tauri drag region + native window controls) — do not touch. */
 .toolbar {
   height: var(--toolbar-height);
   min-height: var(--toolbar-height);
-  background: transparent;
-  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-chrome);
+  border-bottom: var(--hairline-w) solid var(--hairline);
   display: flex;
   align-items: center;
-  padding: 0 10px 0 12px;
+  padding: 0 8px 0 0;
   -webkit-app-region: drag;
   -webkit-user-select: none;
   user-select: none;
@@ -28,48 +31,22 @@
   height: 100%;
 }
 
+/* Over the sidebar column: lights, then the sidebar toggle, then drag space. */
 .left {
   width: var(--sidebar-width);
   flex: none;
   position: relative;
-  justify-content: flex-end;
-  padding-right: 6px;
+  justify-content: flex-start;
+  padding: 0 8px 0 10px;
   gap: 2px;
   overflow: hidden;
   -webkit-app-region: drag;
 }
 
-/* Flexible gap on either side of the app name. The name stays visually centred in
-   whatever space the buttons leave, but it is a real flex item — it can never be
-   painted on top of them. It used to be position:absolute at left:50%, which at a
-   narrow sidebar put the label straight over the right-aligned toggles. */
 .leftSpacer {
   flex: 1 1 auto;
   min-width: 0;
-}
-
-.appName {
-  flex: 0 1 auto;
-  min-width: 0;
-  pointer-events: none;
-  user-select: none;
-  opacity: 0.9;
-}
-
-.appNameFull {
-  display: block;
-}
-
-.appNameShort {
-  display: none;
-}
-
-.narrowSidebar .appNameFull {
-  display: none;
-}
-
-.narrowSidebar .appNameShort {
-  display: block;
+  align-self: stretch;
 }
 
 /* Reserve room for the native traffic-light buttons on macOS. Never remove:
@@ -83,59 +60,60 @@
   flex: none;
 }
 
-:global(#app.sidebar-hidden) .appName {
-  display: none;
-}
-
 .center {
   flex: 1;
+  min-width: 0;
   gap: 8px;
-  padding-left: 2px;
+  padding-left: 8px;
+}
+
+/* With the tab strip in it, the centre is the strip — no breadcrumb padding. */
+.centerTabs {
+  gap: 0;
+  padding-left: 6px;
 }
 
 .right {
   flex: none;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 2px;
+  padding-left: 8px;
 }
 
-/* Sidebar toggle / filter toggle — iconBtn vocabulary (26×26 transparent) plus
-   the no-drag override so they remain clickable inside the drag region. */
-.sidebarToggle,
-.filterToggle {
-  width: 26px;
-  height: 26px;
+/* Sidebar toggle — the shared icon-button recipe, no-drag so it stays clickable. */
+.sidebarToggle {
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-muted);
+  border-radius: 8px;
+  color: var(--fg-secondary);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
   -webkit-app-region: no-drag;
 }
 
-.sidebarToggle:hover,
-.filterToggle:hover {
-  background: var(--surface-hover);
+.sidebarToggle:hover {
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
-.sidebarToggle:focus-visible,
-.filterToggle:focus-visible {
+.sidebarToggle:focus-visible {
   outline: none;
   box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25);
 }
 
-/* Repo filter icon — accent tint when "active only" is engaged. */
-.filterToggleActive,
-.filterToggleActive:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-  color: var(--accent);
+/* The IDE launcher keeps its own component; this slot only orders it. */
+.ideSlot {
+  order: 6;
+  display: inline-flex;
+  align-items: center;
+  -webkit-app-region: no-drag;
 }
 
 /* Branch chip — quiet breadcrumb: repo / branch. No border at rest. */
@@ -195,10 +173,11 @@
 
 /* Notification group: layout container for bell, watcher, last-item */
 .notifGroup {
+  order: 5;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 26px;
+  gap: 2px;
+  height: 28px;
   position: relative;
   -webkit-app-region: no-drag;
 }
@@ -210,13 +189,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-muted);
+  border-radius: 8px;
+  color: var(--fg-secondary);
   font-size: var(--font-xs);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
@@ -225,7 +204,7 @@
 
 .bell:hover,
 .watcherBtn:hover {
-  background: var(--surface-hover);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
@@ -237,10 +216,10 @@
 
 .notifCount {
   position: absolute;
-  top: -2px;
-  right: -3px;
-  min-width: 15px;
-  height: 15px;
+  top: 2px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
   padding: 0 4px;
   border-radius: var(--radius-pill);
   background: var(--accent);
@@ -252,7 +231,7 @@
   align-items: center;
   justify-content: center;
   pointer-events: none;
-  box-shadow: 0 0 0 2px var(--bg-secondary);
+  box-shadow: 0 0 0 2px var(--bg-chrome);
 }
 
 /* Popover — floating overlay surface */
@@ -529,12 +508,12 @@
 .lastItemBtn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 10px;
-  background: var(--bg-tertiary);
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
+  background: var(--row-selected);
   color: var(--fg-secondary);
-  border: 1px solid var(--border-subtle);
+  border: none;
   border-radius: var(--radius-pill);
   cursor: pointer;
   font-size: var(--font-xs);
@@ -549,14 +528,13 @@
 }
 
 .lastItemBtn:hover {
-  background: var(--bg-highlight);
+  background: var(--wash-2);
   color: var(--fg-primary);
 }
 
 /* Severity tints — the pill is a notification, not a neutral button: make the
    outcome readable at a glance (red = failure, green = success, amber = attention). */
 .lastItemError {
-  border-color: color-mix(in srgb, var(--error) 40%, transparent);
   color: var(--error);
   background: color-mix(in srgb, var(--error) 12%, transparent);
 }
@@ -567,7 +545,6 @@
 }
 
 .lastItemSuccess {
-  border-color: color-mix(in srgb, var(--success) 40%, transparent);
   color: var(--success);
   background: color-mix(in srgb, var(--success) 12%, transparent);
 }
@@ -578,7 +555,6 @@
 }
 
 .lastItemWarn {
-  border-color: color-mix(in srgb, var(--changes) 40%, transparent);
   color: var(--changes);
   background: color-mix(in srgb, var(--changes) 12%, transparent);
 }

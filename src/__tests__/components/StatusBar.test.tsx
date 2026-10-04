@@ -307,6 +307,33 @@ describe("StatusBar", () => {
 		expect(popover).not.toBeNull();
 	});
 
+	describe("title-bar placement", () => {
+		it("renders as a cluster without its own bar, keeping the panel toggles", () => {
+			const { container } = render(() => <StatusBar {...defaultProps} placement="toolbar" />);
+			const root = container.querySelector("#status-bar");
+			expect(root?.classList.contains("inline")).toBe(true);
+			expect(root?.classList.contains("bar")).toBe(false);
+			expect(findToggleByTitle(container, "Git")).not.toBeNull();
+			expect(findToggleByTitle(container, "Markdown")).not.toBeNull();
+		});
+
+		it("leaves out the hold-to-talk mic — the compose dock's Speak replaces it", () => {
+			mockDictationState.enabled = true;
+			const { container } = render(() => <StatusBar {...defaultProps} placement="toolbar" />);
+			expect(findToggleByTitle(container, "Voice Dictation")).toBeNull();
+			expect(container.querySelector('[data-coach="dictation"]')).toBeNull();
+		});
+
+		it("hides the cwd and a 100% zoom, but shows a non-default zoom", () => {
+			const at100 = render(() => <StatusBar {...defaultProps} placement="toolbar" cwd="/Users/me/project" />);
+			expect(at100.container.querySelector(".cwd")).toBeNull();
+			expect(at100.container.querySelector("[data-testid='zoom-indicator']")).toBeNull();
+			at100.unmount();
+			const zoomed = render(() => <StatusBar {...defaultProps} placement="toolbar" zoomLevel={1.25} />);
+			expect(zoomed.container.querySelector("[data-testid='zoom-indicator']")?.textContent).toBe("125%");
+		});
+	});
+
 	it("shows mic button when dictation is enabled", () => {
 		mockDictationState.enabled = true;
 		const { container } = render(() => <StatusBar {...defaultProps} />);

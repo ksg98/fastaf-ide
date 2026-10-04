@@ -252,7 +252,7 @@ describe("Sidebar", () => {
 	});
 
 	describe("footer buttons", () => {
-		it("calls onAddRepo when footer Add Repository button is clicked", () => {
+		it("calls onAddRepo when the Projects header's add button is clicked", () => {
 			const onAddRepo = vi.fn();
 			const { container } = render(() => <Sidebar {...defaultProps({ onAddRepo })} />);
 
@@ -324,11 +324,12 @@ describe("Sidebar", () => {
 			expect(branchName!.textContent).toBe("main");
 		});
 
-		it("shows SVG icons for main and feature branches", () => {
+		it("shows one state dot per branch, with the kind in its tooltip", () => {
 			setRepos({
 				"/repo1": makeRepo({
 					branches: {
-						main: { name: "main", isMain: true, worktreePath: null, terminals: ["t1"], additions: 0, deletions: 0 },
+						// The main checkout's worktree is the repo root itself.
+						main: { name: "main", isMain: true, worktreePath: "/repo1", terminals: ["t1"], additions: 0, deletions: 0 },
 						"feature/x": {
 							name: "feature/x",
 							isMain: false,
@@ -347,9 +348,11 @@ describe("Sidebar", () => {
 			const mainIcon = Array.from(icons).find((i) => i.classList.contains("branchIconMain"));
 			const featureIcon = Array.from(icons).find((i) => i.classList.contains("branchIconWorktree"));
 			expect(mainIcon).toBeDefined();
-			expect(mainIcon!.querySelector("svg")).not.toBeNull();
+			expect(mainIcon!.querySelector(".branchDot")).not.toBeNull();
+			expect(mainIcon!.getAttribute("title")).toBe("Main branch");
 			expect(featureIcon).toBeDefined();
-			expect(featureIcon!.querySelector("svg")).not.toBeNull();
+			expect(featureIcon!.querySelector(".branchDot")).not.toBeNull();
+			expect(featureIcon!.getAttribute("title")).toBe("Worktree");
 		});
 
 		it("sorts branches with main first", () => {

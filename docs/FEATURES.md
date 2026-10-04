@@ -47,13 +47,14 @@
 - Pause/resume PTY output (`pause_pty` / `resume_pty` Tauri commands) — suspends reader thread without killing the session
 
 ### 1.2 Tab Bar
+- Lives in the title bar (section 4), right of the sidebar column: 28px pill tabs, the `+` and Multiview buttons follow the last tab, and empty strip space drags the window
 - Create: `Cmd+T`, `+` button (click = new tab, right-click = split options)
 - Close: `Cmd+W`, middle-click, context menu
 - Reopen last closed: `Cmd+Shift+T` (remembers last 10 closed tabs)
 - Switch: `Cmd+1` through `Cmd+9`, `Ctrl+Tab` / `Ctrl+Shift+Tab`
 - Rename: double-click tab name (inline editing)
 - Reorder: drag-and-drop with visual drop indicators (works for all tab types: terminal, diff, editor, markdown, plugin panels)
-- Tab status dot (left of name): grey=idle, blue-pulse=busy, green=done, purple=unseen (completed while not viewed), orange-pulse=question (needs input), red-pulse=error
+- Tab status dot (left of name): grey=idle, blue-pulse=busy, unseen colour=completed while not viewed, orange-pulse=question (needs input), red-pulse=error
 - Tab type colors: red gradient=diff, blue gradient=editor, teal gradient=markdown, purple gradient=panel, amber gradient=remote PTY session
 - Remote PTY sessions (created via HTTP/MCP) show "PTY:" prefix and amber styling
 - Progress bar (OSC 9;4)
@@ -208,6 +209,28 @@ A multi-line editor docked under the terminal for writing a prompt without fight
 - **Order** — queued commands are typed one per idle window, in the order they were composed; a new one never overtakes one already waiting
 - **Agents only** — queueing is hidden for a plain shell: its idle state says nothing about which program currently owns stdin
 
+### 1.20a Compose Dock ("Speak or type")
+
+A one-row bar under the terminal column, on screen while a terminal tab is in front: **Speak**, **Type**, and the terminal they go to. It is the voice-first way to write to an agent; the per-terminal `Compose ⌘I` hint steps aside while it shows (`Cmd+I` still opens the multi-line editor above). The bar sits under the terminal panes only — never under the Files or Git panel. Component: `src/components/ComposeDock/`; the shape follows Codex's composer (`docs/frontend/STYLE_GUIDE.md` › Composer).
+
+- **No second text box at rest** — the agent in the terminal already draws its own prompt. The bar opens into a card (field + control row) only when there is text to look at: Speak, Type, or a saved draft. The card folds back into the bar after Enter sends, on `Esc`, or when an empty card loses focus
+- **Speak** — opens the card, focuses the field, then starts dictation, so the transcript lands in the field instead of the terminal. While recording the words show as the field's placeholder, the row becomes a dotted live waveform with a stop button, and the mic's stop ends it. With **Auto-send** on, the transcript is sent as soon as it lands. Dictation started from the hotkey while the terminal has focus still goes straight to the terminal; the bar shows the waveform and the words meanwhile. Speak is hidden when dictation is off
+- **Type** — opens the card for the keyboard. `Enter` sends through `sendCommand` (agent-aware Enter semantics, same as the Compose panel); `Shift+Enter` is a newline; `Esc` hands focus back to the terminal
+- **Queue** — `Option+Enter` queues for an agent's next idle window (`enqueue_command`), keeps the card open for the next prompt, and an `N queued` chip shows while commands wait
+- **Target** — the chip at the right names who receives the text (the detected agent, else the tab name), its branch, and a state dot (grey idle, blue pulse busy, orange awaiting input); clicking it focuses the terminal
+- **Voice chat** — when AI Chat is enabled, the round button opens it while the field is empty (voice mode lives there)
+- **Drafts** — unsent text is kept per terminal across tab switches; a terminal with a draft reopens the card
+- **Hidden** when no terminal is active, or while a diff, markdown or editor tab is in front. The dictation toast stays away while the dock or the empty-state composer is on screen
+
+### 1.20b Empty-state composer ("What should we build?")
+
+Once the welcome card is dismissed, the empty well shows "What should we build in ‹repo›?" over the card, with the active repo and branch on a strip above it.
+
+- **Agent picker** — a ghost chip lists the installed, enabled agents that accept a starting prompt (Claude Code, Codex CLI)
+- **Enter** opens a terminal on the active branch and, on its first idle prompt, starts that agent with the text as its first prompt (`claude '…'`, one shell-quoted argument; a prompt starting with `-` goes after `--`). The agent's launch command is stored without the prompt, so a resume never replays it
+- **No shell target, on purpose** — the text may come straight from dictation; it is only ever handed to an agent as a quoted prompt, never run as a command nobody has read
+- Disabled, and says why, until a repository exists ("Add a repository to start") or while no prompt-taking agent is installed
+
 ### 1.21 Auto-Standby (Unix)
 
 Idle, unfocused terminals are suspended to stop them consuming CPU and battery. A background checker (every 30s) sends `SIGSTOP` to the entire process group of a session — `kill(-pgid, …)`, so children (dev servers, agent processes) are paused too, not just the shell.
@@ -223,8 +246,14 @@ Idle, unfocused terminals are suspended to stop them consuming CPU and battery. 
 
 ## 2. Sidebar
 
+### 2.0 Layout
+- Top: **New terminal** (opens a terminal in the active repo's active branch, `Cmd+T`) and **Search projects** (Enter activates the first match, Esc clears)
+- "Projects" section header; hovering it reveals the **active-only filter** (see 2.8) and **Add repository** (`+`)
+- Repos are folder rows (open folder while expanded); branches sit under them as plain rows whose text lines up with the repo name, with one 6px state dot in front (see 2.3)
+- Footer: one row — git sync icons on the left (2.4), workspaces / help / settings on the right
+
 ### 2.1 Repository List
-- Add repository via `+` button or folder dialog
+- Add repository via the Projects header's `+` button or folder dialog
 - Click repo header to expand/collapse branch list
 - Click again to toggle icon-only mode (shows initials)
 - `⋯` button: Repo Settings, Switch Branch (via context menu on main worktree), Create Worktree, Move to Group, Park Repository, Remove
@@ -249,10 +278,9 @@ Right-click the main worktree row → **Switch Branch** submenu to checkout a di
 - Right-click context menu: Copy Path, Add Terminal, Create Worktree, Merge & Archive, Delete Worktree, Open in IDE, Rename Branch
 - CI ring: proportional arc segments (green=passed, red=failed, yellow=pending)
 - PR badge: always shows `#number` plus its highest-priority state when applicable (Draft, Conflicts, CI, review, merged/closed), with state color — click for detail popover
-- Diff stats: `+N / -N` additions/deletions
+- Diff stats: `+N / -N` additions/deletions, shown on hover and on the selected row
 - Merged badge: branches merged into main show a "Merged" badge
-- Question indicator: `?` icon (orange, pulsing) when agent asks a question
-- Idle indicator: branch icons turn grey when the repo has no active terminals
+- State dot (one per branch, in front of the name): none = no terminal open, grey = a terminal is open, blue pulse = busy, orange pulse = the agent asked a question, red = error, unseen colour = finished while not viewed. The tooltip names the kind (main branch, worktree, shell)
 - Quick switcher badge: numbered index shown when `Cmd+Ctrl` held
 - Remote-only branches with open PRs: shown in sidebar with PR badge and inline accordion actions (Checkout, Create Worktree). Additional actions when PR popover is open: Merge, View Diff, Approve, Dismiss
 - Dismiss/Show Dismissed: remote-only PRs can be dismissed from the sidebar; a "Show Dismissed" toggle reveals them again
@@ -265,7 +293,7 @@ Right-click the main worktree row → **Switch Branch** submenu to checkout a di
 - Single-terminal branches stay compact — no caret, no list — and the whole feature is inert when the setting is off.
 
 ### 2.4 Git Quick Actions
-- Bottom of sidebar when a repo is active
+- Left end of the sidebar footer when a repo is active, as icon buttons (labels in their tooltips; the Git panel's sync row has the same four with labels)
 - Pull, Push, Fetch, Stash buttons — execute in active terminal
 
 ### 2.5 Sidebar Resize
@@ -538,16 +566,18 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 
 ---
 
-## 4. Toolbar
+## 4. Toolbar (title bar)
+
+The one band above the content, laid out like Codex's title bar: traffic lights and the sidebar toggle over the sidebar column, the tab strip (1.2) in the centre, and at the right end the notifications, the IDE launcher and the status cluster (section 5). There is no separate tab strip or bottom status bar.
 
 ### 4.1 Sidebar Toggle
-- `◧` button (left side) — same as `Cmd+[`
+- Panel icon right of the traffic lights — same as `Cmd+[`
 - Hotkey hint visible during quick switcher
-- Adjacent **filter icon** (shown while the sidebar is visible) toggles the "Active only" repo filter — see section 2.8
+- The "Active only" repo filter moved to the sidebar's Projects header — see section 2.8
 
 ### 4.2 Branch Display
-- Center: shows `repo / branch` name
-- Click to open branch rename dialog
+- Replaced by the tab strip in the app's title bar; the sidebar's selected row shows the active repo and branch
+- Still rendered when the toolbar is used without tabs: `repo / branch`, click to open the branch rename dialog
 
 ### 4.3 Plan File Button
 - Appears when an AI agent emits a plan file path (e.g., `PLAN.md`)
@@ -577,12 +607,14 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 
 ---
 
-## 5. Status Bar
+## 5. Status Bar (status cluster in the title bar)
+
+The status bar no longer has its own strip: it renders inside the title bar's right end (`StatusBar placement="toolbar"`). Status, usage and PR badges flow before the notifications; the panel toggles end the row.
 
 ### 5.1 Left Section
-- Zoom indicator: current font size (shown when != default)
-- Status info text (with pendulum ticker for overflow, pulse animation on new messages)
-- CWD path: shortened with `~/`, click to copy to clipboard (shows "Copied!" feedback)
+- Zoom indicator: current zoom (shown only when not 100%)
+- Status info text — only while it says something other than "Ready" (with pendulum ticker for overflow, pulse animation on new messages)
+- CWD path: not shown in the title bar (the bottom-strip placement still shows it: shortened with `~/`, click to copy)
 - Unified agent badge with priority cascade:
   1. Rate limit warning (highest): count + countdown timer when sessions are rate-limited
   2. Claude Usage API ticker: live utilization from Anthropic API (click opens dashboard)
@@ -601,10 +633,12 @@ Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the 
 
 ### 5.3 Right Section — Panel Toggles
 - Ideas (lightbulb icon) — `Cmd+Alt+N`
-- File Browser (folder icon) — `Cmd+E`
-- Markdown (MD icon) — `Cmd+Shift+M`
-- Git (diff icon) — `Cmd+Shift+D` (opens Git Panel)
-- Mic button (when dictation enabled): hold to record, release to transcribe
+- File Browser (pages icon) — `Cmd+E`
+- Markdown (document icon) — `Cmd+Shift+M`
+- Git (branch-merge icon) — `Cmd+Shift+D` (opens Git Panel)
+- AI Chat (speech-bubble icon, when enabled) — `Cmd+Alt+A`
+- An open panel lights its toggle
+- Mic button: only in the bottom-strip placement (hold to record, release to transcribe); in the title bar the compose dock's **Speak** is the way to dictate
 
 ---
 

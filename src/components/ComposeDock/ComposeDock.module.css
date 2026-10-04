@@ -1,0 +1,433 @@
+/* Compose dock — the voice-first way to talk to the active terminal, and the
+   empty well's "What should we build?" hero (docs/frontend/STYLE_GUIDE.md ›
+   Composer).
+
+   Shape borrowed from Codex's composer: one raised card — a tonal step on the
+   well, no hairline, 18px radius — a 15px field, and a row of 28px round
+   controls, the single bright one being the action. Under a live terminal the
+   dock is a one-row bar (Speak · Type · target): the agent in the terminal
+   already draws its own prompt, so a second text box only appears when there
+   is text to look at — a draft, a transcript, typing. */
+
+.dock {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px 10px;
+  background: var(--bg-primary);
+}
+
+/* The empty state passes clicks through (pointer-events: none) so drops reach
+   the well; the hero takes them back. */
+.hero {
+  width: min(760px, calc(100% - 48px));
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 28px;
+  pointer-events: auto;
+}
+
+.heroTitle {
+  margin: 0;
+  text-align: center;
+  font-size: 28px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  color: var(--fg-primary);
+}
+
+.heroRepo {
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 6px;
+}
+
+/* ── Bar: the dock at rest ─────────────────────────────────────── */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  min-width: 0;
+}
+
+.speakBtn,
+.typeBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 13px 0 11px;
+  border: none;
+  border-radius: var(--radius-pill);
+  font-family: inherit;
+  font-size: var(--font-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.speakBtn > svg,
+.typeBtn > svg {
+  flex-shrink: 0;
+}
+
+/* The one bright object on the row — voice is the first thing the dock offers. */
+.speakBtn {
+  background: var(--fg-primary);
+  color: var(--bg-primary);
+}
+
+.speakBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg-primary) 86%, var(--bg-primary));
+}
+
+.typeBtn {
+  background: transparent;
+  color: var(--fg-secondary);
+}
+
+.typeBtn:hover:not(:disabled) {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.speakBtn:disabled,
+.typeBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.speakBtn:focus-visible,
+.typeBtn:focus-visible,
+.target:focus-visible,
+.iconBtn:focus-visible,
+.circleBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.3);
+}
+
+.spacer {
+  flex: 1;
+  min-width: 8px;
+}
+
+/* Dictation started from the keyboard goes straight into the terminal; the
+   bar still shows what is being heard. */
+.barPartial {
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+}
+
+/* ── Card: field + row ─────────────────────────────────────────── */
+.cardStack {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.card {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 12px 12px 16px;
+  background: var(--surface-composer);
+  border-radius: 18px;
+}
+
+.cardDisabled {
+  opacity: 0.6;
+}
+
+/* Hero only: where the new terminal opens, as the strip Codex tucks behind
+   its composer — repo and branch, slightly darker than the card. */
+.contextRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 0 14px -12px;
+  padding: 8px 16px 20px;
+  border-radius: 14px 14px 0 0;
+  background: color-mix(in srgb, var(--surface-composer) 50%, var(--bg-primary));
+}
+
+.contextChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+  white-space: nowrap;
+}
+
+.contextChip > svg {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+.textarea {
+  width: 100%;
+  min-height: 22px;
+  max-height: 200px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  resize: none;
+  overflow-y: auto;
+  box-sizing: border-box;
+  color: var(--fg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-lg);
+  line-height: 1.45;
+}
+
+.textarea::placeholder {
+  color: var(--fg-muted);
+}
+
+.textarea:disabled {
+  cursor: not-allowed;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  min-width: 0;
+}
+
+/* Which terminal the text goes to. Ghost, like Codex's row chips. */
+.target {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 10px 0 8px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-family: inherit;
+  font-size: var(--font-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.target:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.targetName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.targetMeta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-muted);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--wash-1);
+  color: var(--fg-secondary);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chip > svg {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+/* Hero: which agent the new terminal runs — ghost, like the target chip. */
+.picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.picker:hover {
+  background: var(--wash-1);
+}
+
+.picker > svg {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+.pickerValue {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The native <select> lies invisibly over the picker: the label sets the
+   width, macOS still pops the system menu. */
+.chipSelect {
+  appearance: none;
+  -webkit-appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.picker:focus-within {
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.35);
+}
+
+/* State dot: what the target terminal is doing (colour = state, STYLE_GUIDE). */
+.dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--fg-muted);
+}
+
+.dotBusy {
+  background: var(--activity);
+  animation: dotPulse 1.4s var(--ease-in-out) infinite;
+}
+
+.dotAwaiting {
+  background: var(--attention);
+}
+
+@keyframes dotPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.iconBtn:hover:not(:disabled) {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.iconBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Round 28px controls: grey at rest, the action in the text colour. */
+.circleBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--wash-2);
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    opacity var(--duration-fast) var(--ease-out);
+}
+
+.circleBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg-primary) 22%, transparent);
+}
+
+.circleBtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.sendBtn {
+  background: var(--fg-primary);
+  color: var(--bg-primary);
+}
+
+.sendBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg-primary) 86%, var(--bg-primary));
+}
+
+.wave {
+  flex: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dotBusy {
+    animation: none;
+  }
+}

@@ -11,8 +11,8 @@
   /* Detach/reattach/close chrome — override the default 24×24 for the
      slightly wider tab-strip hit-area (auto width + 4/6 padding) while
      inheriting hover wash, focus ring, and color from the primitive. */
-  width: auto;
-  height: auto;
-  padding: 4px 6px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   line-height: 1;
 }

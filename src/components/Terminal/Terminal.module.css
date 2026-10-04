@@ -16,6 +16,11 @@
   padding: 8px 0 8px 8px;
 }
 
+/* With the dock below, the agent's own prompt sits close to the bar. */
+:global(#app.compose-dock) .content {
+  padding-bottom: 2px;
+}
+
 .content :global(.xterm) {
   flex: 1;
   min-height: 0;

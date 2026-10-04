@@ -4,20 +4,23 @@
 }
 
 /* ── Sidebar ───────────────────────────────────────────────────────────────
-   Part of the frame: same surface as the toolbar and status bar, divided
-   from the content by one hairline. Hierarchy comes from type — repos are
-   13px/500 rows, branches are 13px/400 rows indented beneath them, terminal
-   sessions 12px beneath those. Icons are monochrome (shape = kind); only
-   states that need attention get colour. Everything sits on a 28px row
-   rhythm. */
+   Codex's sidebar, rebuilt for terminals: action rows (New terminal, Search)
+   on top, a "Projects" section, then folder rows (repos) with their branches
+   as plain rows whose text lines up with the repo name. Every row is 30px,
+   8px radius, inset 8px from the edges; selection is a neutral step
+   (--row-selected), never the accent. Icons are 16px strokes from
+   components/icons; state is the one 6px dot in front of a branch. The
+   sidebar is the frame tone and meets the content with a hairline. */
 .sidebar {
+  --sidebar-row-fg: color-mix(in srgb, var(--fg-primary) 88%, transparent);
+  --sidebar-branch-fg: color-mix(in srgb, var(--fg-primary) 74%, transparent);
   width: var(--sidebar-width);
   min-width: 200px;
   max-width: 500px;
   flex-shrink: 0;
   background: var(--surface-glass);
   backdrop-filter: var(--blur-glass);
-  border-right: 1px solid var(--border-subtle);
+  border-right: var(--hairline-w) solid var(--hairline);
   display: flex;
   flex-direction: column;
   position: relative;
@@ -46,7 +49,7 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 2px 0 8px;
+  padding: 8px 0 10px;
   container-type: inline-size;
   container-name: sidebar-list;
 }
@@ -79,56 +82,159 @@
   /* container for repo sections */
 }
 
-/* ── Repo search box ── */
-.searchBox {
+/* ── Action rows (New terminal, Search) ── */
+.actionRows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-bottom: 12px;
+}
+
+.actionRow {
   display: flex;
   align-items: center;
-  padding: 4px 8px 8px;
+  gap: 10px;
+  height: 30px;
+  margin: 0 8px;
+  padding: 0 8px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--sidebar-row-fg);
+  font-family: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.actionRow > svg {
+  flex-shrink: 0;
+  color: var(--fg-secondary);
+}
+
+.actionRow:hover:not(:disabled) {
+  background: var(--wash-0);
+  color: var(--fg-primary);
+}
+
+.actionRow:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.actionRow:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.4);
+}
+
+.actionLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The search row is an input dressed as an action row. */
+.searchBox {
+  cursor: text;
+}
+
+.searchBox:focus-within {
+  background: var(--row-selected);
 }
 
 .searchInput {
   flex: 1;
   min-width: 0;
-  height: 28px;
-  padding: 0 10px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
   outline: none;
-  transition: border-color var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out);
-}
-
-.searchInput:hover:not(:focus) {
-  border-color: var(--border-strong);
-}
-
-.searchInput:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
+  color: var(--fg-primary);
+  font-size: 13.5px;
+  font-family: inherit;
 }
 
 .searchInput::placeholder {
-  color: var(--fg-muted);
+  color: var(--sidebar-row-fg);
+}
+
+/* ── Section header ("Projects") — label left, actions on hover ── */
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  margin: 0 8px 2px;
+  padding: 0 4px 0 8px;
+}
+
+.sectionLabel {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--fg-secondary);
+}
+
+.sectionActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.sectionHeader:hover .sectionActions,
+.sectionActions:focus-within,
+.sectionActions:has(.sectionActionActive) {
+  opacity: 1;
+}
+
+.sectionAction {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.sectionAction:hover {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+.sectionActionActive,
+.sectionActionActive:hover {
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
 }
 
 /* ── Repo filter status banner (shown only while "active only" is engaged) ── */
 .filterStatus {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: calc(100% - 16px);
-  margin: 0 8px 6px;
-  padding: 5px 8px;
-  background: rgba(var(--accent-rgb), 0.12);
+  height: 30px;
+  margin: 0 8px 4px;
+  padding: 0 8px;
+  background: rgba(var(--accent-rgb), 0.1);
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: 8px;
   color: var(--accent);
-  font-size: var(--font-xs);
-  font-weight: 500;
+  font-size: var(--font-sm);
+  font-weight: 400;
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out);
 }
@@ -143,48 +249,26 @@
   opacity: 0.85;
 }
 
-/* ── Footer ── */
+/* ── Footer — one row: git sync icons left, workspace/help/settings right ── */
 .footer {
-  height: 36px;
-  min-height: 36px;
-  padding: 0 6px;
-  border-top: 1px solid var(--border-subtle);
+  height: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border-top: var(--hairline-w) solid var(--hairline);
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 2px;
 }
 
-.addRepo {
+.footerSpacer {
   flex: 1;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 26px;
-  padding: 0 8px;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
-  text-align: left;
   min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
 }
 
-.addRepo:hover {
-  background: var(--surface-hover);
-  color: var(--fg-primary);
-}
-
-.addRepoIcon {
-  flex-shrink: 0;
+/* "Add Repository" is the Projects header's + now; the class marks it. */
+.addRepo {
+  flex: none;
 }
 
 .footerIcons {
@@ -195,22 +279,22 @@
 }
 
 .footerAction {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-muted);
+  border-radius: 8px;
+  color: var(--fg-secondary);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 .footerAction:hover {
-  background: var(--surface-hover);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
@@ -227,40 +311,40 @@
 }
 
 .empty button {
-  height: 28px;
+  height: 30px;
   padding: 0 14px;
   margin: 2px 3px;
-  background: var(--accent);
+  background: var(--fg-primary);
   border: none;
-  border-radius: var(--radius-md);
-  color: var(--text-on-accent);
+  border-radius: var(--radius-pill);
+  color: var(--bg-primary);
   font-size: var(--font-md);
-  font-weight: 600;
+  font-weight: 500;
   font-family: inherit;
   cursor: pointer;
 }
 
 /* ── Repository Section ── */
 .repoSection {
-  margin-bottom: 6px;
+  margin-bottom: 2px;
 }
 
-/* Repo row — a real row, not a label: 28px, chevron leading, name 13px/600. */
+/* Repo row — Codex's project row: folder icon (open while expanded), name. */
 .repoHeader {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 28px;
-  margin: 0 6px;
-  padding: 0 6px 0 4px;
-  border-radius: var(--radius-md);
+  gap: 10px;
+  height: 30px;
+  margin: 0 8px;
+  padding: 0 4px 0 8px;
+  border-radius: 8px;
   cursor: pointer;
   position: relative;
   transition: background var(--duration-fast) var(--ease-out);
 }
 
 .repoHeader:hover {
-  background: var(--surface-hover);
+  background: var(--wash-0);
 }
 
 .repoInitials {
@@ -285,9 +369,9 @@
 
 .repoName {
   flex: 1;
-  font-size: var(--font-md);
+  font-size: 13.5px;
   font-weight: 500;
-  color: var(--fg-primary);
+  color: var(--sidebar-row-fg);
   letter-spacing: -0.005em;
   white-space: nowrap;
   overflow: hidden;
@@ -316,39 +400,34 @@
   }
 }
 
-/* Leading disclosure chevron: the › glyph, rotated to point down when open. */
+/* Leading folder icon — open while the repo is expanded. Clicking the row toggles. */
 .repoChevron {
   order: -1;
-  width: 14px;
+  width: 16px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: var(--font-lg);
-  color: var(--fg-muted);
-  transition: transform 150ms ease, color var(--duration-fast) var(--ease-out);
-  transform: rotate(0deg);
+  color: var(--fg-secondary);
   flex-shrink: 0;
-  line-height: 1;
-}
-
-.repoChevron.expanded {
-  transform: rotate(90deg);
+  transition: color var(--duration-fast) var(--ease-out);
 }
 
 .repoHeader:hover .repoChevron {
-  color: var(--fg-secondary);
+  color: var(--fg-primary);
 }
 
 .repoActionBtn {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
+  border-radius: 6px;
+  color: var(--fg-secondary);
   font-size: var(--font-md);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
@@ -356,18 +435,17 @@
 }
 
 .repoActionBtn:hover {
-  background: var(--wash-2);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
 .addBtn {
-  color: var(--fg-muted);
-  font-weight: 600;
+  color: var(--fg-secondary);
 }
 
 .addBtn:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-  color: var(--accent);
+  background: var(--row-selected);
+  color: var(--fg-primary);
 }
 
 /* Empty stand-in for an action button that does not apply to this repo.
@@ -443,18 +521,18 @@
 .groupHeader {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 28px;
-  margin: 0 6px;
-  padding: 0 6px 0 4px;
+  gap: 8px;
+  height: 30px;
+  margin: 6px 8px 0;
+  padding: 0 4px 0 8px;
   cursor: pointer;
   user-select: none;
-  border-radius: var(--radius-md);
+  border-radius: 8px;
   transition: background var(--duration-fast) var(--ease-out);
 }
 
 .groupHeader:hover {
-  background: var(--surface-hover);
+  background: var(--wash-0);
 }
 
 .groupColorDot {
@@ -464,11 +542,11 @@
   flex-shrink: 0;
 }
 
-/* Group = a folder of repos: 12px/600, muted, sentence case. */
+/* Group = a section of repos, read like the "Projects" label: 13px, muted. */
 .groupName {
   flex: 1;
-  font-size: var(--font-sm);
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 400;
   color: var(--fg-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -500,7 +578,7 @@
 }
 
 .groupRepos {
-  padding-left: 10px;
+  padding-left: 0;
 }
 
 .groupEmptyHint {
@@ -513,11 +591,11 @@
 /* One indent step below the repo header — same step the file browser uses per
    tree level, so the two panels read as one system (see --tree-indent). */
 .repoBranches {
-  padding: 1px 0 3px;
+  padding: 0 0 4px;
 }
 
 .repoEmpty {
-  padding: 4px 12px 4px 36px;
+  padding: 4px 12px 4px 42px;
   font-size: var(--font-sm);
   color: var(--fg-muted);
 }
@@ -525,33 +603,39 @@
 .branchItem {
   display: flex;
   align-items: center;
-  gap: 7px;
-  height: var(--row-h);
-  min-height: var(--row-h);
-  padding: 0 6px 0 24px;
-  margin: 0 6px;
+  gap: 10px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 4px 0 8px;
+  margin: 0 8px;
   cursor: pointer;
-  border-radius: var(--radius-md);
+  border-radius: 8px;
   position: relative;
-  color: var(--fg-secondary);
+  color: var(--sidebar-branch-fg);
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 @media (hover: hover) {
   .branchItem:hover {
-    background: var(--surface-hover);
+    background: var(--wash-0);
+    color: var(--fg-primary);
   }
 }
 
-/* Selection = translucent accent wash — no solid accent fill, no inset stripe. */
+/* Selection = a neutral step (Codex #2f2f2f), never the accent. */
 .branchItem.active {
-  background: rgba(var(--accent-rgb), 0.13);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
 .branchItem.active .branchName {
   color: var(--fg-primary);
+}
+
+/* Diff counts are detail, not chrome: they show on hover and on the selected row. */
+.branchItem:not(:hover):not(.active) .branchStats {
+  display: none;
 }
 
 .branchPreparing {
@@ -560,26 +644,30 @@
   opacity: 0.6;
 }
 
-/* Icon = kind (star / fork / shell), monochrome at rest. */
+/* The state dot sits in a 16px slot under the repo's folder icon, so branch
+   text lines up with the repo name. Kind (main / worktree / shell) is in the
+   tooltip; the dot only says what is happening. */
 .branchIcon {
-  font-size: var(--font-sm);
-  font-weight: 700;
   width: 16px;
   height: 16px;
-  text-align: center;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--fg-muted);
+  color: transparent;
 }
 
-.branchIconMain {
-  color: var(--fg-secondary);
+.branchDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
+/* A terminal is open here and nothing needs a glance: a quiet grey dot. */
+.branchIconMain,
 .branchIconWorktree {
-  color: var(--fg-secondary);
+  color: color-mix(in srgb, var(--fg-muted) 75%, transparent);
 }
 
 /* Terminal state colors — applied directly via BranchIcon colorClass prop.
@@ -599,9 +687,9 @@
   animation: pulse-opacity 1s ease-in-out infinite;
 }
 
+/* No terminal open: no dot. */
 .branchIconIdle {
-  color: var(--fg-muted);
-  opacity: 0.75;
+  color: transparent;
 }
 
 .branchIconUnseen {
@@ -620,9 +708,9 @@
      and a 300px sidebar rendered "fix/msn…" beside an intact "+238 -267 ⌘^3". */
   flex: 1;
   min-width: 0;
-  font-size: var(--font-md);
+  font-size: 13.5px;
   font-weight: 400;
-  color: var(--fg-primary);
+  color: inherit;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -631,13 +719,13 @@
 /* Diff stats — quiet tabular figures, no chip. */
 .branchStats {
   display: flex;
-  gap: 5px;
-  font-size: var(--font-xs);
+  gap: 6px;
+  font-size: 11.5px;
   font-family: var(--font-ui);
   font-variant-numeric: tabular-nums;
   background: transparent;
   border: none;
-  padding: 0;
+  padding: 0 4px 0 0;
   flex-shrink: 0;
   margin-left: auto;
   color: var(--fg-muted);
@@ -915,8 +1003,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 0;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   font-size: var(--font-md);
   font-weight: 600;
   cursor: pointer;
@@ -927,8 +1016,8 @@
 }
 
 .branchAddBtn:hover {
-  background: rgba(var(--accent-rgb), 0.16);
-  color: var(--accent);
+  background: var(--row-selected);
+  color: var(--fg-primary);
 }
 
 .branchRemoveBtn:hover {
@@ -951,26 +1040,26 @@
 .globalWorkspaceEntry {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 28px;
-  margin: 2px 6px;
-  padding: 0 8px 0 10px;
-  border-radius: var(--radius-md);
+  gap: 10px;
+  height: 30px;
+  margin: 2px 8px;
+  padding: 0 8px;
+  border-radius: 8px;
   cursor: pointer;
-  color: var(--fg-secondary);
+  color: var(--sidebar-row-fg);
   background: transparent;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 .globalWorkspaceEntry:hover {
-  background: var(--surface-hover);
+  background: var(--wash-0);
   color: var(--fg-primary);
 }
 
-/* Selection = translucent accent wash — no left-border stripe. */
+/* Selection = the same neutral step as a branch row. */
 .globalWorkspaceActive {
-  background: rgba(var(--accent-rgb), 0.13);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
@@ -991,12 +1080,8 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Git Quick Actions ── */
+/* ── Git Quick Actions — icon buttons at the left of the footer ── */
 .gitQuickActions {
-  height: 34px;
-  min-height: 34px;
-  padding: 0 6px;
-  border-top: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -1010,34 +1095,28 @@
 
 .gitQuickBtns {
   display: flex;
-  flex: 1;
   gap: 2px;
 }
 
 .gitQuickBtn {
-  flex: 1;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 6px;
+  padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: 8px;
   color: var(--fg-secondary);
-  font-size: var(--font-sm);
-  font-weight: 500;
   font-family: inherit;
   cursor: pointer;
-  white-space: nowrap;
-  min-width: 0;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 .gitQuickBtn:hover:not(:disabled) {
-  background: var(--surface-hover);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 
@@ -1055,19 +1134,26 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  color: var(--fg-muted);
+  color: inherit;
 }
 
-.gitQuickText {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Narrow sidebar: icon-only git actions so all four always fit. */
-@container sidebar-shell (max-width: 259px) {
-  .gitQuickText {
+/* Narrow sidebar: four git icons + three footer icons need ~224px. Below 240px
+   the git row steps aside (the Git panel's sync row has the same four) so the
+   settings button — and its onboarding anchor — never clip off the edge. */
+@container sidebar-shell (max-width: 239px) {
+  .gitQuickActions {
     display: none;
   }
+}
+
+/* Icon-only buttons; the label stays in the DOM for screen readers. */
+.gitQuickText {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .addRepoLabel {
@@ -1075,10 +1161,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
-}
-
-.gitQuickBtn:hover:not(:disabled) .gitQuickIcon {
-  color: var(--fg-primary);
 }
 
 /* Parked repos popover */

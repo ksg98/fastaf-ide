@@ -1,4 +1,4 @@
-import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { type Component, createEffect, createMemo, createSignal, For, type JSX, onCleanup, Show } from "solid-js";
 import releaseNotes from "../../assets/release-notes.json";
 import { useGitHub } from "../../hooks/useGitHub";
 import { t } from "../../i18n";
@@ -20,6 +20,7 @@ import { cx } from "../../utils";
 import { keyFor } from "../../utils/hotkey";
 import { getRepoColor } from "../../utils/repoColor";
 import { IdeLauncher } from "../IdeLauncher";
+import { IconBell, IconEye, IconPanelLeft, IconSearch } from "../icons";
 import { PrDetailPopover } from "../PrDetailPopover/PrDetailPopover";
 import { SmartPromptsDropdown } from "../SmartPromptsDropdown/SmartPromptsDropdown";
 import { WatcherManager } from "../WatcherManager/WatcherManager";
@@ -34,17 +35,6 @@ function relativeAge(timestamp: number): string {
 	if (hours < 24) return `${hours}h ago`;
 	return `${Math.floor(hours / 24)}d ago`;
 }
-
-/** Narrowest sidebar that still fits the full "FastAF" wordmark.
- *
- * Worst case is macOS: 78px of `padding-left` reserved for the traffic lights,
- * 10px `padding-right`, two 26px toggles plus gaps (~56px) and the 110px svg —
- * 254px total. The old threshold was 240, so between 240 and 254 the full name
- * did not fit; because it was absolutely positioned it overlapped the toggles
- * instead of pushing them. Below this the short "TUIC" mark (38px) is used, which
- * fits comfortably at the 200px minimum sidebar width.
- */
-const FULL_APP_NAME_MIN_SIDEBAR_PX = 254;
 
 const NOTIFICATION_LABELS: Record<PrNotificationType, { label: string; icon: string; cls: string }> = {
 	merged: { label: "Merged", icon: "\u2714", cls: s.notifMerged },
@@ -139,6 +129,11 @@ export interface ToolbarProps {
 	onReviewPr?: (repoPath: string, branchName: string, command: string) => void;
 	onOpenSettings?: () => void;
 	onShowWhatsNew?: (version: string) => void;
+	/** The tab strip. When given it takes the centre of the bar, the way Codex
+	 *  puts its pane tabs in the title bar; otherwise the repo/branch breadcrumb shows. */
+	tabs?: JSX.Element;
+	/** Trailing cluster after the notifications (the status bar's controls). */
+	trailing?: JSX.Element;
 }
 
 export const Toolbar: Component<ToolbarProps> = (props) => {
@@ -265,140 +260,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 
 	return (
 		<div id="toolbar" class={s.toolbar} data-tauri-drag-region>
-			<div
-				class={cx(s.left, uiStore.state.sidebarWidth < FULL_APP_NAME_MIN_SIDEBAR_PX && s.narrowSidebar)}
-				data-tauri-drag-region
-			>
-				<span class={s.leftSpacer} data-tauri-drag-region />
-				{/* Embossed app name — full version for wide sidebar, short for narrow */}
-				<svg
-					class={`${s.appName} ${s.appNameFull}`}
-					data-tauri-drag-region
-					viewBox="0 0 110 16"
-					width="110"
-					height="16"
-					aria-label="FastAF"
-				>
-					<defs>
-						<linearGradient id="toolbar-name-grad" x1="0" y1="0" x2="110" y2="0" gradientUnits="userSpaceOnUse">
-							<stop offset="0%" stop-color="#909090" />
-							<stop offset="32%" stop-color="#767676" />
-							<stop offset="100%" stop-color="#5a5a5a" />
-						</linearGradient>
-					</defs>
-					<text
-						x="0"
-						y="12"
-						fill="#060606"
-						font-size="11"
-						font-weight="700"
-						letter-spacing="0.09em"
-						font-family="system-ui,-apple-system,sans-serif"
-						dx="1"
-						dy="1"
-					>
-						FastAF
-					</text>
-					<text
-						x="0"
-						y="12"
-						fill="#3e3e3e"
-						font-size="11"
-						font-weight="700"
-						letter-spacing="0.09em"
-						font-family="system-ui,-apple-system,sans-serif"
-						dx="-0.5"
-						dy="-0.5"
-					>
-						FastAF
-					</text>
-					<text
-						x="0"
-						y="12"
-						fill="url(#toolbar-name-grad)"
-						font-size="11"
-						font-weight="700"
-						letter-spacing="0.09em"
-						font-family="system-ui,-apple-system,sans-serif"
-					>
-						FastAF
-					</text>
-				</svg>
-				<svg
-					class={`${s.appName} ${s.appNameShort}`}
-					data-tauri-drag-region
-					viewBox="0 0 38 16"
-					width="38"
-					height="16"
-					aria-label="FastAF"
-				>
-					<defs>
-						<linearGradient id="toolbar-name-grad-short" x1="0" y1="0" x2="38" y2="0" gradientUnits="userSpaceOnUse">
-							<stop offset="0%" stop-color="#909090" />
-							<stop offset="50%" stop-color="#767676" />
-							<stop offset="100%" stop-color="#5a5a5a" />
-						</linearGradient>
-					</defs>
-					<text
-						x="0"
-						y="12"
-						fill="#060606"
-						font-size="11"
-						font-weight="700"
-						letter-spacing="0.09em"
-						font-family="system-ui,-apple-system,sans-serif"
-						dx="1"
-						dy="1"
-					>
-						AF
-					</text>
-					<text
-						x="0"
-						y="12"
-						fill="#3e3e3e"
-						font-size="11"
-						font-weight="700"
-						letter-spacing="0.09em"
-						font-family="system-ui,-apple-system,sans-serif"
-						dx="-0.5"
-						dy="-0.5"
-					>
-						AF
-					</text>
-					<text
-						x="0"
-						y="12"
-						fill="url(#toolbar-name-grad-short)"
-						font-size="11"
-						font-weight="700"
-						letter-spacing="0.09em"
-						font-family="system-ui,-apple-system,sans-serif"
-					>
-						AF
-					</text>
-				</svg>
-				<span class={s.leftSpacer} data-tauri-drag-region />
-				<Show when={uiStore.state.sidebarVisible}>
-					<button
-						class={s.filterToggle}
-						classList={{ [s.filterToggleActive]: uiStore.state.repoFilterActiveOnly }}
-						onClick={() => uiStore.toggleRepoFilter()}
-						title={
-							uiStore.state.repoFilterActiveOnly
-								? t("toolbar.filterActiveOn", "Showing active repos only — click to show all")
-								: t("toolbar.filterActiveOff", "Show only repos with open terminals")
-						}
-					>
-						<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-							<path
-								d="M1.5 2.5h13l-5 6v5l-3 1.5v-6.5l-5-6Z"
-								stroke="currentColor"
-								stroke-width="1.3"
-								stroke-linejoin="round"
-							/>
-						</svg>
-					</button>
-				</Show>
+			<div class={s.left} data-tauri-drag-region>
 				<button
 					class={s.sidebarToggle}
 					onClick={() => uiStore.toggleSidebar()}
@@ -408,24 +270,12 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 							: `${t("toolbar.showSidebar", "Show Sidebar")} (${keyFor("toggle-sidebar")})`
 					}
 				>
-					{/* Panel-toggle icon: rounded panel + left-sidebar divider + chevron.
-					    Chevron points left to collapse (sidebar visible) or right to expand. */}
-					<svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-						<rect x="2" y="3" width="12" height="10" rx="1.6" stroke="currentColor" stroke-width="1.3" />
-						<path d="M6.5 3v10" stroke="currentColor" stroke-width="1.3" />
-						<path
-							d={uiStore.state.sidebarVisible ? "M11 6 9 8l2 2" : "M9 6l2 2-2 2"}
-							stroke="currentColor"
-							stroke-width="1.3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						/>
-					</svg>
+					<IconPanelLeft size={16} />
 				</button>
+				<span class={s.leftSpacer} data-tauri-drag-region />
 			</div>
-
-			<div class={s.center} data-tauri-drag-region>
-				<Show when={activeBranchName()}>
+			<div class={cx(s.center, props.tabs !== undefined && s.centerTabs)} data-tauri-drag-region>
+				<Show when={props.tabs === undefined && activeBranchName()}>
 					<button
 						class={s.branch}
 						onClick={(e) => {
@@ -447,6 +297,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 						<Show when={aheadBehind()}>{(ab) => <span class={s.aheadBehind}>{ab()}</span>}</Show>
 					</button>
 				</Show>
+				{props.tabs}
 			</div>
 
 			<div class={s.right}>
@@ -467,9 +318,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 								}}
 								title="Watchers"
 							>
-								<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-									<path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" />
-								</svg>
+								<IconEye size={16} />
 							</button>
 							<Show when={showWatcherPopover()}>
 								<WatcherManager />
@@ -540,9 +389,7 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 						onClick={() => setShowNotifPopover(!showNotifPopover())}
 						title={`${totalBadgeCount()} ${t("toolbar.notifications", "notification(s)")}`}
 					>
-						<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-							<path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z" />
-						</svg>
+						<IconBell size={16} />
 						<Show when={totalBadgeCount() > 0}>
 							<span class={s.notifCount}>{totalBadgeCount()}</span>
 						</Show>
@@ -774,22 +621,23 @@ export const Toolbar: Component<ToolbarProps> = (props) => {
 							aria-controls="command-palette"
 							aria-expanded={commandPaletteStore.state.isOpen}
 						>
-							<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-								<path d="M15.5 14h-.79l-.28-.27a6.471 6.471 0 0 0 1.48-5.34c-.47-2.78-2.79-5-5.59-5.34a6.505 6.505 0 0 0-7.27 7.27c.34 2.8 2.56 5.12 5.34 5.59a6.471 6.471 0 0 0 5.34-1.48l.27.28v.79l4.25 4.25c.41.41 1.08.41 1.49 0 .41-.41.41-1.08 0-1.49L15.5 14zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
-							</svg>
+							<IconSearch size={16} />
 						</button>
 					}
 				>
-					<IdeLauncher
-						repoPath={launchPath()}
-						focusedFilePath={focusedFilePath()}
-						cwd={terminalsStore.getActive()?.cwd ?? undefined}
-						cursorLine={editorTabsStore.getActive()?.cursorLine}
-						cursorCol={editorTabsStore.getActive()?.cursorCol}
-						runCommand={props.runCommand}
-						onRun={props.onRun}
-					/>
+					<span class={s.ideSlot}>
+						<IdeLauncher
+							repoPath={launchPath()}
+							focusedFilePath={focusedFilePath()}
+							cwd={terminalsStore.getActive()?.cwd ?? undefined}
+							cursorLine={editorTabsStore.getActive()?.cursorLine}
+							cursorCol={editorTabsStore.getActive()?.cursorCol}
+							runCommand={props.runCommand}
+							onRun={props.onRun}
+						/>
+					</span>
 				</Show>
+				{props.trailing}
 			</div>
 
 			{/* PR detail popover triggered from notification click */}

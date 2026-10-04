@@ -117,20 +117,20 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
   background: transparent;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: 8px;
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 .iconBtn:hover:not(:disabled) {
-  background: var(--surface-hover);
+  background: var(--row-selected);
   color: var(--fg-primary);
 }
 

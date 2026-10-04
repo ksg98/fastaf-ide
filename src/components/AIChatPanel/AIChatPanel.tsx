@@ -24,6 +24,17 @@ import { writeClipboard } from "../../utils/clipboard";
 import { createThrottled } from "../../utils/createThrottled";
 import { getShellFamily, sendCommand } from "../../utils/sendCommand";
 import { MicMeter } from "../DictationToast/MicMeter";
+import {
+	IconArrowUp as UiArrowUp,
+	IconChevronDown as UiChevronDown,
+	IconChevronRight as UiChevronRight,
+	IconClose as UiClose,
+	IconHistory as UiHistory,
+	IconMic as UiMic,
+	IconSparkle as UiSparkle,
+	IconTrash as UiTrash,
+	IconWaveform as UiWaveform,
+} from "../icons";
 import p from "../shared/panel.module.css";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
@@ -102,11 +113,7 @@ function extractCodeText(pre: HTMLPreElement): string {
 
 // ── Inline SVG icons (monochrome, fill=currentColor) ─────────────────────
 
-const IconSend = () => (
-	<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M8 2.5l-4.5 4.5h3v5h3v-5h3z" />
-	</svg>
-);
+const IconSend = () => <UiArrowUp size={16} stroke={2} />;
 
 const IconStop = () => (
 	<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
@@ -114,23 +121,11 @@ const IconStop = () => (
 	</svg>
 );
 
-const IconMic = () => (
-	<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-		<rect x="6" y="1.75" width="4" height="7.5" rx="2" fill="currentColor" stroke="none" />
-		<path d="M3.75 7.25v.75a4.25 4.25 0 008.5 0v-.75" stroke-linecap="round" />
-		<path d="M8 12.25v2" stroke-linecap="round" />
-	</svg>
-);
+const IconMic = () => <UiMic size={16} />;
 
-// Mic inside a conversation bubble — a running voice session, distinct from
+// Waveform — a running voice conversation (Codex's voice glyph), distinct from
 // the plain mic that dictates one message into the composer.
-const IconVoice = () => (
-	<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">
-		<path d="M1.75 6.5a6.25 4.75 0 1112.5 0 6.25 4.75 0 01-8.7 4.37L2.5 12l.7-2.2A4.6 4.6 0 011.75 6.5z" />
-		<rect x="7" y="4" width="2" height="3.5" rx="1" fill="currentColor" stroke="none" />
-		<path d="M6 6.75v.25a2 2 0 004 0v-.25" stroke-linecap="round" />
-	</svg>
-);
+const IconVoice = () => <UiWaveform size={16} />;
 
 // The same mic as IconMic with a slash through it — the mute state of a running
 // voice session, not a second way to start one.
@@ -143,12 +138,7 @@ const IconMicMuted = () => (
 	</svg>
 );
 
-const IconTrash = () => (
-	<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
-		<path d="M2.5 4h9M5 4V2.5h4V4M3.5 4v7.5a1 1 0 001 1h5a1 1 0 001-1V4" />
-		<path d="M5.5 6.5v3M8.5 6.5v3" />
-	</svg>
-);
+const IconTrash = () => <UiTrash size={16} />;
 
 // SVG strings for imperative DOM injection (codeBlock Copy/Run buttons live
 // inside markdown-parsed HTML, so they're constructed via createElement rather
@@ -160,18 +150,9 @@ const SVG_COPIED =
 const SVG_RUN =
 	'<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><path d="M4 2.5l8 4.5-8 4.5z"/></svg>';
 
-const IconClose = () => (
-	<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4">
-		<path d="M3 3l6 6M9 3l-6 6" stroke-linecap="round" />
-	</svg>
-);
+const IconClose = () => <UiClose size={14} />;
 
-const IconHistory = () => (
-	<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
-		<circle cx="7" cy="7" r="5.5" />
-		<path d="M7 4v3.5l2 1.5" stroke-linecap="round" />
-	</svg>
-);
+const IconHistory = () => <UiHistory size={16} />;
 
 const IconPause = () => (
 	<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
@@ -193,23 +174,11 @@ const IconUnlock = () => (
 	</svg>
 );
 
-const IconSpark = () => (
-	<svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M8 1.5c.3 2.9 1.6 4.2 4.5 4.5-2.9.3-4.2 1.6-4.5 4.5-.3-2.9-1.6-4.2-4.5-4.5 2.9-.3 4.2-1.6 4.5-4.5zM3.25 10c.15 1.35.75 1.95 2.1 2.1-1.35.15-1.95.75-2.1 2.1-.15-1.35-.75-1.95-2.1-2.1 1.35-.15 1.95-.75 2.1-2.1z" />
-	</svg>
-);
+const IconSpark = () => <UiSparkle size={20} stroke={1.5} />;
 
-const IconArrowRight = () => (
-	<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4">
-		<path d="M4 2.5L7.5 6 4 9.5" stroke-linecap="round" stroke-linejoin="round" />
-	</svg>
-);
+const IconArrowRight = () => <UiChevronRight size={14} />;
 
-const IconChevronDown = () => (
-	<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4">
-		<path d="M2.5 3.75L5 6.25l2.5-2.5" stroke-linecap="round" stroke-linejoin="round" />
-	</svg>
-);
+const IconChevronDown = () => <UiChevronDown size={12} stroke={2} />;
 
 /**
  * Starter prompts for the empty state. Each is a real question against the
@@ -1116,6 +1085,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 				<div class={s.composerRow}>
 					<div class={s.composerChips}>
 						<label class={cx(s.chip, autonomy() === "autonomous" && s.chipAccent)} title="Ask answers; Agent acts">
+							<span class={s.chipValue}>{autonomy() === "autonomous" ? "Agent" : "Ask"}</span>
 							<select
 								class={s.chipSelect}
 								data-testid="mode-picker"
@@ -1130,6 +1100,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 						</label>
 						<Show when={availableModels().length > 0}>
 							<label class={s.chip} title="Model for this conversation">
+								<span class={s.chipValue}>{modelOverride() || "Default model"}</span>
 								<select
 									class={s.chipSelect}
 									value={modelOverride()}
@@ -1146,6 +1117,7 @@ export const AIChatPanel: Component<AIChatPanelProps> = (props) => {
 						    configured effort; leaving it on Default falls through to that,
 						    then to the global AI Chat setting. */}
 						<label class={s.chip} title="Reasoning effort for this conversation">
+							<span class={s.chipValue}>{effort() || "Effort"}</span>
 							<select
 								class={s.chipSelect}
 								data-testid="effort-picker"

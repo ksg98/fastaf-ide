@@ -42,6 +42,7 @@ import { ptyCaptureStore } from "../../utils/ptyCapture";
 import { getRepoColor } from "../../utils/repoColor";
 import type { ContextMenuItem } from "../ContextMenu/ContextMenu";
 import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
+import { IconGrid, IconPlus } from "../icons";
 import s from "./TabBar.module.css";
 import { alignDockedTabs, DiffTabView, EditorTabView, MarkdownTabView, TerminalTabView } from "./TabViews";
 
@@ -778,6 +779,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 	return (
 		<div
 			class={s.tabBarWrapper}
+			data-tauri-drag-region
 			data-drop-target="tab-bar"
 			onDragOver={(e) => {
 				if (e.dataTransfer?.types?.includes("application/x-tuic-path")) {
@@ -1000,7 +1002,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 				onContextMenu={openNewTabMenu}
 				title={`${t("tabBar.newTab", "New Tab")} (${keyFor("new-terminal")})`}
 			>
-				+
+				<IconPlus size={16} />
 			</button>
 
 			{/* Multiview toggle — hover shows a preview of the grid */}
@@ -1019,12 +1021,7 @@ export const TabBar: Component<TabBarProps> = (props) => {
 					onMouseLeave={() => setMvPreviewPos(null)}
 					title={`Multiview — all terminals grid (${keyFor("toggle-multiview")})`}
 				>
-					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-						<rect x="3" y="3" width="7" height="7" rx="1" />
-						<rect x="14" y="3" width="7" height="7" rx="1" />
-						<rect x="3" y="14" width="7" height="7" rx="1" />
-						<rect x="14" y="14" width="7" height="7" rx="1" />
-					</svg>
+					<IconGrid size={15} />
 				</button>
 				<Show when={multiviewStore.state.isOpen ? null : mvPreviewPos()}>
 					{(pos) => {

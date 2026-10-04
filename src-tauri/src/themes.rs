@@ -307,6 +307,7 @@ const BUILTIN_THEMES: &[(&str, &str)] = &[
     ("commander.json", include_str!("themes/commander.json")),
     ("nezha-dark.json", include_str!("themes/nezha-dark.json")),
     ("cursor-dark.json", include_str!("themes/cursor-dark.json")),
+    ("codex-dark.json", include_str!("themes/codex-dark.json")),
     ("vscode-dark.json", include_str!("themes/vscode-dark.json")),
     ("tokyo-night.json", include_str!("themes/tokyo-night.json")),
     (

@@ -1281,6 +1281,7 @@ export const Terminal: Component<TerminalProps> = (props) => {
 			<Show when={!composeOpen()}>
 				<div
 					class={s.composeHint}
+					data-compose-hint
 					onClick={() => setComposeOpen(true)}
 					title={`Open compose editor (${keyFor("toggle-compose-panel")})`}
 				>

@@ -35,7 +35,7 @@ export default function TipOfTheDay() {
 
 	return (
 		<div class={styles.card}>
-			<div class={styles.label}>TIP OF THE DAY</div>
+			<div class={styles.label}>Tip of the day</div>
 			<div class={styles.body}>
 				<button class={styles.arrow} onClick={prev} aria-label="Previous tip">
 					<svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">

@@ -23,7 +23,8 @@ const GAP = 10;
 const EDGE = 8;
 
 export function CoachMark(props: CoachMarkProps) {
-	const [pos, setPos] = createSignal<{ left: number; bottom: number; arrow: number } | null>(null);
+	/** `bottom` places the mark above its anchor; `top` (anchors in the title bar) below it. */
+	const [pos, setPos] = createSignal<{ left: number; bottom?: number; top?: number; arrow: number } | null>(null);
 
 	const place = () => {
 		const el = document.querySelector<HTMLElement>(`[data-coach="${props.anchor}"]`);
@@ -34,11 +35,13 @@ export function CoachMark(props: CoachMarkProps) {
 		const r = el.getBoundingClientRect();
 		const centre = r.left + r.width / 2;
 		const left = Math.max(EDGE, Math.min(window.innerWidth - WIDTH - EDGE, centre - WIDTH / 2));
-		setPos({
-			left,
-			bottom: window.innerHeight - r.top + GAP,
-			arrow: Math.max(14, Math.min(WIDTH - 14, centre - left)),
-		});
+		const arrow = Math.max(14, Math.min(WIDTH - 14, centre - left));
+		// Anchors in the top half (the title bar) get the mark below them.
+		if (r.top + r.height / 2 < window.innerHeight / 2) {
+			setPos({ left, top: r.bottom + GAP, arrow });
+		} else {
+			setPos({ left, bottom: window.innerHeight - r.top + GAP, arrow });
+		}
 	};
 
 	onMount(() => {
@@ -63,13 +66,14 @@ export function CoachMark(props: CoachMarkProps) {
 			<Show when={pos()}>
 				{(p) => (
 					<div
-						class={s.mark}
+						class={p().top !== undefined ? `${s.mark} ${s.below}` : s.mark}
 						role="dialog"
 						aria-label={props.title}
 						data-testid={`coach-${props.anchor}`}
 						style={{
 							left: `${p().left}px`,
-							bottom: `${p().bottom}px`,
+							top: p().top !== undefined ? `${p().top}px` : undefined,
+							bottom: p().bottom !== undefined ? `${p().bottom}px` : undefined,
 							width: `${WIDTH}px`,
 							"--arrow-x": `${p().arrow}px`,
 						}}
