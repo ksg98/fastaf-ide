@@ -45,8 +45,10 @@ state*. Colour is spent only on things that need a glance.
 
 ## Color Palette
 
-Values shown are the **cursor-dark** defaults (defined in `:root` of `global.css`
-and mirrored in `src-tauri/src/themes/cursor-dark.json`). Every theme overrides
+Values shown are **Cursor Dark**'s, the first-paint seed (defined in `:root` of
+`global.css` and mirrored in `src-tauri/src/themes/cursor-dark.json`). The default
+theme is **Codex Dark** (`settings.ts`, `config.rs`), whose values come from its JSON
+alone. Every theme overrides
 the core keys at runtime via `applyAppTheme()` in `themes.ts`, which also emits
 the derived tokens (`--border-subtle`, `--surface-hover`, `--wash-*`, `--scrim`,
 scrollbar colours) with the right polarity for light themes. Always use
