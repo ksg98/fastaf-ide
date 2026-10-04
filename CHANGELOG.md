@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-03
+
 ### Added
 
 - **Speak or type to the agent from under its terminal.** A one-row bar now sits under the terminal column: **Speak**, **Type**, and the terminal they go to with a dot for what its agent is doing. Speak opens a Codex-style card, shows the words as you say them with a live dotted waveform, and Enter sends them with the agent's own Enter handling (Option+Enter queues for the agent's next idle moment); Type opens the same card for the keyboard. The card folds back into the bar once sent, so there is never a second text box stacked under the agent's own prompt. A half-written prompt stays with its terminal when you switch tabs. The dock sits under the terminal column only, not under the Files or Git panel.
