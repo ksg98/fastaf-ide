@@ -277,5 +277,13 @@
     ],
     "contributions": [],
     "date": "2026-10-03"
+  },
+  "2.0.1": {
+    "highlights": [
+      "New installs open in Codex Dark; the theme you already use is kept",
+      "Cursor Dark is glossy black again: glass composer, shiny chips and a blue selected branch, like 1.8"
+    ],
+    "contributions": [],
+    "date": "2026-10-04"
   }
 }
