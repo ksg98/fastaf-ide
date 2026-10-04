@@ -70,10 +70,26 @@ variables, never hardcode core palette values.
 
 **Tonal themes.** When a theme's frame and well differ in tone (`--bg-secondary` ≠
 `--bg-primary`, as in Codex Dark: `#1d1d1d` frame, `#181818` well, `#2d2d2d` raised),
-`applyAppTheme` adds `html.tonal`: `--border-subtle` drops to white 3.5 % and `--border-strong`
-to 10 %, the frame goes opaque (no glass), and `--sheen` is `none`. A tonal step is a valid
-divider — do not add a hairline where two tones already meet. Flat one-black themes (Cursor
-Dark) keep the 8 % hairlines, which are all the structure they have.
+`applyAppTheme` adds `html.tonal`: `--border-subtle` drops to white 6 % and `--border-strong`
+to 12 %, the frame goes opaque (no glass), `--sheen` is `none`, and region dividers become
+half-pixel lines. A tonal step is a valid divider — do not add a hairline where two tones
+already meet. Flat one-black themes (Cursor Dark) keep the 8 % hairlines, which are all the
+structure they have.
+
+**Two materials.** The same controls are glass in a flat theme and plain in a tonal one. The
+switch lives in tokens, not in per-component rules: a component names the token and both
+themes come out right.
+
+| Variable | Flat (Cursor Dark) | Tonal (Codex Dark) | Usage |
+|----------|--------------------|--------------------|-------|
+| `--rim` | `--highlight-inset` | transparent shadow | Rim light on composer cards and chips. Transparent rather than `none`, so it can lead a shadow list |
+| `--chip-fill` / `--chip-fill-hover` | `--wash-1` / `--wash-2` | transparent / `--wash-1` | Chat chips at rest / hovered |
+| `--chip-accent-fill` / `--chip-accent-fill-hover` | accent 16 % / 24 % | transparent / accent 14 % | The Agent chip |
+| `--branch-selected` | accent 13 % | `--row-selected` | The selected branch row |
+
+Composer cards put the sheen first — `background: var(--sheen), var(--surface-composer)` — and
+`--sheen` is `none` in a tonal theme. Never zero `--highlight-inset` itself from CSS:
+`applyAppTheme` writes it inline, where no `html.tonal` rule can reach it. Derive a token.
 
 ### Glass
 
@@ -177,7 +193,7 @@ Compose from these; never hand-roll a button.
 ## Component reference
 
 ### Sidebar
-- Every row is 30px, inset 8px from both edges, radius 8, padding-left 8, gap 10, text 13.5px. Hover = `--wash-0`; selection = `--row-selected` (white 8 %, Codex #2f2f2f) with `--fg-primary` text. Never the accent.
+- Every row is 30px, inset 8px from both edges, radius 8, padding-left 8, gap 10, text 13.5px. Hover = `--wash-0`; selection = `--branch-selected` with `--fg-primary` text: `--row-selected` (white 8 %, Codex #2f2f2f) in a tonal theme, the accent wash 1.8 used in a flat one.
 - Top: action rows — **New terminal** (compose icon; opens a terminal in the active branch) and **Search projects** (an input dressed as a row; focus = `--row-selected`).
 - Section label "Projects": 13px/400 `--fg-secondary`; its actions (active-only filter, add repository) appear on hover, and the filter stays visible while engaged.
 - Repo row: leading 16px folder icon — open while expanded, closed while collapsed — name 13.5px/500. Hover reveals `⋯` and `+` in place.
@@ -229,7 +245,7 @@ hover rule.
 A conversation, not a control panel (`components/AIChatPanel`):
 
 - **Header** carries only what the chat is attached to (session dot + terminal chip), history, clear, window controls.
-- **Composer** is one glass field: textarea on top, a chip row beneath. Left chips shape the turn (Ask/Agent, model, effort; Steps and Approvals appear in Agent mode). Right: voice, dictate, and the single accent send button. Chips are native `<select>`s dressed as pills so macOS pops the system menu.
+- **Composer** is the compose dock's card — glass in a flat theme, plain in a tonal one: textarea on top, a chip row beneath. Left chips shape the turn (Ask/Agent, model, effort; Steps and Approvals appear in Agent mode) — filled pills with a rim light in a flat theme, ghost in a tonal one. Right: voice, dictate, and the round `--fg-primary` send button. Chips are native `<select>`s dressed as pills so macOS pops the system menu.
 - **Thread** is flat: assistant text sits on the panel, user turns are `--wash-1` blocks on the right, tool calls are 26px expandable rows, and agent progress, results, errors and approvals are rows at the *end* of the thread (`.statusRow`, `.errorBanner`, `.approvalCard`), never banners above it.
 - **Empty state** teaches by doing: three starter prompts that send on click plus a hand-off to Agent mode.
 - **Voice stage** (`.voiceStage`) shows the `VoiceOrb` (`components/ui/VoiceOrb.tsx`): a canvas sphere fed by the mic level and the speaker level from `voice_status`. Idle breathes, listening grows a halo, speaking brightens the core, thinking orbits a glint, muted drains to grey. A 16px twin sits in the status bar while a session runs.
@@ -245,8 +261,9 @@ Speaking and typing are the first thing the window offers, the way Codex's compo
   agent name · branch in `--fg-muted`) and a `--wash-1` "N queued" count when there is one. No
   text box: the agent in the terminal already draws its own prompt, so a second one only appears
   when there is text to look at.
-- **The card** (Speak, Type, a saved draft, or the hero): a flat raised object — `--bg-tertiary`
-  on the well, **no border, no sheen**, 18px radius, padding 14/12/12/16. Field on top, 15px
+- **The card** (Speak, Type, a saved draft, or the hero): a raised object — `--surface-composer`
+  on the well, no border, 18px radius, padding 14/12/12/16. Glass in a flat theme (`--sheen`
+  over the fill, a `--rim` light on top), plain in a tonal one. Field on top, 15px
   `--font-lg`, grows to 200px then scrolls, placeholder in `--fg-muted` ("Speak or type a
   prompt"). Beneath it one row of 28px controls: ghost chips at the left (target chip, hero's
   agent picker, queue count), then mic (ghost) and the round action at the right — `--fg-primary`

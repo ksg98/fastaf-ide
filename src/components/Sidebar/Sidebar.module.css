@@ -7,8 +7,9 @@
    Codex's sidebar, rebuilt for terminals: action rows (New terminal, Search)
    on top, a "Projects" section, then folder rows (repos) with their branches
    as plain rows whose text lines up with the repo name. Every row is 30px,
-   8px radius, inset 8px from the edges; selection is a neutral step
-   (--row-selected), never the accent. Icons are 16px strokes from
+   8px radius, inset 8px from the edges; the selected branch is
+   --branch-selected — a neutral step in a tonal theme (Codex Dark), the
+   accent wash 1.8 used in a flat one (Cursor Dark). Icons are 16px strokes from
    components/icons; state is the one 6px dot in front of a branch. The
    sidebar is the frame tone and meets the content with a hairline. */
 .sidebar {
@@ -623,9 +624,10 @@
   }
 }
 
-/* Selection = a neutral step (Codex #2f2f2f), never the accent. */
+/* Selection: Codex's neutral #2f2f2f in a tonal theme, the accent wash in a
+   flat one (--branch-selected, global.css). */
 .branchItem.active {
-  background: var(--row-selected);
+  background: var(--branch-selected);
   color: var(--fg-primary);
 }
 

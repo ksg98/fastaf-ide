@@ -360,6 +360,19 @@
   --row-selected: var(--wash-1);             /* selected sidebar row, active tab */
   --hairline-w: 1px;                         /* width of region dividers */
   --hairline: var(--border-subtle);          /* colour of region dividers */
+  /* Material. A flat theme (one black — Cursor Dark) draws raised controls as
+     glass, the way 1.8 did: a sheen over the composer cards (--sheen), a 1px
+     top rim light (--rim), chips filled at rest and the selected branch
+     washed with the accent. A tonal theme (html.tonal — Codex Dark) draws the
+     same controls flat. --rim is derived because applyAppTheme writes
+     --highlight-inset inline, where no html.tonal rule can reach it; it is a
+     transparent shadow rather than `none` so it can sit in a shadow list. */
+  --rim: var(--highlight-inset);
+  --chip-fill: var(--wash-1);
+  --chip-fill-hover: var(--wash-2);
+  --chip-accent-fill: rgba(var(--accent-rgb), 0.16);
+  --chip-accent-fill-hover: rgba(var(--accent-rgb), 0.24);
+  --branch-selected: rgba(var(--accent-rgb), 0.13);
   --status-height: 26px;
   --font-mono: "JetBrains Mono", "Fira Code", "Hack", "Cascadia Code", "Source Code Pro", "DejaVu Sans Mono", monospace;
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Liberation Sans", sans-serif;
@@ -409,6 +422,12 @@ html.vibrancy.tonal {
   --row-selected: rgba(255, 255, 255, 0.08);
   --hairline-w: 0.5px;
   --hairline: rgba(255, 255, 255, 0.09);
+  --rim: 0 0 0 0 transparent;
+  --chip-fill: transparent;
+  --chip-fill-hover: var(--wash-1);
+  --chip-accent-fill: transparent;
+  --chip-accent-fill-hover: rgba(var(--accent-rgb), 0.14);
+  --branch-selected: var(--row-selected);
 }
 
 /* Flat themes under macOS vibrancy: the title bar stays see-through like the

@@ -36,6 +36,20 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Cursor Dark glossy again — two materials (2026-10-03)
+
+Frontend-only (tokens in `global.css`). Checked in the shell harness (`fastaf/.tmp/shell-shots/gloss/`):
+Codex Dark home, chat and open-composer shots are pixel-identical before and after (only the rotating
+Usage/Stories ticker differs); Cursor Dark's composer card measures a #363636 rim over a #212121 →
+#171717 sheen on #161616, chips are filled pills with a rim, the selected branch is #101924 (accent
+13 % on #050505). What only the native window can show:
+
+- [ ] Cursor Dark with macOS transparency on: sidebar and title bar still let the desktop through,
+  the composer card under the terminal and the chat composer read as glass (light top edge, soft
+  top-down sheen), and the Ask / Effort chips are filled pills.
+- [ ] Switch to Codex Dark in Settings › Appearance: composer, chips and selected branch go flat and
+  grey again, with no rim light anywhere.
+
 ## Codex-style window: title bar, sidebar, panels, icons (2026-10-03)
 
 Frontend-only. Checked in a headless WebKit harness that boots the real `App` against a fake Tauri

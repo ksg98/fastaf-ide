@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Cursor Dark is glossy again.** 2.0 drew the composer cards, the chat chips and the selected sidebar row flat in every theme, so jet black lost the glass it had in 1.8. In a flat one-black theme such as Cursor Dark they are glass again: a sheen and a 1px rim light on the composer cards, filled chips with a rim light, and the selected branch washed in the accent. Codex Dark is unchanged — the two themes now differ in material as well as colour.
+
 ## [2.0.0] - 2026-10-03
 
 ### Added
