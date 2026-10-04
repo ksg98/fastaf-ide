@@ -30,7 +30,7 @@ FastAF auto-detects which agent is running in each terminal by matching output p
 
 When detected:
 
-- The **status bar** shows the agent's brand logo and name
+- The **title bar's status cluster** shows the agent's brand logo and name
 - The **tab indicator** updates to reflect agent state
 - Rate limit and question detection activate for that provider's patterns
 
@@ -40,7 +40,7 @@ Binary detection uses `resolve_cli()` — Rust probes well-known directories so 
 
 When an agent hits a rate limit, FastAF detects it from terminal output:
 
-- **Status bar warning** — Shows a badge with the number of rate-limited sessions and a countdown timer
+- **Rate-limit warning** — The title bar shows a badge with the number of rate-limited sessions and a countdown timer
 - **Per-session tracking** — Each session's rate limit is tracked independently with automatic cleanup when expired
 - **Provider-specific patterns** — Custom regex for Claude ("overloaded", "rate limit"), Gemini ("429", "quota exceeded"), OpenAI ("too many requests"), and generic patterns
 
@@ -83,7 +83,7 @@ For Claude, `awaiting` also covers **MCP elicitation** — the dialog an MCP ser
 
 For Claude Code, FastAF detects weekly and session usage limit messages from terminal output:
 
-- **Unified agent badge** — When Claude is the active agent, the status bar shows a single badge combining the agent icon with usage data. The badge displays rate limit countdowns (when rate-limited), Claude Usage API data (5h/7d utilization percentages), or terminal-detected usage limits, in that priority order.
+- **Unified agent badge** — When Claude is the active agent, the title bar shows a single badge combining the agent icon with usage data. The badge displays rate limit countdowns (when rate-limited), Claude Usage API data (5h/7d utilization percentages), or terminal-detected usage limits, in that priority order.
   - Blue: < 70% utilization
   - Yellow: 70–89%
   - Red (pulsing): >= 90%
@@ -104,7 +104,7 @@ When enabled, FastAF polls the Claude API every 5 minutes and shows:
 - **Model usage** — Breakdown by model (messages, input, output, cache created, cache read).
 - **Per-project breakdown** — All projects ranked by token usage. Click a project to filter the dashboard to that project.
 
-The dashboard opens as a tab in the Activity Center. You can also reach it by clicking the Claude usage badge in the status bar.
+The dashboard opens as a tab in the Activity Center. You can also reach it by clicking the Claude usage badge in the title bar.
 
 ## Agent Teams
 

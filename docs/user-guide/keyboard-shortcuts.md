@@ -104,7 +104,7 @@ Font size range: 8px to 32px, step 2px per action.
 | `Alt+↑` / `Alt+↓` | Navigate panes (horizontal split) |
 | `Cmd+W` | Close active pane (collapses to single) |
 | `Cmd+Shift+Enter` | Maximize / restore active pane |
-| `Cmd+Alt+Enter` | Focus mode — hide sidebar, tab bar, and all side panels (keeps toolbar + status bar) |
+| `Cmd+Alt+Enter` | Focus mode — hide sidebar, tabs, and all side panels (keeps the title bar and its panel toggles) |
 
 ## Panels
 
@@ -227,8 +227,7 @@ While a context menu is open, pressing a menu item's shortcut chord (modifier + 
 | Drag | Tab | Reorder tabs |
 | Drag | Sidebar right edge | Resize sidebar (200-500px) |
 | Click | PR badge / CI ring | Open PR detail popover |
-| Click | Status bar CWD path | Copy path to clipboard |
-| Click | Status bar panel buttons | Toggle Git/MD/FB/Ideas panels |
+| Click | Title bar panel buttons | Toggle Ideas/Files/Markdown/Git/Chat panels |
 | Drag | Panel left edge | Resize right-side panel (200-800px) |
 | Drag | Split pane divider | Resize split terminal panes |
 

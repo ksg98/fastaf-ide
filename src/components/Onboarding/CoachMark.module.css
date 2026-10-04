@@ -1,4 +1,5 @@
-/* Coach mark — a glass callout pinned above a status-bar control. The arrow is
+/* Coach mark — a glass callout pinned to a control: above it when the control
+   sits low in the window, below it when it sits in the title bar. The arrow is
    a rotated square in the raised tone so it survives the bubble's blur. */
 .mark {
   position: fixed;
@@ -26,6 +27,13 @@
   background: var(--bg-tertiary);
   border-right: 1px solid var(--border-strong);
   border-bottom: 1px solid var(--border-strong);
+}
+
+/* Below its anchor (title-bar controls): the arrow moves to the top edge. */
+.below::after {
+  top: -7px;
+  bottom: auto;
+  transform: rotate(225deg);
 }
 
 @keyframes markIn {

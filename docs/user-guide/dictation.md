@@ -14,7 +14,7 @@ FastAF includes local voice-to-text using Whisper AI. All processing happens on 
 
 **Push-to-talk workflow:**
 
-1. **Hold** the dictation hotkey (default: `F5`) or the mic button in the status bar
+1. **Hold** the dictation hotkey (default: `F5`), or click **Speak** in the bar under the terminal
 2. **Speak** your text
 3. **Release** the key/button
 4. Transcribed text is inserted into the focused input element (textarea, input, or contenteditable). If no text input has focus, the text falls back to the active terminal PTY. The focus target is captured at key-press time.
@@ -72,7 +72,7 @@ Select which microphone to use from the dropdown in dictation settings. Lists al
 
 | Indicator | Meaning |
 |-----------|---------|
-| Mic button (status bar) | Click/hold to start recording |
+| **Speak** (bar under the terminal) | Click to start recording into the compose card; ■ stops |
 | Recording animation | Audio is being captured |
 | Live level meter in the dictation preview | The selected microphone is receiving sound; it appears immediately while recording |
 | Processing spinner | Whisper is transcribing |

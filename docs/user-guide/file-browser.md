@@ -2,7 +2,7 @@
 
 ## File Browser Panel
 
-Toggle with `Cmd+E` or the folder icon in the status bar. The file browser shows the directory tree of the active repository (or linked worktree when on a worktree branch).
+Toggle with `Cmd+E` or the Files icon at the right of the title bar. The file browser shows the directory tree of the active repository (or linked worktree when on a worktree branch).
 
 The file browser, Markdown viewer, and Diff panels are mutually exclusive — opening one closes any other that is open.
 

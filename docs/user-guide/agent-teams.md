@@ -78,7 +78,7 @@ Agent Teams is an experimental Claude Code feature. Current limitations:
 
 **Teammates not appearing as tabs:**
 - Verify the env var is set: `echo $CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` should print `1`
-- Check that FastAF's MCP server is running (status bar shows the MCP icon)
+- Check that FastAF's MCP server is running (the title bar's status cluster shows the MCP icon)
 
 **Teammates not spawning at all:**
 - Claude Code decides whether to create a team based on task complexity. Be explicit: "Create an agent team with N teammates"

@@ -1,6 +1,8 @@
+/* Top right, under the title bar — the bottom of the content column belongs
+   to the compose dock, and there is no status bar to sit above any more. */
 .container {
   position: fixed;
-  bottom: calc(var(--status-height, 28px) + 12px);
+  top: calc(var(--toolbar-height, 38px) + 12px);
   right: 16px;
   z-index: var(--z-toast);
   display: flex;
@@ -126,7 +128,7 @@
 @keyframes slideIn {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(-8px);
   }
   to {
     opacity: 1;

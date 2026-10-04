@@ -387,6 +387,8 @@ Some frontend-only stores persist to localStorage:
 - [x] VAD energy gate (ported from whisper.cpp vad_simple)
 - [x] Floating toast for partial transcription results
 - [x] Prompt token carry-forward across windows
+- [x] Compose dock under the terminal area: speak or type to the active terminal, dictation lands in the field with an in-row meter, Option+Enter queues, per-terminal drafts
+- [x] Empty-state composer: "What should we build in ‹repo›?" starts Claude Code / Codex CLI with the text as its prompt (never runs it as a shell command)
 
 ### Completed (P2)
 - [x] Alternate-screen scrollback — isolated bounded history for fullscreen apps, primary-only durable logs, and atomic renderer-generation transitions

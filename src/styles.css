@@ -12,8 +12,8 @@
 }
 
 /* Focus mode (Cmd+Alt+Enter): maximize active tab content.
- * Hides sidebar, tab bar, and all side panels. Toolbar and StatusBar stay
- * visible so Boss can still see repo/branch/session state and exit the mode. */
+ * Hides sidebar, tab strip, and all side panels. The title bar stays, with the
+ * panel toggles in it, so Boss can still see session state and exit the mode. */
 #app.focus-mode #sidebar,
 #app.focus-mode #tab-bar,
 #app.focus-mode #ai-chat-panel,
@@ -52,19 +52,20 @@
   background: transparent;
 }
 
-/* Tab strip — flush with the left edge of the column; tabs are flat text
-   (TabBar.module.css). The hairline under it belongs to the content below. */
+/* Tab strip — lives in the title bar's centre (Toolbar `tabs`), pill tabs
+   (TabBar.module.css). It fills the space between the sidebar column and the
+   notifications. */
 #tab-bar {
-  height: var(--tab-bar-height);
-  min-height: var(--tab-bar-height);
+  height: 100%;
+  flex: 1;
+  min-width: 0;
   background: transparent;
   display: flex;
   align-items: center;
-  padding: 0 var(--well-gap);
 }
 
 /* The content area — terminals, editors and diffs, edge to edge under the
-   tab strip. One hairline on top separates it from the tabs. */
+   title bar, whose divider separates them. */
 #terminal-container {
   flex: 1;
   display: flex;
@@ -72,13 +73,13 @@
   position: relative;
   margin: 0 var(--well-gap) var(--well-gap);
   background: var(--bg-primary);
-  border-top: 1px solid var(--border-subtle);
   border-radius: var(--well-radius);
 }
 
-/* Focus mode hides the tab strip; the toolbar's own hairline then does the job. */
-#app.focus-mode #terminal-container {
-  border-top: none;
+/* While the compose dock is on screen it is the way to write to a terminal, so
+   the per-terminal "Compose ⌘I" hint steps aside (⌘I still opens the editor). */
+#app.compose-dock [data-compose-hint] {
+  display: none;
 }
 
 /* Highlight applied (via JS) to the folder row under a Tauri drag-drop cursor.
@@ -103,9 +104,21 @@
   box-shadow: var(--highlight-inset), var(--shadow-dropdown);
 }
 
+/* The terminal column: the panes, then the compose dock under them. The side
+   panels sit beside the column, so the dock never runs under Files or Git. */
+#terminal-column {
+  flex: 1;
+  min-width: 200px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
 #terminal-panes {
   flex: 1;
   min-width: 200px;
+  min-height: 0;
   position: relative;
   background: var(--bg-primary);
 }

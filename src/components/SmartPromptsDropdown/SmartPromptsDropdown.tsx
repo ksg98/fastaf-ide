@@ -5,6 +5,7 @@ import { promptLibraryStore, type SavedPrompt } from "../../stores/promptLibrary
 import { smartPromptsDropdownStore } from "../../stores/smartPromptsDropdown";
 import { terminalsStore } from "../../stores/terminals";
 import { cx } from "../../utils";
+import { IconBolt } from "../icons";
 import s from "./SmartPromptsDropdown.module.css";
 import { VariableInputDialog } from "./VariableInputDialog";
 
@@ -157,9 +158,7 @@ export const SmartPromptsDropdown: Component<SmartPromptsDropdownProps> = (props
 	return (
 		<div class={s.wrapper} ref={wrapperRef}>
 			<button class={cx(s.trigger, open() && s.triggerActive)} onClick={toggle} title="Smart Prompts Library">
-				<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
-					<path d="M9.504.43a1.516 1.516 0 0 1 2.437 1.713L10.415 5.5h2.123c1.57 0 2.346 1.909 1.22 3.004l-7.34 7.142a1.249 1.249 0 0 1-1.847-.041 1.249 1.249 0 0 1-.137-1.363L5.96 10.5H3.462c-1.57 0-2.346-1.909-1.22-3.004L9.504.43z" />
-				</svg>
+				<IconBolt size={16} />
 			</button>
 
 			<Show when={open()}>

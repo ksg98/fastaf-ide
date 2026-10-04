@@ -18,6 +18,92 @@
   gap: 8px;
 }
 
+/* Title-bar placement: the bar's box disappears and its sections become items
+   of the toolbar's right cluster. Info, usage and PR flow before the
+   notifications (order 1–2); the panel toggles end the row (order 10). */
+.inline {
+  display: contents;
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
+}
+
+.inline > .section:not(.controls) {
+  order: 1;
+  flex: none;
+  gap: 6px;
+  overflow: visible;
+  margin-right: 4px;
+}
+
+.inline > .githubStatus {
+  order: 2;
+  margin: 0 4px 0 0;
+  padding-left: 0;
+  border-left: none;
+}
+
+.inline > .controls {
+  order: 10;
+  margin-left: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.inline .info {
+  flex: none;
+  max-width: 320px;
+  min-width: 0;
+  color: var(--fg-muted);
+}
+
+.inline .agentBadge {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+
+.inline .tickerLabel {
+  font-weight: 500;
+  color: var(--fg-secondary);
+}
+
+.inline .tickerMessage {
+  padding: 0 6px;
+}
+
+.inline .toggleBtn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--fg-secondary);
+}
+
+.inline .toggleBtn:hover {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+.inline .toggleActive,
+.inline .toggleActive:hover {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+.inline .toggleBadge {
+  top: 2px;
+  right: 1px;
+  box-shadow: 0 0 0 2px var(--bg-chrome);
+}
+
+/* Fixed popovers open under the title bar instead of over a bottom strip. */
+.inline .infoBalloon,
+.inline .tickerPopover {
+  top: calc(var(--toolbar-height) + 8px);
+  bottom: auto;
+}
+
 .section {
   display: flex;
   align-items: center;

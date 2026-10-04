@@ -1,6 +1,6 @@
-/* Panel splitter — 4px hit area, 1px hairline centered inside.
-   Hover and the `.dragging` state class light the line accent-blue and add a
-   soft glow. The `.dragging` selector is preserved even though the current
+/* Panel splitter — 4px hit area over the panel's own divider. It draws no
+   line at rest (the panel's border is the line); hover and the `.dragging`
+   state class light it accent-blue and add a soft glow. The `.dragging` selector is preserved even though the current
    TSX doesn't apply it yet, so future state-driven styling stays consistent. */
 .handle {
   position: absolute;
@@ -21,7 +21,7 @@
   content: "";
   width: 1px;
   height: 100%;
-  background: var(--border-subtle);
+  background: transparent;
   transition: background var(--duration-fast) var(--ease-out);
 }
 

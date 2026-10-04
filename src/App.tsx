@@ -1,7 +1,9 @@
 import { type Component, createSignal, lazy, Show, Suspense } from "solid-js";
+import { AGENTS } from "./agents";
 import { ApplicationOverlays } from "./components/ApplicationOverlays/ApplicationOverlays";
 import { BranchSwitcher } from "./components/BranchSwitcher/BranchSwitcher";
 import { CommandPalette } from "./components/CommandPalette";
+import { buildStartTargets, ComposeDock, type StartTarget, startCommandFor } from "./components/ComposeDock";
 import { createContextMenu } from "./components/ContextMenu";
 import { KnowledgeHistoryOverlay } from "./components/KnowledgeHistory/KnowledgeHistoryOverlay";
 import { PanelOrchestrator } from "./components/PanelOrchestrator";
@@ -92,8 +94,10 @@ import { githubStore } from "./stores/github";
 import { globalWorkspaceStore } from "./stores/globalWorkspace";
 import { keybindingsStore } from "./stores/keybindings";
 import { mdTabsStore } from "./stores/mdTabs";
+import { multiviewStore } from "./stores/multiview";
 import { notesStore } from "./stores/notes";
 import { notificationsStore } from "./stores/notifications";
+import { onboardingStore } from "./stores/onboarding";
 import { paneLayoutStore } from "./stores/paneLayout";
 import { pluginStore } from "./stores/pluginStore";
 import { prNotificationsStore } from "./stores/prNotifications";
@@ -110,6 +114,7 @@ import { updaterStore } from "./stores/updater";
 import { userActivityStore } from "./stores/userActivity";
 import { worktreeManagerStore } from "./stores/worktreeManager";
 import { isTauri } from "./transport";
+import { buildAgentLaunchCommand } from "./utils/agentSession";
 import { openFileAction, openFileBesideTerminal } from "./utils/filePreview";
 import { navigateToTerminal } from "./utils/navigateToTerminal";
 import { initPaneTabAssignment } from "./utils/paneTabAssign";
@@ -493,6 +498,68 @@ const App: Component = () => {
 		setTermRenamePromptVisible,
 	});
 
+	// ── Compose dock ("speak or type") ───────────────────────────────────────
+	// The dock sends to the active terminal; it steps aside while a diff,
+	// markdown or editor tab is in front, since those are not what it targets.
+	const composeDockVisible = () =>
+		!!terminalsStore.state.activeId &&
+		!diffTabsStore.state.activeId &&
+		!mdTabsStore.state.activeId &&
+		!editorTabsStore.state.activeId;
+
+	/** The hero shows in the empty well once the welcome card is dismissed. */
+	const composeHeroVisible = () =>
+		!terminalsStore.state.activeId &&
+		!diffTabsStore.state.activeId &&
+		!mdTabsStore.state.activeId &&
+		!editorTabsStore.state.activeId &&
+		!paneLayoutStore.isSplit() &&
+		!multiviewStore.state.isOpen &&
+		onboardingStore.isDismissed("welcome");
+
+	/** A composer (dock or hero) is drawing the live dictation, so the toast stays away. */
+	const composerOnScreen = () => composeDockVisible() || composeHeroVisible();
+
+	/** What the empty-state composer can start: installed, enabled agents that take a starting prompt. */
+	const composeStartTargets = (): StartTarget[] =>
+		buildStartTargets(
+			agentDetection
+				.getAvailable()
+				.filter((agent) => settingsStore.isAgentEnabled(agent.type))
+				.map((agent) => {
+					const runConfig = agentConfigsStore.getDefaultConfig(agent.type);
+					return {
+						type: agent.type,
+						name: AGENTS[agent.type].name,
+						command: runConfig ? [runConfig.command, ...runConfig.args].join(" ") : AGENTS[agent.type].binary,
+					};
+				}),
+		);
+
+	/**
+	 * Open a terminal in the active repo and start `target` with `text` as its
+	 * first prompt. Same shape as the sidebar's "Add agent" menu
+	 * (useTerminalContextMenus) — the command runs on the new shell's first idle
+	 * prompt via `pendingInitCommand`.
+	 */
+	const startFromComposer = async (target: StartTarget, text: string) => {
+		const repo = repositoriesStore.getActive();
+		const branch = repo?.activeBranch ?? Object.keys(repo?.branches ?? {})[0];
+		if (!repo || !branch) return;
+		const termId = await gitOps.handleAddTerminalToBranch(repo.path, branch);
+		if (!termId) return;
+		const agentSessionId = target.agentType === "claude" ? null : (terminalsStore.get(termId)?.tuicSession ?? null);
+		terminalsStore.update(termId, {
+			name: AGENTS[target.agentType].name,
+			nameIsCustom: true,
+			pendingInitCommand: buildAgentLaunchCommand(startCommandFor(target, text), agentSessionId, target.agentType),
+			agentType: target.agentType,
+			// Without the prompt: resume rebuilds from this (applyDefaultRunConfig appends
+			// its args), so storing the prompt here would replay it — split on spaces.
+			agentLaunchCommand: target.command,
+		});
+	};
+
 	/**
 	 * Reveal an arbitrary folder in the FileBrowser panel. Sets an ephemeral
 	 * external root so browsing works outside the active repo — git badges and
@@ -823,10 +890,11 @@ const App: Component = () => {
 			classList={{
 				"sidebar-hidden": !uiStore.state.sidebarVisible,
 				"focus-mode": uiStore.state.focusMode,
+				"compose-dock": composeDockVisible(),
 			}}
 		>
 			<MobileViewBanner />
-			{/* Toolbar - drag region spanning full width */}
+			{/* Title bar: lights + sidebar toggle | tab strip | notifications + panel toggles */}
 			<Toolbar
 				repoPath={gitOps.currentRepoPath()}
 				runCommand={gitOps.activeRunCommand()}
@@ -841,6 +909,66 @@ const App: Component = () => {
 				onReviewPr={gitOps.handleReviewPr}
 				onOpenSettings={() => openSettings("smart-prompts")}
 				onShowWhatsNew={(v) => setWhatsNewVersion(v)}
+				tabs={
+					<div id="tab-bar" data-tauri-drag-region>
+						<TabBar
+							quickSwitcherActive={quickSwitcherVisible()}
+							onTabSelect={terminalLifecycle.handleTerminalSelect}
+							onTabClose={terminalLifecycle.closeTerminal}
+							onCloseOthers={terminalLifecycle.closeOtherTabs}
+							onCloseToRight={terminalLifecycle.closeTabsToRight}
+							onNewTab={gitOps.handleNewTab}
+							onSplitVertical={() => splitPanes.handleSplit("vertical")}
+							onSplitHorizontal={() => splitPanes.handleSplit("horizontal")}
+							onReorder={(from, to) => {
+								const activeRepo = repositoriesStore.getActive();
+								if (activeRepo?.activeBranch) {
+									repositoriesStore.reorderTerminals(activeRepo.path, activeRepo.activeBranch, from, to);
+								}
+							}}
+							onDetachTab={handleDetachTab}
+							onReattachTab={handleReattachTab}
+							onFocusDetachedTab={handleFocusDetachedTab}
+							getWorktreeTargets={gitOps.getWorktreeTargets}
+							onMoveToWorktree={gitOps.moveTerminalToWorktree}
+						/>
+					</div>
+				}
+				trailing={
+					<StatusBar
+						zoomLevel={settingsStore.state.appZoom}
+						statusInfo={statusInfo() === "Ready" ? "" : statusInfo()}
+						placement="toolbar"
+						onToggleDiff={() => togglePanel("git")}
+						onToggleMarkdown={() => uiStore.toggleMarkdownPanel()}
+						onToggleNotes={() => uiStore.toggleNotesPanel()}
+						onToggleFileBrowser={() => uiStore.toggleFileBrowserPanel()}
+						onToggleAiChat={() => togglePanel("ai-chat")}
+						onToggleErrorLog={() => errorLogStore.toggle()}
+						onDictationStart={dictation.handleDictationStart}
+						onDictationStop={dictation.handleDictationStop}
+						currentRepoPath={
+							globalWorkspaceStore.isActive()
+								? terminalsStore.state.activeId
+									? (repositoriesStore.getRepoPathForTerminal(terminalsStore.state.activeId) ?? undefined)
+									: undefined
+								: gitOps.currentRepoPath()
+						}
+						cwd={terminalsStore.getActive()?.cwd || gitOps.activeWorktreePath()}
+						repoRoot={gitOps.activeWorktreePath()}
+						onBranchRenamed={(oldName, newName) => {
+							const repoPath = gitOps.currentRepoPath();
+							if (repoPath) {
+								repositoriesStore.renameBranch(repoPath, oldName, newName);
+							}
+							if (gitOps.currentBranch() === oldName) {
+								gitOps.setCurrentBranch(newName);
+							}
+							setStatusInfo(`Renamed branch ${oldName} to ${newName}`);
+						}}
+						onReviewPr={gitOps.handleReviewPr}
+					/>
+				}
 			/>
 
 			{/* Body: sidebar + main content side by side */}
@@ -903,31 +1031,6 @@ const App: Component = () => {
 
 				{/* Main content */}
 				<main id="main">
-					{/* Tab bar */}
-					<div id="tab-bar">
-						<TabBar
-							quickSwitcherActive={quickSwitcherVisible()}
-							onTabSelect={terminalLifecycle.handleTerminalSelect}
-							onTabClose={terminalLifecycle.closeTerminal}
-							onCloseOthers={terminalLifecycle.closeOtherTabs}
-							onCloseToRight={terminalLifecycle.closeTabsToRight}
-							onNewTab={gitOps.handleNewTab}
-							onSplitVertical={() => splitPanes.handleSplit("vertical")}
-							onSplitHorizontal={() => splitPanes.handleSplit("horizontal")}
-							onReorder={(from, to) => {
-								const activeRepo = repositoriesStore.getActive();
-								if (activeRepo?.activeBranch) {
-									repositoriesStore.reorderTerminals(activeRepo.path, activeRepo.activeBranch, from, to);
-								}
-							}}
-							onDetachTab={handleDetachTab}
-							onReattachTab={handleReattachTab}
-							onFocusDetachedTab={handleFocusDetachedTab}
-							getWorktreeTargets={gitOps.getWorktreeTargets}
-							onMoveToWorktree={gitOps.moveTerminalToWorktree}
-						/>
-					</div>
-
 					{/* Terminal container - render ALL terminals so they never unmount (preserves PTY sessions) */}
 					<TerminalArea
 						onTerminalFocus={terminalLifecycle.handleTerminalFocus}
@@ -944,6 +1047,25 @@ const App: Component = () => {
 							const branch = repo?.activeBranch ?? Object.keys(repo?.branches ?? {})[0];
 							if (branch) void gitOps.handleAddTerminalToBranch(repoPath, branch);
 						}}
+						hero={() => (
+							<ComposeDock
+								variant="hero"
+								onDictationStart={dictation.handleDictationStart}
+								onDictationStop={dictation.handleDictationStop}
+								startTargets={composeStartTargets}
+								onStart={startFromComposer}
+							/>
+						)}
+						dock={() => (
+							<Show when={composeDockVisible()}>
+								<ComposeDock
+									variant="dock"
+									onDictationStart={dictation.handleDictationStart}
+									onDictationStop={dictation.handleDictationStop}
+									onOpenVoiceChat={settingsStore.isAiChatEnabled() ? () => togglePanel("ai-chat") : undefined}
+								/>
+							</Show>
+						)}
 					>
 						{/* Side panels (right panes inside #terminal-container) */}
 						<PanelOrchestrator
@@ -957,40 +1079,6 @@ const App: Component = () => {
 							}}
 						/>
 					</TerminalArea>
-
-					{/* Status bar */}
-					<StatusBar
-						zoomLevel={settingsStore.state.appZoom}
-						statusInfo={statusInfo()}
-						onToggleDiff={() => togglePanel("git")}
-						onToggleMarkdown={() => uiStore.toggleMarkdownPanel()}
-						onToggleNotes={() => uiStore.toggleNotesPanel()}
-						onToggleFileBrowser={() => uiStore.toggleFileBrowserPanel()}
-						onToggleAiChat={() => togglePanel("ai-chat")}
-						onToggleErrorLog={() => errorLogStore.toggle()}
-						onDictationStart={dictation.handleDictationStart}
-						onDictationStop={dictation.handleDictationStop}
-						currentRepoPath={
-							globalWorkspaceStore.isActive()
-								? terminalsStore.state.activeId
-									? (repositoriesStore.getRepoPathForTerminal(terminalsStore.state.activeId) ?? undefined)
-									: undefined
-								: gitOps.currentRepoPath()
-						}
-						cwd={terminalsStore.getActive()?.cwd || gitOps.activeWorktreePath()}
-						repoRoot={gitOps.activeWorktreePath()}
-						onBranchRenamed={(oldName, newName) => {
-							const repoPath = gitOps.currentRepoPath();
-							if (repoPath) {
-								repositoriesStore.renameBranch(repoPath, oldName, newName);
-							}
-							if (gitOps.currentBranch() === oldName) {
-								gitOps.setCurrentBranch(newName);
-							}
-							setStatusInfo(`Renamed branch ${oldName} to ${newName}`);
-						}}
-						onReviewPr={gitOps.handleReviewPr}
-					/>
 				</main>
 			</div>
 
@@ -1000,8 +1088,10 @@ const App: Component = () => {
 			{/* AI knowledge history overlay */}
 			<KnowledgeHistoryOverlay />
 
-			{/* Dictation streaming toast — shows partial transcription */}
-			<DictationToast />
+			{/* Dictation streaming toast — only while no composer is on screen to show it */}
+			<Show when={!composerOnScreen()}>
+				<DictationToast />
+			</Show>
 			<ToastContainer />
 
 			{/* One-time hints for the three things the chrome cannot explain on its own */}

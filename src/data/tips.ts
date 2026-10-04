@@ -137,6 +137,12 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
+		feature: "Speak or Type",
+		description:
+			"The bar under the terminal talks to the agent in that tab. Speak opens a field, shows your words as you say them, and Enter sends them — Option+Enter queues them for when the agent is idle. Type opens the same field for the keyboard.",
+		shortcut: null,
+	},
+	{
 		feature: "Find in Content",
 		description:
 			"Search text in terminals and markdown viewers — matches highlight as you type, with case, regex, and whole-word toggles.",

@@ -41,7 +41,7 @@ You can exercise features through the **web UI** instead of the Tauri desktop ap
 
 - All UI work MUST follow [`docs/frontend/STYLE_GUIDE.md`](docs/frontend/STYLE_GUIDE.md).
 - **Plugin dashboards MUST follow [`docs/plugins-style.md`](docs/plugins-style.md)** — use the shared `.dashboard`/`.dash-*` classes from `PLUGIN_BASE_CSS`, never hand-roll inline layout CSS. The built-in Claude Usage dashboard is the reference.
-- Icons: monochrome inline SVGs with `fill="currentColor"` — never emoji.
+- Icons: monochrome inline SVGs in `currentColor` from the shared stroke set in `src/components/icons` (STYLE_GUIDE › Icons) — never emoji, never a hand-drawn one-off.
 - Take a screenshot after EVERY visual/CSS/layout change to verify rendering.
 
 ## Branching

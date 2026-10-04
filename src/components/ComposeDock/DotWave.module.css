@@ -1,0 +1,29 @@
+/* Dotted live waveform: fixed pitch, newest sample at the right edge. */
+.wave {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  overflow: hidden;
+}
+
+.dot {
+  flex-shrink: 0;
+  width: 3px;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--fg-primary);
+  transition:
+    transform 60ms linear,
+    opacity 60ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot {
+    transition: none;
+  }
+}

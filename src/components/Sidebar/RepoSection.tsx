@@ -27,6 +27,7 @@ import { timeSync } from "../../utils/perfTrace";
 import type { ContextMenuItem } from "../ContextMenu";
 import { ContextMenu, createContextMenu } from "../ContextMenu";
 import { remoteUrlToGitHub } from "../GitPanel/BranchesTab";
+import { IconClose, IconFolder, IconFolderOpen, IconMore, IconPlus } from "../icons";
 import { PromptDialog } from "../PromptDialog";
 import b from "../shared/branch.module.css";
 import { PrStateBadge } from "./PrStateBadge";
@@ -93,46 +94,30 @@ export const BranchIcon: Component<{
 		return "worktree";
 	};
 
+	/** Shape used to be a glyph per kind; the row now shows one state dot, so
+	 *  the kind lives in the tooltip. */
+	const kindLabel = () => {
+		switch (iconShape()) {
+			case "error":
+				return "Error";
+			case "question":
+				return "Waiting for your answer";
+			case "shell":
+				return "Shell (not a git repository)";
+			case "star":
+				return "Main branch";
+			case "branch":
+				return "Branch";
+			default:
+				return "Worktree";
+		}
+	};
+
+	// One dot = state (STYLE_GUIDE › Sidebar): blue pulse busy, orange waiting,
+	// red error, accent unseen, grey "a terminal is open here", none when idle.
 	return (
-		<span class={cx(s.branchIcon, BRANCH_ICON_CLASSES[colorClass()])}>
-			{(() => {
-				switch (iconShape()) {
-					case "error":
-						return "!";
-					case "question":
-						return "?";
-					case "shell":
-						return (
-							<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
-								<path d="M1 3l5 5-5 5h2l5-5-5-5H1zm7 9h7v2H8v-2z" />
-							</svg>
-						);
-					case "star":
-						return (
-							<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
-								<path d="M9.2 1.2v4.4L13 3.2a1.3 1.3 0 1 1 1.3 2.3L10.5 8l3.8 2.5a1.3 1.3 0 1 1-1.3 2.3L9.2 10.4v4.4a1.2 1.2 0 0 1-2.4 0v-4.4L3 13a1.3 1.3 0 1 1-1.3-2.3L5.5 8 1.7 5.5A1.3 1.3 0 0 1 3 3.2l3.8 2.4V1.2a1.2 1.2 0 0 1 2.4 0z" />
-							</svg>
-						);
-					case "worktree":
-						return (
-							<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
-								<path
-									d="M5 1.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm0 10a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm6-4a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zM5 5v2.5a2 2 0 0 0 2 2h2.5M5 10.5V8"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.5"
-									stroke-linecap="round"
-								/>
-							</svg>
-						);
-					default:
-						return (
-							<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
-								<path d="M11.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zm-2.25.75a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25zM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5zM3.5 3.25a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0z" />
-							</svg>
-						);
-				}
-			})()}
+		<span class={cx(s.branchIcon, BRANCH_ICON_CLASSES[colorClass()])} title={kindLabel()}>
+			<span class={s.branchDot} />
 		</span>
 	);
 };
@@ -522,7 +507,7 @@ export const BranchItem: Component<{
 						}}
 						title={t("sidebar.addTerminal", "Add terminal")}
 					>
-						+
+						<IconPlus size={14} />
 					</button>
 					{/* Only linked worktrees can be removed — never the main checkout, whose
 					    worktreePath IS the repo root. `isMain` is name-based (main/master/
@@ -550,7 +535,9 @@ export const BranchItem: Component<{
 									: t("sidebar.removeWorktree", "Remove worktree")
 							}
 						>
-							{props.isRemoving ? "…" : "×"}
+							<Show when={!props.isRemoving} fallback="…">
+								<IconClose size={14} />
+							</Show>
 						</button>
 					</Show>
 				</div>
@@ -806,7 +793,7 @@ export const RepoSection: Component<{
 							onClick={handleMenuToggle}
 							title={t("sidebar.repoOptions", "Repository options")}
 						>
-							⋯
+							<IconMore size={16} />
 						</button>
 						{/* Non-git repos have no worktrees, so the add button is absent. The
 						    fallback keeps its slot occupied — without it the whole trailing
@@ -829,11 +816,17 @@ export const RepoSection: Component<{
 										: t("sidebar.addWorktree", "Add worktree")
 								}
 							>
-								{props.isCreatingWorktree ? "…" : "+"}
+								<Show when={!props.isCreatingWorktree} fallback="…">
+									<IconPlus size={16} />
+								</Show>
 							</button>
 						</Show>
 					</div>
-					<span class={cx(s.repoChevron, props.repo.expanded && s.expanded)}>{"\u203A"}</span>
+					<span class={cx(s.repoChevron, props.repo.expanded && s.expanded)}>
+						<Show when={props.repo.expanded} fallback={<IconFolder size={16} />}>
+							<IconFolderOpen size={16} />
+						</Show>
+					</span>
 				</Show>
 			</div>
 

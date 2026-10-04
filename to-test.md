@@ -35,6 +35,64 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+
+## Codex-style window: title bar, sidebar, panels, icons (2026-10-03)
+
+Frontend-only. Checked in a headless WebKit harness that boots the real `App` against a fake Tauri
+runtime (`fastaf/.tmp/shell-harness/`, shots in `fastaf/.tmp/shell-shots/s*`): tones sampled at
+#242424 / #1d1d1d / #181818 / #2f2f2f / #363636, the same as Codex. Tests: Toolbar, TabBar,
+StatusBar (new title-bar placement block), Sidebar, BranchIcon, AIChatPanel, ComposeDock.
+What only the native window can show:
+
+- [ ] Traffic lights sit centred against the 38px title bar (their position is Tauri config,
+  `trafficLightPosition`, unchanged — if they look 1–2px high, that is the knob, and it needs a rebuild).
+- [ ] Drag the window by the empty title bar over the sidebar column and by the empty space right
+  of the tabs; clicking a tab, `+`, the toggles or the IDE button must not start a drag.
+- [ ] Drag-reorder tabs inside the title bar; drop a file from the Files panel onto the tab strip.
+- [ ] Notifications popover, IDE launcher menu, smart prompts and the PR detail popover (click a
+  PR badge in the title bar) all open below the title bar, not off-screen.
+- [ ] Coach marks for Chat and Dictation (Help › reset hints): the Chat one points up at the title
+  bar toggle from below; the Dictation one sits above **Speak**.
+- [ ] Focus mode (`Cmd+Alt+Enter`) hides sidebar, tabs and panels; the title bar keeps the toggles.
+- [ ] Split panes and Multiview still show their own pane tab bars; the main tabs stay in the title bar.
+- [ ] Sidebar: New terminal opens a tab in the active branch; Search filters; the Projects header's
+  `+` adds a repo, its funnel toggles "Active only"; footer git icons pull/push/fetch/stash.
+- [ ] Switch to Cursor Dark: one black with 1px hairlines, no grey steps; vscode-light keeps dark lines.
+
+## Compose dock, empty-state composer, Codex Dark theme (2026-10-03)
+
+Frontend-only except the theme registration (`themes.rs` `BUILTIN_THEMES`, which only
+matters for fresh installs — `codex-dark.json` was copied into the installed themes dir by
+hand). Covered by `ComposeDock.test.tsx` (16 tests) and screenshotted in a headless WebKit
+harness (`fastaf/.tmp/compose-harness`, shots in `fastaf/.tmp/compose-dock-shots/v2-*`:
+bar at rest, open card, typing with a queue, listening, hero). What no test can reach:
+
+- [ ] Speak in the real app: click **Speak** under a Claude Code tab, talk, click ■. The card
+  opens before capture starts, the words appear as the field's placeholder while you talk with
+  the dotted waveform under them, the transcript lands in the field (not the terminal), Enter
+  sends to Claude Code and the card folds back into the bar. _(Needs a microphone — the harness fakes the level and partial.)_
+- [ ] Dictation hotkey with the terminal focused: the transcript still goes to the terminal as
+  before, and the bar shows the waveform and the words while it records.
+- [ ] Hotkey while the card's field is focused: the transcript lands in the field.
+- [ ] Auto-send on (Settings › Dictation): a transcript spoken into the card is sent as soon as
+  it lands; typing never auto-sends.
+- [ ] Type, then click the terminal without sending: an empty card folds back; a card with text
+  stays. Switch tabs and back: the draft and the card return.
+- [ ] Option+Enter on a busy Claude session: "1 queued" shows, the card stays open, and the text
+  is sent when Claude goes idle.
+- [ ] Multiview, split panes, focus mode, Files or Git open: the bar sits under the terminal
+  column only and targets the *active* terminal.
+- [ ] Empty well → "add a /health route", choose Claude Code, Enter: a new tab opens on the
+  active branch and Claude starts with that prompt. Restart the app and resume that tab: Claude
+  resumes without re-sending the first prompt (`agentLaunchCommand` is stored without it).
+- [ ] The bar disappears while a diff/markdown/editor tab is in front and comes back on a
+  terminal tab; the "Compose ⌘I" hint is gone while the bar shows and ⌘I still opens the editor.
+- [ ] Codex Dark (now the saved theme in `config.json`, so the installed app picks it up on its
+  next launch): frame #1d1d1d, well #181818, hairlines faded to a trace, no glass — Toolbar, tab
+  strip, side panels and status bar all read as tonal steps. Switching to Cursor Dark brings
+  the black and the 8 % hairlines back. Check a light theme (vscode-light) still has its dark
+  hairlines.
+
 ## Multi-select copy/paste in the file browser (2026-09-26, **Rust change — needs a rebuild**)
 
 New `paste_paths` command and `/fs/paste` route; the `/fs/*` HTTP path gate now
@@ -66,7 +124,6 @@ the real `FileBrowserPanel` in headless Chromium against an in-memory backend.
 - [x] Copy + Paste over HTTP _(verified: `test_paste_gates_the_destination_and_every_source`
   drives the real router — 403 with one source outside a registered repo, 200 and
   `a copy.txt` inside it; `transport.test.ts` maps `paste_paths` to `POST /fs/paste`)_
-
 
 ## Renderer freeze, round 2 (1.8.6)
 

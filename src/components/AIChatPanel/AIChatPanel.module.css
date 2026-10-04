@@ -13,7 +13,7 @@
   background: var(--surface-glass);
   backdrop-filter: var(--blur-glass);
   -webkit-backdrop-filter: var(--blur-glass);
-  border-left: 1px solid var(--border-subtle);
+  border-left: var(--hairline-w) solid var(--hairline);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -41,22 +41,20 @@
 
 .headerActions .headerBtnActive,
 .headerActions .headerBtnActive:hover:not(:disabled) {
-  color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.14);
+  color: var(--fg-primary);
+  background: var(--row-selected);
 }
 
 /* Attached-terminal dot: green when a terminal is focused, hollow when not. */
 .sessionDot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
-  margin-right: 2px;
 }
 
 .sessionDotOn {
   background: var(--success);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 18%, transparent);
 }
 
 .sessionDotOff {
@@ -64,12 +62,12 @@
 }
 
 .terminalName {
-  font-size: var(--font-xs);
-  font-weight: 500;
-  color: var(--fg-secondary);
-  padding: 2px 7px;
-  background: var(--wash-1);
-  border-radius: var(--radius-sm);
+  font-size: var(--font-md);
+  font-weight: 400;
+  color: var(--fg-muted);
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
   max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -91,34 +89,30 @@
   flex-shrink: 0;
 }
 
-/* Empty state — teaches by offering real first moves. */
+/* Empty state — a quiet prompt, then the first moves as plain rows (no
+   boxes), the way Codex lists its suggestions. */
 .emptyState {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
-  gap: 8px;
-  padding: 8px 4px 24px;
-  max-width: 340px;
+  gap: 6px;
+  padding: 8px 0 32px;
+  max-width: 360px;
 }
 
 .emptyMark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  margin-bottom: 4px;
-  border-radius: var(--radius-lg);
-  background: var(--sheen-strong), rgba(var(--accent-rgb), 0.12);
-  box-shadow: var(--highlight-inset), 0 0 0 1px rgba(var(--accent-rgb), 0.18);
-  color: var(--accent);
+  margin: 0 0 8px;
+  color: var(--fg-secondary);
 }
 
 .emptyTitle {
-  font-size: var(--font-lg);
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 500;
   color: var(--fg-primary);
   letter-spacing: -0.01em;
   text-wrap: balance;
@@ -126,7 +120,7 @@
 
 .emptyHint {
   font-size: var(--font-md);
-  color: var(--fg-secondary);
+  color: var(--fg-muted);
   line-height: 1.5;
   text-wrap: pretty;
 }
@@ -134,9 +128,9 @@
 .starters {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  margin-top: 10px;
+  gap: 1px;
+  width: calc(100% + 16px);
+  margin: 14px -8px 0;
 }
 
 .starter {
@@ -144,24 +138,23 @@
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 32px;
-  padding: 0 10px 0 12px;
-  background: var(--wash-0);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  color: var(--fg-primary);
+  height: 32px;
+  padding: 0 8px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: color-mix(in srgb, var(--fg-primary) 86%, transparent);
   font-family: inherit;
-  font-size: var(--font-md);
+  font-size: 13.5px;
   text-align: left;
   cursor: pointer;
-  box-shadow: var(--highlight-inset);
   transition: background var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
+    color var(--duration-fast) var(--ease-out);
 }
 
 .starter:hover {
-  background: var(--wash-1);
-  border-color: var(--border-strong);
+  background: var(--row-selected);
+  color: var(--fg-primary);
 }
 
 .starterLabel {
@@ -183,11 +176,11 @@
 
 .starterKind {
   font-size: var(--font-xs);
-  font-weight: 600;
-  color: var(--accent);
-  padding: 1px 7px;
-  border-radius: var(--radius-pill);
-  background: rgba(var(--accent-rgb), 0.14);
+  font-weight: 500;
+  color: var(--fg-muted);
+  padding: 1px 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 /* The user's turn: a quiet block on the right, no bubble tail. */
@@ -911,28 +904,23 @@
   color: var(--error);
 }
 
-/* ── Composer — one glass field ─────────────────────────── */
+/* ── Composer — the same card as the compose dock (ComposeDock.module.css):
+   one raised tone, no border, 18px radius, 28px round controls. ── */
 .inputArea {
-  margin: 8px 12px 10px;
-  padding: 8px 8px 6px 12px;
+  margin: 8px 12px 12px;
+  padding: 12px 10px 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  background: var(--sheen), var(--bg-primary);
-  border: 1px solid var(--border-subtle);
-  border-radius: 14px;
-  box-shadow: var(--inset-well);
-  transition: border-color var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out);
-}
-
-.inputArea:hover:not(:focus-within) {
-  border-color: var(--border-strong);
+  gap: 10px;
+  background: var(--surface-composer);
+  border: none;
+  border-radius: 18px;
+  box-shadow: none;
+  transition: box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .inputArea:focus-within {
-  border-color: rgba(var(--accent-rgb), 0.7);
-  box-shadow: var(--inset-well), 0 0 0 3px rgba(var(--accent-rgb), 0.16);
+  box-shadow: 0 0 0 1px var(--border-strong);
 }
 
 .inputAreaFrozen {
@@ -945,12 +933,12 @@
   border: none;
   border-radius: 0;
   color: var(--fg-primary);
-  font-size: var(--font-md);
+  font-size: var(--font-lg);
   font-family: var(--font-ui);
-  padding: 2px 0;
+  padding: 0;
   resize: none;
-  min-height: 24px;
-  max-height: 150px;
+  min-height: 22px;
+  max-height: 180px;
   line-height: 1.45;
   box-sizing: border-box;
   overflow-y: auto;
@@ -996,25 +984,25 @@
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  height: 22px;
-  padding: 0 6px 0 8px;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
   border-radius: var(--radius-pill);
-  background: var(--wash-1);
+  background: transparent;
   color: var(--fg-secondary);
   font-family: inherit;
-  font-size: var(--font-xs);
-  font-weight: 500;
+  font-size: var(--font-md);
+  font-weight: 400;
   white-space: nowrap;
   cursor: pointer;
   border: none;
-  box-shadow: var(--highlight-inset);
+  box-shadow: none;
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 .chip:hover {
-  background: var(--wash-2);
+  background: var(--wash-1);
   color: var(--fg-primary);
 }
 
@@ -1024,12 +1012,12 @@
 }
 
 .chipAccent {
-  background: rgba(var(--accent-rgb), 0.16);
+  background: transparent;
   color: var(--accent);
 }
 
 .chipAccent:hover {
-  background: rgba(var(--accent-rgb), 0.24);
+  background: rgba(var(--accent-rgb), 0.14);
   color: var(--accent);
 }
 
@@ -1059,21 +1047,30 @@
   color: inherit;
 }
 
-/* The select paints nothing of its own; the chip around it is the control. */
+/* The chip shows its value as text and the native <select> lies invisibly on
+   top of it, so the chip is exactly as wide as its label (a bare select
+   reserves the width of its longest option) and macOS still pops the system
+   menu on click. */
+.chipValue {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chipSelect {
   appearance: none;
   -webkit-appearance: none;
-  background: transparent;
-  border: none;
-  padding: 0;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   margin: 0;
-  color: inherit;
+  padding: 0;
+  opacity: 0;
+  border: none;
   font: inherit;
   cursor: pointer;
-  outline: none;
-  max-width: 130px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .chipSelect:focus-visible {
@@ -1081,7 +1078,7 @@
 }
 
 .chip:focus-within {
-  box-shadow: var(--highlight-inset), 0 0 0 2px rgba(var(--accent-rgb), 0.35);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.35);
 }
 
 .stepInput {
@@ -1103,48 +1100,49 @@
   margin: 0;
 }
 
-/* Send is the only accent in the row; stop takes its place while streaming. */
+/* Send: a 28px circle in the text colour with the arrow cut out of it —
+   Codex's send. Stop takes its place while streaming, same circle, ■. */
 .sendBtn {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   margin-left: 4px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 82%, white), var(--accent));
-  color: var(--text-on-accent);
+  background: var(--fg-primary);
+  color: var(--bg-primary);
   border: none;
   border-radius: var(--radius-full);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 1px 2px rgba(0, 0, 0, 0.4);
+  box-shadow: none;
   cursor: pointer;
   flex-shrink: 0;
   transition: background var(--duration-fast) var(--ease-out),
-    opacity var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out);
+    opacity var(--duration-fast) var(--ease-out);
 }
 
 .sendBtn:hover:not(:disabled) {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-hover) 82%, white), var(--accent-hover));
+  background: color-mix(in srgb, var(--fg-primary) 86%, var(--bg-primary));
 }
 
 .sendBtn:disabled {
-  opacity: 0.3;
-  box-shadow: none;
+  background: var(--wash-2);
+  color: var(--fg-primary);
+  opacity: 0.45;
   cursor: default;
 }
 
 .stopBtn {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   margin-left: 4px;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--error) 82%, white), var(--error));
-  color: var(--text-on-error);
+  background: var(--fg-primary);
+  color: var(--bg-primary);
   border: none;
   border-radius: var(--radius-full);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 1px 2px rgba(0, 0, 0, 0.4);
+  box-shadow: none;
   cursor: pointer;
   flex-shrink: 0;
   transition: opacity var(--duration-fast) var(--ease-out);
