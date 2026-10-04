@@ -330,7 +330,11 @@ Replaced by the Git Panel's Changes tab (section 3.8). `Cmd+Shift+D` now opens t
 - Search filter: text input with `*` and `**` glob wildcard support
 - Git status indicators: orange (modified), green (staged), blue (untracked)
 - Context menu (right-click): Copy (`Cmd+C`), Cut (`Cmd+X`), Paste (`Cmd+V`), Rename, Delete, Add to .gitignore
-- Keyboard shortcuts work when panel is focused (copy/cut/paste)
+- **Multi-select** (flat list and tree view): `Cmd+click` (`Ctrl+click` on Windows/Linux) adds or removes a row, `Shift+click` selects the range from the last-clicked row (in tree view the rows of expanded folders count), `Cmd+A` selects every row on screen, and `Escape` or a click on empty space clears it. A selection click never opens a file or expands a folder. Selected rows get a 22 % accent wash, stronger than the 13 % one that marks the file open in the editor
+- **Copy/Cut/Paste act on the whole selection.** `Cmd+C`/`Cmd+X`, or the menu of a selected row ("Copy 3 Files"), put every selected file on the clipboard, and one Paste lands them all through a single `paste_paths` call. Folders are left out, since only files can be copied, and a toast says so. Right-clicking outside the selection selects just that row
+- **Paste target:** the right-clicked folder, or the folder of the right-clicked file. `Cmd+V` pastes into the last-clicked folder (or beside the last-clicked file) in tree view, and into the folder on screen in the flat list
+- **Paste never overwrites.** A copy whose name is taken lands as `name copy.ext`, then `name copy 2.ext` — so pasting into the source folder duplicates. A move whose name is taken is skipped, and a toast names it. Pasted files come up selected, their folder expanded in tree view
+- Keyboard shortcuts work when panel is focused (copy/cut/paste/select all)
 - Sort dropdown: Name (alphabetical, directories first) or Date (newest first, directories first)
 - **View modes**: flat list (default) and tree view — toggle via toolbar buttons. Tree view shows a collapsible hierarchy with lazy-loaded subdirectories on expand. Switching to tree resets to repo root. Search always uses flat results
 - Click file to open in code editor tab
@@ -1472,9 +1476,13 @@ All data persisted to platform config directory via Rust:
 | `↑/↓` | Navigate files |
 | `Enter` | Open file / enter directory |
 | `Backspace` | Go to parent directory |
-| `Cmd+C` | Copy file |
-| `Cmd+X` | Cut file |
-| `Cmd+V` | Paste file |
+| `Cmd+Click` | Add a row to the selection, or take it out |
+| `Shift+Click` | Select the range from the last-clicked row |
+| `Cmd+A` | Select every row on screen |
+| `Escape` | Clear the selection |
+| `Cmd+C` | Copy the selected files |
+| `Cmd+X` | Cut the selected files |
+| `Cmd+V` | Paste the files (tree view: into the last-clicked folder, or beside the last-clicked file) |
 | `Cmd+Shift+F` | Open file browser and activate content search |
 
 ### Code Editor (when focused)

@@ -63,6 +63,12 @@ export const TIPS: Tip[] = [
 		shortcut: `${mod}+E`,
 	},
 	{
+		feature: "Select Several Files",
+		description:
+			"Cmd+click or Shift+click rows in the file browser to select several files, then copy, cut and paste them all at once.",
+		shortcut: `${mod}+Click`,
+	},
+	{
 		feature: "Plugin File Previews",
 		description:
 			"Install preview plugins from Settings > Plugins > Browse to open formats like DOCX directly from the File Browser.",

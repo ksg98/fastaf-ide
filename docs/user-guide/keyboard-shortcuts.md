@@ -172,9 +172,13 @@ While holding the modifier, all branches show numbered badges. Press a number to
 | `↑` / `↓` | Navigate files |
 | `Enter` | Open file or enter directory |
 | `Backspace` | Go to parent directory |
-| `Cmd+C` | Copy selected file |
-| `Cmd+X` | Cut selected file |
-| `Cmd+V` | Paste file into current directory |
+| `Cmd+Click` | Add a file to the selection, or take it out |
+| `Shift+Click` | Select the range from the last-clicked row |
+| `Cmd+A` | Select every row on screen |
+| `Escape` | Clear the selection |
+| `Cmd+C` | Copy the selected files |
+| `Cmd+X` | Cut the selected files |
+| `Cmd+V` | Paste into the current directory (tree view: into the last-clicked folder, or beside the last-clicked file) |
 
 ## Code Editor (when editor tab is focused)
 

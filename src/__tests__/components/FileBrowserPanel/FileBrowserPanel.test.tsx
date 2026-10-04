@@ -38,6 +38,8 @@ const emitEvent = (event: string, payload: unknown) => {
 
 const { FileBrowserPanel } = await import("../../../components/FileBrowserPanel/FileBrowserPanel");
 const { uiStore } = await import("../../../stores/ui");
+const { toastsStore } = await import("../../../stores/toasts");
+const { resetPlatformCache } = await import("../../../platform");
 
 const dir = (name: string, path = name): DirEntry => ({
 	name,
@@ -419,5 +421,252 @@ describe("FileBrowserPanel create file", () => {
 		fireEvent.keyDown(input, { key: "Enter" });
 
 		await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("create_file", { repoPath: "/repo", file: ".env" }));
+	});
+});
+
+describe("FileBrowserPanel multi-select copy/paste", () => {
+	let pasteResult: { pasted: string[]; skipped: string[]; errors: string[] };
+
+	beforeEach(() => {
+		pasteResult = { pasted: [], skipped: [], errors: [] };
+		mockInvoke.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
+			cmd === "paste_paths" ? Promise.resolve(pasteResult) : defaultInvoke(cmd, args),
+		);
+	});
+
+	afterEach(() => {
+		for (const toast of [...toastsStore.toasts]) toastsStore.remove(toast.id);
+	});
+
+	const pasteCalls = () => mockInvoke.mock.calls.filter(([cmd]) => cmd === "paste_paths").map(([, args]) => args);
+
+	/** The row element whose name label reads `name`. */
+	const rowOf = (container: HTMLElement, name: string) => {
+		const label = Array.from(container.querySelectorAll(".entryName")).find((el) => el.textContent === name);
+		if (!label) throw new Error(`row not found: ${name}`);
+		return label.parentElement as HTMLElement;
+	};
+	const cmdClick = (container: HTMLElement, name: string) => fireEvent.click(rowOf(container, name), { metaKey: true });
+	const shiftClick = (container: HTMLElement, name: string) =>
+		fireEvent.click(rowOf(container, name), { shiftKey: true });
+	const pickedNames = (container: HTMLElement) =>
+		Array.from(container.querySelectorAll(".entryPicked .entryName")).map((el) => el.textContent);
+	/** A keydown as the panel sees it: on the document, Cmd held unless told otherwise. */
+	const press = (key: string, mods: KeyboardEventInit = { metaKey: true }) =>
+		fireEvent.keyDown(document, { key, ...mods });
+	const openMenuOn = (container: HTMLElement, name: string) => fireEvent.contextMenu(rowOf(container, name));
+	const clickMenuItem = (label: string) => {
+		const item = Array.from(document.querySelectorAll("*")).find(
+			(el) => el.children.length === 0 && el.textContent?.trim() === label,
+		);
+		if (!item) throw new Error(`menu item not found: ${label}`);
+		fireEvent.click(item);
+	};
+
+	const renderPanel = (onFileOpen = vi.fn()) =>
+		render(() => <FileBrowserPanel visible={true} repoPath="/repo" onClose={() => {}} onFileOpen={onFileOpen} />);
+
+	it("copies every Cmd+clicked file and pastes them all in one call", async () => {
+		listings.set("/repo|.", [file("a.txt"), file("b.txt"), file("c.txt")]);
+		const onFileOpen = vi.fn();
+		const { container, queryByText } = renderPanel(onFileOpen);
+		await waitFor(() => expect(queryByText("c.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "c.txt");
+		// A selection gesture never opens the file it lands on.
+		expect(onFileOpen).not.toHaveBeenCalled();
+		expect(pickedNames(container)).toEqual(["a.txt", "c.txt"]);
+
+		press("c");
+		press("v");
+
+		await waitFor(() =>
+			expect(pasteCalls()).toEqual([{ sources: ["/repo/a.txt", "/repo/c.txt"], destDir: "/repo", mode: "copy" }]),
+		);
+	});
+
+	it("Cmd+click on a picked row takes it back out", async () => {
+		listings.set("/repo|.", [file("a.txt"), file("b.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("b.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "b.txt");
+		cmdClick(container, "a.txt");
+
+		expect(pickedNames(container)).toEqual(["b.txt"]);
+	});
+
+	it("Shift+click selects the on-screen range of the tree, expanded children included", async () => {
+		listings.set("/repo|.", [dir("src"), file("z.txt")]);
+		listings.set("/repo|src", [file("a.ts", "src/a.ts"), file("b.ts", "src/b.ts")]);
+		const onFileOpen = vi.fn();
+		const { container, queryByText } = renderPanel(onFileOpen);
+		clickTreeViewButton(container);
+		await waitFor(() => expect(queryByText("src")).not.toBeNull());
+		clickRow(container, "src");
+		await waitFor(() => expect(queryByText("a.ts")).not.toBeNull());
+
+		clickRow(container, "a.ts"); // plain click: opens the file and anchors the range
+		shiftClick(container, "z.txt");
+
+		expect(onFileOpen).toHaveBeenCalledTimes(1);
+		expect(pickedNames(container)).toEqual(["a.ts", "b.ts", "z.txt"]);
+
+		press("c");
+		press("v");
+		// Tree view pastes where the anchor row is: beside a.ts, inside src.
+		await waitFor(() =>
+			expect(pasteCalls()).toEqual([
+				{ sources: ["/repo/src/a.ts", "/repo/src/b.ts", "/repo/z.txt"], destDir: "/repo/src", mode: "copy" },
+			]),
+		);
+	});
+
+	it("pastes into the right-clicked folder in tree view, not the root", async () => {
+		listings.set("/repo|.", [dir("docs"), file("a.txt")]);
+		const { container, queryByText } = renderPanel();
+		clickTreeViewButton(container);
+		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+
+		openMenuOn(container, "a.txt");
+		clickMenuItem("Copy");
+		openMenuOn(container, "docs");
+		clickMenuItem("Paste");
+
+		await waitFor(() =>
+			expect(pasteCalls()).toEqual([{ sources: ["/repo/a.txt"], destDir: "/repo/docs", mode: "copy" }]),
+		);
+	});
+
+	it("cuts the selection: its rows dim, and the paste moves them", async () => {
+		listings.set("/repo|.", [dir("dest"), file("a.txt"), file("b.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("b.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "b.txt");
+		press("x");
+		expect(rowOf(container, "a.txt").classList.contains("entryCut")).toBe(true);
+		expect(rowOf(container, "b.txt").classList.contains("entryCut")).toBe(true);
+
+		openMenuOn(container, "dest");
+		clickMenuItem("Paste");
+
+		await waitFor(() =>
+			expect(pasteCalls()).toEqual([{ sources: ["/repo/a.txt", "/repo/b.txt"], destDir: "/repo/dest", mode: "move" }]),
+		);
+	});
+
+	it("leaves folders out of a keyboard copy and says so", async () => {
+		listings.set("/repo|.", [dir("docs"), file("a.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+
+		cmdClick(container, "docs");
+		cmdClick(container, "a.txt");
+		press("c");
+		press("v");
+
+		await waitFor(() => expect(pasteCalls()).toEqual([{ sources: ["/repo/a.txt"], destDir: "/repo", mode: "copy" }]));
+		expect(toastsStore.toasts.map((t) => t.title)).toContain("Copied 1 File");
+	});
+
+	it("offers the whole selection in the menu of a row inside it", async () => {
+		listings.set("/repo|.", [file("a.txt"), file("b.txt"), file("c.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("c.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "b.txt");
+		openMenuOn(container, "b.txt");
+		clickMenuItem("Copy 2 Files");
+		// The right-click kept the selection rather than narrowing it to b.txt.
+		expect(pickedNames(container)).toEqual(["a.txt", "b.txt"]);
+
+		press("v");
+		await waitFor(() =>
+			expect(pasteCalls()).toEqual([{ sources: ["/repo/a.txt", "/repo/b.txt"], destDir: "/repo", mode: "copy" }]),
+		);
+	});
+
+	it("right-clicking outside the selection selects just that row", async () => {
+		listings.set("/repo|.", [file("a.txt"), file("b.txt"), file("c.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("c.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "b.txt");
+		openMenuOn(container, "c.txt");
+
+		expect(pickedNames(container)).toEqual(["c.txt"]);
+	});
+
+	it("pastes once when Cmd+V is pressed with the context menu open", async () => {
+		// The menu's own shortcut handler only matches ⌘ shortcuts, i.e. on macOS.
+		const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+		Object.defineProperty(navigator, "platform", { value: "MacIntel", writable: true, configurable: true });
+		resetPlatformCache();
+		try {
+			listings.set("/repo|.", [dir("docs"), file("a.txt")]);
+			const { container, queryByText } = renderPanel();
+			await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+
+			cmdClick(container, "a.txt");
+			press("c");
+			openMenuOn(container, "docs");
+			press("v");
+
+			await waitFor(() => expect(pasteCalls().length).toBe(1));
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(pasteCalls()).toEqual([{ sources: ["/repo/a.txt"], destDir: "/repo/docs", mode: "copy" }]);
+		} finally {
+			if (originalPlatform) Object.defineProperty(navigator, "platform", originalPlatform);
+			else delete (navigator as unknown as Record<string, unknown>).platform;
+			resetPlatformCache();
+		}
+	});
+
+	it("Escape clears the selection", async () => {
+		listings.set("/repo|.", [file("a.txt"), file("b.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("b.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "b.txt");
+		press("Escape", {});
+
+		expect(pickedNames(container)).toEqual([]);
+	});
+
+	it("selects what it pasted, so a copy made beside its original is on screen", async () => {
+		listings.set("/repo|.", [file("a.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		press("c");
+		pasteResult = { pasted: ["a copy.txt"], skipped: [], errors: [] };
+		listings.set("/repo|.", [file("a.txt"), file("a copy.txt")]);
+		press("v");
+
+		await waitFor(() => expect(pickedNames(container)).toEqual(["a copy.txt"]));
+	});
+
+	it("reports the files a paste left out", async () => {
+		listings.set("/repo|.", [dir("dest"), file("a.txt"), file("b.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("b.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "b.txt");
+		press("x");
+		pasteResult = { pasted: ["b.txt"], skipped: ["a.txt"], errors: [] };
+		openMenuOn(container, "dest");
+		clickMenuItem("Paste");
+
+		await waitFor(() => expect(toastsStore.toasts.map((t) => t.title)).toContain("Moved 1 of 2 files"));
+		expect(toastsStore.toasts.find((t) => t.title === "Moved 1 of 2 files")?.message).toContain("a.txt");
 	});
 });

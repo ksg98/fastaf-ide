@@ -1,6 +1,6 @@
 import { invoke } from "../invoke";
 import { appLogger } from "../stores/appLogger";
-import type { ContentSearchBatch, DirEntry } from "../types/fs";
+import type { ContentSearchBatch, DirEntry, PasteResult } from "../types/fs";
 import { listenContentSearch, newContentSearchId, startContentSearch } from "../utils/contentSearch";
 
 export interface ContentSearchOptions {
@@ -58,6 +58,13 @@ export function useFileBrowser() {
 	/** Move a file by absolute paths — supports cut+paste across different repos. */
 	async function movePathAbs(from: string, to: string): Promise<void> {
 		await invoke("move_path_abs", { from, to });
+	}
+
+	/** Paste files (absolute paths) into `destDir` — the FileBrowser's Copy/Cut +
+	 *  Paste for one file or a whole selection. Never overwrites: a copy whose
+	 *  name is taken gets a " copy" name, a move whose name is taken is skipped. */
+	async function pastePaths(sources: string[], destDir: string, mode: "copy" | "move"): Promise<PasteResult> {
+		return await invoke<PasteResult>("paste_paths", { sources, destDir, mode });
 	}
 
 	async function addToGitignore(repoPath: string, pattern: string): Promise<void> {
@@ -119,6 +126,7 @@ export function useFileBrowser() {
 		copyPath,
 		copyPathAbs,
 		movePathAbs,
+		pastePaths,
 		addToGitignore,
 		searchContent,
 	};

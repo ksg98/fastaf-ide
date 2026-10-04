@@ -173,10 +173,13 @@ fn deny_unless_in_roots(path: &str, roots: &[String]) -> Option<Response> {
     None
 }
 
-/// Extract registered repository root paths from the opaque repos JSON.
+/// Extract registered repository root paths from the opaque repos JSON. The
+/// document keys them under `repos` (`stores/repositories.ts`, and every other
+/// reader of it); asking for any other key finds nothing and denies every gated
+/// route, which is what the `repositories` this once read did.
 fn registered_repo_roots() -> Vec<String> {
     crate::config::load_repositories()
-        .get("repositories")
+        .get("repos")
         .and_then(|r| r.as_object())
         .map(|obj| obj.keys().cloned().collect())
         .unwrap_or_default()
@@ -352,6 +355,20 @@ pub(super) async fn move_path_abs_http(Json(body): Json<FsAbsTransferRequest>) -
     }
 }
 
+/// Paste one or many files (FileBrowser Copy/Cut + Paste). The destination and
+/// every source are gated to registered repo roots, as `/fs/copy-abs` gates both
+/// of its ends: unlike `/fs/transfer`, nothing pasted comes from outside the app.
+pub(super) async fn paste_paths_http(Json(body): Json<FsPastePathsRequest>) -> Response {
+    let roots = registered_repo_roots();
+    if let Some(resp) = std::iter::once(&body.dest_dir)
+        .chain(&body.sources)
+        .find_map(|path| deny_unless_in_roots(path, &roots))
+    {
+        return resp;
+    }
+    json_result(crate::fs::paste_paths(body.sources, body.dest_dir, body.mode).await)
+}
+
 /// Bulk OS drag-drop transfer into a destination directory. Only the destination
 /// is gated to repo roots: sources are frequently external (a file dragged from
 /// the desktop), which is the whole point of drag-import.
@@ -388,6 +405,27 @@ fn deny_unless_both_in_roots(from: &str, to: &str) -> Option<Response> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// Asking the repositories document for `repositories` instead of `repos`
+    /// found no roots, so every gated route — `/fs/copy-abs`, `/fs/move-abs`,
+    /// `/fs/paste`, `/fs/read-external` — refused every browser and remote client.
+    #[test]
+    fn registered_repo_roots_reads_the_repos_the_app_saves() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _config = crate::config::set_config_dir_override(tmp.path().to_path_buf());
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": { "/Users/dev/project-a": {}, "/Users/dev/project-b": {} },
+            "repoOrder": ["/Users/dev/project-a", "/Users/dev/project-b"]
+        }))
+        .unwrap();
+
+        let mut roots = registered_repo_roots();
+        roots.sort();
+
+        assert_eq!(roots, vec!["/Users/dev/project-a", "/Users/dev/project-b"]);
+        assert!(deny_unless_in_roots("/Users/dev/project-a/src/main.rs", &roots).is_none());
+        assert!(deny_unless_in_roots("/Users/dev/elsewhere/x.rs", &roots).is_some());
+    }
 
     #[test]
     fn within_repo_roots_match() {

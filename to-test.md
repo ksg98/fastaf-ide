@@ -35,6 +35,38 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Multi-select copy/paste in the file browser (2026-09-26, **Rust change — needs a rebuild**)
+
+New `paste_paths` command and `/fs/paste` route; the `/fs/*` HTTP path gate now
+reads `repos` (it read `repositories`, found no roots and refused everything).
+Covered by the "multi-select copy/paste" block of `FileBrowserPanel.test.tsx`,
+`fs::tests::paste_*`, `registered_repo_roots_reads_the_repos_the_app_saves` and
+`test_paste_gates_the_destination_and_every_source`. The "harness" checks below ran
+the real `FileBrowserPanel` in headless Chromium against an in-memory backend.
+
+- [ ] In the installed app, after FastAF is restarted on the new build: Cmd+click two files, Cmd+C, click a folder, Cmd+V. Both land in that
+  folder and come up selected. _(Only this needs the live app: it is the one path —
+  Tauri IPC into the new command — that no test above exercised end to end.)_
+- [x] Tree view: Shift+click and Cmd+click select across folders; one paste lands in
+  the clicked folder, not the repo root _(verified: harness — Shift+click a.ts → index.ts
+  plus Cmd+click notes.txt selected 4 rows, the menu offered "Copy 4 Files", clicking
+  `docs` then Cmd+V sent one `paste_paths` with `destDir` `/demo/docs`, and the pasted
+  rows came up selected with `docs` expanded)_
+- [x] Shift+click highlights no text _(verified: `.entry` sets `user-select: none`; no
+  text selection in the harness screenshots)_
+- [x] Paste into the source folder makes `name copy.ext`, then `name copy 2.ext`
+  _(verified: `paste_copy_into_its_own_folder_makes_copies`; harness showed
+  `a copy.ts`, `b copy.ts`, `index copy.ts`, `notes copy.txt`)_
+- [x] A cut into a folder holding the same name skips that file, moves the rest and
+  names it in a toast _(verified: `paste_move_skips_a_taken_name_and_touches_neither_file`;
+  vitest "reports the files a paste left out" → "Moved 1 of 2 files")_
+- [x] Selected rows read differently from the file open in the editor _(verified:
+  harness computed 22 % vs 13 % accent wash; the difference is visible but subtle —
+  worth a glance in the real theme)_
+- [x] Copy + Paste over HTTP _(verified: `test_paste_gates_the_destination_and_every_source`
+  drives the real router — 403 with one source outside a registered repo, 200 and
+  `a copy.txt` inside it; `transport.test.ts` maps `paste_paths` to `POST /fs/paste`)_
+
 
 ## Renderer freeze, round 2 (1.8.6)
 
