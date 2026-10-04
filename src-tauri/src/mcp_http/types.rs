@@ -393,6 +393,15 @@ pub(super) struct FsAbsTransferRequest {
     pub to: String,
 }
 
+/// FileBrowser paste of one or many files into a destination directory.
+#[derive(Deserialize)]
+pub(super) struct FsPastePathsRequest {
+    pub sources: Vec<String>,
+    #[serde(rename = "destDir")]
+    pub dest_dir: String,
+    pub mode: crate::fs::TransferMode,
+}
+
 /// Bulk OS drag-drop transfer (move/copy) into a destination directory.
 #[derive(Deserialize)]
 pub(super) struct FsTransferPathsRequest {

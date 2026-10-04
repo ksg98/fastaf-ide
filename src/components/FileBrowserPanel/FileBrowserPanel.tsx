@@ -1,4 +1,4 @@
-import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
+import { type Component, createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { ContentSearchOptions } from "../../hooks/useFileBrowser";
 import { useFileBrowser } from "../../hooks/useFileBrowser";
@@ -13,7 +13,7 @@ import { editorTabsStore } from "../../stores/editorTabs";
 import { repositoriesStore } from "../../stores/repositories";
 import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
-import type { ContentMatch, DirEntry } from "../../types/fs";
+import type { ContentMatch, DirEntry, PasteResult } from "../../types/fs";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
@@ -77,6 +77,12 @@ const ContentModeIcon = () => (
 	</svg>
 );
 
+/** Shared empty set: clearing the selection allocates nothing. */
+const EMPTY_PATHS: ReadonlySet<string> = new Set();
+
+/** "1 File" / "3 Files", for menu labels and toasts about a selection. */
+const fileCount = (n: number) => (n === 1 ? "1 File" : `${n} Files`);
+
 export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	const mode = () => props.mode ?? "inline";
 	const [entries, setEntries] = createSignal<DirEntry[]>([]);
@@ -127,14 +133,29 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	type CreateKind = "folder" | "file";
 	const [inlineCreate, setInlineCreate] = createSignal<{ kind: CreateKind; parent: string } | null>(null);
 
-	// File clipboard state for copy/cut/paste. `sourceRoot` is the repo the entry
-	// was copied from — captured so paste works across different repos (entry.path
-	// is relative to its own repo, not the paste destination's).
+	// File clipboard for Copy/Cut + Paste: every file that was selected when it
+	// was copied. `sourceRoot` is the repo those entries came from — captured so
+	// paste works across different repos (entry.path is relative to its own repo,
+	// not the paste destination's).
 	const [clipboard, setClipboard] = createSignal<{
-		entry: DirEntry;
+		entries: DirEntry[];
 		mode: "copy" | "cut";
 		sourceRoot: string;
 	} | null>(null);
+
+	/** Repo-relative paths of the files cut from THIS root, for dimming their rows. */
+	const cutPaths = createMemo((): ReadonlySet<string> => {
+		const clip = clipboard();
+		if (clip?.mode !== "cut" || clip.sourceRoot !== root()) return EMPTY_PATHS;
+		return new Set(clip.entries.map((e) => e.path));
+	});
+
+	// Multi-selection, VS Code / Finder style: Cmd/Ctrl+click toggles a row and
+	// Shift+click selects the range from the anchor. Paths are repo-relative. The
+	// anchor is also where Cmd+V pastes in tree view (see keyboardPasteDir).
+	const [selection, setSelection] = createSignal<ReadonlySet<string>>(EMPTY_PATHS);
+	const [selectionAnchor, setSelectionAnchor] = createSignal<string | null>(null);
+	let panelRef: HTMLDivElement | undefined;
 
 	// Search mode: "filename" (default) or "content" (full-text grep)
 	type SearchMode = "filename" | "content";
@@ -471,6 +492,11 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		if (!props.visible || viewMode() !== "tree") return;
 		const fsRoot = root();
 		if (!fsRoot) return;
+		// The cache belongs to the root the listing effect last loaded, and that
+		// effect resets it when the root changes. Effects re-run in an order Solid
+		// reshuffles as subscribers come and go, so on a switch this one can run
+		// first — and would re-list the previous repo's folders under the new root.
+		if (fsRoot !== lastRepoPath) return;
 		// Both signals: repo-changed is recursive but skips gitignored paths, the
 		// dir watcher is non-recursive but sees them for the current directory.
 		void (props.repoPath ? repositoriesStore.getRevision(props.repoPath) : 0);
@@ -623,6 +649,89 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		setRefreshTrigger((n) => n + 1);
 	};
 
+	/**
+	 * Every entry row on screen, in on-screen order: what a Shift+click range
+	 * runs over, and the only rows a selection action may touch. The flat list
+	 * (and any filename search) renders `filteredEntries()`; tree view renders it
+	 * depth-first, descending into each expanded folder whose children are
+	 * loaded, which is TreeNode's own render order. Content search shows no rows.
+	 */
+	const visibleRows = createMemo((): DirEntry[] => {
+		if (searchMode() !== "filename") return [];
+		const top = filteredEntries();
+		if (viewMode() !== "tree" || searchQuery().trim()) return top;
+		const expanded = expandedDirs();
+		const cache = treeCache();
+		const rows: DirEntry[] = [];
+		const walk = (list: DirEntry[]) => {
+			for (const entry of list) {
+				rows.push(entry);
+				if (entry.is_dir && expanded.has(entry.path)) walk(cache.get(entry.path) ?? []);
+			}
+		};
+		walk(top);
+		return rows;
+	});
+
+	/** The selected rows still on screen, in on-screen order. Rows inside a folder
+	 *  collapsed since they were picked are left out: an action never touches a
+	 *  file the user can no longer see. */
+	const selectedRows = createMemo((): DirEntry[] => {
+		const picked = selection();
+		if (picked.size === 0) return [];
+		return visibleRows().filter((e) => picked.has(e.path));
+	});
+
+	const selectOnly = (entry: DirEntry) => {
+		setSelection(new Set([entry.path]));
+		setSelectionAnchor(entry.path);
+	};
+
+	const clearSelection = () => {
+		setSelection(EMPTY_PATHS);
+		setSelectionAnchor(null);
+	};
+
+	// Rows aren't focusable and a click on one does not hand WebKit's focus to the
+	// panel, but the copy/paste shortcuts only listen while the panel has focus.
+	const focusPanel = () => panelRef?.focus({ preventScroll: true });
+
+	/**
+	 * Apply a click's modifiers to the selection: Cmd/Ctrl toggles the row, Shift
+	 * selects the range from the anchor, Cmd/Ctrl+Shift adds that range. Returns
+	 * true for any of those, and the caller must then neither open the file nor
+	 * enter/expand the folder. A plain click returns false.
+	 */
+	const applySelectionClick = (entry: DirEntry, e: MouseEvent): boolean => {
+		const toggle = e.metaKey || e.ctrlKey;
+		if (!toggle && !e.shiftKey) return false;
+		focusPanel();
+		if (e.shiftKey) {
+			const rows = visibleRows();
+			const anchor = selectionAnchor();
+			const from = anchor === null ? -1 : rows.findIndex((r) => r.path === anchor);
+			const to = rows.findIndex((r) => r.path === entry.path);
+			if (from < 0 || to < 0) {
+				selectOnly(entry);
+				return true;
+			}
+			const range = rows.slice(Math.min(from, to), Math.max(from, to) + 1).map((r) => r.path);
+			setSelection(new Set(toggle ? [...selection(), ...range] : range));
+			return true;
+		}
+		const next = new Set(selection());
+		if (next.has(entry.path)) next.delete(entry.path);
+		else next.add(entry.path);
+		setSelection(next);
+		setSelectionAnchor(entry.path);
+		return true;
+	};
+
+	// A selection belongs to the listing it was made in. Another root, folder,
+	// search, search mode or view drops it, so a copy never picks up rows that
+	// are no longer on screen.
+	createEffect(on([root, currentSubdir, searchQuery, searchMode, viewMode], clearSelection, { defer: true }));
+
 	const navigateInto = (entry: DirEntry) => {
 		changeSubdir(entry.path);
 	};
@@ -690,6 +799,22 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		if (entry.is_dir) return entry.path;
 		const idx = entry.path.lastIndexOf("/");
 		return idx >= 0 ? entry.path.slice(0, idx) : "";
+	};
+
+	/** The folder the flat list shows, relative to root(); "" is the root. */
+	const currentDirRel = () => (currentSubdir() === "." ? "" : currentSubdir());
+
+	/**
+	 * Where Cmd+V pastes. Tree view has no current folder of its own (its
+	 * `currentSubdir` stays at the root), so, as in VS Code, it pastes where the
+	 * last-clicked row is: into that folder, or beside that file. The flat list
+	 * pastes into the folder it shows.
+	 */
+	const keyboardPasteDir = (): string => {
+		if (viewMode() !== "tree" || searchQuery().trim()) return currentDirRel();
+		const anchor = selectionAnchor();
+		const row = anchor !== null && selection().has(anchor) ? visibleRows().find((e) => e.path === anchor) : undefined;
+		return row ? parentDirFor(row) : currentDirRel();
 	};
 
 	const startInlineCreate = (kind: CreateKind, parent: string) => {
@@ -850,41 +975,62 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		}
 	};
 
-	const handleCopy = (entry: DirEntry) => {
+	/** Put the files among `picked` on the clipboard. A paste can only create
+	 *  files, so folders stay behind. Returns how many files went on it. */
+	const putOnClipboard = (picked: DirEntry[], mode: "copy" | "cut"): number => {
 		const r = root();
-		if (!r) return;
-		setClipboard({ entry, mode: "copy", sourceRoot: r });
+		const files = picked.filter((e) => !e.is_dir);
+		if (!r || files.length === 0) return 0;
+		setClipboard({ entries: files, mode, sourceRoot: r });
+		return files.length;
 	};
 
-	const handleCut = (entry: DirEntry) => {
-		const r = root();
-		if (!r) return;
-		setClipboard({ entry, mode: "cut", sourceRoot: r });
+	/**
+	 * Cmd+C / Cmd+X. Acts on the selection; with none, on the row the flat list's
+	 * arrow-key cursor is on (tree view draws no cursor, so there it does
+	 * nothing). The context menu names its file count, so only this path has to
+	 * say when folders were left out.
+	 */
+	const copyFromKeyboard = (mode: "copy" | "cut") => {
+		let picked = selectedRows();
+		if (picked.length === 0 && (viewMode() === "flat" || searchQuery().trim())) {
+			const row = filteredEntries()[selectedIndex()];
+			if (row) picked = [row];
+		}
+		if (picked.length === 0) return;
+		const count = putOnClipboard(picked, mode);
+		if (count === picked.length) return;
+		toastsStore.add(
+			count === 0
+				? mode === "copy"
+					? t("fileBrowser.foldersNotCopied", "Folders can't be copied")
+					: t("fileBrowser.foldersNotCut", "Folders can't be cut")
+				: mode === "copy"
+					? t("fileBrowser.copiedFiles", "Copied {count}", { count: fileCount(count) })
+					: t("fileBrowser.cutFiles", "Cut {count}", { count: fileCount(count) }),
+			t("fileBrowser.onlyFilesCopied", "Only files can be copied or cut, so folders were left out."),
+			"info",
+		);
 	};
 
-	const handlePaste = async () => {
+	/**
+	 * Paste the clipboard into `destRel`, a folder relative to root() ("" is the
+	 * root; the default is the folder the flat list shows). One backend call
+	 * pastes every file and never overwrites (see `paste_paths`), so a clean
+	 * paste needs no toast: the pasted files come up selected, their folder
+	 * expanded in tree view.
+	 */
+	const handlePaste = async (destRel: string = currentDirRel()) => {
 		const clip = clipboard();
 		const destRoot = root();
 		if (!clip || !destRoot) return;
-		const destDir = currentSubdir() === "." ? "" : `${currentSubdir()}/`;
-		const destRel = `${destDir}${clip.entry.name}`;
-
-		// Resolve to absolute paths so paste works across different repos: the
-		// source belongs to clip.sourceRoot, the destination to the current repo.
-		const fromAbs = joinPath(clip.sourceRoot, clip.entry.path);
-		const toAbs = joinPath(destRoot, destRel);
-
-		// Avoid pasting a file onto itself
-		if (fromAbs === toAbs) return;
-
+		// Absolute paths, so a paste can cross repos: the sources belong to
+		// clip.sourceRoot, the destination to the repo on screen now.
+		const sources = clip.entries.map((e) => (isAbsolutePath(e.path) ? e.path : joinPath(clip.sourceRoot, e.path)));
+		const destDir = destRel ? joinPath(destRoot, destRel) : destRoot;
+		let result: PasteResult;
 		try {
-			if (clip.mode === "copy") {
-				await fb.copyPathAbs(fromAbs, toAbs);
-			} else {
-				await fb.movePathAbs(fromAbs, toAbs);
-				setClipboard(null);
-			}
-			refresh();
+			result = await fb.pastePaths(sources, destDir, clip.mode === "copy" ? "copy" : "move");
 		} catch (err) {
 			appLogger.error("app", `Failed to ${clip.mode === "copy" ? "copy" : "move"}`, err);
 			toastsStore.add(
@@ -892,7 +1038,51 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				String(err),
 				"error",
 			);
+			return;
 		}
+		// A cut is spent once anything moved. When nothing did (every name taken,
+		// or pasted back into its own folder) it stays, ready to paste elsewhere.
+		if (clip.mode === "cut" && result.pasted.length > 0) setClipboard(null);
+		refresh();
+		// The panel may have moved to another repo while the paste ran; its rows
+		// are not the ones just pasted, so select and expand nothing there.
+		if (result.pasted.length > 0 && root() === destRoot) {
+			const tree = viewMode() === "tree" && !searchQuery().trim();
+			if (tree && destRel) setExpandedDirs((prev) => (prev.has(destRel) ? prev : new Set(prev).add(destRel)));
+			if (tree || destRel === currentDirRel()) {
+				const pasted = result.pasted.map((name) => (destRel ? `${destRel}/${name}` : name));
+				setSelection(new Set(pasted));
+				setSelectionAnchor(pasted[0]);
+			}
+		}
+		reportPasteProblems(result, clip.mode);
+	};
+
+	/** Name the files a paste left out. A paste that took everything says nothing. */
+	const reportPasteProblems = (result: PasteResult, mode: "copy" | "cut") => {
+		const problems = [
+			...result.skipped.map((name) =>
+				t("fileBrowser.pasteNameTaken", "{name}: a file with that name is already there", { name }),
+			),
+			...result.errors,
+		];
+		if (problems.length === 0) return;
+		appLogger.warn("app", "Paste left files out", { skipped: result.skipped, errors: result.errors });
+		const done = result.pasted.length;
+		const counts = { done: String(done), total: String(done + problems.length) };
+		const title =
+			done === 0
+				? mode === "copy"
+					? t("fileBrowser.copyFailed", "Copy failed")
+					: t("fileBrowser.moveFailed", "Move failed")
+				: mode === "copy"
+					? t("fileBrowser.copiedSome", "Copied {done} of {total} files", counts)
+					: t("fileBrowser.movedSome", "Moved {done} of {total} files", counts);
+		const more =
+			problems.length > 3
+				? ` \u00B7 ${t("fileBrowser.andMore", "and {count} more", { count: String(problems.length - 3) })}`
+				: "";
+		toastsStore.add(title, problems.slice(0, 3).join(" \u00B7 ") + more, done === 0 ? "error" : "warn");
 	};
 
 	const handleRenameConfirm = async (newName: string) => {
@@ -1060,6 +1250,16 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		}
 	};
 
+	/** TreeNode's click hook. A selection gesture stays one; a plain click selects
+	 *  just that row, then TreeNode opens the file or expands the folder. */
+	const handleTreeRowClick = (entry: DirEntry, e: MouseEvent): boolean => {
+		if (_ptrSuppressClick) return true;
+		if (applySelectionClick(entry, e)) return true;
+		selectOnly(entry);
+		focusPanel();
+		return false;
+	};
+
 	// Raw absolute path (VSCode "Copy Path" behavior — no ~ shortening)
 	const handleCopyPath = (entry: DirEntry) => {
 		const fsRoot = root();
@@ -1073,7 +1273,41 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		writeClipboard(entry.path).catch((err) => appLogger.error("app", "Failed to copy relative path", err));
 	};
 
+	/**
+	 * Menu for a right-click inside a multi-selection: what applies to every
+	 * selected file at once. Single-item actions (rename, delete, reveal…) take a
+	 * plain click on that row first, which selects it alone.
+	 */
+	const getSelectionMenuItems = (entry: DirEntry, picked: DirEntry[]): ContextMenuItem[] => {
+		const mod = getModifierSymbol();
+		const files = picked.filter((e) => !e.is_dir).length;
+		const items: ContextMenuItem[] = [];
+		if (files > 0) {
+			items.push({
+				label: t("fileBrowser.copySelected", "Copy {count}", { count: fileCount(files) }),
+				shortcut: `${mod}C`,
+				action: () => putOnClipboard(picked, "copy"),
+			});
+			items.push({
+				label: t("fileBrowser.cutSelected", "Cut {count}", { count: fileCount(files) }),
+				shortcut: `${mod}X`,
+				action: () => putOnClipboard(picked, "cut"),
+			});
+		}
+		items.push({
+			label: t("fileBrowser.paste", "Paste"),
+			shortcut: `${mod}V`,
+			action: () => void handlePaste(parentDirFor(entry)),
+			disabled: !clipboard(),
+		});
+		return items;
+	};
+
 	const getContextMenuItems = (entry: DirEntry): ContextMenuItem[] => {
+		// Right-click inside a multi-selection: the menu acts on all of it.
+		const picked = selectedRows();
+		if (picked.length > 1 && picked.some((p) => p.path === entry.path)) return getSelectionMenuItems(entry, picked);
+
 		const mod = getModifierSymbol();
 		const items: ContextMenuItem[] = [];
 
@@ -1109,22 +1343,26 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			items.push({
 				label: t("fileBrowser.copy", "Copy"),
 				shortcut: `${mod}C`,
-				action: () => handleCopy(entry),
+				action: () => putOnClipboard([entry], "copy"),
 			});
 			items.push({
 				label: t("fileBrowser.cut", "Cut"),
 				shortcut: `${mod}X`,
-				action: () => handleCut(entry),
+				action: () => putOnClipboard([entry], "cut"),
 			});
 		}
 
+		// Into the right-clicked folder, or beside the right-clicked file (VS Code).
 		items.push({
 			label: t("fileBrowser.paste", "Paste"),
 			shortcut: `${mod}V`,
-			action: handlePaste,
+			action: () => void handlePaste(parentDirFor(entry)),
 			disabled: !clipboard(),
-			separator: true,
 		});
+		// The divider is a row of its own, not Paste's trailing `separator`: the
+		// menu's shortcut matcher skips items that carry one, and ⌘V has to reach
+		// Paste while the menu is open (the panel stands aside then).
+		items.push({ label: "", separator: true, action: () => {} });
 
 		if (!entry.is_dir) {
 			items.push({
@@ -1178,6 +1416,10 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	const handleContextMenu = (e: MouseEvent, entry: DirEntry) => {
 		e.preventDefault();
 		e.stopPropagation();
+		// Right-clicking outside the selection selects just that row (Finder, VS
+		// Code); right-clicking inside it keeps the selection for the menu to act on.
+		if (!selection().has(entry.path)) selectOnly(entry);
+		focusPanel();
 		setContextEntry(entry);
 		contextMenu.open(e);
 	};
@@ -1200,7 +1442,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			{
 				label: t("fileBrowser.paste", "Paste"),
 				shortcut: `${getModifierSymbol()}V`,
-				action: handlePaste,
+				action: () => void handlePaste(parent),
 				disabled: !clipboard(),
 			},
 		];
@@ -1210,6 +1452,8 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		// Listing operations don't apply to search results
 		if (searchQuery().trim() || !root()) return;
 		e.preventDefault();
+		clearSelection();
+		focusPanel();
 		setContextEntry(null);
 		contextMenu.open(e);
 	};
@@ -1223,6 +1467,10 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			const panel = document.getElementById("file-browser-panel");
 			if (!panel?.contains(document.activeElement) && document.activeElement !== panel) return;
 
+			// While its context menu is open the menu runs its own shortcuts (Cmd+C/X/V
+			// trigger its items); handling them here as well would paste twice.
+			if (contextMenu.visible()) return;
+
 			// Let the search input handle its own keyboard events
 			const isInputFocused = document.activeElement instanceof HTMLInputElement;
 
@@ -1232,19 +1480,25 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			// Copy/Cut/Paste shortcuts (work even with empty list for paste)
 			if (!isInputFocused && isMeta && e.key === "c" && list.length > 0) {
 				e.preventDefault();
-				const selected = list[selectedIndex()];
-				if (selected && !selected.is_dir) handleCopy(selected);
+				copyFromKeyboard("copy");
 				return;
 			}
 			if (!isInputFocused && isMeta && e.key === "x" && list.length > 0) {
 				e.preventDefault();
-				const selected = list[selectedIndex()];
-				if (selected && !selected.is_dir) handleCut(selected);
+				copyFromKeyboard("cut");
 				return;
 			}
 			if (!isInputFocused && isMeta && e.key === "v") {
 				e.preventDefault();
-				handlePaste();
+				void handlePaste(keyboardPasteDir());
+				return;
+			}
+			// Select every row on screen (in tree view, expanded folders' rows too)
+			if (!isInputFocused && isMeta && e.key === "a" && visibleRows().length > 0) {
+				e.preventDefault();
+				const rows = visibleRows();
+				setSelection(new Set(rows.map((r) => r.path)));
+				if (!rows.some((r) => r.path === selectionAnchor())) setSelectionAnchor(rows[0].path);
 				return;
 			}
 
@@ -1253,14 +1507,28 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 			if (list.length === 0) return;
 
+			// In the flat list the selection follows the arrow-key cursor, so the row
+			// that looks selected is the one Cmd+C copies. Tree view draws no cursor.
+			const followCursor = viewMode() === "flat" || !!searchQuery().trim();
+			const moveCursor = (i: number) => {
+				setSelectedIndex(i);
+				if (followCursor && list[i]) selectOnly(list[i]);
+			};
+
 			switch (e.key) {
 				case "ArrowUp":
 					e.preventDefault();
-					setSelectedIndex((i) => Math.max(0, i - 1));
+					moveCursor(Math.max(0, selectedIndex() - 1));
 					break;
 				case "ArrowDown":
 					e.preventDefault();
-					setSelectedIndex((i) => Math.min(list.length - 1, i + 1));
+					moveCursor(Math.min(list.length - 1, selectedIndex() + 1));
+					break;
+				case "Escape":
+					if (selection().size > 0) {
+						e.preventDefault();
+						clearSelection();
+					}
 					break;
 				case "Enter": {
 					e.preventDefault();
@@ -1291,6 +1559,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 	return (
 		<div
+			ref={panelRef}
 			id="file-browser-panel"
 			class={cx(s.panel, mode() === "detached" && s.detached, !props.visible && s.hidden)}
 			tabIndex={-1}
@@ -1499,7 +1768,17 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				</div>
 			</Show>
 
-			<div class={p.content} ref={contentRef} onContextMenu={handleBackgroundContextMenu}>
+			<div
+				class={p.content}
+				ref={contentRef}
+				onContextMenu={handleBackgroundContextMenu}
+				onClick={(e) => {
+					// A plain click on empty space below (or beside) the rows deselects,
+					// as in Finder. A modifier click that just missed a row does not.
+					if (e.target !== e.currentTarget || _ptrSuppressClick) return;
+					if (!e.metaKey && !e.ctrlKey && !e.shiftKey) clearSelection();
+				}}
+			>
 				<Show when={loading() || (searching() && searchMode() === "filename")}>
 					<div class={s.empty}>
 						{searching() ? t("fileBrowser.searching", "Searching\u2026") : t("fileBrowser.loading", "Loading...")}
@@ -1590,6 +1869,9 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 										onPointerDragStart={handlePointerDragStart}
 										childrenCache={treeCache()}
 										onChildrenLoaded={onChildrenLoaded}
+										isSelected={(path) => selection().has(path)}
+										isCut={(path) => cutPaths().has(path)}
+										onRowClick={handleTreeRowClick}
 										inlineCreateParent={inlineCreate()?.parent ?? null}
 										renderInlineCreate={(depth) => <InlineCreateRow depth={depth} />}
 									/>
@@ -1654,18 +1936,19 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 												entry.is_dir && s.entryDir,
 												selectedIndex() === index() && s.entrySelected,
 												!entry.is_dir && entry.path === activeFilePath() && s.entryActive,
+												selection().has(entry.path) && s.entryPicked,
 												entry.is_ignored && s.entryIgnored,
-												clipboard()?.mode === "cut" &&
-													clipboard()?.sourceRoot === root() &&
-													clipboard()?.entry.path === entry.path &&
-													s.entryCut,
+												cutPaths().has(entry.path) && s.entryCut,
 											)}
 											data-drop-target={entry.is_dir ? "folder" : undefined}
 											data-abs-path={entry.is_dir ? absPath() : undefined}
 											onPointerDown={(e) => handlePointerDragStart(absPath(), e)}
-											onClick={() => {
+											onClick={(e) => {
 												if (_ptrSuppressClick) return;
 												setSelectedIndex(index());
+												if (applySelectionClick(entry, e)) return;
+												selectOnly(entry);
+												focusPanel();
 												handleEntryClick(entry);
 											}}
 											onContextMenu={(e) => handleContextMenu(e, entry)}

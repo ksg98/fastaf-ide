@@ -6,9 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Select several files in the file browser and copy, cut or paste them together.** Cmd+click adds or removes a file, Shift+click takes the whole range from the last one you clicked, and Cmd+A takes everything on screen — in the tree as well as the flat list, where a range runs through expanded folders. Cmd+C, Cmd+X and the menu of a selected row ("Copy 3 Files") act on every selected file, and one paste moves or copies them all. Folders are left out of a copy, and a toast says so.
+
 ### Changed
 
+- **Paste lands where you point, and never overwrites.** In tree view a paste always went to the repository root, whichever folder you right-clicked. It now goes into that folder, or next to the file you right-clicked; Cmd+V pastes where you last clicked. A copy that meets a file of the same name lands beside it as `name copy.ext`, so pasting a file into its own folder now duplicates it instead of doing nothing — and a copy into another folder no longer silently replaces a file there. A move that meets one is skipped, and a toast names it.
+
 - **macOS builds are signed and notarized.** Releases and nightlies are now signed with a Developer ID and notarized by Apple, so the DMG opens like any other app. The `xattr -cr` quarantine workaround is only needed for v1.8.6 and earlier. The first launch after updating from an unsigned build asks again for microphone and other permissions, because macOS ties those grants to the app's signature.
+
+### Fixed
+
+- **Copying, moving and opening files from a browser or the phone app was always refused.** The check that keeps those requests inside your registered repositories looked them up under a name the repositories file does not use, found none, and answered every request with a 403. It now finds them, so these routes work again for paths inside a registered repository — and only there.
 
 ## [1.8.6] - 2026-09-20
 

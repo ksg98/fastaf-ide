@@ -1643,6 +1643,178 @@ fn move_path_abs_impl(from: String, to: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// paste_paths — FileBrowser Copy/Cut + Paste of one or many selected files.
+// ---------------------------------------------------------------------------
+
+/// Result payload for `paste_paths`.
+///
+/// File names, not paths: the caller already knows the folder it pasted into,
+/// and a name survives the canonicalization (`/var` → `/private/var`) that an
+/// absolute path returned from here would carry back.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PasteResult {
+    /// The name each pasted source now has inside the destination, in source
+    /// order. A copy whose name was taken lands under a ` copy` name.
+    pub pasted: Vec<String>,
+    /// Moves left where they were because the destination already holds that name.
+    pub skipped: Vec<String>,
+    /// One `name: reason` message per source that could not be pasted.
+    pub errors: Vec<String>,
+}
+
+/// What happened to one source in [`paste_paths`].
+enum PasteOutcome {
+    /// Landed in the destination under this file name.
+    Pasted(String),
+    /// A move whose name is already taken in the destination.
+    Skipped(String),
+    /// A move into the folder the file already lives in.
+    Unchanged,
+}
+
+/// Paste files into a folder: the FileBrowser's Copy/Cut + Paste, for one file
+/// or a whole selection, in one call.
+///
+/// **Never overwrites.** A copy whose name is taken lands beside it as
+/// `name copy.ext`, then `name copy 2.ext`, and so on — the same names Duplicate
+/// gives — so pasting into the folder the files came from makes copies rather
+/// than silently doing nothing. A move whose name is taken is skipped and
+/// reported. A move into the folder the file already lives in changes nothing.
+///
+/// Folders are refused per item, as `copy_path_abs` refuses them, and one
+/// failing source never stops the rest. Paths are absolute so a paste can cross
+/// repositories; see [`copy_path_abs`] for the trust-boundary rationale.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn paste_paths(
+    sources: Vec<String>,
+    dest_dir: String,
+    mode: TransferMode,
+) -> Result<PasteResult, String> {
+    spawn_blocking_fs(move || paste_paths_impl(sources, dest_dir, mode)).await
+}
+
+fn paste_paths_impl(
+    sources: Vec<String>,
+    dest_dir: String,
+    mode: TransferMode,
+) -> Result<PasteResult, String> {
+    let dest = PathBuf::from(&dest_dir)
+        .canonicalize()
+        .map_err(|e| format!("Invalid destination '{dest_dir}': {e}"))?;
+    if !dest.is_dir() {
+        return Err(format!("Destination '{dest_dir}' is not a directory"));
+    }
+
+    let mut result = PasteResult::default();
+    for source in &sources {
+        let src = std::path::Path::new(source);
+        match paste_one(src, &dest, mode) {
+            Ok(PasteOutcome::Pasted(name)) => result.pasted.push(name),
+            Ok(PasteOutcome::Skipped(name)) => result.skipped.push(name),
+            Ok(PasteOutcome::Unchanged) => {}
+            Err(e) => {
+                let name = src
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| source.clone());
+                result.errors.push(format!("{name}: {e}"));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn paste_one(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    mode: TransferMode,
+) -> Result<PasteOutcome, String> {
+    let name = src
+        .file_name()
+        .ok_or_else(|| "not a file path".to_string())?;
+    let meta = std::fs::metadata(src).map_err(|e| format!("cannot read it: {e}"))?;
+    if meta.is_dir() {
+        return Err("folders can't be pasted, only files".to_string());
+    }
+
+    match mode {
+        TransferMode::Copy => {
+            let target = free_copy_target(dest, name)?;
+            std::fs::copy(src, &target).map_err(|e| format!("copy failed: {e}"))?;
+            Ok(PasteOutcome::Pasted(file_name_lossy(&target)))
+        }
+        TransferMode::Move => {
+            // Compare canonical parents: a trailing slash, `/var` vs
+            // `/private/var` or a symlinked repo root must not read as a move
+            // into some other folder, which would then collide with itself.
+            let same_dir = src
+                .parent()
+                .and_then(|p| p.canonicalize().ok())
+                .is_some_and(|p| p == dest);
+            if same_dir {
+                return Ok(PasteOutcome::Unchanged);
+            }
+            let target = dest.join(name);
+            if path_taken(&target) {
+                return Ok(PasteOutcome::Skipped(file_name_lossy(&target)));
+            }
+            match std::fs::rename(src, &target) {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == Some(libc_cross_device()) => {
+                    std::fs::copy(src, &target).map_err(|e| format!("move failed: {e}"))?;
+                    std::fs::remove_file(src).map_err(|e| {
+                        format!("copied, but the original could not be removed: {e}")
+                    })?;
+                }
+                Err(e) => return Err(format!("move failed: {e}")),
+            }
+            Ok(PasteOutcome::Pasted(file_name_lossy(&target)))
+        }
+    }
+}
+
+/// The first name in `dest` that nothing occupies: `name` itself, then
+/// `name copy.ext`, `name copy 2.ext`, … The extension splits at the last dot
+/// unless that dot leads the name, so `.env` becomes `.env copy` — the same rule
+/// the FileBrowser's Duplicate uses.
+fn free_copy_target(dest: &std::path::Path, name: &std::ffi::OsStr) -> Result<PathBuf, String> {
+    let plain = dest.join(name);
+    if !path_taken(&plain) {
+        return Ok(plain);
+    }
+    let name = name.to_string_lossy();
+    let (base, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (&name[..], ""),
+    };
+    for n in 1..=10_000u32 {
+        let candidate = if n == 1 {
+            format!("{base} copy{ext}")
+        } else {
+            format!("{base} copy {n}{ext}")
+        };
+        let path = dest.join(candidate);
+        if !path_taken(&path) {
+            return Ok(path);
+        }
+    }
+    Err(format!("no free name left for a copy of '{name}'"))
+}
+
+/// Whether anything at all sits at `path`, a dangling symlink included.
+/// `Path::exists` follows links and calls a dangling one free, and copying onto
+/// it would write through the link to wherever it points.
+fn path_taken(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+fn file_name_lossy(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // fs_transfer_paths — drag-drop move/copy from OS filesystem into a target dir.
 // ---------------------------------------------------------------------------
 
@@ -2622,6 +2794,248 @@ mod tests {
             !src.path().join("main.rs").exists(),
             "source removed after move"
         );
+    }
+
+    // --- paste_paths (FileBrowser multi-file Copy/Cut + Paste) ---
+
+    fn paste<P: AsRef<std::path::Path>>(
+        sources: &[P],
+        dest: &std::path::Path,
+        mode: TransferMode,
+    ) -> PasteResult {
+        paste_paths_impl(
+            sources
+                .iter()
+                .map(|p| p.as_ref().to_string_lossy().into_owned())
+                .collect(),
+            dest.to_string_lossy().into_owned(),
+            mode,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn paste_copies_several_files_into_another_folder() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(src.path().join("a.txt"), "a").unwrap();
+        fs::write(src.path().join("b.rs"), "b").unwrap();
+
+        let r = paste(
+            &[src.path().join("a.txt"), src.path().join("b.rs")],
+            dst.path(),
+            TransferMode::Copy,
+        );
+
+        assert_eq!(r.pasted, vec!["a.txt", "b.rs"]);
+        assert!(r.skipped.is_empty() && r.errors.is_empty(), "{r:?}");
+        assert_eq!(fs::read_to_string(dst.path().join("a.txt")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(dst.path().join("b.rs")).unwrap(), "b");
+        assert!(src.path().join("a.txt").exists(), "a copy keeps its source");
+    }
+
+    #[test]
+    fn paste_copy_never_overwrites_it_keeps_both() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(src.path().join("notes.md"), "new").unwrap();
+        fs::write(dst.path().join("notes.md"), "old").unwrap();
+        fs::write(dst.path().join("notes copy.md"), "older copy").unwrap();
+
+        let r = paste(
+            &[src.path().join("notes.md")],
+            dst.path(),
+            TransferMode::Copy,
+        );
+
+        assert_eq!(r.pasted, vec!["notes copy 2.md"]);
+        assert_eq!(
+            fs::read_to_string(dst.path().join("notes.md")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.path().join("notes copy.md")).unwrap(),
+            "older copy"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.path().join("notes copy 2.md")).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn paste_copy_into_its_own_folder_makes_copies() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        fs::write(dir.path().join(".env"), "X=1").unwrap();
+
+        let r = paste(
+            &[dir.path().join("main.rs"), dir.path().join(".env")],
+            dir.path(),
+            TransferMode::Copy,
+        );
+        assert_eq!(r.pasted, vec!["main copy.rs", ".env copy"]);
+
+        // A second paste takes the next free name rather than the first copy's.
+        let again = paste(
+            &[dir.path().join("main.rs")],
+            dir.path(),
+            TransferMode::Copy,
+        );
+        assert_eq!(again.pasted, vec!["main copy 2.rs"]);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("main copy.rs")).unwrap(),
+            "fn main() {}"
+        );
+    }
+
+    #[test]
+    fn paste_copy_of_two_same_named_files_keeps_both() {
+        // Two `index.ts` picked from filename-search results in different folders.
+        let a = TempDir::new().unwrap();
+        let b = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(a.path().join("index.ts"), "a").unwrap();
+        fs::write(b.path().join("index.ts"), "b").unwrap();
+
+        let r = paste(
+            &[a.path().join("index.ts"), b.path().join("index.ts")],
+            dst.path(),
+            TransferMode::Copy,
+        );
+
+        assert_eq!(r.pasted, vec!["index.ts", "index copy.ts"]);
+        assert_eq!(
+            fs::read_to_string(dst.path().join("index.ts")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.path().join("index copy.ts")).unwrap(),
+            "b"
+        );
+    }
+
+    #[test]
+    fn paste_move_relocates_the_files() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(src.path().join("a.txt"), "a").unwrap();
+        fs::write(src.path().join("b.txt"), "b").unwrap();
+
+        let r = paste(
+            &[src.path().join("a.txt"), src.path().join("b.txt")],
+            dst.path(),
+            TransferMode::Move,
+        );
+
+        assert_eq!(r.pasted, vec!["a.txt", "b.txt"]);
+        assert!(!src.path().join("a.txt").exists() && !src.path().join("b.txt").exists());
+        assert_eq!(fs::read_to_string(dst.path().join("b.txt")).unwrap(), "b");
+    }
+
+    #[test]
+    fn paste_move_skips_a_taken_name_and_touches_neither_file() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(src.path().join("config.json"), "mine").unwrap();
+        fs::write(src.path().join("other.json"), "other").unwrap();
+        fs::write(dst.path().join("config.json"), "theirs").unwrap();
+
+        let r = paste(
+            &[
+                src.path().join("config.json"),
+                src.path().join("other.json"),
+            ],
+            dst.path(),
+            TransferMode::Move,
+        );
+
+        assert_eq!(r.skipped, vec!["config.json"]);
+        assert_eq!(r.pasted, vec!["other.json"], "the rest still moves");
+        assert_eq!(
+            fs::read_to_string(src.path().join("config.json")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.path().join("config.json")).unwrap(),
+            "theirs"
+        );
+    }
+
+    #[test]
+    fn paste_move_into_its_own_folder_is_a_no_op() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+
+        let r = paste(&[dir.path().join("a.txt")], dir.path(), TransferMode::Move);
+
+        assert!(
+            r.pasted.is_empty() && r.skipped.is_empty() && r.errors.is_empty(),
+            "{r:?}"
+        );
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "a");
+    }
+
+    #[test]
+    fn paste_refuses_folders_but_still_pastes_the_files() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::create_dir(src.path().join("docs")).unwrap();
+        fs::write(src.path().join("a.txt"), "a").unwrap();
+
+        let r = paste(
+            &[src.path().join("docs"), src.path().join("a.txt")],
+            dst.path(),
+            TransferMode::Copy,
+        );
+
+        assert_eq!(r.pasted, vec!["a.txt"]);
+        assert_eq!(r.errors.len(), 1, "{r:?}");
+        assert!(r.errors[0].starts_with("docs: "), "{r:?}");
+        assert!(!dst.path().join("docs").exists());
+    }
+
+    #[test]
+    fn paste_reports_a_source_that_no_longer_exists() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+
+        let r = paste(
+            &[src.path().join("gone.txt")],
+            dst.path(),
+            TransferMode::Copy,
+        );
+
+        assert!(r.pasted.is_empty());
+        assert_eq!(r.errors.len(), 1);
+        assert!(r.errors[0].starts_with("gone.txt: "), "{r:?}");
+    }
+
+    #[test]
+    fn paste_rejects_a_destination_that_is_not_a_folder() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        let not_a_dir = dir.path().join("a.txt").to_string_lossy().into_owned();
+
+        let err = paste_paths_impl(vec![not_a_dir.clone()], not_a_dir, TransferMode::Copy);
+
+        assert!(err.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paste_treats_a_dangling_symlink_as_a_taken_name() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        fs::write(src.path().join("a.txt"), "a").unwrap();
+        let victim = elsewhere.path().join("victim.txt");
+        std::os::unix::fs::symlink(&victim, dst.path().join("a.txt")).unwrap();
+
+        let r = paste(&[src.path().join("a.txt")], dst.path(), TransferMode::Copy);
+
+        assert_eq!(r.pasted, vec!["a copy.txt"]);
+        assert!(!victim.exists(), "a copy must never write through the link");
     }
 
     #[test]
@@ -4119,6 +4533,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(fs::read_to_string(&to).unwrap(), "content");
+    }
+
+    #[tokio::test]
+    async fn paste_paths_command_is_awaitable_and_pastes() {
+        let dir = TempDir::new().unwrap();
+        let from = dir.path().join("a.txt");
+        fs::write(&from, "content").unwrap();
+
+        let r = paste_paths(
+            vec![from.to_string_lossy().to_string()],
+            dir.path().to_string_lossy().to_string(),
+            TransferMode::Copy,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(r.pasted, vec!["a copy.txt"]);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a copy.txt")).unwrap(),
+            "content"
+        );
     }
 
     #[tokio::test]

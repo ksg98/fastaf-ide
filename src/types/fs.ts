@@ -13,6 +13,18 @@ export interface DirEntry {
 	is_ignored: boolean;
 }
 
+/** What `paste_paths` did with each pasted file. Names, not paths: each is the
+ *  file name inside the destination folder the caller pasted into. */
+export interface PasteResult {
+	/** The name each pasted file now has, in source order. A copy whose name was
+	 *  taken lands under a " copy" name — a paste never overwrites. */
+	pasted: string[];
+	/** Moves left in place because the destination already holds that name. */
+	skipped: string[];
+	/** One "name: reason" message per file that could not be pasted. */
+	errors: string[];
+}
+
 /** A single content match from full-text search */
 export interface ContentMatch {
 	path: string;

@@ -119,6 +119,9 @@
   border-radius: var(--radius-md);
   transition: background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
+  /* Shift+click selects a range of rows, not the text between two clicks. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .entry:hover {
@@ -134,6 +137,19 @@
 }
 
 .entryActive .entryName {
+  color: var(--fg-primary);
+}
+
+/* In the multi-selection (Cmd/Ctrl+click, Shift+click). Declared after
+   .entryActive so a picked row reads as picked even when it is the open file,
+   and at 22 % (the Git panel's focused-selection wash) rather than 13 % so
+   "selected" and "open in the editor" stay apart. Hover keeps the wash. */
+.entryPicked,
+.entryPicked:hover {
+  background: rgba(var(--accent-rgb), 0.22);
+}
+
+.entryPicked .entryName {
   color: var(--fg-primary);
 }
 

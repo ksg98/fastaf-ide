@@ -343,7 +343,7 @@ Some frontend-only stores persist to localStorage:
 - [x] Git Panel (4 tabs: Changes with History/Blame sub-panels, Log with canvas commit graph, Stashes, Branches) — replaces Git Operations Panel and DiffPanel
 - [x] Branch Panel (4th tab in Git Panel): checkout, create, delete, rename, merge, rebase, push, pull, fetch, prefix folding, inline search, context menu, stale/merged indicators. `Cmd+G` opens directly on Branches tab
 - [x] Context menu submenus and "New Group..." via PromptDialog
-- [x] File Browser panel (`Cmd+E`) with content search (`Cmd+Shift+F`, case/regex/whole-word, streaming results)
+- [x] File Browser panel (`Cmd+E`) with content search (`Cmd+Shift+F`, case/regex/whole-word, streaming results) and multi-select (`Cmd`/`Shift+click`) copy/cut/paste of several files at once
 - [x] CodeMirror code editor
 - [x] Find in terminal (`Cmd+F`)
 - [x] Configurable keybindings system

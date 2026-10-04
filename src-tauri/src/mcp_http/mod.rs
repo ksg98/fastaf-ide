@@ -809,6 +809,7 @@ fn shared_routes() -> Router<Arc<AppState>> {
         )
         .route("/fs/copy-abs", post(fs_routes::copy_path_abs_http))
         .route("/fs/move-abs", post(fs_routes::move_path_abs_http))
+        .route("/fs/paste", post(fs_routes::paste_paths_http))
         .route("/fs/transfer", post(fs_routes::fs_transfer_paths_http))
         // Claude Usage dashboard
         .route("/claude/usage", get(claude_routes::claude_usage_api))
@@ -2688,6 +2689,51 @@ mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "Notes save from non-loopback should be rejected"
+        );
+    }
+
+    /// `/fs/paste` gates its destination AND every source to registered repos:
+    /// one outside source refuses the whole request, even into a registered repo.
+    #[tokio::test]
+    async fn test_paste_gates_the_destination_and_every_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        let repo_path = repo.to_string_lossy().to_string();
+        let _config = crate::config::set_config_dir_override(tmp.path().join("cfg"));
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": { repo_path.clone(): {} }
+        }))
+        .unwrap();
+        let paste = |sources: Vec<String>| {
+            mcp_post(
+                "/fs/paste",
+                &serde_json::json!({ "sources": sources, "destDir": repo_path, "mode": "copy" }),
+            )
+        };
+
+        let outside = build_router(test_state(), false, true)
+            .oneshot(paste(vec![
+                format!("{repo_path}/a.txt"),
+                "/etc/hosts".to_string(),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !repo.join("a copy.txt").exists(),
+            "a refused request pastes nothing"
+        );
+
+        let inside = build_router(test_state(), false, true)
+            .oneshot(paste(vec![format!("{repo_path}/a.txt")]))
+            .await
+            .unwrap();
+        assert_eq!(inside.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a copy.txt")).unwrap(),
+            "a"
         );
     }
 

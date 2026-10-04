@@ -2015,6 +2015,7 @@ pub fn run() {
             fs::copy_path,
             fs::copy_path_abs,
             fs::move_path_abs,
+            fs::paste_paths,
             fs::fs_transfer_paths,
             fs::add_to_gitignore,
             plugins::list_user_plugins,

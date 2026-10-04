@@ -1739,6 +1739,13 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 	move_path_abs: {
 		map: (args) => ({ method: "POST", path: "/fs/move-abs", body: { from: args.from, to: args.to } }),
 	},
+	paste_paths: {
+		map: (args) => ({
+			method: "POST",
+			path: "/fs/paste",
+			body: { sources: args.sources, destDir: args.destDir, mode: args.mode },
+		}),
+	},
 	fs_transfer_paths: {
 		map: (args) => ({
 			method: "POST",

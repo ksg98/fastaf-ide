@@ -24,6 +24,14 @@ export interface TreeNodeProps {
 	/** Cache of loaded children, keyed by dir path */
 	childrenCache: Map<string, DirEntry[]>;
 	onChildrenLoaded: (path: string, children: DirEntry[]) => void;
+	/** Whether a path is in the panel's multi-selection. */
+	isSelected?: (path: string) => boolean;
+	/** Whether a path is on the clipboard as a cut (its row is dimmed). */
+	isCut?: (path: string) => boolean;
+	/** Runs before a row click opens the file or expands the folder. Returning
+	 *  true means the panel handled the click (a Cmd/Shift selection gesture),
+	 *  and the default is skipped. */
+	onRowClick?: (entry: DirEntry, e: MouseEvent) => boolean;
 	/** Dir path an inline-create input is active for (VS Code-style New File/Folder). */
 	inlineCreateParent?: string | null;
 	/** Renders the inline-create input row at the given tree depth. */
@@ -65,7 +73,8 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 			});
 	});
 
-	const handleClick = () => {
+	const handleClick = (e: MouseEvent) => {
+		if (props.onRowClick?.(props.entry, e)) return;
 		if (props.entry.is_dir) {
 			props.onToggleExpand(props.entry.path);
 		} else {
@@ -83,7 +92,9 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 					s.entry,
 					props.entry.is_dir && s.entryDir,
 					!props.entry.is_dir && props.entry.path === props.activePath && s.entryActive,
+					props.isSelected?.(props.entry.path) && s.entryPicked,
 					props.entry.is_ignored && s.entryIgnored,
+					props.isCut?.(props.entry.path) && s.entryCut,
 				)}
 				style={{ "padding-left": `calc(var(--row-pad-x) + ${props.depth} * var(--tree-indent))` }}
 				onClick={handleClick}
@@ -144,6 +155,9 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 							onPointerDragStart={props.onPointerDragStart}
 							childrenCache={props.childrenCache}
 							onChildrenLoaded={props.onChildrenLoaded}
+							isSelected={props.isSelected}
+							isCut={props.isCut}
+							onRowClick={props.onRowClick}
 							inlineCreateParent={props.inlineCreateParent}
 							renderInlineCreate={props.renderInlineCreate}
 						/>

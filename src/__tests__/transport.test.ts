@@ -640,6 +640,21 @@ describe("transport", () => {
 			expect(result.body).toEqual({ from: "/a/x", to: "/b/x" });
 		});
 
+		it("maps paste_paths to POST /fs/paste", () => {
+			const result = mapCommandToHttp("paste_paths", {
+				sources: ["/repo/a.txt", "/repo/b.txt"],
+				destDir: "/repo/dst",
+				mode: "copy",
+			});
+			expect(result.method).toBe("POST");
+			expect(result.path).toBe("/fs/paste");
+			expect(result.body).toEqual({
+				sources: ["/repo/a.txt", "/repo/b.txt"],
+				destDir: "/repo/dst",
+				mode: "copy",
+			});
+		});
+
 		it("maps fs_transfer_paths to POST /fs/transfer", () => {
 			const result = mapCommandToHttp("fs_transfer_paths", {
 				destDir: "/repo/dst",
