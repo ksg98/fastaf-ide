@@ -8,6 +8,8 @@
   <strong>Voice to action. The voice-first Agentic Development Environment.<br>Talk to every Claude Code and Codex session at once. A local AI writes the prompts, drives the agents, and tells you when they're done.</strong>
 </p>
 
+<p align="center"><strong>Free and open source</strong> (Apache 2.0) · macOS, Windows and Linux · no account, no telemetry</p>
+
 <p align="center">
   <img src="https://img.shields.io/badge/voice--first-ADE-a78bfa?style=flat-square" alt="Voice-first ADE">
   <img src="https://img.shields.io/badge/voice-on--device-f472b6?style=flat-square" alt="On-device voice">
@@ -29,10 +31,10 @@
 ---
 
 <p align="center">
-  <img src="assets/screenshot-hero.png" alt="FastAF in Codex Dark: Claude Code working in one repo, the AI Chat reporting on every agent, Speak and Type under the terminal" width="900" />
+  <img src="assets/screenshot-hero.png" alt="FastAF in Codex Dark: Claude Code working in one repo while the AI Chat speaks its report on every agent, Speak and Type under the terminal" width="900" />
 </p>
 
-<p align="center"><sub>Claude Code works on a branch while the AI Chat keeps track of every agent: one is done, one is waiting for your approval.</sub></p>
+<p align="center"><sub>Claude Code works on a branch while the voice agent reads out where every agent stands: one is done, one is waiting for your approval.</sub></p>
 
 **Install on macOS (Apple Silicon):**
 
@@ -57,6 +59,10 @@ Stop typing prompts into five terminals. **Say what you want.** FastAF's voice a
                                           ▼
                      answers out loud (Kokoro, on-device) + tab badge + notification
 ```
+
+<p align="center">
+  <img src="assets/screenshot-voice-chat.png" alt="The AI Chat in voice mode: it sent a prompt to Claude Code, then reports on three agents out loud, with Interrupt and Mute controls" width="380" />
+</p>
 
 - **Speak to the terminal in front of you.** A **Speak** / **Type** bar sits under the terminal column, aimed at the active terminal. Press Speak, say the task, watch the words appear, and Enter hands it to that terminal's agent with the agent's own Enter handling.
 - **Or talk it through.** Tap the voice orb in the AI Chat panel and hold a hands-free conversation. No push-to-talk, no typing, no copy-paste between windows.
