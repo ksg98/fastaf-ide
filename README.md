@@ -29,8 +29,18 @@
 ---
 
 <p align="center">
-  <img src="assets/tui-screenshot.png" alt="FastAF — multiple agents, split panes, sidebar with repos" width="900" />
+  <img src="assets/screenshot-hero.png" alt="FastAF in Codex Dark: Claude Code working in one repo, the AI Chat reporting on every agent, Speak and Type under the terminal" width="900" />
 </p>
+
+<p align="center"><sub>Claude Code works on a branch while the AI Chat keeps track of every agent: one is done, one is waiting for your approval.</sub></p>
+
+**Install on macOS (Apple Silicon):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/scripts/install.sh | bash
+```
+
+Windows and Linux builds (`.exe`, `.deb`, `.rpm`, `.AppImage`) are on the [Releases](https://github.com/ksg98/fastaf-ide/releases) page. More options are under [Installation](#installation).
 
 ---
 
@@ -48,13 +58,23 @@ Stop typing prompts into five terminals. **Say what you want.** FastAF's voice a
                      answers out loud (Kokoro, on-device) + tab badge + notification
 ```
 
-- **Talk to your Claude Code session.** Tap the voice orb in the AI Chat panel and just talk. No push-to-talk, no typing, no copy-paste between windows.
+- **Speak to the terminal in front of you.** A **Speak** / **Type** bar sits under the terminal column, aimed at the active terminal. Press Speak, say the task, watch the words appear, and Enter hands it to that terminal's agent with the agent's own Enter handling.
+- **Or talk it through.** Tap the voice orb in the AI Chat panel and hold a hands-free conversation. No push-to-talk, no typing, no copy-paste between windows.
 - **A local model runs the show.** Point the agent at Ollama and the whole loop runs on your machine: speech in, reasoning, speech out. Or plug in Anthropic, OpenAI, OpenRouter or any compatible endpoint.
 - **Many terminals, one conversation.** The agent sees every live session, spawns new ones, sends each one its prompt and reads back the result, across repos and branches.
 - **It writes the prompts.** Describe the goal in plain speech. The agent turns it into a precise prompt for Claude Code or Codex.
 - **Get told when it's done.** The agent waits for each coding agent to go idle, then speaks the answer. Tab badges, sounds and desktop notifications flag finished, waiting and rate-limited sessions even when you aren't listening.
 - **Hands-free and interruptible.** Voice-activity turn detection, barge-in to cut the agent off mid-sentence, OS echo cancellation on macOS, and mute without ending the session.
 - **Or just dictate.** A push-to-talk hotkey types straight into the focused terminal or input field.
+
+## One window for every agent
+
+FastAF 2.0 borrows the shape of OpenAI's Codex app and keeps the terminals at the centre.
+
+- **Tabs in the title bar.** Terminal tabs sit as pills in the title bar, next to usage, notifications and the panel toggles. No tab strip and no status bar, so the terminal gets the room.
+- **Projects at a glance.** The sidebar lists your repos with their branches underneath, and each branch has one dot that shows what its agent is doing: working, waiting for you, or done.
+- **Start from a sentence.** With no tab open, the window asks "What should we build?". Type or speak a task, pick Claude Code or Codex CLI, and a terminal opens on the current branch with the agent already working on it.
+- **Two looks.** New installs open in **Codex Dark**, a charcoal theme that matches the Codex app. **Cursor Dark** keeps 1.8's jet-black glass. Both are in Settings › Appearance.
 
 ## ⚡ Why FastAF?
 
@@ -74,6 +94,10 @@ Most AI editors are Electron apps wearing a trench coat — every window is a fu
 ## Multiview — a 3×3 wall of live terminals
 
 Stop hopping terminal-by-terminal, project-by-project. **Multiview** (`Cmd+Alt+M`) tiles every live terminal — across every repo and branch — into one auto-adjusting grid: **up to 9 sessions in a 3×3 layout**, with a "+N more" overflow pill once you're running more than that.
+
+<p align="center">
+  <img src="assets/screenshot-multiview.png" alt="Multiview: six live sessions across six repos, each tile labelled busy, idle or input" width="900" />
+</p>
 
 - Click a tile to type in it in place — no need to fully switch
 - Double-click a tile's header to snap it back to full-size
@@ -227,7 +251,7 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 | Idle memory | ~50–150 MB | ~300–600 MB | 2–3 GB | 1–2 GB | **~300 MB** |
 | Terminal sessions | Yes | Yes | Yes | No | Yes (50) |
 | Multi-terminal grid view | No | No | No | No | **Multiview — 3×3, all repos at once** |
-| AI coding agents | No | Partial | Built-in | Built-in | Any agent (10 detected) |
+| AI coding agents | No | Partial | Built-in | Built-in | Any agent (11 detected) |
 | Parallel agents | No | No | Limited | No | Unlimited |
 | Git worktree orchestration | No | No | No | No | Automatic |
 | Agent observability | No | No | No | No | Real-time |
@@ -311,21 +335,6 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 
 ---
 
-## Get started
-
-FastAF is built from source:
-
-**Prerequisites:** Node.js 24+, Rust toolchain, [Tauri CLI](https://tauri.app/start/)
-
-```bash
-pnpm install
-pnpm tauri dev      # Development with hot reload
-pnpm tauri build    # Production build
-pnpm test               # Run tests
-```
-
-See [docs/guides/development-setup.md](docs/guides/development-setup.md) for platform-specific instructions.
-
 ## Installation
 
 ### macOS (Apple Silicon)
@@ -378,6 +387,19 @@ If it still refuses to open, the bundle's signature did not survive the download
 ```bash
 codesign --force --deep --sign - /Applications/FastAF.app
 ```
+
+## Build from source
+
+**Prerequisites:** Node.js 24+, Rust toolchain, [Tauri CLI](https://tauri.app/start/)
+
+```bash
+pnpm install
+pnpm tauri dev      # Development with hot reload
+pnpm tauri build    # Production build
+pnpm test               # Run tests
+```
+
+See [docs/guides/development-setup.md](docs/guides/development-setup.md) for platform-specific instructions.
 
 ## Plugins
 
