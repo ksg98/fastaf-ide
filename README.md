@@ -21,6 +21,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.producthunt.com/products/fastaf-2?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-fastaf-2" target="_blank" rel="noopener noreferrer"><img alt="FastAF - Free, open-source voice workspace for Claude Code and Codex | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1276876&amp;theme=dark&amp;t=1791754298102"></a>
+</p>
+
+<p align="center">
   <a href="#-voice-to-action"><strong>Voice to action</strong></a> &bull;
   <a href="docs/FEATURES.md"><strong>All Features</strong></a> &bull;
   <a href="#-why-fastaf">Why FastAF</a> &bull;
@@ -29,6 +33,12 @@
 </p>
 
 ---
+
+<p align="center">
+  <a href="https://youtu.be/suO0tITWuEM"><img src="assets/launch-video.jpg" alt="Play the FastAF launch video on YouTube: five agents in five terminals, and one of them has been waiting on you for 23 minutes" width="900" /></a>
+</p>
+
+<p align="center"><sub><a href="https://youtu.be/suO0tITWuEM"><strong>Watch the 90-second launch video</strong></a> on YouTube.</sub></p>
 
 <p align="center">
   <img src="assets/screenshot-hero.png" alt="FastAF in Codex Dark: Claude Code working in one repo while the AI Chat speaks its report on every agent, Speak and Type under the terminal" width="900" />
