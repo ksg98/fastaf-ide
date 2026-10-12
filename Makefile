@@ -136,7 +136,8 @@ sign:
 		fi; \
 	fi; \
 	echo "Signing with: $$SIGN_ID"; \
-	codesign --force --deep --sign "$$SIGN_ID" \
+	TIMESTAMP=--timestamp; [ "$$SIGN_ID" = "-" ] && TIMESTAMP=; \
+	codesign --force --deep --sign "$$SIGN_ID" $$TIMESTAMP \
 		--entitlements src-tauri/Entitlements.plist \
 		--identifier "$(BUNDLE_ID)" \
 		--options runtime \
@@ -147,14 +148,16 @@ sign:
 verify-sign:
 	codesign -dvvv "$(APP_BUNDLE)"
 
-# Notarize with Apple (requires stored credentials).
-# First run: xcrun notarytool store-credentials "FastAF" --apple-id YOUR_ID --team-id YOUR_TEAM
+# Notarize with Apple (requires stored credentials; notarization also needs the
+# secure timestamp `sign` adds for a Developer ID).
+# First run: xcrun notarytool store-credentials notary --apple-id YOUR_ID --team-id YOUR_TEAM
+NOTARY_PROFILE?=notary
 notarize: sign
 	@echo "Creating zip for notarization..."
 	@mkdir -p $(DIST_DIR)
 	ditto -c -k --keepParent "$(APP_BUNDLE)" "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip"
 	@echo "Submitting to Apple notary service..."
-	xcrun notarytool submit "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip" --keychain-profile "FastAF" --wait
+	xcrun notarytool submit "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip" --keychain-profile "$(NOTARY_PROFILE)" --wait
 	@echo "Stapling notarization ticket..."
 	xcrun stapler staple "$(APP_BUNDLE)"
 	@rm -f "$(DIST_DIR)/$(BINARY_NAME)-notarize.zip"
