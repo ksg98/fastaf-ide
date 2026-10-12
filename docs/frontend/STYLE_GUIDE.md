@@ -197,7 +197,7 @@ Compose from these; never hand-roll a button.
 ### Sidebar
 - Every row is 30px, inset 8px from both edges, radius 8, padding-left 8, gap 10, text 13.5px. Hover = `--wash-0`; selection = `--branch-selected` with `--fg-primary` text: `--row-selected` (white 8 %, Codex #2f2f2f) in a tonal theme, the accent wash 1.8 used in a flat one.
 - Top: action rows — **New terminal** (compose icon; opens a terminal in the active branch) and **Search projects** (an input dressed as a row; focus = `--row-selected`).
-- Section label "Projects": 13px/400 `--fg-secondary`; its actions (active-only filter, add repository) appear on hover, and the filter stays visible while engaged.
+- Section label "Projects": 13px/400 `--fg-secondary`; its actions (active-only filter, add repository) are always visible at `--fg-secondary`, brightening on hover.
 - Repo row: leading 16px folder icon — open while expanded, closed while collapsed — name 13.5px/500. Hover reveals `⋯` and `+` in place.
 - Branch row: a 16px slot under the folder icon holds the **state dot** (6px), so branch text lines up with the repo name. Name 13.5px/400 at 74 % `--fg-primary`. Diff counts (11.5px, muted, tabular) only on hover and on the selected row.
 - The dot is the only state signal: none = no terminal, grey = a terminal is open, busy = `--activity` pulse, question = `--attention` pulse, error = `--error`, unseen = `--unseen`. Kind (main / worktree / shell) is the tooltip.

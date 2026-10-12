@@ -36,6 +36,10 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Projects header actions always visible (2.0.2)
+
+- [ ] The funnel and `+` next to "Projects" show without hovering, in Codex Dark and Cursor Dark.
+
 ## Cursor Dark glossy again — two materials (2026-10-03)
 
 Frontend-only (tokens in `global.css`). Checked in the shell harness (`fastaf/.tmp/shell-shots/gloss/`):

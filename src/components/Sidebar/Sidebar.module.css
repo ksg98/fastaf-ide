@@ -163,7 +163,7 @@
   color: var(--sidebar-row-fg);
 }
 
-/* ── Section header ("Projects") — label left, actions on hover ── */
+/* ── Section header ("Projects") — label left, actions always visible ── */
 .sectionHeader {
   display: flex;
   align-items: center;
@@ -184,14 +184,6 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
-  transition: opacity var(--duration-fast) var(--ease-out);
-}
-
-.sectionHeader:hover .sectionActions,
-.sectionActions:focus-within,
-.sectionActions:has(.sectionActionActive) {
-  opacity: 1;
 }
 
 .sectionAction {
