@@ -85,6 +85,7 @@
 
 ### 1.5 Copy & Paste
 - Copy selection: `Cmd+C`
+- **Drag past the edge to keep selecting** — Dragging a selection above the top or below the bottom of the terminal keeps scrolling through the scrollback, faster the further out the pointer is, until it comes back inside. Full-screen apps that keep no scrollback (Codex CLI's default view) only reach the screen edge
 - Paste to terminal: `Cmd+V`
 - **Trailing whitespace trimmed** — All copy paths (Cmd+C, Ctrl+C, copy-on-select) strip trailing spaces from terminal rows
 - **Claude gutter normalization** — Multi-line terminal selections remove Claude's repeated non-breaking-space plus `▎` visual margin while preserving isolated block characters and the content's indentation

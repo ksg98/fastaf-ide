@@ -18,7 +18,14 @@ import { ContextMenu, createContextMenu } from "../ContextMenu/ContextMenu";
 import { createCanvasTerminalBindings } from "./canvasTerminalBindings";
 import { createCanvasLinkController } from "./canvasTerminalLinks";
 import { createCanvasScrollController, ROW_CACHE_CHUNK } from "./canvasTerminalScroll";
-import { createCanvasSearchController, createCanvasSelectionController } from "./canvasTerminalSelection";
+import {
+	createCanvasSearchController,
+	createCanvasSelectionController,
+	EDGE_SCROLL_TICK_MS,
+	edgeScrollDistance,
+	edgeScrollLines,
+	edgeSelectionPoint,
+} from "./canvasTerminalSelection";
 import { installTouchHandlers } from "./canvasTerminalTouch";
 import { createTransport, type TerminalTransport, toBinaryPayload } from "./canvasTerminalTransport";
 import {
@@ -347,27 +354,40 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		});
 	}
 
-	function startSelectionScroll(delta: number) {
-		if (selectionScrollTimer !== null && selectionScrollDelta === delta) return;
-		stopSelectionScroll();
-		selectionScrollDelta = delta;
-		const speed = Math.min(Math.abs(delta), 5);
-		const interval = Math.max(20, 80 - speed * 12);
+	/** Keep scrolling while a drag-selection is held past the top/bottom edge.
+	 *  `distance` is rows past the edge (positive = above); one timer lives for
+	 *  the whole hold and reads the latest distance, so moving the pointer only
+	 *  changes the speed — restarting it on every move starved the tick. */
+	function startSelectionScroll(distance: number) {
+		selectionScrollDelta = distance;
+		if (selectionScrollTimer !== null) return;
 		selectionScrollTimer = setInterval(() => {
 			if (!selection.selecting || !selection.start || !currentFrame || !invokeRef) {
 				stopSelectionScroll();
 				return;
 			}
-			const scrollDir = delta > 0 ? 1 : -1;
-			invokeRef("terminal_scroll", { sessionId: props.sessionId, delta: scrollDir }).catch(ipcErr("terminal_scroll"));
-			const edgeRow = scrollDir > 0 ? 0 : (currentFrame.screenRows || lastResizeRows) - 1;
-			const absRow = viewportRowToAbs(edgeRow);
-			if (absRow !== null) {
-				selection.end = { col: scrollDir > 0 ? 0 : 9999, row: absRow + scrollDir };
+			const lines = edgeScrollLines(selectionScrollDelta, currentFrame.displayOffset, currentFrame.historySize);
+			if (lines !== 0) {
+				invokeRef("terminal_scroll", { sessionId: props.sessionId, delta: lines }).catch(ipcErr("terminal_scroll"));
+			}
+			if (pinSelectionToScrollEdge()) {
 				const m = metrics();
 				if (m) paintFrame(currentFrame, m);
 			}
-		}, interval);
+		}, EDGE_SCROLL_TICK_MS);
+	}
+
+	/** While auto-scrolling, the selection ends at the visible edge it scrolls
+	 *  toward. Re-pinned on every frame, so it follows the rows as they arrive. */
+	function pinSelectionToScrollEdge(): boolean {
+		if (selectionScrollTimer === null || !currentFrame || !selection.start) return false;
+		selection.end = edgeSelectionPoint(
+			selectionScrollDelta,
+			currentFrame.historySize - currentFrame.displayOffset,
+			currentFrame.screenRows || lastResizeRows,
+			lastResizeCols - 1,
+		);
+		return true;
 	}
 
 	function stopSelectionScroll() {
@@ -805,11 +825,14 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 	}
 
+	/** The live row at an absolute index, or null when it is off-screen. */
+	function onscreenRow(absRi: number): DecodedRow | null {
+		const vpRow = absRowToViewport(absRi);
+		return vpRow !== null ? (rowMap.get(vpRow) ?? null) : null;
+	}
+
 	function getLocalSelectionText(): string {
-		return selection.getLocalText((absRi) => {
-			const vpRow = absRowToViewport(absRi);
-			return vpRow !== null ? (rowMap.get(vpRow) ?? null) : null;
-		});
+		return selection.getLocalText(onscreenRow);
 	}
 
 	function paintCursor(frame: DecodedFrame, m: CellMetrics) {
@@ -1577,6 +1600,7 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		}
 
 		currentFrame = frame;
+		pinSelectionToScrollEdge();
 
 		// Re-anchor the soft-keyboard lift to the new cursor row (touch + keyboard
 		// open only; a cheap no-op otherwise). currentFrame is a plain ref, so the
@@ -1620,17 +1644,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			clearOverscan();
 		}
 
-		// Only compare content when the selection is fully on-screen — off-screen rows return empty
-		// strings from getLocalSelectionText() causing spurious mismatches that clear the selection.
-		if (
-			selection.start &&
-			selection.cachedText &&
-			decision.fullReplace &&
-			!selection.spansOffscreen(absRowToViewport)
-		) {
-			const nowText = getLocalSelectionText();
-			if (nowText !== selection.cachedText) selection.clear();
-		}
+		// Drop a copied selection once the app redraws the text under it (not mid-drag,
+		// and not while it reaches off-screen — see isStale).
+		if (decision.fullReplace && selection.isStale(absRowToViewport, onscreenRow)) selection.clear();
 
 		scheduleRepaint();
 		scheduleFileLinkVerification();
@@ -2829,17 +2845,15 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			if (!e || !selection.selecting || !selection.start) return;
 			const rect = selectionDragRect ?? canvasRef.getBoundingClientRect();
 			const m = metrics();
-			if (m) {
-				const yAbove = rect.top - e.clientY;
-				const yBelow = e.clientY - rect.bottom;
-				if (yAbove > 0) {
-					startSelectionScroll(Math.ceil(yAbove / m.cellHeight));
-				} else if (yBelow > 0) {
-					startSelectionScroll(-Math.ceil(yBelow / m.cellHeight));
-				} else {
-					stopSelectionScroll();
-				}
+			const distance = m ? edgeScrollDistance(e.clientY, rect.top, rect.bottom, m.cellHeight) : 0;
+			if (distance !== 0) {
+				// Past the edge: the scroll timer owns the selection end until the
+				// pointer comes back inside.
+				startSelectionScroll(distance);
+				if (currentFrame && m && pinSelectionToScrollEdge()) paintFrame(currentFrame, m);
+				return;
 			}
+			stopSelectionScroll();
 			const pos = canvasToGrid(e, rect);
 			const absRow = viewportRowToAbs(pos.row);
 			if (absRow === null) return;

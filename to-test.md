@@ -36,6 +36,17 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Drag-select keeps scrolling past the terminal edge (2.0.2)
+
+Canvas selection is not observable over HTTP; the logic is unit-tested in
+`canvasTerminalSelection.test.ts`. Needs eyes on the installed build.
+
+- [ ] In a Claude Code tab with a few screens of output, copy something once (so a previous copy exists), then drag a new selection up past the top edge and hold: it keeps scrolling up until the pointer comes back inside, and the highlight reaches the top visible row the whole way.
+- [ ] Same downward: scroll up first, then drag below the bottom edge; it scrolls back down and stops at the live bottom.
+- [ ] Further past the edge scrolls faster; wiggling the pointer while outside does not stall it.
+- [ ] Release after scrolling: the copied text runs from the anchor to the edge row, across every scrolled screen.
+- [ ] Codex CLI (default full-screen view): the selection stops at the screen edge; nothing jumps or errors.
+
 ## Projects header actions always visible (2.0.2)
 
 - [ ] The funnel and `+` next to "Projects" show without hovering, in Codex Dark and Cursor Dark.
