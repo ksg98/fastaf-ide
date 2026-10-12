@@ -338,6 +338,25 @@ jobs:
         with:
           name: macos-signing-state
 
+      # The README's download button links to
+      # releases/latest/download/FastAF_aarch64.dmg, which needs a file of that
+      # exact name in every release. The bundler puts the version in the DMG's
+      # name, so upload a version-less copy beside it. A missing macOS build only
+      # warns: it must not hold back the rest of the release.
+      - name: Add the version-less macOS DMG
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          TAG="v${VERSION}"
+          mkdir -p /tmp/dmg
+          if gh release download "${TAG}" --pattern "FastAF_${VERSION}_aarch64.dmg" --dir /tmp/dmg; then
+            cp "/tmp/dmg/FastAF_${VERSION}_aarch64.dmg" /tmp/dmg/FastAF_aarch64.dmg
+            gh release upload "${TAG}" /tmp/dmg/FastAF_aarch64.dmg --clobber
+          else
+            echo "::warning::FastAF_${VERSION}_aarch64.dmg is not in ${TAG}; the README download button will 404 until FastAF_aarch64.dmg is uploaded"
+          fi
+
       - name: Build release notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -371,7 +390,7 @@ jobs:
 
           * 🍎 **macOS** (Apple Silicon)
               \`FastAF_${VERSION}_aarch64.dmg\`
-              (alt: \`FastAF_aarch64.app.tar.gz\`)
+              (same file: \`FastAF_aarch64.dmg\`; alt: \`FastAF_aarch64.app.tar.gz\`)
           * 🪟 **Windows** (64-bit)
               \`FastAF_${VERSION}_x64-setup.exe\`
           * 🐧 **Linux** (Debian / Ubuntu)

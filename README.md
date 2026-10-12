@@ -21,6 +21,8 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/ksg98/fastaf-ide/releases/latest/download/FastAF_aarch64.dmg"><img src="assets/download-macos.svg" alt="Download FastAF for macOS (Apple Silicon)" width="250" height="54"></a>
+  &nbsp;
   <a href="https://www.producthunt.com/products/fastaf-2?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-fastaf-2" target="_blank" rel="noopener noreferrer"><img alt="FastAF - Free, open-source voice workspace for Claude Code and Codex | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1276876&amp;theme=dark&amp;t=1791754298102"></a>
 </p>
 
@@ -46,13 +48,9 @@
 
 <p align="center"><sub>Claude Code works on a branch while the voice agent reads out where every agent stands: one is done, one is waiting for your approval.</sub></p>
 
-**Install on macOS (Apple Silicon):**
+**Install on macOS (Apple Silicon):** [download the latest `.dmg`](https://github.com/ksg98/fastaf-ide/releases/latest/download/FastAF_aarch64.dmg), open it and drag FastAF to Applications. It is signed and notarized by Apple, so it opens like any other app.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/scripts/install.sh | bash
-```
-
-Windows and Linux builds (`.exe`, `.deb`, `.rpm`, `.AppImage`) are on the [Releases](https://github.com/ksg98/fastaf-ide/releases) page. More options are under [Installation](#installation).
+Windows and Linux builds (`.exe`, `.deb`, `.rpm`, `.AppImage`) are on the [Releases](https://github.com/ksg98/fastaf-ide/releases/latest) page.
 
 ---
 
@@ -355,54 +353,15 @@ FastAF isn't a black box. Everything you click, you can also drive from a script
 
 ### macOS (Apple Silicon)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/scripts/install.sh | bash
-```
-
-Downloads the latest release `.dmg`, installs it to `/Applications`, and clears the
-quarantine attribute (needed only for the unsigned v1.8.6 and earlier). Run the same line again to update — it skips the
-download when you are already on the latest version and only re-clears quarantine.
-
-Options, when piping, go after `-s --`:
-
-```bash
-# a specific release, the nightly pre-release, or somewhere other than /Applications
-curl -fsSL .../install.sh | bash -s -- --version v1.8.1
-curl -fsSL .../install.sh | bash -s -- --nightly
-curl -fsSL .../install.sh | bash -s -- --to ~/Applications
-
-# FastAF is running: ask it to quit first (this ends its terminal sessions)
-curl -fsSL .../install.sh | bash -s -- --quit
-```
-
-The installer refuses to overwrite a running FastAF unless you pass `--quit`.
-Replacing a live bundle corrupts the running process and kills every open PTY and
-agent session in it.
+[Download the latest `.dmg`](https://github.com/ksg98/fastaf-ide/releases/latest/download/FastAF_aarch64.dmg), open it and drag FastAF.app to Applications.
+Builds from v1.8.7 on are signed with a Developer ID and notarized by Apple, so they
+open like any other app.
 
 ### Other platforms
 
 Grab the `.deb`, `.rpm`, `.AppImage` or `.exe` from
 [Releases](https://github.com/ksg98/fastaf-ide/releases). There is currently no
 macOS Intel (x86_64) build — on an Intel Mac, build from source.
-
-### Installing by hand
-
-From v1.8.7 on, macOS builds are signed with a Developer ID and notarized by Apple:
-open the `.dmg` and drag FastAF.app to /Applications, nothing else needed.
-
-v1.8.6 and earlier are unsigned, so macOS Gatekeeper quarantines the app and will
-report it as "damaged" on first launch. After copying one of those to /Applications,
-remove the quarantine attribute BEFORE the first launch:
-
-```bash
-xattr -cr /Applications/FastAF.app
-```
-
-If it still refuses to open, the bundle's signature did not survive the download:
-
-```bash
-codesign --force --deep --sign - /Applications/FastAF.app
-```
 
 ## Build from source
 

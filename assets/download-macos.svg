@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="250" height="54" viewBox="0 0 250 54">
+  <title>Download FastAF for macOS</title>
+  <rect x="0.5" y="0.5" width="249" height="53" rx="10" fill="#221D21" stroke="#221D21"/>
+  <circle cx="26.5" cy="27.5" r="15.5" fill="#FFFFFF"/>
+  <path transform="translate(17.5 18.5) scale(0.75)" fill="#221D21" d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z"/>
+  <text font-family="Helvetica-Bold, Helvetica, Arial, sans-serif" font-size="9" font-weight="bold" fill="#EEF2FF"><tspan x="53" y="20">DOWNLOAD FOR</tspan></text>
+  <text font-family="Helvetica-Bold, Helvetica, Arial, sans-serif" font-size="21" font-weight="bold" fill="#EEF2FF"><tspan x="52" y="40">macOS</tspan></text>
+  <text font-family="Helvetica, Arial, sans-serif" font-size="10" fill="#A1A1AA" text-anchor="end"><tspan x="236" y="31">Apple Silicon</tspan></text>
+</svg>

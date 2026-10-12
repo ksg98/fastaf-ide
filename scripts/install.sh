@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — download, install and de-quarantine FastAF on macOS.
+# install.sh — download and install FastAF on macOS.
 #
 #   curl -fsSL https://raw.githubusercontent.com/ksg98/fastaf-ide/main/scripts/install.sh | bash
 #
@@ -10,12 +10,6 @@
 #   --force            reinstall even when the installed version already matches
 #   --quit             ask a running FastAF to quit, then wait for it
 #   --keep-backup      keep the replaced .app as <name>.bak-<version>-<date>
-#
-# FastAF v1.8.6 and earlier are not code-signed or notarized, so macOS
-# quarantines them and reports them as "damaged" on first launch. This script
-# clears that attribute on every install, which keeps --version installs of old
-# releases working. v1.8.7+ are signed and notarized, where clearing it is a
-# harmless no-op.
 
 set -euo pipefail
 
@@ -98,9 +92,7 @@ if [[ -d "$TARGET_APP" ]]; then
     "$TARGET_APP/Contents/Info.plist" 2>/dev/null || true)"
 fi
 if [[ -n "$INSTALLED" && "$TAG" == "v$INSTALLED" && $FORCE -eq 0 ]]; then
-  note "FastAF $INSTALLED is already installed — clearing quarantine and exiting."
-  xattr -cr "$TARGET_APP" 2>/dev/null || true
-  note "Nothing else to do. Re-run with --force to reinstall."
+  note "FastAF $INSTALLED is already installed. Re-run with --force to reinstall."
   exit 0
 fi
 [[ -n "$INSTALLED" ]] && note "Installed: $INSTALLED  →  installing: ${TAG#v}"
@@ -185,20 +177,6 @@ if ! ditto "$SRC_APP" "$STAGED" 2>/dev/null; then
   die "cannot write to $INSTALL_DIR — re-run with sudo, or use --to ~/Applications"
 fi
 
-# Clear quarantine on the staged copy BEFORE it becomes the live bundle, so the
-# app is never briefly installed-but-quarantined.
-note "Clearing the quarantine attribute (xattr -cr)"
-xattr -cr "$STAGED" || true
-
-# Gatekeeper also rejects a bundle whose signature is missing or broken. Old
-# releases are ad-hoc signed; re-sign only if verification actually fails, so a
-# Developer ID signature is never replaced with a weaker one.
-if ! codesign --verify --no-strict "$STAGED" >/dev/null 2>&1; then
-  note "Signature did not verify — applying an ad-hoc signature"
-  codesign --force --deep --sign - "$STAGED" >/dev/null 2>&1 \
-    || note "ad-hoc signing failed; if the app will not open, run: codesign --force --deep --sign - $TARGET_APP"
-fi
-
 if [[ -d "$TARGET_APP" ]]; then
   BACKUP="$INSTALL_DIR/$APP_NAME.bak-${INSTALLED:-prev}-$(date +%Y%m%d%H%M%S)"
   mv "$TARGET_APP" "$BACKUP"
@@ -209,9 +187,6 @@ if [[ -d "$TARGET_APP" ]]; then
   fi
 fi
 mv "$STAGED" "$TARGET_APP"
-
-# Belt and braces: the move itself can re-tag the bundle on some macOS versions.
-xattr -cr "$TARGET_APP" 2>/dev/null || true
 
 note "Installed FastAF ${TAG#v} to $TARGET_APP"
 note "Launch it with:  open -a FastAF"
