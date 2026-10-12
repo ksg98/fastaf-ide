@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createCanvasSearchController, createCanvasSelectionController } from "../canvasTerminalSelection";
+import {
+	createCanvasSearchController,
+	createCanvasSelectionController,
+	edgeScrollDistance,
+	edgeScrollLines,
+	edgeSelectionPoint,
+} from "../canvasTerminalSelection";
 import type { DecodedRow } from "../canvasTerminalUtils";
 
 function row(text: string): DecodedRow {
@@ -125,5 +131,84 @@ describe("canvas terminal search controller", () => {
 			expect(search.dropRows(new Set())).toBe(false);
 			expect(search.matches).toEqual(matches);
 		});
+	});
+});
+
+describe("selection staleness", () => {
+	const rows = new Map([
+		[10, row("new text")],
+		[11, row("more")],
+	]);
+	const onscreen = (index: number) => (rows.has(index) ? index - 10 : null);
+	const getRow = (index: number) => rows.get(index) ?? null;
+
+	it("never drops a selection mid-drag, even against an older copy's text", () => {
+		const selection = createCanvasSelectionController();
+		selection.cachedText = "previous copy";
+		selection.start = { row: 10, col: 0 };
+		selection.end = { row: 11, col: 3 };
+		selection.selecting = true;
+		expect(selection.isStale(onscreen, getRow)).toBe(false);
+	});
+
+	it("drops a finished selection once the text under it changes", () => {
+		const selection = createCanvasSelectionController();
+		selection.cachedText = "old text\nmore";
+		selection.start = { row: 10, col: 0 };
+		selection.end = { row: 11, col: 3 };
+		expect(selection.isStale(onscreen, getRow)).toBe(true);
+		selection.cachedText = "new text\nmore";
+		expect(selection.isStale(onscreen, getRow)).toBe(false);
+	});
+
+	it("keeps a selection that reaches off-screen or was never copied", () => {
+		const selection = createCanvasSelectionController();
+		selection.start = { row: 9, col: 0 };
+		selection.end = { row: 11, col: 3 };
+		expect(selection.isStale(onscreen, getRow)).toBe(false);
+		selection.cachedText = "something else";
+		expect(selection.isStale(onscreen, getRow)).toBe(false);
+	});
+});
+
+describe("edge auto-scroll", () => {
+	it("measures rows past the edge: positive above, negative below, zero inside", () => {
+		expect(edgeScrollDistance(150, 100, 500, 20)).toBe(0);
+		expect(edgeScrollDistance(99, 100, 500, 20)).toBe(1);
+		expect(edgeScrollDistance(55, 100, 500, 20)).toBe(3);
+		expect(edgeScrollDistance(-200, 100, 500, 20)).toBe(15);
+		expect(edgeScrollDistance(501, 100, 500, 20)).toBe(-1);
+		expect(edgeScrollDistance(545, 100, 500, 20)).toBe(-3);
+	});
+
+	it("scrolls into history above the top and toward the bottom below it", () => {
+		expect(edgeScrollLines(1, 0, 1000)).toBe(1);
+		expect(edgeScrollLines(-1, 50, 1000)).toBe(-1);
+		expect(edgeScrollLines(0, 50, 1000)).toBe(0);
+	});
+
+	it("speeds up the further past the edge the pointer is, up to a cap", () => {
+		expect(edgeScrollLines(2, 0, 1000)).toBe(1);
+		expect(edgeScrollLines(6, 0, 1000)).toBe(3);
+		expect(edgeScrollLines(100, 0, 1000)).toBe(10);
+		expect(edgeScrollLines(-100, 500, 1000)).toBe(-10);
+	});
+
+	it("stops at either end of the scrollback", () => {
+		expect(edgeScrollLines(20, 1000, 1000)).toBe(0);
+		expect(edgeScrollLines(20, 997, 1000)).toBe(3);
+		expect(edgeScrollLines(-20, 0, 1000)).toBe(0);
+		expect(edgeScrollLines(-20, 2, 1000)).toBe(-2);
+		// Alternate screen: no history to scroll through.
+		expect(edgeScrollLines(5, 0, 0)).toBe(0);
+	});
+
+	it("ends the selection at the start of the top row going up", () => {
+		expect(edgeSelectionPoint(3, 400, 40, 119)).toEqual({ row: 400, col: 0 });
+	});
+
+	it("ends the selection at the end of the bottom row going down", () => {
+		expect(edgeSelectionPoint(-3, 400, 40, 119)).toEqual({ row: 439, col: 119 });
+		expect(edgeSelectionPoint(-1, 0, 0, -1)).toEqual({ row: 0, col: 0 });
 	});
 });

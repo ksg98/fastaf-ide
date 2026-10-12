@@ -26,6 +26,17 @@ export interface CanvasSelectionController {
 	hasRange: () => boolean;
 	spansOffscreen: (toViewportRow: (absoluteRow: number) => number | null) => boolean;
 	getLocalText: (getRow: (absoluteRow: number) => DecodedRow | null) => string;
+	/**
+	 * True when a finished, copied selection no longer covers the text it copied
+	 * (the app redrew those rows), so it should be dropped. Never true mid-drag:
+	 * `cachedText` is still the PREVIOUS copy then, so every redraw would read as
+	 * "changed" and clear the selection under the pointer — which is what killed
+	 * edge auto-scroll after its first line.
+	 */
+	isStale: (
+		toViewportRow: (absoluteRow: number) => number | null,
+		getRow: (absoluteRow: number) => DecodedRow | null,
+	) => boolean;
 }
 
 export interface CanvasSearchController {
@@ -44,7 +55,7 @@ export function createCanvasSelectionController(): CanvasSelectionController {
 	let end: SelectionPoint | null = null;
 	let cachedText = "";
 
-	return {
+	const controller: CanvasSelectionController = {
 		get selecting() {
 			return selecting;
 		},
@@ -123,7 +134,55 @@ export function createCanvasSelectionController(): CanvasSelectionController {
 			while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 			return lines.join("\n");
 		},
+		isStale(toViewportRow, getRow) {
+			if (selecting || !start || !cachedText) return false;
+			// Off-screen rows read back empty, which would look like a change.
+			if (controller.spansOffscreen(toViewportRow)) return false;
+			return controller.getLocalText(getRow) !== cachedText;
+		},
 	};
+	return controller;
+}
+
+/** Auto-scroll tick while a drag-selection is held past the viewport edge. */
+export const EDGE_SCROLL_TICK_MS = 40;
+
+/**
+ * How far past the viewport edge the pointer is, in rows: positive above the
+ * top (scroll into history), negative below the bottom, 0 inside.
+ */
+export function edgeScrollDistance(clientY: number, top: number, bottom: number, cellHeight: number): number {
+	if (cellHeight <= 0) return 0;
+	if (clientY < top) return Math.ceil((top - clientY) / cellHeight);
+	if (clientY > bottom) return -Math.ceil((clientY - bottom) / cellHeight);
+	return 0;
+}
+
+/**
+ * Lines to scroll on one auto-scroll tick (positive = into history), faster
+ * the further past the edge the pointer is, and never past either end of the
+ * scrollback — a scroll at the limit is a no-op that still repaints the grid.
+ */
+export function edgeScrollLines(distance: number, displayOffset: number, historySize: number): number {
+	if (distance === 0) return 0;
+	const step = Math.min(Math.ceil(Math.abs(distance) / 2), 10);
+	if (distance > 0) return Math.min(step, Math.max(0, historySize - displayOffset));
+	return displayOffset > 0 ? -Math.min(step, displayOffset) : 0;
+}
+
+/**
+ * Where a drag-selection ends while auto-scrolling: the start of the top
+ * visible row going up, the end of the bottom visible row going down. Absolute
+ * rows, so `viewportTop` is `historySize - displayOffset`.
+ */
+export function edgeSelectionPoint(
+	distance: number,
+	viewportTop: number,
+	screenRows: number,
+	lastCol: number,
+): SelectionPoint {
+	if (distance > 0) return { col: 0, row: viewportTop };
+	return { col: Math.max(0, lastCol), row: viewportTop + Math.max(1, screenRows) - 1 };
 }
 
 export function createCanvasSearchController(): CanvasSearchController {

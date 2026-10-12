@@ -200,6 +200,7 @@ Also accessible via the "Search Terminals" command in the palette.
 
 - **Copy:** Select text in the terminal, then `Cmd+C`. A "Copied to clipboard" confirmation appears in the status bar. Multi-line Claude messages paste as clean text: the repeated `▎` visual gutter is removed while bullets, numbering, and indentation are preserved. Inside such a quote, rows that Claude broke only to fit the terminal width are joined back into one paragraph, so pasting into Slack or an email keeps whole sentences. Blank rows, list items and deeper indents keep their own line, and a quote that never reaches the terminal edge is copied exactly as shown.
 - **Paste:** `Cmd+V` writes clipboard content to the active terminal
+- **Select more than a screen:** drag the selection above the top or below the bottom of the terminal and it keeps scrolling, faster the further out you go, until you move the pointer back inside. This works wherever the terminal holds the scrollback — the shell, Claude Code, `codex --no-alt-screen`. Codex CLI's default full-screen view keeps its history itself, so a selection there stops at the screen edge.
 
 ### Copy on Select
 
