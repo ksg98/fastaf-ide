@@ -248,7 +248,7 @@ Idle, unfocused terminals are suspended to stop them consuming CPU and battery. 
 
 ### 2.0 Layout
 - Top: **New terminal** (opens a terminal in the active repo's active branch, `Cmd+T`) and **Search projects** (Enter activates the first match, Esc clears)
-- "Projects" section header; hovering it reveals the **active-only filter** (see 2.8) and **Add repository** (`+`)
+- "Projects" section header with the **active-only filter** (see 2.8) and **Add repository** (`+`), always visible
 - Repos are folder rows (open folder while expanded); branches sit under them as plain rows whose text lines up with the repo name, with one 6px state dot in front (see 2.3)
 - Footer: one row — git sync icons on the left (2.4), workspaces / help / settings on the right
 
