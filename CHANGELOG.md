@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-10-11
+
+### Fixed
+
+- **Dragging a selection past the edge of the terminal keeps scrolling.** Dragging above the top or below the bottom stopped after a single line once you had copied anything before, because the terminal mistook the drag for a stale selection and dropped it. It now keeps scrolling through the scrollback for as long as you hold the pointer outside, faster the further out you go, until you move it back in, so a selection can run across many screens of Claude Code output. Codex CLI's default full-screen view keeps its own history, so a selection there still stops at the screen edge; `codex --no-alt-screen` scrolls like Claude Code.
+
+- **The Projects header's filter and + are always visible.** They only appeared while hovering the header, so adding a repository or filtering to active ones looked like it was missing.
+
 ## [2.0.1] - 2026-10-04
 
 ### Changed

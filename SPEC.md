@@ -1,6 +1,6 @@
 # FastAF Specification
 
-**Version:** 2.0.1
+**Version:** 2.0.2
 **Last Updated:** 2026-08-27
 
 ## Overview

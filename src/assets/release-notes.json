@@ -285,5 +285,13 @@
     ],
     "contributions": [],
     "date": "2026-10-04"
+  },
+  "2.0.2": {
+    "highlights": [
+      "Drag a selection past the top or bottom of a terminal and it keeps scrolling until you move back in",
+      "The filter and + buttons beside Projects are always visible, not only on hover"
+    ],
+    "contributions": [],
+    "date": "2026-10-11"
   }
 }
