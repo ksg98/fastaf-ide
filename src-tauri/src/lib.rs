@@ -2011,6 +2011,7 @@ pub fn run() {
             fs::create_file,
             fs::create_directory,
             fs::delete_path,
+            fs::delete_paths,
             fs::rename_path,
             fs::copy_path,
             fs::copy_path_abs,

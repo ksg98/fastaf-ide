@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Delete a whole selection in the Files panel.** Right-clicking inside a multi-selection now offers Copy, Cut, Paste, Copy Paths, Copy Relative Paths and **Delete N Items…**, which asks once and deletes everything selected. It used to offer only Copy and Cut for the files in it, so a selection of folders showed nothing but Paste.
+
+- **Copy, cut and paste folders.** Copy and Cut work on folders too, alone or in a selection with files: a pasted folder arrives with everything in it, and one pasted inside itself is refused.
+
+### Fixed
+
+- **Deleting a symlink in the Files panel deletes the link, not what it points at.** A link to another folder in the repository used to delete that folder, and a link pointing outside the repository could not be deleted at all.
+
 ## [2.0.2] - 2026-10-11
 
 ### Fixed

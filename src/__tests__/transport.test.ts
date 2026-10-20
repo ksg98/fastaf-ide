@@ -640,6 +640,13 @@ describe("transport", () => {
 			expect(result.body).toEqual({ from: "/a/x", to: "/b/x" });
 		});
 
+		it("maps delete_paths to POST /fs/delete-paths", () => {
+			const result = mapCommandToHttp("delete_paths", { repoPath: "/repo", paths: ["docs", "a.txt"] });
+			expect(result.method).toBe("POST");
+			expect(result.path).toBe("/fs/delete-paths");
+			expect(result.body).toEqual({ repoPath: "/repo", paths: ["docs", "a.txt"] });
+		});
+
 		it("maps paste_paths to POST /fs/paste", () => {
 			const result = mapCommandToHttp("paste_paths", {
 				sources: ["/repo/a.txt", "/repo/b.txt"],

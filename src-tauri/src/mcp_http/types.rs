@@ -340,6 +340,13 @@ pub(super) struct FsPathRequest {
 }
 
 #[derive(Deserialize)]
+pub(super) struct FsDeletePathsRequest {
+    #[serde(rename = "repoPath")]
+    pub repo_path: String,
+    pub paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct FsRenameRequest {
     #[serde(rename = "repoPath")]
     pub repo_path: String,

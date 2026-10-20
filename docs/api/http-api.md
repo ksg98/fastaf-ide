@@ -1175,6 +1175,7 @@ GET  /fs/read-external?path=/absolute/path/to/file
 POST /fs/write         { "repoPath": "...", "file": "...", "content": "..." }
 POST /fs/mkdir         { "repoPath": "...", "dir": "..." }
 POST /fs/delete        { "repoPath": "...", "path": "..." }
+POST /fs/delete-paths  { "repoPath": "...", "paths": ["...", ...] } -> DeleteResult { deleted, errors } (repoPath gated to registered repos; symlinks removed, not followed)
 POST /fs/rename        { "repoPath": "...", "from": "...", "to": "..." }
 POST /fs/copy          { "repoPath": "...", "from": "...", "to": "..." }
 POST /fs/gitignore     { "repoPath": "...", "pattern": "..." }
@@ -1185,7 +1186,7 @@ POST /fs/warm-index    { "repoPath": "..." }                   -> { "ok": true }
 POST /fs/write-external { "path": "/abs", "content": "..." }   -> { "ok": true }
 POST /fs/copy-abs      { "from": "/abs", "to": "/abs" }        -> { "ok": true }
 POST /fs/move-abs      { "from": "/abs", "to": "/abs" }        -> { "ok": true }
-POST /fs/paste         { "sources": ["/abs", ...], "destDir": "/abs", "mode": "copy"|"move" } -> PasteResult { pasted, skipped, errors }
+POST /fs/paste         { "sources": ["/abs", ...], "destDir": "/abs", "mode": "copy"|"move" } -> PasteResult { pasted, skipped, errors } (folders paste recursively)
 POST /fs/transfer      { "destDir": "/abs", "paths": [...], "mode": "move"|"copy", "allowRecursive": bool } -> TransferResult
 ```
 

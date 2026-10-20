@@ -176,8 +176,8 @@ While holding the modifier, all branches show numbered badges. Press a number to
 | `Shift+Click` | Select the range from the last-clicked row |
 | `Cmd+A` | Select every row on screen |
 | `Escape` | Clear the selection |
-| `Cmd+C` | Copy the selected files |
-| `Cmd+X` | Cut the selected files |
+| `Cmd+C` | Copy the selected files and folders |
+| `Cmd+X` | Cut the selected files and folders |
 | `Cmd+V` | Paste into the current directory (tree view: into the last-clicked folder, or beside the last-clicked file) |
 
 ## Code Editor (when editor tab is focused)

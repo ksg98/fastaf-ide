@@ -36,6 +36,18 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Files panel: Delete a selection, copy folders (2026-10-19)
+
+Backend (`paste_paths` folders, `delete_paths`) and the menu are unit-tested
+(`fs.rs`, `FileBrowserPanel.test.tsx`). Needs the installed build for the real
+menu and dialog.
+
+- [ ] Cmd+click two folders, right-click one: the menu shows Copy 2 Folders, Cut 2 Folders, Paste, Copy Paths, Copy Relative Paths, Delete 2 Folders….
+- [ ] Delete 2 Items… on a file + folder: one dialog ("Permanently delete 2 items, folders with all their contents?"), both gone after confirming, selection cleared.
+- [ ] Copy a folder, right-click another folder → Paste: it arrives with its contents and comes up selected. Paste into its own subfolder: a toast refuses it.
+- [ ] Cut a folder and paste it elsewhere: it moves; the dimmed row goes away.
+- [ ] Delete on a symlink row removes only the link.
+
 ## Drag-select keeps scrolling past the terminal edge (2.0.2)
 
 Canvas selection is not observable over HTTP; the logic is unit-tested in

@@ -13,7 +13,7 @@ import { editorTabsStore } from "../../stores/editorTabs";
 import { repositoriesStore } from "../../stores/repositories";
 import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
-import type { ContentMatch, DirEntry, PasteResult } from "../../types/fs";
+import type { ContentMatch, DeleteResult, DirEntry, PasteResult } from "../../types/fs";
 import { cx } from "../../utils";
 import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
@@ -80,8 +80,13 @@ const ContentModeIcon = () => (
 /** Shared empty set: clearing the selection allocates nothing. */
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
-/** "1 File" / "3 Files", for menu labels and toasts about a selection. */
-const fileCount = (n: number) => (n === 1 ? "1 File" : `${n} Files`);
+/** "1 File", "3 Folders", "4 Items": menu labels and dialogs about a selection. */
+const itemCount = (entries: readonly DirEntry[]) => {
+	const n = entries.length;
+	const folders = entries.filter((e) => e.is_dir).length;
+	const noun = folders === 0 ? "File" : folders === n ? "Folder" : "Item";
+	return `${n} ${noun}${n === 1 ? "" : "s"}`;
+};
 
 export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	const mode = () => props.mode ?? "inline";
@@ -125,7 +130,9 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 	// Delete confirmation dialog state
 	const [deleteDialogVisible, setDeleteDialogVisible] = createSignal(false);
-	const [deleteTarget, setDeleteTarget] = createSignal<DirEntry | null>(null);
+	/** What the open Delete dialog will delete: one row, or a selection as it
+	 *  stood when the dialog opened. */
+	const [deleteTargets, setDeleteTargets] = createSignal<DirEntry[]>([]);
 
 	// VS Code-style inline create: when set, an editable name row is rendered in
 	// place in the listing (instead of a popup). `parent` is the dir the new item
@@ -774,22 +781,79 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		setRenameDialogVisible(true);
 	};
 
-	const handleDelete = (entry: DirEntry) => {
-		setDeleteTarget(entry);
+	const handleDelete = (picked: DirEntry[]) => {
+		if (picked.length === 0) return;
+		setDeleteTargets(picked);
 		setDeleteDialogVisible(true);
 	};
 
+	/** One backend call deletes every target (see `delete_paths`): a symlink goes
+	 *  itself, never what it points at. Whatever went stops being selected or on
+	 *  the clipboard. */
 	const confirmDelete = async () => {
-		const entry = deleteTarget();
-		if (!entry || !root()) return;
+		const picked = deleteTargets();
+		const r = root();
+		if (picked.length === 0 || !r) return;
 		setDeleteDialogVisible(false);
+		let result: DeleteResult;
 		try {
-			await fb.deletePath(root()!, entry.path);
-			refresh();
+			result = await fb.deletePaths(
+				r,
+				picked.map((e) => e.path),
+			);
 		} catch (err) {
 			appLogger.error("app", "Failed to delete", err);
 			toastsStore.add(t("fileBrowser.deleteFailed", "Couldn't delete"), String(err), "error");
+			return;
 		}
+		if (result.deleted.length > 0 && root() === r) {
+			const gone = new Set(result.deleted);
+			if ([...selection()].some((path) => gone.has(path))) clearSelection();
+			const clip = clipboard();
+			if (clip?.sourceRoot === r && clip.entries.some((e) => gone.has(e.path))) {
+				const left = clip.entries.filter((e) => !gone.has(e.path));
+				setClipboard(left.length > 0 ? { ...clip, entries: left } : null);
+			}
+		}
+		refresh();
+		if (result.errors.length > 0) {
+			appLogger.warn("app", "Delete left paths behind", { errors: result.errors });
+			const more =
+				result.errors.length > 3
+					? ` \u00B7 ${t("fileBrowser.andMore", "and {count} more", { count: String(result.errors.length - 3) })}`
+					: "";
+			toastsStore.add(
+				result.deleted.length === 0
+					? t("fileBrowser.deleteFailed", "Couldn't delete")
+					: t("fileBrowser.deletedSome", "Deleted {done} of {total}", {
+							done: String(result.deleted.length),
+							total: String(picked.length),
+						}),
+				result.errors.slice(0, 3).join(" \u00B7 ") + more,
+				result.deleted.length === 0 ? "error" : "warn",
+			);
+		}
+	};
+
+	/** The Delete dialog's title and question, for one row or a selection. */
+	const deleteDialogTitle = () => {
+		const picked = deleteTargets();
+		if (picked.length > 1) return t("fileBrowser.deleteSelectedTitle", "Delete {count}", { count: itemCount(picked) });
+		return picked[0]?.is_dir ? "Delete Folder" : "Delete File";
+	};
+	const deleteDialogMessage = () => {
+		const picked = deleteTargets();
+		if (picked.length > 1) {
+			return picked.some((e) => e.is_dir)
+				? t("fileBrowser.deleteSelectedWithFolders", "Permanently delete {count}, folders with all their contents?", {
+						count: itemCount(picked).toLowerCase(),
+					})
+				: t("fileBrowser.deleteSelectedMessage", "Permanently delete {count}?", {
+						count: itemCount(picked).toLowerCase(),
+					});
+		}
+		const entry = picked[0];
+		return `Permanently delete "${entry?.name ?? ""}"${entry?.is_dir ? " and all its contents" : ""}?`;
 	};
 
 	/** Compute the parent dir (relative to root) for creating a new item next to `entry`.
@@ -975,21 +1039,21 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		}
 	};
 
-	/** Put the files among `picked` on the clipboard. A paste can only create
-	 *  files, so folders stay behind. Returns how many files went on it. */
-	const putOnClipboard = (picked: DirEntry[], mode: "copy" | "cut"): number => {
+	/** Put `picked` on the clipboard, files and folders alike. A row inside a
+	 *  picked folder (tree view) is left out: it already travels with the
+	 *  folder, and pasting it again would land a second copy beside it. */
+	const putOnClipboard = (picked: DirEntry[], mode: "copy" | "cut") => {
 		const r = root();
-		const files = picked.filter((e) => !e.is_dir);
-		if (!r || files.length === 0) return 0;
-		setClipboard({ entries: files, mode, sourceRoot: r });
-		return files.length;
+		if (!r || picked.length === 0) return;
+		const folders = picked.filter((e) => e.is_dir).map((e) => `${e.path}/`);
+		const entries = picked.filter((e) => !folders.some((f) => e.path.startsWith(f)));
+		setClipboard({ entries, mode, sourceRoot: r });
 	};
 
 	/**
 	 * Cmd+C / Cmd+X. Acts on the selection; with none, on the row the flat list's
 	 * arrow-key cursor is on (tree view draws no cursor, so there it does
-	 * nothing). The context menu names its file count, so only this path has to
-	 * say when folders were left out.
+	 * nothing).
 	 */
 	const copyFromKeyboard = (mode: "copy" | "cut") => {
 		let picked = selectedRows();
@@ -997,20 +1061,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			const row = filteredEntries()[selectedIndex()];
 			if (row) picked = [row];
 		}
-		if (picked.length === 0) return;
-		const count = putOnClipboard(picked, mode);
-		if (count === picked.length) return;
-		toastsStore.add(
-			count === 0
-				? mode === "copy"
-					? t("fileBrowser.foldersNotCopied", "Folders can't be copied")
-					: t("fileBrowser.foldersNotCut", "Folders can't be cut")
-				: mode === "copy"
-					? t("fileBrowser.copiedFiles", "Copied {count}", { count: fileCount(count) })
-					: t("fileBrowser.cutFiles", "Cut {count}", { count: fileCount(count) }),
-			t("fileBrowser.onlyFilesCopied", "Only files can be copied or cut, so folders were left out."),
-			"info",
-		);
+		putOnClipboard(picked, mode);
 	};
 
 	/**
@@ -1062,7 +1113,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	const reportPasteProblems = (result: PasteResult, mode: "copy" | "cut") => {
 		const problems = [
 			...result.skipped.map((name) =>
-				t("fileBrowser.pasteNameTaken", "{name}: a file with that name is already there", { name }),
+				t("fileBrowser.pasteNameTaken", "{name}: something with that name is already there", { name }),
 			),
 			...result.errors,
 		];
@@ -1076,8 +1127,8 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 					? t("fileBrowser.copyFailed", "Copy failed")
 					: t("fileBrowser.moveFailed", "Move failed")
 				: mode === "copy"
-					? t("fileBrowser.copiedSome", "Copied {done} of {total} files", counts)
-					: t("fileBrowser.movedSome", "Moved {done} of {total} files", counts);
+					? t("fileBrowser.copiedSome", "Copied {done} of {total}", counts)
+					: t("fileBrowser.movedSome", "Moved {done} of {total}", counts);
 		const more =
 			problems.length > 3
 				? ` \u00B7 ${t("fileBrowser.andMore", "and {count} more", { count: String(problems.length - 3) })}`
@@ -1260,47 +1311,59 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		return false;
 	};
 
-	// Raw absolute path (VSCode "Copy Path" behavior — no ~ shortening)
-	const handleCopyPath = (entry: DirEntry) => {
+	// Raw absolute paths, one per line (VSCode "Copy Path" behavior — no ~ shortening)
+	const handleCopyPath = (picked: DirEntry[]) => {
 		const fsRoot = root();
 		if (!fsRoot) return;
-		const fullPath = `${fsRoot}/${entry.path}`;
-		writeClipboard(fullPath).catch((err) => appLogger.error("app", "Failed to copy path", err));
+		const paths = picked.map((e) => (isAbsolutePath(e.path) ? e.path : `${fsRoot}/${e.path}`));
+		writeClipboard(paths.join("\n")).catch((err) => appLogger.error("app", "Failed to copy path", err));
 	};
 
 	// entry.path is already relative to the repo root (see DirEntry in types/fs.ts)
-	const handleCopyRelativePath = (entry: DirEntry) => {
-		writeClipboard(entry.path).catch((err) => appLogger.error("app", "Failed to copy relative path", err));
+	const handleCopyRelativePath = (picked: DirEntry[]) => {
+		writeClipboard(picked.map((e) => e.path).join("\n")).catch((err) =>
+			appLogger.error("app", "Failed to copy relative path", err),
+		);
 	};
 
 	/**
 	 * Menu for a right-click inside a multi-selection: what applies to every
-	 * selected file at once. Single-item actions (rename, delete, reveal…) take a
-	 * plain click on that row first, which selects it alone.
+	 * selected file and folder at once. Single-item actions (rename, duplicate,
+	 * reveal…) take a plain click on that row first, which selects it alone.
 	 */
 	const getSelectionMenuItems = (entry: DirEntry, picked: DirEntry[]): ContextMenuItem[] => {
 		const mod = getModifierSymbol();
-		const files = picked.filter((e) => !e.is_dir).length;
-		const items: ContextMenuItem[] = [];
-		if (files > 0) {
-			items.push({
-				label: t("fileBrowser.copySelected", "Copy {count}", { count: fileCount(files) }),
+		const count = itemCount(picked);
+		return [
+			{
+				label: t("fileBrowser.copySelected", "Copy {count}", { count }),
 				shortcut: `${mod}C`,
 				action: () => putOnClipboard(picked, "copy"),
-			});
-			items.push({
-				label: t("fileBrowser.cutSelected", "Cut {count}", { count: fileCount(files) }),
+			},
+			{
+				label: t("fileBrowser.cutSelected", "Cut {count}", { count }),
 				shortcut: `${mod}X`,
 				action: () => putOnClipboard(picked, "cut"),
-			});
-		}
-		items.push({
-			label: t("fileBrowser.paste", "Paste"),
-			shortcut: `${mod}V`,
-			action: () => void handlePaste(parentDirFor(entry)),
-			disabled: !clipboard(),
-		});
-		return items;
+			},
+			{
+				label: t("fileBrowser.paste", "Paste"),
+				shortcut: `${mod}V`,
+				action: () => void handlePaste(parentDirFor(entry)),
+				disabled: !clipboard(),
+			},
+			// A divider row of its own, as in the single-row menu: ⌘V must reach Paste.
+			{ label: "", separator: true, action: () => {} },
+			{ label: t("fileBrowser.copyPaths", "Copy Paths"), action: () => handleCopyPath(picked) },
+			{
+				label: t("fileBrowser.copyRelativePaths", "Copy Relative Paths"),
+				action: () => handleCopyRelativePath(picked),
+				separator: true,
+			},
+			{
+				label: t("fileBrowser.deleteSelected", "Delete {count}\u2026", { count }),
+				action: () => handleDelete(picked),
+			},
+		];
 	};
 
 	const getContextMenuItems = (entry: DirEntry): ContextMenuItem[] => {
@@ -1332,25 +1395,23 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 		items.push({
 			label: t("fileBrowser.copyPath", "Copy Path"),
-			action: () => handleCopyPath(entry),
+			action: () => handleCopyPath([entry]),
 		});
 		items.push({
 			label: t("fileBrowser.copyRelativePath", "Copy Relative Path"),
-			action: () => handleCopyRelativePath(entry),
+			action: () => handleCopyRelativePath([entry]),
 		});
 
-		if (!entry.is_dir) {
-			items.push({
-				label: t("fileBrowser.copy", "Copy"),
-				shortcut: `${mod}C`,
-				action: () => putOnClipboard([entry], "copy"),
-			});
-			items.push({
-				label: t("fileBrowser.cut", "Cut"),
-				shortcut: `${mod}X`,
-				action: () => putOnClipboard([entry], "cut"),
-			});
-		}
+		items.push({
+			label: t("fileBrowser.copy", "Copy"),
+			shortcut: `${mod}C`,
+			action: () => putOnClipboard([entry], "copy"),
+		});
+		items.push({
+			label: t("fileBrowser.cut", "Cut"),
+			shortcut: `${mod}X`,
+			action: () => putOnClipboard([entry], "cut"),
+		});
 
 		// Into the right-clicked folder, or beside the right-clicked file (VS Code).
 		items.push({
@@ -1391,7 +1452,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 		items.push({
 			label: t("fileBrowser.delete", "Delete"),
-			action: () => handleDelete(entry),
+			action: () => handleDelete([entry]),
 			separator: true,
 		});
 
@@ -1995,8 +2056,8 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			{/* Delete confirmation dialog */}
 			<ConfirmDialog
 				visible={deleteDialogVisible()}
-				title={deleteTarget()?.is_dir ? "Delete Folder" : "Delete File"}
-				message={`Permanently delete "${deleteTarget()?.name ?? ""}"${deleteTarget()?.is_dir ? " and all its contents" : ""}?`}
+				title={deleteDialogTitle()}
+				message={deleteDialogMessage()}
 				confirmLabel="Delete"
 				kind="warning"
 				onClose={() => setDeleteDialogVisible(false)}

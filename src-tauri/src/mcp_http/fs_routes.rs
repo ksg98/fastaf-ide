@@ -246,6 +246,16 @@ pub(super) async fn delete_path_http(Json(body): Json<FsPathRequest>) -> Respons
     }
 }
 
+/// Delete one or many repo-relative paths (FileBrowser Delete on a selection).
+/// The repo is gated to registered repo roots, as `/fs/paste` gates its paths;
+/// `delete_paths` itself keeps every path inside that repo.
+pub(super) async fn delete_paths_http(Json(body): Json<FsDeletePathsRequest>) -> Response {
+    if let Some(resp) = deny_unless_in_roots(&body.repo_path, &registered_repo_roots()) {
+        return resp;
+    }
+    json_result(crate::fs::delete_paths(body.repo_path, body.paths).await)
+}
+
 pub(super) async fn rename_path_http(Json(body): Json<FsRenameRequest>) -> Response {
     if let Err(e) = validate_repo_path(&body.repo_path) {
         return e.into_response();

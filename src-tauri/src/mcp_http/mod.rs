@@ -790,6 +790,7 @@ fn shared_routes() -> Router<Arc<AppState>> {
         .route("/fs/create", post(fs_routes::create_file_http))
         .route("/fs/mkdir", post(fs_routes::create_directory_http))
         .route("/fs/delete", post(fs_routes::delete_path_http))
+        .route("/fs/delete-paths", post(fs_routes::delete_paths_http))
         .route("/fs/rename", post(fs_routes::rename_path_http))
         .route("/fs/copy", post(fs_routes::copy_path_http))
         .route("/fs/gitignore", post(fs_routes::add_to_gitignore_http))
@@ -2735,6 +2736,46 @@ mod tests {
             std::fs::read_to_string(repo.join("a copy.txt")).unwrap(),
             "a"
         );
+    }
+
+    /// `/fs/delete-paths` deletes only inside a registered repo.
+    #[tokio::test]
+    async fn test_delete_paths_gates_the_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        std::fs::write(other.join("a.txt"), "a").unwrap();
+        let _config = crate::config::set_config_dir_override(tmp.path().join("cfg"));
+        crate::config::replace_repositories_for_test(serde_json::json!({
+            "repos": { repo.to_string_lossy(): {} }
+        }))
+        .unwrap();
+        let delete = |root: &std::path::Path| {
+            mcp_post(
+                "/fs/delete-paths",
+                &serde_json::json!({ "repoPath": root.to_string_lossy(), "paths": ["a.txt"] }),
+            )
+        };
+
+        let outside = build_router(test_state(), false, true)
+            .oneshot(delete(&other))
+            .await
+            .unwrap();
+        assert_eq!(outside.status(), StatusCode::FORBIDDEN);
+        assert!(
+            other.join("a.txt").exists(),
+            "a refused request deletes nothing"
+        );
+
+        let inside = build_router(test_state(), false, true)
+            .oneshot(delete(&repo))
+            .await
+            .unwrap();
+        assert_eq!(inside.status(), StatusCode::OK);
+        assert!(!repo.join("a.txt").exists());
     }
 
     #[tokio::test]

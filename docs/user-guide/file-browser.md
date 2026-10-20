@@ -79,16 +79,16 @@ Right-click any entry to open the context menu:
 | Action | Shortcut | Notes |
 |--------|----------|-------|
 | Copy Path | — | Copies the full absolute path to the clipboard |
-| Copy | `Cmd+C` | Files only; stores the file (or every selected file) in the internal clipboard |
-| Cut | `Cmd+X` | Files only; cut entries are shown dimmed |
+| Copy | `Cmd+C` | Stores the file or folder (or every selected row) in the internal clipboard |
+| Cut | `Cmd+X` | Same, as a move; cut entries are shown dimmed |
 | Paste | `Cmd+V` | Pastes into the right-clicked folder, or beside the right-clicked file; disabled when clipboard is empty |
 | Rename… | — | Opens a rename dialog; enter the new name and confirm |
-| Delete | — | Requires confirmation; directories are deleted recursively |
+| Delete | — | Requires confirmation; directories are deleted recursively, and a symlink is removed itself — never what it points at |
 | Add to .gitignore | — | Appends the entry's path to `.gitignore`; disabled if already ignored |
 
 The keyboard shortcuts (`Cmd+C`, `Cmd+X`, `Cmd+V`) also work when the file browser has focus, without opening the context menu.
 
-Cut + Paste performs a move. Copy + Paste copies the file. A paste never overwrites anything: a copy whose name is already taken lands beside it as `name copy.ext` (then `name copy 2.ext`, and so on), so pasting a file into its own folder duplicates it. A move whose name is taken is skipped, and a toast names the file. Pasted files come up selected.
+Cut + Paste performs a move. Copy + Paste copies the file, or the folder with everything in it. A folder can't be pasted inside itself. A paste never overwrites anything: a copy whose name is already taken lands beside it as `name copy.ext` (then `name copy 2.ext`, and so on), so pasting a file into its own folder duplicates it. A move whose name is taken is skipped, and a toast names the file. Pasted files come up selected.
 
 ### Selecting Several Files
 
@@ -103,7 +103,7 @@ Works in both the flat list and the tree view:
 
 A selection click never opens a file or expands a folder. Selected rows are tinted more strongly than the row of the file open in the editor.
 
-With several rows selected, `Cmd+C` / `Cmd+X` put every selected file on the clipboard, and right-clicking a selected row offers **Copy N Files**, **Cut N Files** and **Paste** for the whole selection. Right-clicking a row outside the selection selects just that row. Folders are left out of a copy — only files can be copied — and a toast says so. Rename, Delete and the other single-item actions work on one row: click it first.
+With several rows selected, `Cmd+C` / `Cmd+X` put every selected file and folder on the clipboard, and right-clicking a selected row offers, for the whole selection: **Copy N Items**, **Cut N Items**, **Paste**, **Copy Paths** and **Copy Relative Paths** (one path per line), and **Delete N Items…**, which asks once and deletes them all. The label says Files, Folders or Items depending on what is selected. A row inside a selected folder is not copied twice: it travels with the folder. Right-clicking a row outside the selection selects just that row. Rename, Duplicate and the other single-item actions work on one row: click it first.
 
 `Cmd+V` pastes into the folder on screen in the flat list. The tree view has no current folder of its own, so it pastes where you last clicked: into that folder, or beside that file (the repo root when nothing is selected).
 

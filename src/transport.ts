@@ -1681,6 +1681,13 @@ const COMMAND_TABLE: Record<string, CommandTableEntry> = {
 			body: { repoPath: args.repoPath, path: args.path },
 		}),
 	},
+	delete_paths: {
+		map: (args) => ({
+			method: "POST",
+			path: "/fs/delete-paths",
+			body: { repoPath: args.repoPath, paths: args.paths },
+		}),
+	},
 	rename_path: {
 		map: (args) => ({
 			method: "POST",

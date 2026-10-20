@@ -1681,9 +1681,11 @@ enum PasteOutcome {
 /// than silently doing nothing. A move whose name is taken is skipped and
 /// reported. A move into the folder the file already lives in changes nothing.
 ///
-/// Folders are refused per item, as `copy_path_abs` refuses them, and one
-/// failing source never stops the rest. Paths are absolute so a paste can cross
-/// repositories; see [`copy_path_abs`] for the trust-boundary rationale.
+/// Folders paste with everything in them: a copy is recursive, a move is a
+/// rename. A folder pasted into itself or one of its own subfolders is refused,
+/// since a recursive copy there would never end. One failing source never stops
+/// the rest. Paths are absolute so a paste can cross repositories; see
+/// [`copy_path_abs`] for the trust-boundary rationale.
 #[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn paste_paths(
     sources: Vec<String>,
@@ -1733,14 +1735,28 @@ fn paste_one(
         .file_name()
         .ok_or_else(|| "not a file path".to_string())?;
     let meta = std::fs::metadata(src).map_err(|e| format!("cannot read it: {e}"))?;
-    if meta.is_dir() {
-        return Err("folders can't be pasted, only files".to_string());
+    let is_dir = meta.is_dir();
+    if is_dir
+        && src
+            .canonicalize()
+            .is_ok_and(|folder| dest.starts_with(&folder))
+    {
+        return Err("a folder can't be pasted inside itself".to_string());
     }
 
     match mode {
         TransferMode::Copy => {
-            let target = free_copy_target(dest, name)?;
-            std::fs::copy(src, &target).map_err(|e| format!("copy failed: {e}"))?;
+            let target = free_copy_target(dest, name, is_dir)?;
+            if is_dir {
+                if let Err(e) = copy_dir_recursive(src, &target) {
+                    // The name was free, so everything there is this copy's own
+                    // half-finished work.
+                    let _ = std::fs::remove_dir_all(&target);
+                    return Err(format!("copy failed: {e}"));
+                }
+            } else {
+                std::fs::copy(src, &target).map_err(|e| format!("copy failed: {e}"))?;
+            }
             Ok(PasteOutcome::Pasted(file_name_lossy(&target)))
         }
         TransferMode::Move => {
@@ -1761,10 +1777,17 @@ fn paste_one(
             match std::fs::rename(src, &target) {
                 Ok(()) => {}
                 Err(e) if e.raw_os_error() == Some(libc_cross_device()) => {
-                    std::fs::copy(src, &target).map_err(|e| format!("move failed: {e}"))?;
-                    std::fs::remove_file(src).map_err(|e| {
-                        format!("copied, but the original could not be removed: {e}")
-                    })?;
+                    if is_dir {
+                        if let Err(e) = copy_dir_recursive(src, &target) {
+                            let _ = std::fs::remove_dir_all(&target);
+                            return Err(format!("move failed: {e}"));
+                        }
+                        std::fs::remove_dir_all(src)
+                    } else {
+                        std::fs::copy(src, &target).map_err(|e| format!("move failed: {e}"))?;
+                        std::fs::remove_file(src)
+                    }
+                    .map_err(|e| format!("copied, but the original could not be removed: {e}"))?;
                 }
                 Err(e) => return Err(format!("move failed: {e}")),
             }
@@ -1776,15 +1799,20 @@ fn paste_one(
 /// The first name in `dest` that nothing occupies: `name` itself, then
 /// `name copy.ext`, `name copy 2.ext`, … The extension splits at the last dot
 /// unless that dot leads the name, so `.env` becomes `.env copy` — the same rule
-/// the FileBrowser's Duplicate uses.
-fn free_copy_target(dest: &std::path::Path, name: &std::ffi::OsStr) -> Result<PathBuf, String> {
+/// the FileBrowser's Duplicate uses. A folder has no extension: `v1.2` becomes
+/// `v1.2 copy`.
+fn free_copy_target(
+    dest: &std::path::Path,
+    name: &std::ffi::OsStr,
+    is_dir: bool,
+) -> Result<PathBuf, String> {
     let plain = dest.join(name);
     if !path_taken(&plain) {
         return Ok(plain);
     }
     let name = name.to_string_lossy();
     let (base, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        Some(i) if i > 0 && !is_dir => (&name[..i], &name[i..]),
         _ => (&name[..], ""),
     };
     for n in 1..=10_000u32 {
@@ -1812,6 +1840,91 @@ fn file_name_lossy(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// delete_paths — FileBrowser Delete of one row or a whole selection.
+// ---------------------------------------------------------------------------
+
+/// Result payload for `delete_paths`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DeleteResult {
+    /// The paths that are gone, as the caller passed them. A path inside a
+    /// folder that was also being deleted counts: it went with the folder.
+    pub deleted: Vec<String>,
+    /// One `name: reason` message per path that could not be deleted.
+    pub errors: Vec<String>,
+}
+
+/// Delete files and folders inside a repository: the FileBrowser's Delete, for
+/// one row or a whole selection, in one call.
+///
+/// Unlike [`delete_path`], a symlink is removed itself and never followed: a
+/// link to a folder elsewhere leaves that folder alone. The repository root is
+/// refused. One failing path never stops the rest.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn delete_paths(repo_path: String, paths: Vec<String>) -> Result<DeleteResult, String> {
+    spawn_blocking_fs(move || Ok(delete_paths_impl(&repo_path, paths))).await
+}
+
+fn delete_paths_impl(repo_path: &str, paths: Vec<String>) -> DeleteResult {
+    let mut result = DeleteResult::default();
+    let name_of = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string())
+    };
+
+    // Locate every path before deleting any, so a selected file inside a
+    // selected folder can still be recognised once the folder is gone.
+    // `validate_path_for_creation` resolves the parent and keeps the last
+    // component as written, which is what leaves a symlink unfollowed.
+    let mut targets = Vec::with_capacity(paths.len());
+    for path in paths {
+        match validate_path_for_creation(repo_path, &path) {
+            Ok((repo, entry)) if entry == repo => result.errors.push(format!(
+                "{}: the repository itself can't be deleted",
+                name_of(&path)
+            )),
+            Ok((_, entry)) => targets.push((path, entry)),
+            Err(e) => result.errors.push(format!("{}: {e}", name_of(&path))),
+        }
+    }
+
+    for (path, entry) in &targets {
+        let meta = match std::fs::symlink_metadata(entry) {
+            Ok(meta) => meta,
+            Err(e) => {
+                let inside_deleted_folder = targets
+                    .iter()
+                    .any(|(_, other)| other != entry && entry.starts_with(other));
+                if inside_deleted_folder {
+                    result.deleted.push(path.clone());
+                } else {
+                    result.errors.push(format!("{}: {e}", name_of(path)));
+                }
+                continue;
+            }
+        };
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir_all(entry)
+        } else {
+            // On Windows a link to a folder is a directory entry: remove_dir.
+            std::fs::remove_file(entry).or_else(|e| {
+                if meta.file_type().is_symlink() {
+                    std::fs::remove_dir(entry)
+                } else {
+                    Err(e)
+                }
+            })
+        };
+        match removed {
+            Ok(()) => result.deleted.push(path.clone()),
+            Err(e) => result.errors.push(format!("{}: {e}", name_of(path))),
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2977,10 +3090,12 @@ mod tests {
     }
 
     #[test]
-    fn paste_refuses_folders_but_still_pastes_the_files() {
+    fn paste_copies_a_folder_with_everything_in_it_beside_the_files() {
         let src = TempDir::new().unwrap();
         let dst = TempDir::new().unwrap();
-        fs::create_dir(src.path().join("docs")).unwrap();
+        fs::create_dir_all(src.path().join("docs/img")).unwrap();
+        fs::write(src.path().join("docs/readme.md"), "r").unwrap();
+        fs::write(src.path().join("docs/img/logo.png"), "png").unwrap();
         fs::write(src.path().join("a.txt"), "a").unwrap();
 
         let r = paste(
@@ -2989,10 +3104,149 @@ mod tests {
             TransferMode::Copy,
         );
 
-        assert_eq!(r.pasted, vec!["a.txt"]);
+        assert_eq!(r.pasted, vec!["docs", "a.txt"]);
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert_eq!(
+            fs::read_to_string(dst.path().join("docs/img/logo.png")).unwrap(),
+            "png"
+        );
+        assert!(
+            src.path().join("docs/readme.md").exists(),
+            "a copy keeps its source"
+        );
+    }
+
+    #[test]
+    fn paste_copy_of_a_folder_into_its_own_parent_names_it_without_an_extension() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("v1.2")).unwrap();
+        fs::write(dir.path().join("v1.2/notes.txt"), "n").unwrap();
+
+        let r = paste(&[dir.path().join("v1.2")], dir.path(), TransferMode::Copy);
+
+        assert_eq!(r.pasted, vec!["v1.2 copy"]);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("v1.2 copy/notes.txt")).unwrap(),
+            "n"
+        );
+    }
+
+    #[test]
+    fn paste_moves_a_folder() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::create_dir(src.path().join("docs")).unwrap();
+        fs::write(src.path().join("docs/readme.md"), "r").unwrap();
+
+        let r = paste(&[src.path().join("docs")], dst.path(), TransferMode::Move);
+
+        assert_eq!(r.pasted, vec!["docs"]);
+        assert!(!src.path().join("docs").exists());
+        assert_eq!(
+            fs::read_to_string(dst.path().join("docs/readme.md")).unwrap(),
+            "r"
+        );
+    }
+
+    #[test]
+    fn paste_refuses_a_folder_into_itself_but_still_pastes_the_rest() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("docs/sub")).unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+
+        for mode in [TransferMode::Copy, TransferMode::Move] {
+            let r = paste(
+                &[dir.path().join("docs"), dir.path().join("a.txt")],
+                &dir.path().join("docs/sub"),
+                mode,
+            );
+            assert_eq!(r.pasted, vec!["a.txt"], "{r:?}");
+            assert_eq!(r.errors.len(), 1, "{r:?}");
+            assert!(r.errors[0].starts_with("docs: "), "{r:?}");
+            assert!(!dir.path().join("docs/sub/docs").exists());
+            let _ = fs::rename(dir.path().join("docs/sub/a.txt"), dir.path().join("a.txt"));
+        }
+    }
+
+    // --- delete_paths (FileBrowser Delete of one row or a selection) ---
+
+    fn delete(repo: &std::path::Path, paths: &[&str]) -> DeleteResult {
+        delete_paths_impl(
+            &repo.to_string_lossy(),
+            paths.iter().map(|p| p.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn delete_removes_files_and_folders_together() {
+        let repo = TempDir::new().unwrap();
+        fs::create_dir_all(repo.path().join("docs/img")).unwrap();
+        fs::write(repo.path().join("docs/img/logo.png"), "png").unwrap();
+        fs::write(repo.path().join("a.txt"), "a").unwrap();
+        fs::write(repo.path().join("keep.txt"), "k").unwrap();
+
+        let r = delete(repo.path(), &["docs", "a.txt"]);
+
+        assert_eq!(r.deleted, vec!["docs", "a.txt"]);
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert!(!repo.path().join("docs").exists());
+        assert!(!repo.path().join("a.txt").exists());
+        assert!(repo.path().join("keep.txt").exists());
+    }
+
+    #[test]
+    fn delete_counts_a_file_that_went_with_its_selected_folder() {
+        // Tree view: a folder and a file inside it, both selected, folder first.
+        let repo = TempDir::new().unwrap();
+        fs::create_dir(repo.path().join("docs")).unwrap();
+        fs::write(repo.path().join("docs/readme.md"), "r").unwrap();
+
+        let r = delete(repo.path(), &["docs", "docs/readme.md"]);
+
+        assert_eq!(r.deleted, vec!["docs", "docs/readme.md"]);
+        assert!(r.errors.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn delete_reports_a_missing_path_and_still_deletes_the_rest() {
+        let repo = TempDir::new().unwrap();
+        fs::write(repo.path().join("a.txt"), "a").unwrap();
+
+        let r = delete(repo.path(), &["gone.txt", "a.txt"]);
+
+        assert_eq!(r.deleted, vec!["a.txt"]);
         assert_eq!(r.errors.len(), 1, "{r:?}");
-        assert!(r.errors[0].starts_with("docs: "), "{r:?}");
-        assert!(!dst.path().join("docs").exists());
+        assert!(r.errors[0].starts_with("gone.txt: "), "{r:?}");
+    }
+
+    #[test]
+    fn delete_refuses_the_repository_and_anything_outside_it() {
+        let parent = TempDir::new().unwrap();
+        let repo = parent.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        fs::write(parent.path().join("outside.txt"), "o").unwrap();
+
+        let r = delete(&repo, &["", ".", "../outside.txt"]);
+
+        assert!(r.deleted.is_empty(), "{r:?}");
+        assert_eq!(r.errors.len(), 3, "{r:?}");
+        assert!(repo.exists());
+        assert!(parent.path().join("outside.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_removes_a_symlink_and_leaves_what_it_points_at() {
+        let repo = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        fs::write(elsewhere.path().join("precious.txt"), "p").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), repo.path().join("linked")).unwrap();
+
+        let r = delete(repo.path(), &["linked"]);
+
+        assert_eq!(r.deleted, vec!["linked"]);
+        assert!(fs::symlink_metadata(repo.path().join("linked")).is_err());
+        assert!(elsewhere.path().join("precious.txt").exists());
     }
 
     #[test]
@@ -4554,6 +4808,24 @@ mod tests {
             fs::read_to_string(dir.path().join("a copy.txt")).unwrap(),
             "content"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_paths_command_is_awaitable_and_deletes() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("docs")).unwrap();
+        fs::write(dir.path().join("a.txt"), "content").unwrap();
+
+        let r = delete_paths(
+            dir.path().to_string_lossy().to_string(),
+            vec!["docs".to_string(), "a.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(r.deleted, vec!["docs", "a.txt"]);
+        assert!(!dir.path().join("docs").exists());
+        assert!(!dir.path().join("a.txt").exists());
     }
 
     #[tokio::test]

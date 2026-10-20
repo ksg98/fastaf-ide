@@ -25,6 +25,15 @@ export interface PasteResult {
 	errors: string[];
 }
 
+/** What `delete_paths` removed. Paths are repo-relative, as passed in. */
+export interface DeleteResult {
+	/** The paths that are gone. One inside a selected folder that was also
+	 *  deleted counts: it went with the folder. */
+	deleted: string[];
+	/** One "name: reason" message per path that could not be deleted. */
+	errors: string[];
+}
+
 /** A single content match from full-text search */
 export interface ContentMatch {
 	path: string;

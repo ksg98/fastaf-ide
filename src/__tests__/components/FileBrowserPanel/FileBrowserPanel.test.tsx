@@ -426,11 +426,17 @@ describe("FileBrowserPanel create file", () => {
 
 describe("FileBrowserPanel multi-select copy/paste", () => {
 	let pasteResult: { pasted: string[]; skipped: string[]; errors: string[] };
+	let deleteResult: { deleted: string[]; errors: string[] };
 
 	beforeEach(() => {
 		pasteResult = { pasted: [], skipped: [], errors: [] };
+		deleteResult = { deleted: [], errors: [] };
 		mockInvoke.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
-			cmd === "paste_paths" ? Promise.resolve(pasteResult) : defaultInvoke(cmd, args),
+			cmd === "paste_paths"
+				? Promise.resolve(pasteResult)
+				: cmd === "delete_paths"
+					? Promise.resolve(deleteResult)
+					: defaultInvoke(cmd, args),
 		);
 	});
 
@@ -439,6 +445,7 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 	});
 
 	const pasteCalls = () => mockInvoke.mock.calls.filter(([cmd]) => cmd === "paste_paths").map(([, args]) => args);
+	const deleteCalls = () => mockInvoke.mock.calls.filter(([cmd]) => cmd === "delete_paths").map(([, args]) => args);
 
 	/** The row element whose name label reads `name`. */
 	const rowOf = (container: HTMLElement, name: string) => {
@@ -559,7 +566,7 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 		);
 	});
 
-	it("leaves folders out of a keyboard copy and says so", async () => {
+	it("copies folders along with the files", async () => {
 		listings.set("/repo|.", [dir("docs"), file("a.txt")]);
 		const { container, queryByText } = renderPanel();
 		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
@@ -569,8 +576,94 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 		press("c");
 		press("v");
 
-		await waitFor(() => expect(pasteCalls()).toEqual([{ sources: ["/repo/a.txt"], destDir: "/repo", mode: "copy" }]));
-		expect(toastsStore.toasts.map((t) => t.title)).toContain("Copied 1 File");
+		await waitFor(() =>
+			expect(pasteCalls()).toEqual([{ sources: ["/repo/docs", "/repo/a.txt"], destDir: "/repo", mode: "copy" }]),
+		);
+		expect(toastsStore.toasts).toEqual([]);
+	});
+
+	it("leaves out a row whose folder is picked too, since it travels with the folder", async () => {
+		listings.set("/repo|.", [dir("docs"), file("z.txt")]);
+		listings.set("/repo|docs", [file("a.md", "docs/a.md")]);
+		const { container, queryByText } = renderPanel();
+		clickTreeViewButton(container);
+		await waitFor(() => expect(queryByText("docs")).not.toBeNull());
+		clickRow(container, "docs");
+		await waitFor(() => expect(queryByText("a.md")).not.toBeNull());
+
+		press("a");
+		press("c");
+		openMenuOn(container, "z.txt");
+		clickMenuItem("Paste");
+
+		await waitFor(() =>
+			expect(pasteCalls()).toEqual([{ sources: ["/repo/docs", "/repo/z.txt"], destDir: "/repo", mode: "copy" }]),
+		);
+	});
+
+	it("offers Copy, Cut and Delete for a selection of folders", async () => {
+		listings.set("/repo|.", [dir("docs"), dir("src"), file("a.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+
+		cmdClick(container, "docs");
+		cmdClick(container, "src");
+		openMenuOn(container, "src");
+
+		for (const label of ["Copy 2 Folders", "Cut 2 Folders", "Paste", "Copy Paths", "Delete 2 Folders\u2026"]) {
+			expect(() => clickMenuItem(label), label).not.toThrow();
+			openMenuOn(container, "src");
+		}
+	});
+
+	it("deletes the whole selection in one call once confirmed", async () => {
+		listings.set("/repo|.", [dir("docs"), file("a.txt"), file("b.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("b.txt")).not.toBeNull());
+
+		cmdClick(container, "docs");
+		cmdClick(container, "a.txt");
+		openMenuOn(container, "a.txt");
+		clickMenuItem("Delete 2 Items\u2026");
+		// The dialog renders in a portal, outside the panel's container.
+		expect(document.body.textContent).toContain("Permanently delete 2 items, folders with all their contents?");
+		expect(deleteCalls()).toEqual([]);
+
+		deleteResult = { deleted: ["docs", "a.txt"], errors: [] };
+		clickMenuItem("Delete");
+
+		await waitFor(() => expect(deleteCalls()).toEqual([{ repoPath: "/repo", paths: ["docs", "a.txt"] }]));
+		await waitFor(() => expect(pickedNames(container)).toEqual([]));
+	});
+
+	it("deletes a single row through the same call", async () => {
+		listings.set("/repo|.", [file("a.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("a.txt")).not.toBeNull());
+
+		openMenuOn(container, "a.txt");
+		clickMenuItem("Delete");
+		expect(document.body.textContent).toContain('Permanently delete "a.txt"?');
+		deleteResult = { deleted: ["a.txt"], errors: [] };
+		clickMenuItem("Delete");
+
+		await waitFor(() => expect(deleteCalls()).toEqual([{ repoPath: "/repo", paths: ["a.txt"] }]));
+	});
+
+	it("reports the paths a delete left behind", async () => {
+		listings.set("/repo|.", [file("a.txt"), file("b.txt")]);
+		const { container, queryByText } = renderPanel();
+		await waitFor(() => expect(queryByText("b.txt")).not.toBeNull());
+
+		cmdClick(container, "a.txt");
+		cmdClick(container, "b.txt");
+		openMenuOn(container, "b.txt");
+		clickMenuItem("Delete 2 Files\u2026");
+		deleteResult = { deleted: ["a.txt"], errors: ["b.txt: Permission denied"] };
+		clickMenuItem("Delete");
+
+		await waitFor(() => expect(toastsStore.toasts.map((t) => t.title)).toContain("Deleted 1 of 2"));
+		expect(toastsStore.toasts.find((t) => t.title === "Deleted 1 of 2")?.message).toContain("b.txt");
 	});
 
 	it("offers the whole selection in the menu of a row inside it", async () => {
@@ -666,7 +759,7 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 		openMenuOn(container, "dest");
 		clickMenuItem("Paste");
 
-		await waitFor(() => expect(toastsStore.toasts.map((t) => t.title)).toContain("Moved 1 of 2 files"));
-		expect(toastsStore.toasts.find((t) => t.title === "Moved 1 of 2 files")?.message).toContain("a.txt");
+		await waitFor(() => expect(toastsStore.toasts.map((t) => t.title)).toContain("Moved 1 of 2"));
+		expect(toastsStore.toasts.find((t) => t.title === "Moved 1 of 2")?.message).toContain("a.txt");
 	});
 });

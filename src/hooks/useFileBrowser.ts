@@ -1,6 +1,6 @@
 import { invoke } from "../invoke";
 import { appLogger } from "../stores/appLogger";
-import type { ContentSearchBatch, DirEntry, PasteResult } from "../types/fs";
+import type { ContentSearchBatch, DeleteResult, DirEntry, PasteResult } from "../types/fs";
 import { listenContentSearch, newContentSearchId, startContentSearch } from "../utils/contentSearch";
 
 export interface ContentSearchOptions {
@@ -40,6 +40,12 @@ export function useFileBrowser() {
 
 	async function deletePath(repoPath: string, path: string): Promise<void> {
 		await invoke("delete_path", { repoPath, path });
+	}
+
+	/** Delete repo-relative paths — the FileBrowser's Delete for one row or a
+	 *  whole selection. A symlink is removed itself, never followed. */
+	async function deletePaths(repoPath: string, paths: string[]): Promise<DeleteResult> {
+		return await invoke<DeleteResult>("delete_paths", { repoPath, paths });
 	}
 
 	async function renamePath(repoPath: string, from: string, to: string): Promise<void> {
@@ -122,6 +128,7 @@ export function useFileBrowser() {
 		createFile,
 		createDirectory,
 		deletePath,
+		deletePaths,
 		renamePath,
 		copyPath,
 		copyPathAbs,
