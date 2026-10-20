@@ -64,6 +64,7 @@ A configurable OS-level shortcut to toggle FastAF's visibility from any applicat
 | `Escape` | Close search overlay |
 | `Cmd+C` | Copy selection |
 | `Cmd+V` | Paste to terminal |
+| `Cmd+Click` | Open the file path or URL under the pointer (`Ctrl+Click` on Windows/Linux), even while the agent captures the mouse |
 | `Cmd+Home` | Scroll to top |
 | `Cmd+End` | Scroll to bottom |
 | `Shift+PageUp` | Scroll page up |

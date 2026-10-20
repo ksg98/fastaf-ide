@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { CODING_EXT, filePathRegex, fileUrlRegex, matchWebUrls } from "../../components/Terminal/linkProvider";
+import {
+	CODING_EXT,
+	filePathRegex,
+	fileUrlRegex,
+	matchFilePaths,
+	matchWebUrls,
+} from "../../components/Terminal/linkProvider";
 
 describe("linkProvider regexes", () => {
 	describe("filePathRegex", () => {
@@ -173,5 +179,54 @@ describe("matchWebUrls", () => {
 
 	it("is not a link once trimming leaves a bare scheme", () => {
 		expect(urls("http://,")).toEqual([]);
+	});
+});
+
+describe("matchFilePaths", () => {
+	const SHOT = "/Users/me/Desktop/Screenshot 2026-10-19 at 9.41.02 PM.png";
+	/** Each candidate as `text -> candidate` (just `text` when they agree). */
+	const paths = (text: string) =>
+		matchFilePaths(text).map((m) => (m.text === m.candidate ? m.text : `${m.text} -> ${m.candidate}`));
+
+	it("keeps everything filePathRegex finds", () => {
+		expect(paths("see src/main.rs:42 and /tmp/out.png")).toEqual(["src/main.rs:42", "/tmp/out.png"]);
+	});
+
+	it("offers a screenshot path with spaces whole, ahead of its last word", () => {
+		const found = matchFilePaths(`Saved ${SHOT}`);
+		expect(found[0]).toEqual({ index: 6, text: SHOT, candidate: SHOT });
+		expect(found.map((m) => m.text)).toContain("PM.png");
+	});
+
+	it("finds it inside an agent's tool call, quotes and parentheses", () => {
+		expect(paths(`⏺ Read(${SHOT})`)).toContain(SHOT);
+		expect(paths(`open "${SHOT}" now`)).toContain(SHOT);
+		expect(paths(`open '${SHOT}'`)).toContain(SHOT);
+	});
+
+	it("unescapes a backslash-escaped path for the resolver, but underlines what is shown", () => {
+		const shown = "/Users/me/Desktop/My\\ Shot\\ (1).png";
+		expect(paths(`ls ${shown}`)).toContain(`${shown} -> /Users/me/Desktop/My Shot (1).png`);
+	});
+
+	it("offers a ~/ path with spaces", () => {
+		expect(paths("wrote ~/Pictures/My Shot.png")).toContain("~/Pictures/My Shot.png");
+	});
+
+	it("offers a quoted relative path with spaces", () => {
+		expect(paths('created "docs/Release Notes.md"')).toContain("docs/Release Notes.md");
+	});
+
+	it("keeps a line suffix on a spaced path", () => {
+		expect(paths("at /repo/My File.ts:12:3")).toContain("/repo/My File.ts:12:3");
+	});
+
+	it("still offers each of two paths in prose, alongside the stretch between them", () => {
+		// The stretch is only a guess; it does not exist on disk, so it never links.
+		expect(paths("compare /a/x.png and /b/y.png.")).toEqual(["/a/x.png and /b/y.png", "/a/x.png", "/b/y.png"]);
+	});
+
+	it("does not run a path across a column gap", () => {
+		expect(paths("/a/x.png    /b/y.png")).toEqual(["/a/x.png", "/b/y.png"]);
 	});
 });

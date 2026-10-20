@@ -220,7 +220,9 @@ The bell behavior when receiving BEL character (\x07) is configurable in Setting
 
 ## Clickable File Paths
 
-File paths appearing in terminal output are automatically detected and become clickable links. Hover over a path to see the link underline, then click to open it.
+File paths appearing in terminal output are automatically detected and become clickable links. Hover over a path to see the link underline, then click to open it, or `Cmd+Click` (`Ctrl+Click` on Windows/Linux). `Cmd+Click` works even while the agent captures the mouse (Codex, full-screen TUIs), where a plain click goes to the agent — it does the same as right-click → **Open**.
+
+Paths with spaces are found too, so a macOS screenshot such as `~/Desktop/Screenshot 2026-10-19 at 9.41.02 PM.png` is a link, whether printed plainly, quoted, or with backslash-escaped spaces. Images, PDFs, video and audio open in the Preview tab beside the terminal.
 
 - `.md` / `.mdx` files open in the Markdown viewer panel
 - All other code files open in your configured IDE, at the line number if a `:line` or `:line:col` suffix is present

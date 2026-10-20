@@ -48,6 +48,17 @@ menu and dialog.
 - [ ] Cut a folder and paste it elsewhere: it moves; the dimmed row goes away.
 - [ ] Delete on a symlink row removes only the link.
 
+## Terminal: Cmd+click opens a path, paths with spaces link (2026-10-19)
+
+Matching is unit-tested (`Terminal-linkProvider.test.ts`); the click flow is a
+source scan (`canvasTerminalLinkClick.test.ts`). Canvas clicks are not
+observable over HTTP.
+
+- [ ] Take a screenshot to the Desktop, `ls ~/Desktop/Screenshot*` in a terminal whose cwd is under `~/Desktop`: the whole name (spaces and all) underlines, and Cmd+click opens the image in the pane beside the terminal.
+- [ ] Same path in Claude Code output (e.g. ask it to print the path): Cmd+click opens it; plain click still opens too.
+- [ ] In Codex (mouse capture on): Cmd+click on a printed path opens it and Codex does not register a click; a plain click still goes to Codex and opens nothing.
+- [ ] Right-click → Open still works; after using it, a plain click elsewhere in Codex does not reopen that link.
+
 ## Drag-select keeps scrolling past the terminal edge (2.0.2)
 
 Canvas selection is not observable over HTTP; the logic is unit-tested in

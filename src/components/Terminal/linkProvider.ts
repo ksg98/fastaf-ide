@@ -17,6 +17,76 @@ export function filePathRegex(): RegExp {
 	);
 }
 
+/** A file path found in a row of terminal text. `text` is what the row shows
+ *  (the span to underline and hit-test); `candidate` is what to resolve on
+ *  disk — the same string with shell backslash-escapes removed. */
+export interface FilePathMatch {
+	index: number;
+	text: string;
+	candidate: string;
+}
+
+/** Where a path that may hold spaces can begin: an absolute or `~/` path after
+ *  the same boundary characters `filePathRegex` accepts. */
+const SPACED_PATH_START_SOURCE = `(?:^|[\\s"'\`([{])(~/|/)`;
+/** A known extension plus optional `:line[:col|-end]`, then a boundary. */
+const PATH_END_SOURCE = `\\.(?:${CODING_EXT})(?::\\d+(?::\\d+|-\\d+)?)?(?=[\\s"'\`),;.!?:\\]}>]|$)`;
+/** `"…"`, `'…'` or a backticked path holding at least one space. */
+const QUOTED_PATH_SOURCE = `(["'\`])([^"'\`\\n]*\\s[^"'\`\\n]*?\\.(?:${CODING_EXT})(?::\\d+(?::\\d+|-\\d+)?)?)\\1`;
+/** Past these a "path" is prose: no real file name runs this long or this spaced. */
+const SPACED_PATH_MAX_LEN = 300;
+const SPACED_PATH_MAX_SPACES = 10;
+
+/**
+ * Every file path candidate in `text`, for the resolver to confirm or drop.
+ *
+ * `filePathRegex` stops at a space, so `Screenshot 2026-10-19 at 9.41.02 PM.png`
+ * — the name macOS gives every screenshot — came out as `PM.png`, which never
+ * resolves, and no image path with a space ever became a link. On top of its
+ * matches this offers, for each absolute or `~/` path, every stretch up to a
+ * known extension that holds a space (`/a/My File.png`, escaped `/a/My\ File.png`),
+ * plus quoted paths with spaces. Spaces make that ambiguous — `/a/x.png and
+ * /b/y.png` is also one stretch — so a candidate is only a guess: the caller
+ * shows it as a link once `resolve_terminal_path(s)` finds it on disk.
+ *
+ * Sorted by position, longest first at a shared start, so the first match that
+ * covers a column is the most complete one.
+ */
+export function matchFilePaths(text: string): FilePathMatch[] {
+	const found: FilePathMatch[] = [];
+	const seen = new Set<string>();
+	const add = (index: number, span: string) => {
+		const key = `${index}:${span.length}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		found.push({ index, text: span, candidate: span.includes("\\") ? span.replace(/\\(.)/g, "$1") : span });
+	};
+
+	const plain = filePathRegex();
+	let m: RegExpExecArray | null;
+	while ((m = plain.exec(text)) !== null) add(text.indexOf(m[1], m.index), m[1]);
+
+	const starts = new RegExp(SPACED_PATH_START_SOURCE, "g");
+	const end = new RegExp(PATH_END_SOURCE, "g");
+	while ((m = starts.exec(text)) !== null) {
+		const start = m.index + m[0].length - m[1].length;
+		end.lastIndex = start;
+		let e: RegExpExecArray | null;
+		while ((e = end.exec(text)) !== null) {
+			const span = text.slice(start, e.index + e[0].length);
+			// Two spaces in a row, a tab or a quote mark is column layout or prose.
+			if (span.length > SPACED_PATH_MAX_LEN || /\s{2}|\t|["'`]/.test(span)) break;
+			if ((span.match(/ /g)?.length ?? 0) > SPACED_PATH_MAX_SPACES) break;
+			if (/[ \\]/.test(span)) add(start, span);
+		}
+	}
+
+	const quoted = new RegExp(QUOTED_PATH_SOURCE, "g");
+	while ((m = quoted.exec(text)) !== null) add(m.index + 1, m[2]);
+
+	return found.sort((a, b) => a.index - b.index || b.text.length - a.text.length);
+}
+
 /** Factory — returns a fresh file:// URL regex. */
 export function fileUrlRegex(): RegExp {
 	return /\bfile:\/\/(\/[^\s"'`<>()[\]{}]+)/g;

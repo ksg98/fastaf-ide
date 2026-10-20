@@ -12,7 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Copy, cut and paste folders.** Copy and Cut work on folders too, alone or in a selection with files: a pasted folder arrives with everything in it, and one pasted inside itself is refused.
 
+- **Cmd+click opens a path or link in the terminal.** It works even while the agent captures the mouse (Codex, full-screen TUIs), where a click used to go to the agent and only right-click → Open worked. Ctrl+click on Windows and Linux.
+
 ### Fixed
+
+- **Image paths with spaces are clickable in the terminal.** A macOS screenshot path such as `Screenshot 2026-10-19 at 9.41.02 PM.png` only ever matched its last word, so it never became a link. Paths with spaces, quoted or backslash-escaped, now open beside the terminal like any other file.
 
 - **Deleting a symlink in the Files panel deletes the link, not what it points at.** A link to another folder in the repository used to delete that folder, and a link pointing outside the repository could not be deleted at all.
 

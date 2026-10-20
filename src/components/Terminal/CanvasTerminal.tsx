@@ -50,7 +50,7 @@ import { installFrameTimingDebugHook, isFrameTimingEnabled, recordFrameTiming, r
 import { acquireCache, getSharedMetrics, invalidateGlyphCache, releaseCache } from "./glyphCache";
 import { createGridRenderer, type GridRenderer } from "./gridRenderer";
 import { kittySequenceForKey } from "./kittyKeyboard";
-import { filePathRegex, fileUrlRegex, matchWebUrls } from "./linkProvider";
+import { fileUrlRegex, matchFilePaths, matchWebUrls } from "./linkProvider";
 import { createClickDragArbiter } from "./mouseGesture";
 import { INTENT_HIGHLIGHT_RE, planSuggestOverlay, SUGGEST_ANCHOR_RE } from "./suggestOverlay";
 import {
@@ -222,6 +222,18 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		spans?: { row: number; colStart: number; colEnd: number }[];
 	} | null = null;
 	const detectedLinks = linkController.detectedSpans;
+	/** Set by a Cmd/Ctrl+press the canvas kept for a link, so the matching release
+	 *  stays quiet and the click opens the link under the pointer. */
+	let linkPress = false;
+	/** Cmd on macOS, Ctrl elsewhere: the modifier that opens a link on click. */
+	const isLinkModifier = (e: MouseEvent) => (isMacOS() ? e.metaKey : e.ctrlKey);
+	/** Whether a cell sits on a link already found: an underlined span, or the hovered link. */
+	const isOnKnownLink = (pos: { row: number; col: number }) => {
+		const inSpan = (sp: { colStart: number; colEnd: number }) => pos.col >= sp.colStart && pos.col < sp.colEnd;
+		if (detectedLinks.get(pos.row)?.some(inSpan)) return true;
+		if (!hoveredLink) return false;
+		return (hoveredLink.spans ?? [hoveredLink]).some((sp) => sp.row === pos.row && inSpan(sp));
+	};
 	// Spans of links that span soft-wrapped rows (web + file://), keyed by row.
 	// scanRowForLinks() merges these each time it rebuilds a row's dashed-underline
 	// spans, so multi-row underlines survive the per-frame rebuild at line ~1367.
@@ -1654,7 +1666,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 
 	// --- Link detection ---
 
-	const FILE_PATH_RE = filePathRegex();
 	const FILE_URL_RE = fileUrlRegex();
 
 	// Per-session cache: row text → verified file link spans (null = checked, none exist)
@@ -1716,12 +1727,10 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			}
 
 			const candidates: { colStart: number; colEnd: number; raw: string }[] = [];
-			FILE_PATH_RE.lastIndex = 0;
-			let m: RegExpExecArray | null;
-			while ((m = FILE_PATH_RE.exec(text)) !== null) {
-				const idx = text.indexOf(m[1], m.index);
-				candidates.push({ colStart: idx, colEnd: idx + m[1].length, raw: m[1] });
+			for (const fp of matchFilePaths(text)) {
+				candidates.push({ colStart: fp.index, colEnd: fp.index + fp.text.length, raw: fp.candidate });
 			}
+			let m: RegExpExecArray | null;
 			FILE_URL_RE.lastIndex = 0;
 			while ((m = FILE_URL_RE.exec(text)) !== null) {
 				candidates.push({ colStart: m.index, colEnd: m.index + m[0].length, raw: m[1] });
@@ -1909,7 +1918,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		const cacheKey = `${row}:${rowText}`;
 		let links = linkCache.get(cacheKey);
 		if (links === undefined) {
-			const fpRe = FILE_PATH_RE;
 			const fuRe = FILE_URL_RE;
 			const fileMatches: { text: string; candidate: string; index: number }[] = [];
 			const urlMatches: { text: string; path: string; index: number }[] = [];
@@ -1926,10 +1934,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			}
 
 			// File paths
-			fpRe.lastIndex = 0;
-			while ((match = fpRe.exec(rowText)) !== null) {
-				const idx = rowText.indexOf(match[1], match.index);
-				fileMatches.push({ text: match[1], candidate: match[1], index: idx });
+			for (const fp of matchFilePaths(rowText)) {
+				fileMatches.push({ text: fp.text, candidate: fp.candidate, index: fp.index });
 			}
 			fuRe.lastIndex = 0;
 			while ((match = fuRe.exec(rowText)) !== null) {
@@ -2018,7 +2024,6 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					const colOffset = (row - startRow) * cols;
 					const logicalCol = colOffset + col;
 					const fuRe = FILE_URL_RE;
-					const fpRe = FILE_PATH_RE;
 					const logicalMatches: { text: string; candidate: string; index: number; isUrl: boolean }[] = [];
 
 					fuRe.lastIndex = 0;
@@ -2026,10 +2031,8 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 					while ((m = fuRe.exec(logicalText)) !== null) {
 						logicalMatches.push({ text: m[0], candidate: m[1], index: m.index, isUrl: false });
 					}
-					fpRe.lastIndex = 0;
-					while ((m = fpRe.exec(logicalText)) !== null) {
-						const idx = logicalText.indexOf(m[1], m.index);
-						logicalMatches.push({ text: m[1], candidate: m[1], index: idx, isUrl: false });
+					for (const fp of matchFilePaths(logicalText)) {
+						logicalMatches.push({ text: fp.text, candidate: fp.candidate, index: fp.index, isUrl: false });
 					}
 					for (const url of matchWebUrls(logicalText)) {
 						logicalMatches.push({ text: url.text, candidate: url.text, index: url.index, isUrl: true });
@@ -2747,6 +2750,21 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 				lastClickTime = now;
 			}
 
+			// Cmd/Ctrl+click opens the link under the pointer (the click listener
+			// resolves it). Under mouse reporting the press never reaches the app —
+			// SGR has no bit for Cmd, so the app would read it as a plain click. Without
+			// reporting it is kept from starting a selection only over a known link,
+			// so Cmd+drag elsewhere still selects.
+			linkPress = false;
+			if (e.button === 0 && isLinkModifier(e)) {
+				const reporting = !!currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey;
+				if (reporting || isOnKnownLink(canvasToGrid(e))) {
+					linkPress = true;
+					e.preventDefault();
+					return;
+				}
+			}
+
 			if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) {
 				const pos = canvasToGrid(e);
 				// Right-click on a detected link → let the contextmenu handler fire (Open /
@@ -2926,6 +2944,9 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 			const reportUp = shouldReportMouseUp(reportedDown, e.button, isPointerInsideRect(e, rect));
 			const owed = reportedDown.delete(e.button);
 			if (hidden && !owed) return;
+			// The release of a link press: the app never saw the press, and no
+			// selection was started.
+			if (linkPress && e.button === 0) return;
 			if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) {
 				const up = gestureArbiter.onUp();
 				if (up.kind === "click") {
@@ -2975,11 +2996,27 @@ const CanvasTerminal: Component<CanvasTerminalProps> = (props) => {
 		bindings.listen(document, "mousemove", onMouseMove);
 		bindings.listen(document, "mouseup", onMouseUp);
 
-		// Link click — plain click opens, skip if user was selecting text
-		bindings.listen(canvasRef, "click", () => {
-			if (!hoveredLink) return;
-			if (selection.hasRange()) return;
-			openLink(hoveredLink);
+		// Link click. A plain click opens the hovered link unless the user was
+		// selecting text; under mouse reporting the app owns plain clicks, and a
+		// link left hovered by the right-click menu must not open on one.
+		// Cmd/Ctrl+click resolves the link under the pointer now, as the right-click
+		// menu does: the hover result can be gone (a scrolling frame clears it) or
+		// never made (hover detection is off under mouse reporting).
+		bindings.listen(canvasRef, "click", async (e: MouseEvent) => {
+			const pressed = linkPress;
+			linkPress = false;
+			if (!pressed) {
+				if (selection.hasRange()) return;
+				if (currentFrame && currentFrame.mouseMode > 0 && !e.shiftKey) return;
+			}
+			if (pressed || isLinkModifier(e)) {
+				// A hover check still pending from the last move would supersede this
+				// one mid-await and leave the click with nothing to open.
+				clearTimeout(linkThrottle);
+				const pos = canvasToGrid(e);
+				await checkLinksAtRow(pos.row, pos.col);
+			}
+			if (hoveredLink) openLink(hoveredLink);
 		});
 
 		// Right-click on a detected link → context menu (Open / Copy link).

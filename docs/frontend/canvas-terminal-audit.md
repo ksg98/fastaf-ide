@@ -165,8 +165,8 @@ Primary and alternate grids can reuse identical numeric row coordinates while re
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| File path detection (hover) | OK | Async row text fetch + regex |
-| File path Cmd+click open | OK | |
+| File path detection (hover) | OK | Async row text fetch + `matchFilePaths` (paths with spaces, quoted or `\ `-escaped, become candidates; the resolver confirms) |
+| File path Cmd+click open | OK | Resolved at click time via `checkLinksAtRow`, like right-click → Open; works under mouse reporting, where the press is kept from the app |
 | Pointer cursor on link | OK | |
 | Web URL links (http/https) | OK | `webUrlRe` regex in `checkLinksAtRow` |
 | OSC 8 hyperlinks | OK | `terminal_hyperlink_at` IPC, priority over other link types |
