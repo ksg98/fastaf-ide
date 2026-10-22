@@ -304,5 +304,17 @@
     ],
     "contributions": [],
     "date": "2026-10-20"
+  },
+  "2.0.4": {
+    "highlights": [
+      "The commit box is one card: the message grows as you type, with Generate, Amend and a Commit button",
+      "Changed files show their icon, folder and line counts; Stage, Unstage and Discard appear on hover",
+      "The Log shows two-line commits with branch and tag chips; expand one to see its full message and files",
+      "Stashes, Branches, History and Blame match the new look, and stash buttons are always visible",
+      "The Files panel is quieter: view and sort sit in the header, search options sit inside the field",
+      "Blame no longer gets stuck on loading, and branch ages now show in the app"
+    ],
+    "contributions": [],
+    "date": "2026-10-22"
   }
 }

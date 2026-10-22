@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-10-22
+
 ### Changed
 
 - **The commit box is one composer card at the top of the Changes tab.** The message field grows as you type and says where ⌘↵ goes ("Message (⌘↵ to commit on main)"). Under it sit Generate (the sparkle), an Amend toggle, the Smart Commit chip and a Commit button whose label follows what it will do — Commit, Amend, Committing…, Committed — and whose tooltip says why it is disabled. A failed commit, such as a pre-commit hook error, shows git's message in a red banner under the card that you can select and dismiss.
