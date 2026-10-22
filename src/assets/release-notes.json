@@ -293,5 +293,16 @@
     ],
     "contributions": [],
     "date": "2026-10-11"
+  },
+  "2.0.3": {
+    "highlights": [
+      "Select several files or folders and delete them all from the right-click menu",
+      "Copy, cut and paste folders in the Files panel, alone or with files",
+      "Cmd+click a path in the terminal to open it, even while the agent captures the mouse",
+      "Image paths with spaces, like macOS screenshots, open from the terminal",
+      "Deleting a symlink removes only the link"
+    ],
+    "contributions": [],
+    "date": "2026-10-20"
   }
 }

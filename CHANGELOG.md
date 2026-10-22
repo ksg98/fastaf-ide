@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-10-20
+
 ### Added
 
 - **Delete a whole selection in the Files panel.** Right-clicking inside a multi-selection now offers Copy, Cut, Paste, Copy Paths, Copy Relative Paths and **Delete N Items…**, which asks once and deletes everything selected. It used to offer only Copy and Cut for the files in it, so a selection of folders showed nothing but Paste.
