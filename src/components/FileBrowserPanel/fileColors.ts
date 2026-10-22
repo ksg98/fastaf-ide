@@ -8,10 +8,11 @@
  * under every theme.
  */
 
-/** Muted gray-blue folder tone, in the spirit of VSCode's folder icons. */
-const FOLDER_COLOR = "#8f98a7";
-
 const MUTED = "var(--fg-muted)";
+
+/** Folders are chrome (the stroke folder glyph), so they take the muted text
+ *  tone of the theme rather than a type colour. */
+const FOLDER_COLOR = MUTED;
 
 const COLORS = {
 	blue: "#60a5fa",

@@ -1,4 +1,17 @@
-import { type Component, createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	For,
+	Match,
+	on,
+	onCleanup,
+	onMount,
+	Show,
+	Switch,
+	untrack,
+} from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { ContentSearchOptions } from "../../hooks/useFileBrowser";
 import { useFileBrowser } from "../../hooks/useFileBrowser";
@@ -15,21 +28,38 @@ import { toastsStore } from "../../stores/toasts";
 import { uiStore } from "../../stores/ui";
 import type { ContentMatch, DeleteResult, DirEntry, PasteResult } from "../../types/fs";
 import { cx } from "../../utils";
-import { onClickKeyDown } from "../../utils/a11y";
 import { writeClipboard } from "../../utils/clipboard";
-import { isAbsolutePath, joinPath, replaceBasename } from "../../utils/pathUtils";
+import { isAbsolutePath, joinPath, pathBasename, pathDirname, replaceBasename } from "../../utils/pathUtils";
 import { fileContextSmartMenuItem } from "../../utils/promptContext";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu";
+import {
+	IconAlert,
+	IconArrowDownUp,
+	IconCaseSensitive,
+	IconChevronRight,
+	IconFiles,
+	IconFolder,
+	IconList,
+	IconListTree,
+	IconPlus,
+	IconRegex,
+	IconSearch,
+	IconTextSearch,
+	IconWholeWord,
+} from "../icons";
 import { PromptDialog } from "../PromptDialog";
+import { EmptyState } from "../shared/EmptyState";
 import g from "../shared/git-status.module.css";
 import p from "../shared/panel.module.css";
+import { SearchField, SearchFieldToggle } from "../shared/SearchField";
+import { Spinner } from "../shared/Spinner";
 import { Dropdown } from "../ui/Dropdown";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
 import s from "./FileBrowserPanel.module.css";
 import { FileIcon } from "./FileIcon";
-import { fileTooltip, formatSize, getStatusClass } from "./fileUtils";
+import { fileTooltip, getStatusClass, matchPreview, statusLabel } from "./fileUtils";
 import { TreeNode } from "./TreeNode";
 import { revalidateTreeCache } from "./treeRevalidate";
 
@@ -43,48 +73,14 @@ export interface FileBrowserPanelProps {
 	mode?: "inline" | "detached";
 }
 
-/** SVG icons for content search toggle buttons (same as SearchBar) */
-const CaseSensitiveIcon = () => (
-	<svg viewBox="0 0 16 16" fill="currentColor">
-		<path d="M8.854 11.702h-1l-.816-2.159H3.772l-.768 2.16H2L5.09 4h.76l3.004 7.702zm-2.27-3.074L5.452 5.549a1.635 1.635 0 01-.066-.252h-.02a1.674 1.674 0 01-.07.256L4.17 8.628h2.415zM13.995 11.7v-.73c-.37.47-.955.792-1.705.792-1.2 0-2.088-.797-2.088-1.836 0-1.092.855-1.792 2.156-1.867l1.636-.09v-.362c0-.788-.49-1.257-1.328-1.257-.678 0-1.174.31-1.399.778h-.91c.153-.95 1.085-1.635 2.333-1.635 1.39 0 2.227.79 2.227 2.04V11.7h-.922z" />
-	</svg>
-);
-
-const WholeWordIcon = () => (
-	<svg viewBox="0 0 16 16" fill="currentColor">
-		<path d="M2 6h1v7H2V6zm5.38 4.534h-.022c-.248.371-.7.596-1.205.596C5.344 11.13 4.7 10.48 4.7 9.6c0-.925.604-1.46 1.703-1.522l1-.052V7.72c0-.547-.336-.87-.918-.87-.514 0-.836.22-1.002.563H4.59c.156-.734.808-1.253 1.866-1.253 1.117 0 1.825.6 1.825 1.548v3.023h-.9v-.197zM5.604 9.6c0 .37.283.64.674.64.548 0 .96-.373.96-.836v-.45l-.864.046c-.57.034-.77.256-.77.6zM10.552 6.26c.467 0 .824.186 1.078.54V4h.904v8.73h-.9v-.65c-.258.456-.66.72-1.158.72C9.546 12.8 8.8 11.88 8.8 10.52c0-1.37.74-2.26 1.752-2.26zm.18.816c-.647 0-1.038.56-1.038 1.44s.39 1.46 1.048 1.46c.647 0 1.043-.57 1.043-1.45s-.396-1.45-1.053-1.45z" />
-		<path d="M1 13h14v1H1z" />
-	</svg>
-);
-
-const RegexIcon = () => (
-	<svg viewBox="0 0 16 16" fill="currentColor">
-		<path d="M10.012 2h.976v3.113l2.56-1.557.486.885L11.47 6l2.564 1.559-.486.885-2.56-1.557V10h-.976V6.887l-2.56 1.557-.486-.885L9.53 6 6.966 4.441l.486-.885 2.56 1.557V2zM2 10h4v4H2v-4z" />
-	</svg>
-);
-
-/** Filename mode icon — simple "F" in a doc shape */
-const FilenameModeIcon = () => (
-	<svg viewBox="0 0 16 16" fill="currentColor">
-		<path d="M4 2h5l3 3v9H4V2zm1 1v10h6V6H9V3H5zm1.5 4h3v1h-3V7zm0 2h3v1h-3V9z" />
-	</svg>
-);
-
-/** Content mode icon — magnifier with lines */
-const ContentModeIcon = () => (
-	<svg viewBox="0 0 16 16" fill="currentColor">
-		<path d="M11.5 7a4.5 4.5 0 1 0-1.77 3.56l3.35 3.36.71-.71-3.36-3.35A4.48 4.48 0 0 0 11.5 7zM7 10.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zM5 6h4v1H5V6zm0 2h4v1H5V8z" />
-	</svg>
-);
-
 /** Shared empty set: clearing the selection allocates nothing. */
 const EMPTY_PATHS: ReadonlySet<string> = new Set();
 
-/** "1 File", "3 Folders", "4 Items": menu labels and dialogs about a selection. */
+/** "1 file", "3 folders", "4 items": menu labels and dialogs about a selection. */
 const itemCount = (entries: readonly DirEntry[]) => {
 	const n = entries.length;
 	const folders = entries.filter((e) => e.is_dir).length;
-	const noun = folders === 0 ? "File" : folders === n ? "Folder" : "Item";
+	const noun = folders === 0 ? "file" : folders === n ? "folder" : "item";
 	return `${n} ${noun}${n === 1 ? "" : "s"}`;
 };
 
@@ -162,6 +158,9 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	// anchor is also where Cmd+V pastes in tree view (see keyboardPasteDir).
 	const [selection, setSelection] = createSignal<ReadonlySet<string>>(EMPTY_PATHS);
 	const [selectionAnchor, setSelectionAnchor] = createSignal<string | null>(null);
+	/** The flat list's arrow-key cursor is drawn only once the keyboard moves it;
+	 *  a pointer press hides it again (a mouse user never sees a stray ring). */
+	const [keyboardCursor, setKeyboardCursor] = createSignal(false);
 	let panelRef: HTMLDivElement | undefined;
 
 	// Search mode: "filename" (default) or "content" (full-text grep)
@@ -839,17 +838,17 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	const deleteDialogTitle = () => {
 		const picked = deleteTargets();
 		if (picked.length > 1) return t("fileBrowser.deleteSelectedTitle", "Delete {count}", { count: itemCount(picked) });
-		return picked[0]?.is_dir ? "Delete Folder" : "Delete File";
+		return picked[0]?.is_dir ? "Delete folder" : "Delete file";
 	};
 	const deleteDialogMessage = () => {
 		const picked = deleteTargets();
 		if (picked.length > 1) {
 			return picked.some((e) => e.is_dir)
 				? t("fileBrowser.deleteSelectedWithFolders", "Permanently delete {count}, folders with all their contents?", {
-						count: itemCount(picked).toLowerCase(),
+						count: itemCount(picked),
 					})
 				: t("fileBrowser.deleteSelectedMessage", "Permanently delete {count}?", {
-						count: itemCount(picked).toLowerCase(),
+						count: itemCount(picked),
 					});
 		}
 		const entry = picked[0];
@@ -920,7 +919,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 	/** VS Code-style inline name input, rendered as a row in the listing.
 	 *  Enter/blur commits, Escape cancels; duplicate names block commit with an
 	 *  inline error. Remounts (and so resets) each time inlineCreate is set. */
-	const InlineCreateRow: Component<{ depth?: number }> = (p) => {
+	const InlineCreateRow: Component<{ depth?: number }> = (row) => {
 		const [value, setValue] = createSignal("");
 		let done = false;
 
@@ -959,7 +958,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		};
 
 		return (
-			<div class={cx(s.entry, s.inlineCreateRow)} style={{ "padding-left": `${8 + (p.depth ?? 0) * 16}px` }}>
+			<div class={cx(s.entry, s.inlineCreateRow)} style={{ "--depth": String(row.depth ?? 0) }}>
 				<FileIcon name={isFolder() ? value() : value() || "file"} isDir={isFolder()} class={s.entryIcon} />
 				<Show when={prefix()}>
 					<span class={s.inlineCreatePrefix}>{prefix()}/</span>
@@ -1353,9 +1352,9 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			},
 			// A divider row of its own, as in the single-row menu: ⌘V must reach Paste.
 			{ label: "", separator: true, action: () => {} },
-			{ label: t("fileBrowser.copyPaths", "Copy Paths"), action: () => handleCopyPath(picked) },
+			{ label: t("fileBrowser.copyPaths", "Copy paths"), action: () => handleCopyPath(picked) },
 			{
-				label: t("fileBrowser.copyRelativePaths", "Copy Relative Paths"),
+				label: t("fileBrowser.copyRelativePaths", "Copy relative paths"),
 				action: () => handleCopyRelativePath(picked),
 				separator: true,
 			},
@@ -1384,21 +1383,21 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 		const parentForNew = parentDirFor(entry);
 		items.push({
-			label: t("fileBrowser.newFolder", "New Folder\u2026"),
+			label: t("fileBrowser.newFolder", "New folder\u2026"),
 			action: () => startInlineCreate("folder", parentForNew),
 		});
 		items.push({
-			label: t("fileBrowser.newFile", "New File\u2026"),
+			label: t("fileBrowser.newFile", "New file\u2026"),
 			action: () => startInlineCreate("file", parentForNew),
 			separator: true,
 		});
 
 		items.push({
-			label: t("fileBrowser.copyPath", "Copy Path"),
+			label: t("fileBrowser.copyPath", "Copy path"),
 			action: () => handleCopyPath([entry]),
 		});
 		items.push({
-			label: t("fileBrowser.copyRelativePath", "Copy Relative Path"),
+			label: t("fileBrowser.copyRelativePath", "Copy relative path"),
 			action: () => handleCopyRelativePath([entry]),
 		});
 
@@ -1427,7 +1426,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 
 		if (!entry.is_dir) {
 			items.push({
-				label: t("fileBrowser.openDefault", "Open with Default App"),
+				label: t("fileBrowser.openDefault", "Open with default app"),
 				action: () => {
 					const r = root();
 					if (!r) return;
@@ -1457,7 +1456,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		});
 
 		items.push({
-			label: t("fileBrowser.revealInOS", "Reveal in File Manager"),
+			label: t("fileBrowser.revealInOS", "Reveal in file manager"),
 			action: () => handleRevealInOS(entry),
 		});
 
@@ -1492,11 +1491,11 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		const parent = currentSubdir() === "." ? "" : currentSubdir();
 		return [
 			{
-				label: t("fileBrowser.newFolder", "New Folder…"),
+				label: t("fileBrowser.newFolder", "New folder\u2026"),
 				action: () => startInlineCreate("folder", parent),
 			},
 			{
-				label: t("fileBrowser.newFile", "New File…"),
+				label: t("fileBrowser.newFile", "New file\u2026"),
 				action: () => startInlineCreate("file", parent),
 				separator: true,
 			},
@@ -1576,6 +1575,10 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 				if (followCursor && list[i]) selectOnly(list[i]);
 			};
 
+			if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "Enter" || e.key === "Backspace") {
+				setKeyboardCursor(true);
+			}
+
 			switch (e.key) {
 				case "ArrowUp":
 					e.preventDefault();
@@ -1618,6 +1621,152 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 		return dir ? joinPath(dir, currentSubdir()) : undefined;
 	};
 
+	/** The listing's own folder name — the breadcrumb's first segment. */
+	const rootName = () => {
+		const r = root() ?? "";
+		return pathBasename(r) || r || "/";
+	};
+
+	/** The breadcrumb names the folder the flat list shows; a search is not in a folder. */
+	const showBreadcrumb = () =>
+		!!root() && viewMode() === "flat" && searchMode() === "filename" && !searchQuery().trim();
+
+	/** The listing's width, kept current across panel resizes. */
+	const [listWidth, setListWidth] = createSignal(0);
+	onMount(() => {
+		if (!contentRef || typeof ResizeObserver === "undefined") return;
+		const ro = new ResizeObserver(() => setListWidth(contentRef?.clientWidth ?? 0));
+		ro.observe(contentRef);
+		onCleanup(() => ro.disconnect());
+	});
+
+	/**
+	 * How many characters of a matching line show before its match
+	 * (matchPreview): about 45 % of what fits beside the line number, so the
+	 * match stays on screen at any panel width. 86px is the match row's insets,
+	 * line number and gap; 11px mono runs ~6.6px a character. 16 until the
+	 * listing has been measured.
+	 */
+	const matchLead = createMemo(() => {
+		const w = listWidth();
+		return w > 0 ? Math.max(8, Math.round(((w - 86) / 6.6) * 0.45)) : 16;
+	});
+
+	// Keep the folder on screen in view when the path is wider than the panel —
+	// after each move and each resize — and fade whichever end is clipped.
+	let breadcrumbEl: HTMLElement | undefined;
+	const [crumbClip, setCrumbClip] = createSignal(
+		{ start: false, end: false },
+		{ equals: (a, b) => a.start === b.start && a.end === b.end },
+	);
+	const measureCrumb = () => {
+		const el = breadcrumbEl;
+		if (!el) return;
+		const max = el.scrollWidth - el.clientWidth;
+		setCrumbClip({ start: el.scrollLeft > 0.5, end: el.scrollLeft < max - 0.5 });
+	};
+	createEffect(() => {
+		void currentSubdir();
+		void listWidth();
+		if (!showBreadcrumb()) return;
+		requestAnimationFrame(() => {
+			if (!breadcrumbEl) return;
+			breadcrumbEl.scrollLeft = breadcrumbEl.scrollWidth;
+			measureCrumb();
+		});
+	});
+
+	const showTree = () => {
+		uiStore.setFileBrowserViewMode("tree");
+		setCurrentSubdir(".");
+		setSearchQuery("");
+	};
+
+	/** Filename ⇄ content search; each mode's results go with it. */
+	const toggleSearchMode = () => {
+		const next = searchMode() === "filename" ? "content" : "filename";
+		setSearchMode(next);
+		if (next === "content") {
+			setSearchResults([]);
+		} else {
+			resetContentSearch();
+		}
+		setSelectedIndex(0);
+	};
+
+	/** What clearing the field (its × or Esc) resets besides the query. */
+	const resetContentSearch = () => {
+		resetContentMatches();
+		setContentSearching(false);
+		setContentStats({ filesSearched: 0, filesSkipped: 0, truncated: false });
+	};
+
+	const contentStatusText = () => {
+		const count = contentMatchCount();
+		if (count === 0) return t("fileBrowser.noMatches", "No matches");
+		const files = contentMatchGroups.length;
+		const stats = contentStats();
+		return `${count} match${count !== 1 ? "es" : ""} in ${files} file${files !== 1 ? "s" : ""}${stats.truncated ? " (results limited)" : ""}${stats.filesSkipped > 0 ? ` \u00B7 ${stats.filesSkipped} skipped` : ""}`;
+	};
+
+	/** A row of the flat list or of the filename results (the tree draws TreeNode). */
+	const FlatRow: Component<{ entry: DirEntry; index: number; result?: boolean }> = (row) => {
+		const absPath = () => (isAbsolutePath(row.entry.path) ? row.entry.path : joinPath(root() ?? "", row.entry.path));
+		const dir = () => (row.result ? pathDirname(row.entry.path) : "");
+		return (
+			<div
+				class={cx(
+					s.entry,
+					row.result && s.entryResult,
+					selectedIndex() === row.index && s.entrySelected,
+					!row.entry.is_dir && row.entry.path === activeFilePath() && s.entryActive,
+					selection().has(row.entry.path) && s.entryPicked,
+					row.entry.is_ignored && s.entryIgnored,
+					cutPaths().has(row.entry.path) && s.entryCut,
+				)}
+				title={fileTooltip(row.entry)}
+				data-drop-target={row.entry.is_dir ? "folder" : undefined}
+				data-abs-path={row.entry.is_dir ? absPath() : undefined}
+				onPointerDown={(e) => handlePointerDragStart(absPath(), e)}
+				onClick={(e) => {
+					if (_ptrSuppressClick) return;
+					setSelectedIndex(row.index);
+					if (applySelectionClick(row.entry, e)) return;
+					selectOnly(row.entry);
+					focusPanel();
+					handleEntryClick(row.entry);
+				}}
+				onContextMenu={(e) => handleContextMenu(e, row.entry)}
+			>
+				<FileIcon name={row.entry.name} isDir={row.entry.is_dir} class={s.entryIcon} />
+				<span class={s.entryName}>{row.entry.name}</span>
+				<Show when={dir()}>
+					<span class={s.entryDir}>{dir()}</span>
+				</Show>
+				<Show when={row.entry.git_status}>
+					<span
+						class={cx(g.dot, getStatusClass(row.entry.git_status), s.entryDot)}
+						title={statusLabel(row.entry.git_status)}
+					/>
+				</Show>
+			</div>
+		);
+	};
+
+	/** The empty folder, with the one thing to do in it. */
+	const EmptyFolder = () => (
+		<EmptyState
+			icon={IconFolder}
+			title={t("fileBrowser.emptyDir", "This folder is empty")}
+			action={
+				<button type="button" class={s.emptyAction} onClick={() => startInlineCreate("file", currentDirRel())}>
+					<IconPlus size={14} />
+					{t("fileBrowser.newFileAction", "New file")}
+				</button>
+			}
+		/>
+	);
+
 	return (
 		<div
 			ref={panelRef}
@@ -1626,6 +1775,7 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			tabIndex={-1}
 			data-drop-target={panelDropDir() ? "folder" : undefined}
 			data-abs-path={panelDropDir()}
+			onPointerDown={() => setKeyboardCursor(false)}
 		>
 			<Show when={mode() === "inline"}>
 				<PanelResizeHandle panelId="file-browser-panel" />
@@ -1633,182 +1783,161 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 			<div class={p.header}>
 				<div class={p.headerLeft}>
 					<span class={p.title}>{t("fileBrowser.title", "Files")}</span>
-					<Show when={!loading() && entries().length > 0}>
-						<span class={p.fileCountBadge}>{entries().length}</span>
-					</Show>
-					<span class={p.headerSep} />
-					<div class={g.legend}>
-						<span class={g.legendItem} title={t("fileBrowser.modified", "Modified (unstaged changes)")}>
-							<span class={cx(g.dot, g.modified)} /> mod
-						</span>
-						<span class={g.legendItem} title={t("fileBrowser.staged", "Staged for commit")}>
-							<span class={cx(g.dot, g.staged)} /> staged
-						</span>
-						<span class={g.legendItem} title={t("fileBrowser.untracked", "Untracked (new file)")}>
-							<span class={cx(g.dot, g.untracked)} /> new
-						</span>
-					</div>
 				</div>
-				<PanelWindowControls panelId="file-browser" mode={mode()} onInlineClose={props.onClose} />
-			</div>
-
-			{/* Search filter with F/C mode toggle */}
-			<div class={s.searchBar}>
-				<button
-					class={cx(s.modeToggle, searchMode() === "content" && s.modeToggleActive)}
-					onClick={() => {
-						const next = searchMode() === "filename" ? "content" : "filename";
-						setSearchMode(next);
-						// Clear results from the other mode
-						if (next === "content") {
-							setSearchResults([]);
-						} else {
-							resetContentMatches();
-							setContentSearching(false);
-							setContentStats({ filesSearched: 0, filesSkipped: 0, truncated: false });
-						}
-						setSelectedIndex(0);
-					}}
-					title={searchMode() === "filename" ? "Switch to content search" : "Switch to filename search"}
-				>
-					<Show when={searchMode() === "filename"} fallback={<ContentModeIcon />}>
-						<FilenameModeIcon />
-					</Show>
-				</button>
-				<input
-					ref={searchInputRef}
-					type="text"
-					class={p.searchInput}
-					data-focus-target="file-browser-search"
-					data-repo-path={props.repoPath ?? ""}
-					placeholder={
-						searchMode() === "filename"
-							? t("fileBrowser.search", "Search files\u2026 (*, ** wildcards)")
-							: t("fileBrowser.searchContent", "Search in file contents\u2026")
-					}
-					value={searchQuery()}
-					autocomplete="off"
-					autocorrect="off"
-					spellcheck={false}
-					onInput={(e) => {
-						setSearchQuery(e.currentTarget.value);
-						setSelectedIndex(0);
-					}}
-				/>
-				<Show when={searchMode() === "content"}>
+				<div class={s.headerTools}>
 					<button
-						class={cx(s.toggleBtn, caseSensitive() && s.toggleActive)}
-						onClick={() => setCaseSensitive((v) => !v)}
-						title="Match Case"
-					>
-						<CaseSensitiveIcon />
-					</button>
-					<button
-						class={cx(s.toggleBtn, useRegex() && s.toggleActive)}
-						onClick={() => setUseRegex((v) => !v)}
-						title="Use Regular Expression"
-					>
-						<RegexIcon />
-					</button>
-					<button
-						class={cx(s.toggleBtn, wholeWord() && s.toggleActive)}
-						onClick={() => setWholeWord((v) => !v)}
-						title="Match Whole Word"
-					>
-						<WholeWordIcon />
-					</button>
-				</Show>
-				<Show when={searchQuery()}>
-					<button
-						class={p.searchClear}
-						onClick={() => {
-							setSearchQuery("");
-							setSelectedIndex(0);
-							resetContentMatches();
-							setContentSearching(false);
-							setContentStats({ filesSearched: 0, filesSkipped: 0, truncated: false });
-						}}
-					>
-						&times;
-					</button>
-				</Show>
-			</div>
-
-			{/* Toolbar: breadcrumb + sort */}
-			<div class={s.toolbar}>
-				<Show when={viewMode() === "flat"}>
-					<div class={s.breadcrumb}>
-						<span class={s.breadcrumbSegment} onClick={() => handleBreadcrumbClick(-1)}>
-							/
-						</span>
-						<For each={breadcrumbs()}>
-							{(segment, index) => (
-								<>
-									<Show when={index() > 0}>
-										<span class={s.breadcrumbSep}>/</span>
-									</Show>
-									<span
-										class={cx(s.breadcrumbSegment, index() === breadcrumbs().length - 1 && s.breadcrumbCurrent)}
-										onClick={() => handleBreadcrumbClick(index())}
-									>
-										{segment}
-									</span>
-								</>
-							)}
-						</For>
-					</div>
-				</Show>
-				<div class={s.sortControl}>
-					{/* Flat/tree toggle */}
-					<button
-						class={cx(s.viewModeBtn, viewMode() === "flat" && s.viewModeBtnActive)}
+						type="button"
+						class={cx(s.headerBtn, viewMode() === "flat" && s.headerBtnOn)}
 						onClick={() => uiStore.setFileBrowserViewMode("flat")}
 						title="List view"
+						aria-label="List view"
+						aria-pressed={viewMode() === "flat"}
 					>
-						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-							<path d="M2 3h12v1H2zm0 3h12v1H2zm0 3h12v1H2zm0 3h12v1H2z" />
-						</svg>
+						<IconList size={16} />
 					</button>
 					<button
-						class={cx(s.viewModeBtn, viewMode() === "tree" && s.viewModeBtnActive)}
-						onClick={() => {
-							uiStore.setFileBrowserViewMode("tree");
-							setCurrentSubdir(".");
-							setSearchQuery("");
-						}}
+						type="button"
+						class={cx(s.headerBtn, viewMode() === "tree" && s.headerBtnOn)}
+						onClick={showTree}
 						title="Tree view"
+						aria-label="Tree view"
+						aria-pressed={viewMode() === "tree"}
 					>
-						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-							<path d="M2 2h3v1H2zm4 2h5v1H6zm4 2h4v1h-4zM6 8h5v1H6zM2 10h3v1H2zm4 2h5v1H6z" />
-						</svg>
+						<IconListTree size={16} />
 					</button>
-					<button
-						class={s.sortTrigger}
-						onClick={() => setSortDropdownOpen((v) => !v)}
-						title={`${t("fileBrowser.sortBy", "Sort by")} ${sortBy()}`}
-					>
-						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-							<path d="M1 2h14L9.5 8.5V13l-3 1.5V8.5z" />
-						</svg>
-					</button>
-					<Dropdown
-						items={[
-							{ id: "name", label: t("fileBrowser.sortName", "Name") },
-							{ id: "date", label: t("fileBrowser.sortDate", "Date") },
-						]}
-						selected={sortBy()}
-						visible={sortDropdownOpen()}
-						onSelect={(id) => {
-							setSortBy(id as SortMode);
-							setSortDropdownOpen(false);
-						}}
-						onClose={() => setSortDropdownOpen(false)}
-					/>
+					<div class={s.sortControl}>
+						<button
+							type="button"
+							class={cx(s.headerBtn, sortDropdownOpen() && s.headerBtnOn)}
+							onClick={() => setSortDropdownOpen((v) => !v)}
+							title={`${t("fileBrowser.sortBy", "Sort by")} ${sortBy()}`}
+							aria-label={`${t("fileBrowser.sortBy", "Sort by")} ${sortBy()}`}
+							aria-haspopup="menu"
+							aria-expanded={sortDropdownOpen()}
+						>
+							<IconArrowDownUp size={16} />
+						</button>
+						<Dropdown
+							class={s.sortMenu}
+							items={[
+								{ id: "name", label: t("fileBrowser.sortName", "Name") },
+								{ id: "date", label: t("fileBrowser.sortDate", "Date") },
+							]}
+							selected={sortBy()}
+							visible={sortDropdownOpen()}
+							onSelect={(id) => {
+								setSortBy(id as SortMode);
+								setSortDropdownOpen(false);
+							}}
+							onClose={() => setSortDropdownOpen(false)}
+						/>
+					</div>
+					<span class={s.headerSep} />
+					<PanelWindowControls panelId="file-browser" mode={mode()} onInlineClose={props.onClose} />
 				</div>
 			</div>
 
-			{/* Content search status bar */}
-			<Show when={searchMode() === "content" && searchQuery().trim().length >= 3}>
+			{/* Search: filename (glob) or content, with the content options inside the field */}
+			<div class={s.searchBar}>
+				<SearchField
+					ref={searchInputRef}
+					value={searchQuery()}
+					onInput={(value) => {
+						setSearchQuery(value);
+						setSelectedIndex(0);
+					}}
+					onClear={resetContentSearch}
+					placeholder={
+						searchMode() === "filename"
+							? t("fileBrowser.search", "Search files")
+							: t("fileBrowser.searchContent", "Search in files")
+					}
+					title={
+						searchMode() === "filename"
+							? t("fileBrowser.searchHint", "* matches within a folder, ** across folders")
+							: t("fileBrowser.searchContentHint", "Searches file contents \u00B7 at least 3 characters")
+					}
+					disabled={!root()}
+					data-focus-target="file-browser-search"
+					data-repo-path={props.repoPath ?? ""}
+					trailing={
+						<>
+							<Show when={searchMode() === "content"}>
+								<SearchFieldToggle
+									active={caseSensitive()}
+									title="Match case"
+									onClick={() => setCaseSensitive((v) => !v)}
+								>
+									<IconCaseSensitive size={14} />
+								</SearchFieldToggle>
+								<SearchFieldToggle
+									active={wholeWord()}
+									title="Match whole word"
+									onClick={() => setWholeWord((v) => !v)}
+								>
+									<IconWholeWord size={14} />
+								</SearchFieldToggle>
+								<SearchFieldToggle
+									active={useRegex()}
+									title="Use regular expression"
+									onClick={() => setUseRegex((v) => !v)}
+								>
+									<IconRegex size={14} />
+								</SearchFieldToggle>
+							</Show>
+							<SearchFieldToggle
+								class={s.modeToggle}
+								active={searchMode() === "content"}
+								title={searchMode() === "filename" ? "Switch to content search" : "Switch to filename search"}
+								onClick={toggleSearchMode}
+							>
+								<IconTextSearch size={14} />
+							</SearchFieldToggle>
+						</>
+					}
+				/>
+			</div>
+
+			{/* Flat view: where the list is, root first; each segment jumps there */}
+			<Show when={showBreadcrumb()}>
+				<nav
+					class={cx(s.breadcrumb, crumbClip().start && s.breadcrumbFadeStart, crumbClip().end && s.breadcrumbFadeEnd)}
+					ref={breadcrumbEl}
+					aria-label="Folder"
+					onScroll={measureCrumb}
+				>
+					<span
+						class={cx(s.breadcrumbSegment, breadcrumbs().length === 0 && s.breadcrumbCurrent)}
+						title={root() ?? undefined}
+						onClick={() => handleBreadcrumbClick(-1)}
+					>
+						{rootName()}
+					</span>
+					<For each={breadcrumbs()}>
+						{(segment, index) => (
+							<>
+								<IconChevronRight size={12} class={s.breadcrumbSep} />
+								<span
+									class={cx(s.breadcrumbSegment, index() === breadcrumbs().length - 1 && s.breadcrumbCurrent)}
+									onClick={() => handleBreadcrumbClick(index())}
+								>
+									{segment}
+								</span>
+							</>
+						)}
+					</For>
+				</nav>
+			</Show>
+
+			{/* Content search status. A finished search that found nothing says so in
+			    the listing's empty state instead, not twice. */}
+			<Show
+				when={
+					searchMode() === "content" &&
+					searchQuery().trim().length >= 3 &&
+					(contentSearching() || contentMatchCount() > 0)
+				}
+			>
 				<div
 					class={cx(
 						s.searchStatus,
@@ -1816,21 +1945,19 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 						contentSearching() && s.searchStatusSearching,
 					)}
 				>
-					<Show
-						when={contentSearching()}
-						fallback={
-							contentMatchCount() > 0
-								? `${contentMatchCount()} match${contentMatchCount() !== 1 ? "es" : ""} in ${contentMatchGroups.length} file${contentMatchGroups.length !== 1 ? "s" : ""}${contentStats().truncated ? " (results limited)" : ""}${contentStats().filesSkipped > 0 ? ` \u00B7 ${contentStats().filesSkipped} skipped` : ""}`
-								: "No matches"
-						}
-					>
-						{"Searching\u2026"}
+					<Show when={contentSearching()}>
+						<Spinner size={12} />
 					</Show>
+					<span class={s.searchStatusText}>
+						<Show when={contentSearching()} fallback={contentStatusText()}>
+							{"Searching\u2026"}
+						</Show>
+					</span>
 				</div>
 			</Show>
 
 			<div
-				class={p.content}
+				class={cx(p.content, s.listing, selectedRows().length > 1 && s.listingMulti, keyboardCursor() && s.listingKeys)}
 				ref={contentRef}
 				onContextMenu={handleBackgroundContextMenu}
 				onClick={(e) => {
@@ -1840,81 +1967,136 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 					if (!e.metaKey && !e.ctrlKey && !e.shiftKey) clearSelection();
 				}}
 			>
-				<Show when={loading() || (searching() && searchMode() === "filename")}>
-					<div class={s.empty}>
-						{searching() ? t("fileBrowser.searching", "Searching\u2026") : t("fileBrowser.loading", "Loading...")}
-					</div>
-				</Show>
+				<Switch>
+					<Match when={!root()}>
+						<EmptyState
+							icon={IconFiles}
+							title={t("fileBrowser.noRepo", "No folder open")}
+							description={t("fileBrowser.noRepoHint", "Pick a repository in the sidebar.")}
+						/>
+					</Match>
 
-				<Show when={error()}>
-					<div class={cx(s.empty, s.error)}>
-						{t("fileBrowser.error", "Error:")} {error()}
-					</div>
-				</Show>
-
-				{/* Content search results */}
-				<Show when={searchMode() === "content" && searchQuery().trim().length >= 3}>
-					<Show when={!contentSearching() && contentMatchCount() === 0}>
-						<div class={s.empty}>{t("fileBrowser.noMatches", "No matches")}</div>
-					</Show>
-					<For each={contentMatchGroups}>
-						{(group) => (
-							<div class={s.contentGroup}>
-								<div
-									class={s.contentGroupHeader}
-									onClick={() => {
-										if (root() && group.matches.length > 0) {
-											props.onFileOpen(root()!, group.path, group.matches[0].line_number);
-										}
-									}}
-								>
-									<span>{group.path}</span>
-									<span class={s.contentGroupCount}>
-										{group.matches.length} match{group.matches.length !== 1 ? "es" : ""}
-									</span>
-								</div>
-								<For each={group.matches}>
-									{(match) => (
+					{/* Content search: matches grouped by file */}
+					<Match when={searchMode() === "content"}>
+						<Show
+							when={searchQuery().trim().length >= 3}
+							fallback={
+								<EmptyState
+									icon={IconTextSearch}
+									title={t("fileBrowser.contentHintTitle", "Search file contents")}
+									description={t("fileBrowser.contentHint", "Type at least 3 characters.")}
+								/>
+							}
+						>
+							<Show when={!contentSearching() && contentMatchCount() === 0}>
+								<EmptyState
+									icon={IconTextSearch}
+									title={t("fileBrowser.noMatches", "No matches")}
+									description={`Nothing in this folder contains \u201C${searchQuery().trim()}\u201D.`}
+								/>
+							</Show>
+							<For each={contentMatchGroups}>
+								{(group) => (
+									<div class={s.contentGroup}>
 										<div
-											class={s.contentMatch}
+											class={s.contentGroupHeader}
+											title={group.path}
 											onClick={() => {
-												if (root()) {
-													props.onFileOpen(root()!, match.path, match.line_number);
+												if (root() && group.matches.length > 0) {
+													props.onFileOpen(root()!, group.path, group.matches[0].line_number);
 												}
 											}}
 										>
-											<span class={s.contentMatchLine}>{match.line_number}</span>
-											<span class={s.contentMatchText}>
-												{match.match_start > 0 ? match.line_text.slice(0, match.match_start) : ""}
-												<span class={s.contentMatchHighlight}>
-													{match.line_text.slice(match.match_start, match.match_end)}
-												</span>
-												{match.match_end < match.line_text.length ? match.line_text.slice(match.match_end) : ""}
+											<FileIcon name={pathBasename(group.path)} isDir={false} class={s.entryIcon} />
+											<span class={s.contentGroupName}>{pathBasename(group.path)}</span>
+											<Show when={pathDirname(group.path)}>
+												<span class={s.contentGroupDir}>{pathDirname(group.path)}</span>
+											</Show>
+											<span class={s.contentGroupCount}>
+												{group.matches.length} match{group.matches.length !== 1 ? "es" : ""}
 											</span>
 										</div>
-									)}
-								</For>
-							</div>
-						)}
-					</For>
-				</Show>
+										<For each={group.matches}>
+											{(match) => {
+												const preview = createMemo(() =>
+													matchPreview(match.line_text, match.match_start, match.match_end, matchLead()),
+												);
+												return (
+													<div
+														class={s.contentMatch}
+														title={match.line_text.trim()}
+														onClick={() => {
+															if (root()) {
+																props.onFileOpen(root()!, match.path, match.line_number);
+															}
+														}}
+													>
+														<span class={s.contentMatchLine}>{match.line_number}</span>
+														<span class={s.contentMatchText}>
+															{preview().before}
+															<span class={s.contentMatchHighlight}>{preview().hit}</span>
+															{preview().after}
+														</span>
+													</div>
+												);
+											}}
+										</For>
+									</div>
+								)}
+							</For>
+						</Show>
+					</Match>
 
-				{/* Filename mode: directory listing or filename search results */}
-				<Show when={searchMode() === "filename"}>
-					{/* Tree view (only when no active search query) */}
-					<Show when={viewMode() === "tree" && !searchQuery().trim()}>
+					{/* Filename search: flat results across the whole folder. The last
+					    results stay up while the next query runs, so typing never flashes. */}
+					<Match when={searchQuery().trim()}>
+						<Show when={inlineCreate()}>
+							<InlineCreateRow />
+						</Show>
+						<Show
+							when={filteredEntries().length > 0}
+							fallback={
+								<Show
+									when={!searching()}
+									fallback={<EmptyState loading title={t("fileBrowser.searching", "Searching\u2026")} />}
+								>
+									<Show when={!inlineCreate()}>
+										<EmptyState icon={IconSearch} title={`No files match \u201C${searchQuery().trim()}\u201D`} />
+									</Show>
+								</Show>
+							}
+						>
+							<For each={filteredEntries()}>{(entry, index) => <FlatRow entry={entry} index={index()} result />}</For>
+						</Show>
+					</Match>
+
+					<Match when={error()}>
+						<EmptyState
+							tone="error"
+							icon={IconAlert}
+							title={t("fileBrowser.error", "Couldn't read this folder")}
+							description={error() ?? ""}
+						/>
+					</Match>
+
+					<Match when={loading()}>
+						<EmptyState loading title={t("fileBrowser.loading", "Loading\u2026")} />
+					</Match>
+
+					{/* Tree view */}
+					<Match when={viewMode() === "tree"}>
 						{/* Inline create at the tree root; deeper parents render inside their TreeNode */}
 						<Show when={inlineCreate()?.parent === ""}>
 							<InlineCreateRow depth={0} />
 						</Show>
-						<Show when={!loading() && !error() && filteredEntries().length === 0 && !inlineCreate()}>
-							<div class={s.empty}>
-								{!root()
-									? t("fileBrowser.noRepo", "No repository selected")
-									: t("fileBrowser.emptyDir", "Empty directory")}
-							</div>
-						</Show>
-						<Show when={!loading() && !error() && filteredEntries().length > 0}>
+						<Show
+							when={filteredEntries().length > 0}
+							fallback={
+								<Show when={!inlineCreate()}>
+									<EmptyFolder />
+								</Show>
+							}
+						>
 							<For each={filteredEntries()}>
 								{(entry) => (
 									<TreeNode
@@ -1939,98 +2121,26 @@ export const FileBrowserPanel: Component<FileBrowserPanelProps> = (props) => {
 								)}
 							</For>
 						</Show>
-					</Show>
+					</Match>
 
-					{/* Flat list view (default, or when searching) */}
-					<Show when={viewMode() === "flat" || searchQuery().trim()}>
+					{/* Flat list: the folder the breadcrumb names */}
+					<Match when={true}>
 						{/* Inline create row — shown at the top of the current listing */}
 						<Show when={inlineCreate()}>
 							<InlineCreateRow />
 						</Show>
-						{/* Go up entry when in a subdirectory and not searching — shown even when the
-						    directory is empty so the user is never stranded without a way back. */}
 						<Show
-							when={
-								!loading() &&
-								!searching() &&
-								!error() &&
-								!searchQuery().trim() &&
-								currentSubdir() !== "." &&
-								currentSubdir() !== ""
+							when={filteredEntries().length > 0}
+							fallback={
+								<Show when={!inlineCreate()}>
+									<EmptyFolder />
+								</Show>
 							}
 						>
-							<div
-								class={cx(s.entry, s.entryParent)}
-								role="button"
-								tabIndex={0}
-								onClick={navigateUp}
-								onKeyDown={onClickKeyDown(navigateUp)}
-							>
-								<span class={s.entryIcon}>
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-										<path d="M8 2L2 8l6 6V10h6V6H8V2z" />
-									</svg>
-								</span>
-								<span class={s.entryName}>..</span>
-							</div>
+							<For each={filteredEntries()}>{(entry, index) => <FlatRow entry={entry} index={index()} />}</For>
 						</Show>
-
-						<Show when={!loading() && !searching() && !error() && filteredEntries().length === 0 && !inlineCreate()}>
-							<div class={s.empty}>
-								{!root()
-									? t("fileBrowser.noRepo", "No repository selected")
-									: searchQuery()
-										? t("fileBrowser.noMatches", "No matches")
-										: t("fileBrowser.emptyDir", "Empty directory")}
-							</div>
-						</Show>
-
-						<Show when={!loading() && !searching() && !error() && filteredEntries().length > 0}>
-							<For each={filteredEntries()}>
-								{(entry, index) => {
-									const isSearch = !!searchQuery().trim();
-									const absPath = () => (isAbsolutePath(entry.path) ? entry.path : joinPath(root() ?? "", entry.path));
-									return (
-										<div
-											class={cx(
-												s.entry,
-												entry.is_dir && s.entryDir,
-												selectedIndex() === index() && s.entrySelected,
-												!entry.is_dir && entry.path === activeFilePath() && s.entryActive,
-												selection().has(entry.path) && s.entryPicked,
-												entry.is_ignored && s.entryIgnored,
-												cutPaths().has(entry.path) && s.entryCut,
-											)}
-											data-drop-target={entry.is_dir ? "folder" : undefined}
-											data-abs-path={entry.is_dir ? absPath() : undefined}
-											onPointerDown={(e) => handlePointerDragStart(absPath(), e)}
-											onClick={(e) => {
-												if (_ptrSuppressClick) return;
-												setSelectedIndex(index());
-												if (applySelectionClick(entry, e)) return;
-												selectOnly(entry);
-												focusPanel();
-												handleEntryClick(entry);
-											}}
-											onContextMenu={(e) => handleContextMenu(e, entry)}
-										>
-											<FileIcon name={entry.name} isDir={entry.is_dir} class={s.entryIcon} />
-											<span class={s.entryName} title={fileTooltip(entry)}>
-												{isSearch ? entry.path : entry.name}
-											</span>
-											<Show when={entry.git_status}>
-												<span class={cx(g.dot, getStatusClass(entry.git_status))} title={entry.git_status} />
-											</Show>
-											<Show when={!entry.is_dir && entry.size > 0}>
-												<span class={s.entrySize}>{formatSize(entry.size)}</span>
-											</Show>
-										</div>
-									);
-								}}
-							</For>
-						</Show>
-					</Show>
-				</Show>
+					</Match>
+				</Switch>
 			</div>
 
 			{/* Context menu */}

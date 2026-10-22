@@ -36,6 +36,18 @@ no items left goes too. What stays open must carry its own stated reason.
 
 
 
+## Right-panel redesign: Git panel and Files (2026-10-22)
+
+Frontend only. 130 harness scenes × 2 themes were shot in headless WebKit
+(`.tmp/rightpanel/shots/after`, before|after in `shots/compare`), and the states
+are unit-tested. The harness cannot show the items below: it has no native
+tooltips, no backdrop blur and no real editor focus.
+
+- [ ] Native tooltips render in the desktop app. `global.css` claims WKWebView does not show `title` tooltips, yet the app uses them in about 460 places and this pass moved Files row sizes and ages into them. Hover the Commit button on a clean tree: "Stage files to commit, or turn on Amend". Hover a Files row: its path, size and modified time. If neither shows, the app needs a JS tooltip before this ships.
+- [ ] Cursor Dark menus are frosted, not see-through: Smart Commit ▾, the Files sort menu, Branches ⋯ and a branch's right-click menu. Headless WebKit renders no backdrop-filter, so they look transparent in the shots.
+- [ ] Opening a file from the Files tree: does focus move to the editor? If it does, the clicked row shows only the active fill; if not, it also keeps the accent focus ring.
+- [ ] Both themes in the real window: the composer card, the Changes rows, the Log (expand a commit with tags), Stashes (open one), Branches (New branch form) and Files (tree and content search), at the default width and dragged to the narrowest. Scrolling lists keep a thin 6px scrollbar, and rows sit 6px from both edges.
+
 ## Files panel: Delete a selection, copy folders (2026-10-19)
 
 Backend (`paste_paths` folders, `delete_paths`) and the menu are unit-tested

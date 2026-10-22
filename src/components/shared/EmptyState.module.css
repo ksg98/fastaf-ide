@@ -1,0 +1,99 @@
+/* EmptyState — empty / loading / error for side panels. An icon, a 13px/500
+   title and one muted line, centred a little above the middle of whatever
+   flex column it fills (Codex's "Open file" state, shot 39). Compact is the
+   drawer form: one muted 12px line, no icon. */
+
+.emptyState {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 160px;
+  /* Inside a list whose 6px scrollbar gutter is its right inset
+     (--list-inset-end: 0, global.css › side-panel scrollbars), give up the
+     same 6px on the left, so the state stays centred on the panel. */
+  margin-left: calc(6px - var(--list-inset-end, 6px));
+  padding: 32px 24px 56px;
+  text-align: center;
+}
+
+.emptyIcon {
+  flex-shrink: 0;
+  margin-bottom: 4px;
+  color: var(--fg-muted);
+}
+
+.emptyTitle {
+  font-size: var(--font-md);
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--fg-primary);
+}
+
+/* Balanced, so a two-line description never leaves one word alone on line 2. */
+.emptyDescription {
+  max-width: 260px;
+  font-size: var(--font-sm);
+  line-height: 1.45;
+  color: var(--fg-muted);
+  text-wrap: balance;
+}
+
+.emptyAction {
+  margin-top: 8px;
+}
+
+/* Loading: the spinner leads and the title reads as a status line. */
+.emptyStateLoading .emptyTitle {
+  font-size: var(--font-sm);
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+/* A fetch that answers quickly never flashes its spinner: the loading state
+   only fades in once it has lasted 300ms (the Git tabs remount, and fetch
+   again, on every switch). Under reduced motion it shows at once. */
+@media (prefers-reduced-motion: no-preference) {
+  .emptyStateLoading {
+    animation: emptyStateLate var(--duration-fast) var(--ease-out) 300ms backwards;
+  }
+}
+
+@keyframes emptyStateLate {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Error: red glyph; the message keeps git's line breaks and can be copied. */
+.emptyStateError .emptyIcon {
+  color: var(--error);
+}
+
+.emptyStateError .emptyDescription {
+  max-width: 300px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Compact (drawers): a short block, one muted line. */
+.emptyStateCompact {
+  flex: 0 0 auto;
+  min-height: 0;
+  gap: 4px;
+  padding: 20px 16px;
+}
+
+.emptyStateCompact .emptyTitle {
+  font-size: var(--font-sm);
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+.emptyStateCompact .emptyIcon {
+  margin-bottom: 2px;
+}

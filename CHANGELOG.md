@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The commit box is one composer card at the top of the Changes tab.** The message field grows as you type and says where ⌘↵ goes ("Message (⌘↵ to commit on main)"). Under it sit Generate (the sparkle), an Amend toggle, the Smart Commit chip and a Commit button whose label follows what it will do — Commit, Amend, Committing…, Committed — and whose tooltip says why it is disabled. A failed commit, such as a pre-commit hook error, shows git's message in a red banner under the card that you can select and dismiss.
+
+- **Changed files read like a file list.** Each row shows the file's icon and name, then its folder, its +/− counts and a coloured status letter. Stage, Unstage and Discard appear on hover in place of the counts. Staged and Unstaged have section headers with Stage all, Unstage all and Discard all always visible, and the filter is a proper search field.
+
+- **The Log is readable.** Each commit is a two-line row (subject and refs, then author, age and short hash) on a cleaner graph. A branch and its remote fold into one chip with a cloud, tags get a tag icon, and a row shows at most two chips plus "+N". Expanding a commit shows its whole message reflowed into paragraphs, "N files changed" with a button that copies the hash, and the files, each of which opens its diff. Older commits load as you scroll.
+
+- **Stashes, Branches and the History and Blame drawers match the rest.** Stashes are two-line rows with Apply, Pop and Drop always visible; clicking a stash opens its diff underneath. Branches puts the current branch and its upstream in a strip with Create PR, then a filter, + for a new branch, and a ⋯ menu holding Group by prefix and Delete merged branches. The new-branch form gives the name its own full-width row. Blame marks a line's age with a thin accent bar instead of a green wash.
+
+- **The Files panel is quieter.** The count badge, the colour legend and the extra toolbar row are gone. List/Tree and sort sit in the panel header, the case, whole-word, regex and content-search toggles sit inside the search field, and the tree draws indent guides. File sizes and modified times moved from the rows into each row's tooltip.
+
+### Fixed
+
+- **Blame no longer gets stuck on "Loading blame".** Its own result restarted the fetch, so the drawer could spin forever.
+
+- **Branch ages show in the app.** The desktop app's WebKit could not read git's date format, so no branch showed its age and stale branches never dimmed.
+
+- **Filtering branches highlights the right row.** Typing in the filter used to light up unrelated rows in Recent.
+
+- **Expanding a commit keeps its subject and the graph in line.** A commit with several branches or tags had its subject squeezed to nothing, and the graph's dots drifted below an expanded commit.
+
+- **The new-branch name field has room to type.** The start-point picker squeezed it to about 16px; the start point now sits on its own row.
+
+- **A selected changed file's buttons no longer cover its +/− counts.**
+
+- **The Changes keyboard follows what you see.** Arrow keys now walk the filtered list, collapsing Staged no longer desyncs the cursor, Space on Amend or Commit no longer stages the highlighted file, and Delete no longer offers to discard an untracked file, which git cannot do.
+
+- **Amend with an empty message says why it can't run** instead of failing in git.
+
+- **A failed stash apply, pop or drop shows its error** under the stash; it used to fail silently.
+
+- **Branches keyboard and form fixes.** Arrow keys follow the drawn order when branches are grouped by prefix, renaming a branch listed in both Recent and Local opens one field instead of two, Enter in the filter no longer creates a branch while the new-branch form is open, and a failed branch fetch shows the error with Retry instead of "No branches".
+
+- **Files panel fixes.** The active List/Tree button now looks pressed, a detached Files window fills its window instead of staying 300px wide, the inline New File and New Folder field lines up with its siblings, and the sort menu stays inside the panel at its narrowest.
+
 ## [2.0.3] - 2026-10-20
 
 ### Added

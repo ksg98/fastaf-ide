@@ -122,6 +122,22 @@ describe("FileIcon", () => {
 		expect(container.querySelector("circle")).not.toBeNull();
 	});
 
+	// SPEC §G4: a folder is chrome — the stroke folder glyph in currentColor,
+	// not a filled shape — while a file keeps its type-tinted page.
+	it("draws a folder with the stroke folder glyph when no provider has one", () => {
+		const { container } = render(() => (
+			<>
+				<FileIcon name="src" isDir={true} class="entryIcon" />
+				<FileIcon name="index.ts" isDir={false} class="entryIcon" />
+			</>
+		));
+
+		const [folder, page] = Array.from(container.querySelectorAll("span.entryIcon > svg"));
+		expect(folder.getAttribute("stroke")).toBe("currentColor");
+		expect(folder.getAttribute("fill")).toBe("none");
+		expect(page.getAttribute("fill")).toBe("currentColor");
+	});
+
 	it("distinguishes files from folders", () => {
 		fileIconRegistry.register({
 			resolveFileIcon: (_name, isDir) => (isDir ? OTHER_ICON : ICON),

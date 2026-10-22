@@ -4,10 +4,12 @@ import { appLogger } from "../../stores/appLogger";
 import type { DirEntry } from "../../types/fs";
 import { cx } from "../../utils";
 import { isAbsolutePath, joinPath } from "../../utils/pathUtils";
+import { IconChevronRight } from "../icons";
 import g from "../shared/git-status.module.css";
+import { Spinner } from "../shared/Spinner";
 import s from "./FileBrowserPanel.module.css";
 import { FileIcon } from "./FileIcon";
-import { fileTooltip, formatSize, getStatusClass } from "./fileUtils";
+import { fileTooltip, getStatusClass, statusLabel } from "./fileUtils";
 
 export interface TreeNodeProps {
 	entry: DirEntry;
@@ -90,79 +92,76 @@ export const TreeNode: Component<TreeNodeProps> = (props) => {
 			<div
 				class={cx(
 					s.entry,
-					props.entry.is_dir && s.entryDir,
 					!props.entry.is_dir && props.entry.path === props.activePath && s.entryActive,
 					props.isSelected?.(props.entry.path) && s.entryPicked,
 					props.entry.is_ignored && s.entryIgnored,
 					props.isCut?.(props.entry.path) && s.entryCut,
 				)}
-				style={{ "padding-left": `calc(var(--row-pad-x) + ${props.depth} * var(--tree-indent))` }}
+				style={{ "--depth": String(props.depth) }}
+				title={fileTooltip(props.entry)}
 				onClick={handleClick}
 				onContextMenu={(e) => props.onContextMenu(e, props.entry)}
 				onPointerDown={(e) => props.onPointerDragStart?.(absPath(), e)}
 				data-drop-target={props.entry.is_dir ? "folder" : undefined}
 				data-abs-path={props.entry.is_dir ? absPath() : undefined}
 			>
-				<Show when={props.entry.is_dir}>
-					<svg
-						class={cx(s.treeChevron, isExpanded() && s.treeChevronExpanded)}
-						width="10"
-						height="10"
-						viewBox="0 0 16 16"
-						fill="currentColor"
-					>
-						<path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-					</svg>
+				{/* One 16px slot: a folder's chevron or a file's icon (Codex 41) — no
+				    folder glyph, no leaf spacer, so every name starts in one column. */}
+				<Show
+					when={props.entry.is_dir}
+					fallback={<FileIcon name={props.entry.name} isDir={false} class={s.entryIcon} />}
+				>
+					<span class={s.entrySlot}>
+						<IconChevronRight size={14} class={cx(s.treeChevron, isExpanded() && s.treeChevronExpanded)} />
+					</span>
 				</Show>
-				<Show when={!props.entry.is_dir}>
-					<span class={s.treeLeafSpacer} />
-				</Show>
-				<FileIcon name={props.entry.name} isDir={props.entry.is_dir} class={s.entryIcon} />
-				<span class={s.entryName} title={fileTooltip(props.entry)}>
-					{props.entry.name}
-				</span>
+				<span class={s.entryName}>{props.entry.name}</span>
 				<Show when={props.entry.git_status}>
-					<span class={cx(g.dot, getStatusClass(props.entry.git_status))} title={props.entry.git_status} />
-				</Show>
-				<Show when={!props.entry.is_dir && props.entry.size > 0}>
-					<span class={s.entrySize}>{formatSize(props.entry.size)}</span>
+					<span
+						class={cx(g.dot, getStatusClass(props.entry.git_status), s.entryDot)}
+						title={statusLabel(props.entry.git_status)}
+					/>
 				</Show>
 			</div>
-			{/* Recursive children */}
+			{/* Recursive children, in a wrapper that draws the indent guide */}
 			<Show when={props.entry.is_dir && isExpanded()}>
-				{/* Inline-create input for a new item inside this folder */}
-				<Show when={props.inlineCreateParent === props.entry.path}>{props.renderInlineCreate?.(props.depth + 1)}</Show>
-				<Show when={loading()}>
-					<div
-						class={s.treeLoading}
-						style={{ "padding-left": `calc(var(--row-pad-x) + ${props.depth + 1} * var(--tree-indent))` }}
-					>
-						Loading...
-					</div>
-				</Show>
-				<For each={children()}>
-					{(child) => (
-						<TreeNode
-							entry={child}
-							depth={props.depth + 1}
-							repoPath={props.repoPath}
-							fsRoot={props.fsRoot}
-							activePath={props.activePath}
-							expandedDirs={props.expandedDirs}
-							onToggleExpand={props.onToggleExpand}
-							onFileOpen={props.onFileOpen}
-							onContextMenu={props.onContextMenu}
-							onPointerDragStart={props.onPointerDragStart}
-							childrenCache={props.childrenCache}
-							onChildrenLoaded={props.onChildrenLoaded}
-							isSelected={props.isSelected}
-							isCut={props.isCut}
-							onRowClick={props.onRowClick}
-							inlineCreateParent={props.inlineCreateParent}
-							renderInlineCreate={props.renderInlineCreate}
-						/>
-					)}
-				</For>
+				<div class={s.treeChildren} style={{ "--guide-depth": String(props.depth) }}>
+					{/* Inline-create input for a new item inside this folder */}
+					<Show when={props.inlineCreateParent === props.entry.path}>
+						{props.renderInlineCreate?.(props.depth + 1)}
+					</Show>
+					<Show when={loading()}>
+						<div class={s.treeLoading} style={{ "--depth": String(props.depth + 1) }}>
+							<span class={s.entrySlot}>
+								<Spinner size={12} />
+							</span>
+							{"Loading\u2026"}
+						</div>
+					</Show>
+					<For each={children()}>
+						{(child) => (
+							<TreeNode
+								entry={child}
+								depth={props.depth + 1}
+								repoPath={props.repoPath}
+								fsRoot={props.fsRoot}
+								activePath={props.activePath}
+								expandedDirs={props.expandedDirs}
+								onToggleExpand={props.onToggleExpand}
+								onFileOpen={props.onFileOpen}
+								onContextMenu={props.onContextMenu}
+								onPointerDragStart={props.onPointerDragStart}
+								childrenCache={props.childrenCache}
+								onChildrenLoaded={props.onChildrenLoaded}
+								isSelected={props.isSelected}
+								isCut={props.isCut}
+								onRowClick={props.onRowClick}
+								inlineCreateParent={props.inlineCreateParent}
+								renderInlineCreate={props.renderInlineCreate}
+							/>
+						)}
+					</For>
+				</div>
 			</Show>
 		</>
 	);

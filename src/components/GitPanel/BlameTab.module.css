@@ -1,182 +1,171 @@
-/* BlameTab — line-by-line blame annotations with age heatmap */
-
+/* BlameTab — the Blame drawer's contents: the selected file line by line,
+   each with who last changed it. 20px mono lines; the gutter (150px) leads
+   with a 2px age bar in the accent, bright for recent commits and faint for
+   old ones, and names hash · author · age on a commit's first line, which
+   also gets a hairline above it. A click on the gutter marks that commit. */
 .container {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
 }
 
-.fileHeader {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: var(--font-sm);
-  font-family: var(--font-mono);
-  color: var(--fg-secondary);
-  min-height: 28px;
-}
-
-.fileLabel {
-  color: var(--fg-muted);
+/* Hook: the harness waits for the loading state by this name. */
+.loading {
   flex-shrink: 0;
 }
 
-.filePath {
-  color: var(--fg-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.empty {
-  composes: empty from "./panel.module.css";
-}
-
-.loading {
-  padding: 20px;
-  text-align: center;
-  color: var(--fg-muted);
-  font-size: var(--font-sm);
-}
-
-@keyframes pulse-opacity {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
-}
-
-.loadingDot {
-  animation: pulse-opacity 1.5s ease-in-out infinite;
-}
-
-/* Scrollable blame content — gutter and code scroll together vertically */
+/* Always mounted (the virtualizer needs it); empty while a state shows. */
 .blameScroll {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: auto;
+  flex: 1 1 auto;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* Its 6px scrollbar gutter stays reserved, like every side-panel list's, so
+   the lines keep one width whether or not the file scrolls. */
+@supports selector(::-webkit-scrollbar) {
+  .blameScroll {
+    overflow-y: scroll;
+  }
 }
 
 .blameTable {
+  position: relative;
   width: 100%;
-  font-size: var(--font-sm);
   font-family: var(--font-mono);
+  font-size: var(--font-sm);
   line-height: 20px;
 }
 
 .blameLine {
+  position: absolute;
+  left: 0;
   display: flex;
+  align-items: baseline;
+  width: 100%;
+  height: 20px;
+  padding-left: 6px;
   cursor: default;
   transition: background var(--duration-fast) var(--ease-out);
 }
 
 .blameLine:hover {
-  background: var(--surface-hover) !important;
+  background: var(--wash-0);
 }
 
-/* Highlight all lines from the same commit when one is clicked */
-.blameLineHighlighted {
-  background: rgba(var(--accent-rgb), 0.14) !important;
+/* Every line of the commit whose gutter was clicked. */
+.blameLineHighlighted,
+.blameLineHighlighted:hover {
+  background: var(--row-active);
 }
 
-/* First line of a commit group gets a top border separator */
-.blameLineGroupStart {
-  border-top: 1px solid var(--border-subtle);
+/* A commit's first line: one hairline above it. */
+.blameLineGroupStart::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  border-top: var(--hairline-w) solid var(--hairline);
+  pointer-events: none;
 }
 
-/* Gutter: hash + author + age */
 .gutter {
-  width: 180px;
-  min-width: 180px;
-  max-width: 180px;
-  padding: 0 8px;
-  text-align: right;
-  white-space: nowrap;
-  color: var(--fg-muted);
-  font-size: var(--font-xs);
-  user-select: none;
-  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 150px;
+  padding-right: 8px;
   overflow: hidden;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-/* Continuation lines in same commit group — empty gutter */
-.gutterContinuation {
-  color: transparent;
+.ageBar {
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 2px;
+  background: var(--accent);
 }
 
 .gutterHash {
-  color: var(--fg-secondary);
-  margin-right: 6px;
+  flex-shrink: 0;
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
 }
 
 .gutterAuthor {
-  color: var(--fg-muted);
-  margin-right: 6px;
-  max-width: 70px;
-  display: inline-block;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  vertical-align: bottom;
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
 }
 
 .gutterAge {
-  color: var(--fg-muted);
-  opacity: 0.8;
-}
-
-/* Code content */
-.code {
-  flex: 1;
-  padding: 0 8px;
-  white-space: pre;
-  color: var(--fg-primary);
-  overflow: hidden;
-}
-
-/* Line number */
-.lineNumber {
-  width: 40px;
-  min-width: 40px;
-  padding: 0 6px;
-  text-align: right;
-  color: var(--fg-muted);
-  opacity: 0.5;
+  flex-shrink: 0;
+  margin-left: auto;
+  font-family: var(--font-ui);
   font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+.lineNumber {
+  flex-shrink: 0;
+  width: 36px;
+  text-align: right;
+  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+  -webkit-user-select: none;
   user-select: none;
 }
 
-/* Heatmap legend at bottom */
-.heatmapLegend {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-tertiary);
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-}
-
-.heatmapBar {
-  display: flex;
-  height: 8px;
-  width: 80px;
-  border-radius: var(--radius-sm);
+.code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0 10px;
   overflow: hidden;
+  white-space: pre;
+  tab-size: 4;
+  color: var(--fg-primary);
 }
 
-/* Recency heatmap: strong success wash → nearly-transparent wash.
-   Uses --success (semantic) rather than a hand-picked green literal so
-   the tint tracks theme palettes. */
-.heatmapRecent {
-  flex: 1;
-  background: color-mix(in srgb, var(--success) 25%, transparent);
+/* A failed blame (untracked file, deleted file): the inline error block — a 12% error tint
+   10px from both edges, the alert glyph and git's message (selectable). */
+.errorLine {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  font-size: var(--font-sm);
+  line-height: 1.45;
+  color: var(--error);
 }
 
-.heatmapOld {
-  flex: 1;
-  background: color-mix(in srgb, var(--success) 3%, transparent);
+.errorIcon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.errorText {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
 }

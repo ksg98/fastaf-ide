@@ -1,162 +1,400 @@
-/* StashesTab — stash list with apply/pop/drop actions */
+/* StashesTab — the stash list (STYLE_GUIDE › Side panels). A stash is a 48px
+   two-line row: archive icon on line 1, the stash's subject, then
+   `stash@{n}` · where it came from. Apply, Pop and Drop sit on the right,
+   quiet at rest and bright while the row is hovered, focused or open.
+   Clicking the row opens its diff in a well under it. */
 .container {
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  outline: none;
 }
 
-.scrollContainer {
-  flex: 1;
-  overflow-y: auto;
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-x: hidden;
-  padding: 2px 0;
+  overflow-y: auto;
+  padding: 4px 0 8px;
 }
 
-/* Stash entry card — inset (6px side gutter, radius-md, hover wash),
-   matches the app-wide list-row recipe. */
-.stashEntry {
-  margin: 0 6px 4px 6px;
-  padding: 8px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: transparent;
-  transition: background var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
+/* The list keeps its 6px scrollbar gutter reserved, and the gutter is the
+   rows' right inset (global.css › side-panel scrollbars). */
+@supports selector(::-webkit-scrollbar) {
+  .list {
+    overflow-y: scroll;
+    --list-inset-end: 0px;
+  }
 }
 
-.stashEntry:hover {
-  background: var(--surface-hover);
+/* An untinted wrapper: the row, then (open) its diff well. 2px apart. */
+.stashEntry + .stashEntry {
+  margin-top: 2px;
 }
 
-.stashEntryFocused {
-  background: rgba(var(--accent-rgb), 0.14);
-  border-color: var(--accent);
-}
-
-/* Line 1: ref name + message */
-.stashHeader {
+/* ── Row ─────────────────────────────────────────────────────────────── */
+.stashHead {
+  --stash-action: var(--fg-muted);
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 48px;
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding: 0 6px 0 8px;
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+/* Hovered, or the row whose context menu is open. */
+.stashHead:hover,
+.stashHeadMenuOpen {
+  background: var(--wash-0);
+}
+
+.stashHeadExpanded,
+.stashHeadExpanded:hover {
+  background: var(--row-active);
+}
+
+/* Keyboard focus, only while the list has focus. */
+.container:focus-within .stashEntryFocused .stashHead {
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
+}
+
+/* The actions brighten with the row: hovered, keyboard-focused, open. */
+.stashHead:hover,
+.stashHead:focus-within,
+.stashHeadMenuOpen,
+.stashHeadExpanded,
+.container:focus-within .stashEntryFocused .stashHead {
+  --stash-action: var(--fg-primary);
+}
+
+/* Marks line 1 (y = 16px), like a graph dot does on a commit row. */
+.stashIcon {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 8px;
+  color: var(--fg-muted);
+}
+
+.stashText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  align-self: stretch;
   min-width: 0;
+  padding-top: 6px;
+}
+
+.stashTitle {
+  height: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-md);
+  line-height: 20px;
+  color: var(--fg-primary);
+}
+
+.stashMeta {
+  height: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+  line-height: 16px;
+  color: var(--fg-muted);
 }
 
 .stashRef {
   font-family: var(--font-mono);
   font-size: var(--font-xs);
-  color: var(--accent);
-  flex-shrink: 0;
-  font-weight: 600;
 }
 
-.stashMessage {
+.stashSep {
+  margin: 0 6px;
+}
+
+/* The buttons and the busy spinner share one cell, so nothing shifts. */
+.stashActions {
+  display: grid;
+  align-items: center;
+  justify-items: end;
+  flex-shrink: 0;
+}
+
+.stashActions > * {
+  grid-area: 1 / 1;
+}
+
+.actionGroup {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.actionGroupHidden {
+  visibility: hidden;
+}
+
+.stashSpinner {
+  color: var(--fg-muted);
+}
+
+.textBtn,
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  margin: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--stash-action);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.textBtn {
+  padding: 0 8px;
+  font-family: var(--font-ui);
   font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.iconBtn {
+  width: 24px;
+  padding: 0;
+}
+
+.textBtn:hover:not(:disabled),
+.iconBtn:hover:not(:disabled) {
+  background: var(--wash-1);
   color: var(--fg-primary);
+}
+
+.dangerBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+}
+
+.textBtn:focus-visible,
+.iconBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+.textBtn:disabled,
+.iconBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── A failed apply / pop / drop, under its row ──────────────────────── */
+.stashError {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px var(--list-inset-end, 6px) 8px 38px;
+  padding: 7px 4px 7px 10px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+}
+
+.stashErrorIcon {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.stashErrorText {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Six whole lines, then it scrolls: a cut never lands mid-line. */
+  max-height: 108px;
+  overflow: auto;
+  font-size: var(--font-sm);
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.stashErrorTitle {
+  font-weight: 500;
+}
+
+.stashErrorClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.stashErrorClose:hover {
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+}
+
+/* ── Diff well ───────────────────────────────────────────────────────────
+   Under the open row, aligned with its title: a header row per file in the
+   UI font, then the hunks in mono. The hunk block is as wide as its longest
+   line, so a tint runs the full width when the well scrolls sideways; the
+   header stays put (sticky) while it does. */
+.diffWell {
+  margin: 4px var(--list-inset-end, 6px) 8px 38px;
+  padding: 4px 0 6px;
+  border: var(--hairline-w) solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--bg-primary);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.diffFile {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+}
+
+.diffHunks + .diffFile {
+  margin-top: 6px;
+}
+
+.fileIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.fileIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Basename, then its folder, on one baseline — the Changes rows' label: a
+   wrapping line box one line tall, so a folder that can't get 3em wraps out of
+   sight instead of shrinking to a sliver. The name keeps its width. */
+.fileLabel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  align-content: flex-start;
+  column-gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 20px;
+  overflow: hidden;
+  line-height: 20px;
+}
+
+.fileName {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
-}
-
-/* Line 2: action buttons */
-.stashActions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding-top: 4px;
-}
-
-.actionBtn {
-  composes: btn from "../shared/controls.module.css";
-  min-height: 22px;
-  padding: 2px 10px;
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-}
-
-.actionBtnDanger {
-  composes: btnDanger from "../shared/controls.module.css";
-  min-height: 22px;
-  padding: 2px 10px;
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-}
-
-/* Show diff toggle */
-.diffToggle {
-  background: none;
-  border: none;
-  color: var(--fg-secondary);
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-  cursor: pointer;
-  padding: 2px 0;
-  margin-left: 4px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  transition: color var(--duration-fast) var(--ease-out);
-}
-
-.diffToggle:hover {
   color: var(--fg-primary);
 }
 
-.chevron {
-  display: inline-block;
-  transition: transform var(--duration-base) var(--ease-out);
-  font-size: var(--font-2xs);
+.fileDir {
+  flex: 1 1 0;
+  min-width: 3em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
 }
 
-.chevronOpen {
-  transform: rotate(90deg);
+.fileStats {
+  display: inline-flex;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
 }
 
-/* Diff preview */
-.diffPreview {
-  margin-top: 4px;
-  padding: 6px 8px;
-  background: var(--bg-primary);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  overflow-x: auto;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.diffLine {
-  font-family: var(--font-mono);
-  font-size: var(--font-2xs);
-  white-space: pre;
-  line-height: 1.5;
-}
-
-.diffAdd {
+.statAdd {
   color: var(--success);
-  background: color-mix(in srgb, var(--success) 10%, transparent);
 }
 
-.diffDel {
+.statDel {
   color: var(--error);
-  background: color-mix(in srgb, var(--error) 10%, transparent);
+}
+
+.diffHunks {
+  width: max-content;
+  min-width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  line-height: 18px;
+}
+
+/* Hook for the harness and tests (every hunk line keeps it). */
+.diffLine {
+  padding: 0 10px;
+  white-space: pre;
 }
 
 .diffHunk {
-  color: var(--accent);
+  color: var(--fg-muted);
+}
+
+.diffAdd {
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+.diffDel {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
 }
 
 .diffContext {
+  color: var(--fg-secondary);
+}
+
+.diffNote {
   color: var(--fg-muted);
 }
 
-.diffLoading {
-  font-size: var(--font-xs);
+/* "Loading diff…" / "No diff to show", where the well goes. */
+.diffStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  margin: 4px var(--list-inset-end, 6px) 8px 38px;
+  padding: 0 2px;
+  font-size: var(--font-sm);
   color: var(--fg-muted);
-  padding: 4px 0;
-}
-
-/* Empty / loading states */
-.empty {
-  composes: empty from "./panel.module.css";
 }

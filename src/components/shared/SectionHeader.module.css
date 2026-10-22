@@ -1,0 +1,124 @@
+/* SectionHeader — a group header in a side-panel list (Staged / Unstaged,
+   Recent / Local / Remote) and the History / Blame drawer bands. 32px tall:
+   a 28px toggle (chevron in the rows' 16px icon column, label 12px/600
+   sentence case, count, meta) and the section's 28px actions, always visible.
+   Lines up with list rows: both sit 6px in from the panel edge with 8px of
+   padding, so the label starts where the row names start. */
+
+/* Inset like the rows: 6px, except where the list's own scrollbar gutter is
+   the right inset (--list-inset-end: 0, global.css › side-panel scrollbars). */
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  flex-shrink: 0;
+}
+
+/* Drawer band: full width, one hairline above, the same inner geometry. */
+.sectionHeaderDrawer {
+  margin: 0;
+  padding: 0 6px;
+  border-top: var(--hairline-w) solid var(--hairline);
+}
+
+.sectionTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  text-align: left;
+}
+
+.sectionToggle {
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.sectionToggle:hover {
+  background: var(--wash-0);
+  color: var(--fg-primary);
+}
+
+.sectionToggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+.sectionChevronSlot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--row-icon);
+  height: var(--row-icon);
+  color: var(--fg-muted);
+}
+
+.sectionChevron {
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
+.sectionChevronOpen {
+  transform: rotate(90deg);
+}
+
+.sectionLabelGroup {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.sectionLabel {
+  color: inherit;
+}
+
+.sectionCount {
+  font-size: var(--font-xs);
+  font-weight: 400;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.sectionMeta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+
+.sectionActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sectionAction {
+  composes: iconBtn from "./controls.module.css";
+}
+
+/* Two classes: every module that composes `.iconBtn` re-emits its rules, and a
+   copy loaded after this sheet would otherwise win the hover back to neutral. */
+.sectionAction.sectionActionDanger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+}

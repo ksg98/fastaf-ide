@@ -1,4 +1,7 @@
-/* FileBrowserPanel — frame surface, 28px inset rows */
+/* FileBrowserPanel — the Files side panel (STYLE_GUIDE › Side panels).
+   A 40px header (title · list / tree · sort · window controls), the search
+   field, the flat list's breadcrumb, then 28px rows inset 6px from both edges:
+   a 16px slot (chevron or file icon), the name, a git dot at the right end. */
 .panel {
   position: relative;
   width: 300px;
@@ -7,10 +10,12 @@
   background: var(--surface-glass);
   backdrop-filter: var(--blur-glass);
   -webkit-backdrop-filter: var(--blur-glass);
-  border-left: 1px solid var(--border-subtle);
+  border-left: var(--hairline-w) solid var(--hairline);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* A size container, so the header can tighten up at the 200px minimum. */
+  container-type: inline-size;
 }
 
 /* Compound selector: `.panel` sets its own `display`, which ties with a bare
@@ -20,141 +25,273 @@
   display: none;
 }
 
+/* Its own window: fill it, and no divider — nothing sits to its left. */
+.detached {
+  width: 100%;
+  max-width: 100%;
+  border-left: none;
+}
+
 .panel:focus {
   outline: none;
 }
 
-/* Toolbar: breadcrumb + sort control */
-.toolbar {
+/* ── Header ──────────────────────────────────────────────────────────── */
+
+.headerTools {
   display: flex;
   align-items: center;
-  gap: 4px;
-  height: 30px;
-  padding: 0 6px 0 12px;
-  background: transparent;
-  border-bottom: 1px solid var(--border-subtle);
+  gap: 2px;
+  flex-shrink: 0;
 }
 
+.headerBtn {
+  composes: iconBtn from "../shared/controls.module.css";
+}
+
+/* The current view, and the sort button while its menu is open. Two classes:
+   every module that composes `.iconBtn` re-emits its rules, and the copies
+   loaded after this one would otherwise reset the background. */
+.headerBtn.headerBtnOn {
+  background: var(--row-selected);
+  color: var(--fg-primary);
+}
+
+/* The view not shown hovers a step lighter than the pressed one, so pointing
+   at List while Tree is on never reads as two pressed views. */
+.headerBtn[aria-pressed="false"]:hover:not(:disabled) {
+  background: var(--wash-0);
+}
+
+.headerSep {
+  composes: headerSep from "../shared/panel.module.css";
+  margin: 0 4px;
+}
+
+.sortControl {
+  position: relative;
+  display: flex;
+}
+
+/* Right-aligned under the sort button: narrow enough to stay inside the
+   panel (it clips) even at its 200px minimum. */
+.sortControl .sortMenu {
+  min-width: 120px;
+}
+
+/* Below ~218px of panel the full tool row no longer fits beside the title:
+   drop the separator and narrow the three tools to 26px. The 2px gaps stay,
+   so a pressed button and a hovered neighbour never merge into one pill. */
+@container (max-width: 216px) {
+  .headerSep {
+    display: none;
+  }
+
+  .headerTools .headerBtn {
+    width: 26px;
+  }
+}
+
+/* ── Search row ──────────────────────────────────────────────────────── */
+
+.searchBar {
+  flex-shrink: 0;
+  padding: 8px 10px;
+}
+
+/* Hook for the content-mode toggle (tests and the screenshot harness). */
+.modeToggle {
+  flex-shrink: 0;
+}
+
+/* Content search: "56 matches in 21 files · 14 skipped". */
+.searchStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 14px;
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
+}
+
+.searchStatusText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchStatusTruncated {
+  color: var(--warning);
+}
+
+/* Hook while a content search runs (the harness waits for it to go); the
+   spinner before the text is the visible part. */
+.searchStatusSearching {
+  cursor: progress;
+}
+
+/* ── Breadcrumb (flat view) ──────────────────────────────────────────── */
+
+/* Inset by margins, not padding: a path wider than the panel scrolls to its
+   end inside the inset (FileBrowserPanel keeps the current folder in view),
+   and the clipped side fades out rather than cutting a name at the edge. */
 .breadcrumb {
   display: flex;
   align-items: center;
   gap: 2px;
-  flex: 1;
-  min-width: 0;
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  color: var(--fg-muted);
+  flex-shrink: 0;
+  height: 28px;
+  margin: 0 8px 0 10px;
   overflow-x: auto;
-  white-space: nowrap;
   scrollbar-width: none;
+  white-space: nowrap;
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  color: var(--fg-secondary);
 }
 
 .breadcrumb::-webkit-scrollbar {
   display: none;
 }
 
+.breadcrumbFadeStart {
+  -webkit-mask-image: linear-gradient(to right, transparent, currentColor 24px);
+  mask-image: linear-gradient(to right, transparent, currentColor 24px);
+}
+
+.breadcrumbFadeEnd {
+  -webkit-mask-image: linear-gradient(to left, transparent, currentColor 24px);
+  mask-image: linear-gradient(to left, transparent, currentColor 24px);
+}
+
+.breadcrumbFadeStart.breadcrumbFadeEnd {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    currentColor 24px,
+    currentColor calc(100% - 24px),
+    transparent
+  );
+  mask-image: linear-gradient(to right, transparent, currentColor 24px, currentColor calc(100% - 24px), transparent);
+}
+
 .breadcrumbSegment {
-  cursor: pointer;
-  color: var(--fg-secondary);
+  flex-shrink: 0;
   padding: 2px 4px;
   border-radius: var(--radius-sm);
-  transition: background var(--duration-fast) var(--ease-out),
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
 .breadcrumbSegment:hover {
+  background: var(--wash-1);
   color: var(--fg-primary);
-  background: var(--surface-hover);
 }
 
-.breadcrumbCurrent {
+/* The folder on screen: a label, not a link. */
+.breadcrumbCurrent,
+.breadcrumbCurrent:hover {
+  background: transparent;
   color: var(--fg-primary);
   font-weight: 500;
+  cursor: default;
 }
 
 .breadcrumbSep {
-  color: var(--fg-muted);
-  opacity: 0.5;
-}
-
-/* Sort control (inline with breadcrumb) */
-.sortControl {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  position: relative;
   flex-shrink: 0;
-  margin-left: auto;
-}
-
-.sortTrigger {
-  composes: iconBtn from "../shared/controls.module.css";
-  width: 24px;
-  height: 24px;
-}
-
-/* Empty states */
-.empty {
-  padding: 24px;
-  text-align: center;
   color: var(--fg-muted);
-  font-size: var(--font-sm);
 }
 
-.error {
-  color: var(--error);
+/* ── Listing ─────────────────────────────────────────────────────────── */
+
+/* Next to panel.module.css's `.content` (flex: 1, scrolls): a flex column so
+   an EmptyState can fill and centre itself. Rows keep their 28px — a flex
+   scroller would otherwise squash them before it scrolls. No top padding: the
+   search row's 8px (or the breadcrumb, the status line) is the gap above. */
+.listing {
+  display: flex;
+  flex-direction: column;
 }
 
-/* File entries — inset rows with radius, hover wash, accent selection */
+/* The listing keeps its 6px scrollbar gutter reserved, and the gutter is the
+   rows' right inset (global.css › side-panel scrollbars). Two classes: it
+   overrides panel.module.css's `.content { overflow: auto }`. */
+@supports selector(::-webkit-scrollbar) {
+  .panel .listing {
+    overflow-y: scroll;
+    --list-inset-end: 0px;
+  }
+}
+
+.listing > * {
+  flex-shrink: 0;
+}
+
+/* The 8px under the last row: a spacer, since a scroller's own bottom padding
+   is not part of what it scrolls in every engine. */
+.listing::after {
+  content: "";
+  flex: 0 0 8px;
+}
+
+/* A row in the tree, the flat list or the filename results. `--depth` (set
+   inline by the tree) indents by one --tree-indent per level. 6px inset + 8px
+   padding + the 16px slot + an 8px gap: names start 38px from the edge, as
+   in every list of the Git panel. */
 .entry {
   display: flex;
   align-items: center;
-  gap: 7px;
-  margin: 0 6px;
-  height: 26px;
-  padding: 0 8px;
-  cursor: pointer;
-  font-size: var(--font-md);
-  font-family: var(--font-ui);
+  gap: var(--row-gap);
+  height: var(--row-h);
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding: 0 8px 0 calc(var(--row-pad-x) + var(--depth, 0) * var(--tree-indent));
   border-radius: var(--radius-md);
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
   /* Shift+click selects a range of rows, not the text between two clicks. */
   -webkit-user-select: none;
   user-select: none;
 }
 
 .entry:hover {
-  background: var(--surface-hover);
+  background: var(--wash-0);
 }
 
-.entrySelected {
-  background: var(--surface-hover);
+/* The file open in the editor or a diff tab. */
+.entryActive,
+.entryActive:hover {
+  background: var(--row-active);
 }
 
-.entryActive {
-  background: rgba(var(--accent-rgb), 0.13);
+/* A multi-selection (Cmd/Ctrl+click, Shift+click: two or more rows). Declared
+   after .entryActive so a picked row reads as picked even when it is the open
+   file; kept on hover. */
+.listingMulti .entryPicked,
+.listingMulti .entryPicked:hover {
+  background: var(--row-picked);
 }
 
-.entryActive .entryName {
-  color: var(--fg-primary);
-}
-
-/* In the multi-selection (Cmd/Ctrl+click, Shift+click). Declared after
-   .entryActive so a picked row reads as picked even when it is the open file,
-   and at 22 % (the Git panel's focused-selection wash) rather than 13 % so
-   "selected" and "open in the editor" stay apart. Hover keeps the wash. */
-.entryPicked,
-.entryPicked:hover {
-  background: rgba(var(--accent-rgb), 0.22);
-}
-
-.entryPicked .entryName {
-  color: var(--fg-primary);
+/* The keyboard target while the panel has focus: the flat list's arrow-key
+   cursor once the keyboard has moved it, or a lone selected row (a plain
+   click — a file it opened already reads as active). */
+.panel:focus .listingKeys .entrySelected,
+.panel:focus .listing:not(.listingMulti) .entryPicked {
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
 }
 
 .entryIgnored {
-  opacity: 0.4;
+  opacity: 0.45;
 }
 
 .entryCut {
@@ -162,19 +299,16 @@
   font-style: italic;
 }
 
-.entryParent {
-  padding: 2px 12px;
-  color: var(--fg-muted);
-  font-size: var(--font-xs);
-}
-
-.entryIcon {
+/* The 16px leading slot: a file's icon, or a folder's chevron in the tree. */
+.entryIcon,
+.entrySlot {
   flex-shrink: 0;
-  width: var(--row-icon);
-  height: var(--row-icon);
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: var(--row-icon);
+  height: var(--row-icon);
+  color: var(--fg-muted);
 }
 
 .entryIcon :global(svg) {
@@ -183,29 +317,49 @@
 }
 
 .entryName {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--fg-primary);
 }
 
-.entryDir .entryName {
-  font-weight: 500;
+/* Filename results: the basename, then its folder in muted 12px (Codex's
+   file picker). The name keeps its width; the folder takes the rest. */
+.entryResult .entryName {
+  flex: 0 1 auto;
 }
 
-.entrySize {
-  flex-shrink: 0;
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-  font-variant-numeric: tabular-nums;
+.entryDir,
+.contentGroupDir {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
   color: var(--fg-muted);
 }
 
-/* Tree view */
+/* At the 200px minimum the folder would only ever show as a stub ("d…") next
+   to a truncated name: the name gets the row, the full path stays in the
+   tooltip. */
+@container (max-width: 216px) {
+  .entryDir,
+  .contentGroupDir {
+    display: none;
+  }
+}
+
+/* Git state: the 6px dot (shared/git-status.module.css) at the right end. */
+.entryDot {
+  margin-left: auto;
+  margin-right: 2px;
+}
+
+/* ── Tree ────────────────────────────────────────────────────────────── */
+
 .treeChevron {
-  flex-shrink: 0;
-  color: var(--fg-muted);
   transition: transform var(--duration-base) var(--ease-out);
 }
 
@@ -213,197 +367,158 @@
   transform: rotate(90deg);
 }
 
-.treeLeafSpacer {
-  display: inline-block;
-  width: 10px;
-  flex-shrink: 0;
+/* An expanded folder's children, with the indent guide: a hairline centred
+   under the folder's chevron — 6px inset + 8px padding + half the 16px slot
+   is the chevron's centre, less half the line — from its first child to its
+   last. */
+.treeChildren {
+  position: relative;
 }
 
+.treeChildren::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(21.5px + var(--guide-depth, 0) * var(--tree-indent));
+  width: 1px;
+  background: var(--hairline);
+  pointer-events: none;
+}
+
+/* A folder whose children are still being read. */
 .treeLoading {
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  padding: 4px 8px;
-}
-
-.viewModeBtn {
-  composes: iconBtn from "../shared/controls.module.css";
-  width: 24px;
-  height: 22px;
-}
-
-.viewModeBtnActive {
-  color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.14);
-}
-
-/* Enhanced search bar */
-.searchBar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.modeToggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  height: 24px;
-  padding: 0 5px;
-  background: transparent;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  font-size: var(--font-xs);
+  gap: var(--row-gap);
+  height: var(--row-h);
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding-left: calc(var(--row-pad-x) + var(--depth, 0) * var(--tree-indent));
   font-family: var(--font-ui);
-  font-weight: 600;
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
-  flex-shrink: 0;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
 }
 
-.modeToggle svg {
-  width: 14px;
-  height: 14px;
+/* ── Content search results ──────────────────────────────────────────── */
+
+.contentGroup + .contentGroup {
+  margin-top: 4px;
 }
 
-.modeToggle:hover {
-  background: var(--surface-hover);
-  color: var(--fg-primary);
-}
-
-.modeToggleActive {
-  background: rgba(var(--accent-rgb), 0.14);
-  color: var(--accent);
-  border-color: rgba(var(--accent-rgb), 0.4);
-}
-
-.modeToggleActive:hover {
-  background: rgba(var(--accent-rgb), 0.2);
-  color: var(--accent);
-}
-
-.toggleBtn {
-  composes: iconBtn from "../shared/controls.module.css";
-  width: 24px;
-  height: 24px;
-}
-
-.toggleBtn svg {
-  width: 14px;
-  height: 14px;
-}
-
-.toggleActive {
-  background: rgba(var(--accent-rgb), 0.14);
-  color: var(--accent);
-}
-
-.toggleActive:hover {
-  background: rgba(var(--accent-rgb), 0.2);
-  color: var(--accent);
-}
-
-/* Content search results */
-.contentGroup {
-  border-bottom: 1px solid var(--border-subtle);
-}
-
+/* One file: icon · basename · folder · "3 matches". Opens the first match. */
 .contentGroupHeader {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 12px;
-  cursor: pointer;
-  font-size: var(--font-sm);
+  gap: var(--row-gap);
+  height: var(--row-h);
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
   font-family: var(--font-ui);
-  font-weight: 500;
-  color: var(--fg-secondary);
-  background: transparent;
-  transition: background var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
+  font-size: var(--font-md);
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .contentGroupHeader:hover {
-  background: var(--surface-hover);
-  color: var(--fg-primary);
+  background: var(--wash-0);
+}
+
+.contentGroupName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .contentGroupCount {
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  margin-left: auto;
   flex-shrink: 0;
+  margin-left: auto;
+  font-size: var(--font-xs);
   font-variant-numeric: tabular-nums;
+  color: var(--fg-muted);
 }
 
+/* One matching line, under the file's name: line number, then the line. */
 .contentMatch {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 2px 12px 2px 24px;
-  cursor: pointer;
-  font-size: var(--font-sm);
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding: 0 8px 0 30px;
+  border-radius: var(--radius-md);
   font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out);
 }
 
 .contentMatch:hover {
-  background: var(--surface-hover);
+  background: var(--wash-0);
 }
 
+/* Four digits fit the column; a longer number widens its own row. */
 .contentMatchLine {
   flex-shrink: 0;
-  min-width: 36px;
+  min-width: 28px;
   text-align: right;
+  font-variant-numeric: tabular-nums;
   color: var(--fg-muted);
-  font-size: var(--font-xs);
+  -webkit-user-select: none;
   user-select: none;
 }
 
 .contentMatchText {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--fg-primary);
+  color: var(--fg-secondary);
 }
 
 .contentMatchHighlight {
-  background: rgba(var(--accent-rgb), 0.28);
-  color: var(--accent);
-  border-radius: 2px;
   padding: 0 1px;
+  border-radius: 3px;
+  background: rgba(var(--accent-rgb), 0.26);
+  color: var(--fg-primary);
 }
 
-/* Search status line */
-.searchStatus {
-  padding: 4px 12px;
-  font-size: var(--font-xs);
+/* ── Empty folder action ─────────────────────────────────────────────── */
+
+.emptyAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px 0 10px;
+  background: var(--wash-1);
+  border: none;
+  border-radius: var(--radius-pill);
+  color: var(--fg-secondary);
   font-family: var(--font-ui);
-  color: var(--fg-muted);
-  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
-.searchStatusTruncated {
-  color: var(--warning, var(--fg-secondary));
+.emptyAction:hover {
+  background: var(--wash-2);
+  color: var(--fg-primary);
 }
 
-@keyframes searchPulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 1; }
+.emptyAction:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
 }
 
-.searchStatusSearching {
-  animation: searchPulse 1.2s ease-in-out infinite;
-}
+/* ── Inline create (New file / New folder in place of a popup) ──────── */
 
-/* VS Code-style inline create (New File / New Folder in place of a popup) */
 .inlineCreateRow {
   cursor: default;
 }
@@ -415,47 +530,51 @@
 .inlineCreatePrefix {
   flex-shrink: 0;
   color: var(--fg-muted);
-  font-size: var(--font-md);
 }
 
 .inlineCreateBox {
   position: relative;
-  flex: 1;
+  display: flex;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
+/* 24px inside the 28px row. Pulled left by its border + padding so the typed
+   name starts where the names of the rows around it start. */
 .inlineCreateInput {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 1px 6px;
-  background: var(--bg-primary);
+  width: calc(100% + 4px);
+  height: 24px;
+  margin: 0 0 0 -4px;
+  padding: 0 6px 0 3px;
+  background: var(--field-fill);
   color: var(--fg-primary);
   border: 1px solid var(--accent);
   border-radius: var(--radius-sm);
-  font-size: var(--font-md);
   font-family: var(--font-ui);
+  font-size: var(--font-md);
   outline: none;
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
 }
 
 .inlineCreateInputError {
   border-color: var(--error);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 25%, transparent);
 }
 
 .inlineCreateError {
   position: absolute;
-  top: calc(100% + 2px);
-  left: 0;
+  top: calc(100% + 4px);
+  left: -4px;
   right: 0;
   z-index: var(--z-dropdown);
-  padding: 3px 6px;
+  padding: 4px 8px;
   background: var(--surface-overlay);
   backdrop-filter: var(--blur-overlay);
   -webkit-backdrop-filter: var(--blur-overlay);
-  border: 1px solid var(--error);
-  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--error) 60%, transparent);
+  border-radius: var(--radius-md);
   color: var(--fg-primary);
-  font-size: var(--font-xs);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: 1.4;
+  white-space: normal;
   box-shadow: var(--highlight-inset), var(--shadow-dropdown);
 }

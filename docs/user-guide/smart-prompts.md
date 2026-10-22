@@ -16,7 +16,7 @@ Press **Cmd+Shift+K** (Ctrl+Shift+K on Windows/Linux) or click the lightning bol
 
 ### Git Panel — Changes Tab
 
-The SmartButtonStrip appears above the changed files list. Quick access to prompts like Smart Commit, Review Changes, and Write Tests.
+The **Smart Commit** chip sits in the commit composer's control row, between Amend and Commit. Click it to run the prompt it names; its arrow lists the other Changes prompts (Review Changes, Write Tests, …) with the active one ticked, and the chip then names the one you ran last. When the panel is narrow the chip folds to just its arrow.
 
 ### PR Detail Popover
 
@@ -26,9 +26,13 @@ Click a PR badge in the sidebar to open the popover. The SmartButtonStrip shows 
 
 Open with **Cmd+P** and type "Smart" to see all smart prompts prefixed with "Smart:".
 
+### Git Panel — Branches Tab
+
+The chip at the right end of the Branches tab's top strip (Cmd+G), next to the current branch, runs a branch prompt — **Create PR** by default; its arrow lists the others (Merge Main Into Branch, Summarize Branch, …).
+
 ### Branch Context Menu
 
-Right-click a branch in the Branches tab (Cmd+G) for branch-specific prompts like Create PR, Merge Main Into Branch, and Summarize Branch.
+Right-click a branch in the sidebar for the same branch prompts, run on that branch.
 
 ## Built-in Prompts
 

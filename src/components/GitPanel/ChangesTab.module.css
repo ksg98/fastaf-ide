@@ -1,343 +1,436 @@
-/* ChangesTab — staged/unstaged file tree with actions */
+/* ChangesTab — the commit composer, the filter and the Staged / Unstaged lists
+   (STYLE_GUIDE › Side panels). The composer and the filter stay put at the top;
+   only the list scrolls under them. */
 
 .container {
   display: flex;
   flex-direction: column;
   height: 100%;
+  overflow-x: hidden;
+  /* Safety net only: the list is the scroller. The tab itself scrolls when a
+     tall composer and the filter alone outgrow a short panel. */
   overflow-y: auto;
+  outline: none;
 }
 
-/* Commit section */
+/* ── Composer ──────────────────────────────────────────────────────────
+   The compose dock's card at panel scale: a raised card (glass in a flat
+   theme, a grey step in a tonal one — the tokens decide), the field on top
+   and one row of 28px controls inside it. The caret is the focus: no border
+   and no ring on the card. */
 .commitSection {
+  flex-shrink: 0;
+  margin: 10px 10px 0;
+}
+
+.composer {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  flex-shrink: 0;
+  gap: 6px;
+  padding: 10px 8px 8px 12px;
+  background: var(--sheen), var(--surface-composer);
+  border-radius: 14px;
+  box-shadow: var(--rim);
 }
 
-/* Commit message textarea — composes the shared input recipe (focus ring),
-   layered with row-specific sizing/behavior. */
+/* 2 lines (38px) to 8 (152px), then it scrolls — autoResize sets the height. */
 .commitTextarea {
-  composes: textarea from "../shared/controls.module.css";
-  min-height: 60px;
-  max-height: 114px;
-  overflow-y: hidden;
-  font-family: var(--font-ui);
-  padding: 7px 10px;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 38px;
+  max-height: 152px;
+  margin: 0;
+  padding: 0 4px 0 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  box-shadow: none;
   resize: none;
-  line-height: 1.5;
-  transition: border-color var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out),
-    height var(--duration-fast) var(--ease-out);
-}
-
-.commitRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.commitBtn {
-  composes: btnPrimary from "../shared/controls.module.css";
-}
-
-.commitBtnDisabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.amendLabel {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--fg-secondary);
-  font-size: var(--font-xs);
+  overflow-y: hidden;
+  color: var(--fg-primary);
   font-family: var(--font-ui);
-  cursor: pointer;
-  user-select: none;
+  font-size: var(--font-md);
+  line-height: 19px;
 }
 
-.amendCheckbox {
-  accent-color: var(--accent);
-  cursor: pointer;
+.commitTextarea::placeholder {
+  color: var(--fg-muted);
+  opacity: 1;
 }
 
-/* Textarea + sparkle button row */
-.textareaRow {
+.commitTextarea:disabled {
+  cursor: default;
+}
+
+/* -4px: the first glyph sits under the text, not under the card's padding.
+   Generate, Amend and Commit keep their size; Smart Commit takes what they
+   leave (.smartSlot). */
+.composerRow {
   display: flex;
+  align-items: center;
   gap: 4px;
-  align-items: flex-start;
-}
-
-.textareaRow .commitTextarea {
-  flex: 1;
+  height: 28px;
   min-width: 0;
+  margin-left: -4px;
 }
 
-/* Sparkle "generate commit message" — icon-button variant sized 28x28
-   with a subtle border so it reads next to the textarea. */
+/* The room between Amend and Commit, and the only part of the row that gives
+   way: Smart Commit sits at its right end, its label ellipsises as the slot
+   narrows, it folds to its menu arrow once the slot can't hold "Smart C…"
+   (98px: the chip's padding and 24px arrow plus 60px of label — any less and
+   the ellipsis lands on the word gap, "Smart …", or eats the word, "S…"), and
+   it steps out while a commit runs at the panel's 300px minimum, where not even
+   the arrow fits. z-index lifts its menu over the filter and the list. */
+.smartSlot {
+  container: smart-slot / inline-size;
+  display: flex;
+  justify-content: flex-end;
+  flex: 1 1 0;
+  min-width: 0;
+  z-index: 1;
+}
+
+@container smart-slot (width < 98px) {
+  .smartSlot .smartChip [data-part="main"] {
+    display: none;
+  }
+
+  .smartSlot .smartChip [data-part="arrow"] {
+    width: 28px;
+    border-radius: var(--radius-pill);
+  }
+}
+
+@container smart-slot (width < 28px) {
+  .smartSlot .smartChip {
+    display: none;
+  }
+}
+
+/* Generate — the composer's only sparkle. A 28px round ghost button. */
 .generateBtn {
-  composes: iconBtn from "../shared/controls.module.css";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  margin-top: 5px; /* align with textarea padding */
-  border: 1px solid var(--border-subtle);
-}
-
-.generateBtn:hover:not(:disabled) {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-
-.generateBtnBusy {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-
-.commitError {
-  color: var(--error);
-  font-size: var(--font-xs);
-  font-family: var(--font-mono);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 80px;
-  overflow-y: auto;
-}
-
-.commitSuccess {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--success);
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-}
-
-@keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
-}
-
-.spinner {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--text-on-accent);
-  border-top-color: transparent;
-  border-radius: var(--radius-full);
-  animation: spin 0.6s linear infinite;
-}
-
-/* Filter input */
-.filterRow {
-  position: relative;
-  padding: 4px 12px;
-  flex-shrink: 0;
-}
-
-.filterInput {
-  composes: input from "../shared/controls.module.css";
-  padding: 4px 24px 4px 8px;
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-}
-
-.filterInput::placeholder {
-  color: var(--fg-muted);
-  opacity: 0.5;
-}
-
-.filterClear {
-  composes: iconBtn from "../shared/controls.module.css";
-  position: absolute;
-  right: 16px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 20px;
-  height: 20px;
-  font-size: var(--font-md);
-  line-height: 1;
-}
-
-/* Section headers (Staged, Changes) — sentence case, 12px/600, no fill. */
-.sectionHeader {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  cursor: pointer;
-  user-select: none;
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--fg-secondary);
+  margin: 0;
+  padding: 0;
   background: transparent;
-  border-bottom: 1px solid var(--border-subtle);
-  transition: background var(--duration-fast) var(--ease-out);
-}
-
-.sectionHeader:hover {
-  background: var(--surface-hover);
-}
-
-.chevron {
-  font-size: var(--font-xs);
-  transition: transform var(--duration-base) var(--ease-out);
-  flex-shrink: 0;
-}
-
-.chevronCollapsed {
-  transform: rotate(-90deg);
-}
-
-.sectionLabel {
-}
-
-.sectionCount {
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
-
-.sectionAction {
-  background: none;
   border: none;
+  border-radius: var(--radius-full);
   color: var(--fg-secondary);
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
   cursor: pointer;
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  opacity: 0;
-  transition: opacity var(--duration-fast) var(--ease-out),
+  transition:
     background var(--duration-fast) var(--ease-out),
     color var(--duration-fast) var(--ease-out);
 }
 
-.sectionAction:first-of-type {
-  margin-left: auto;
-}
-
-.sectionHeader:hover .sectionAction {
-  opacity: 1;
-}
-
-.sectionAction:hover {
-  background: var(--surface-hover);
+.generateBtn:hover:not([aria-disabled="true"]) {
+  background: var(--wash-1);
   color: var(--fg-primary);
 }
 
-/* File entries — inset rows (Cursor-style): 6px side gutter, rounded, and
-   a hover/selection wash rather than an edge-to-edge fill. */
-.fileEntry {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 0 6px;
-  height: 26px;
-  padding: 0 6px 0 10px;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-out);
-  font-size: var(--font-md);
-  font-family: var(--font-ui);
+.generateBtn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
 }
 
-.fileEntry:hover {
-  background: var(--surface-hover);
-}
-
-.fileFocused {
-  background: var(--surface-hover);
-  outline: 1px solid rgba(var(--accent-rgb), 0.6);
-  outline-offset: -1px;
-}
-
-.fileSelected {
-  background: rgba(var(--accent-rgb), 0.13);
-}
-
-.fileSelected.fileFocused {
-  background: rgba(var(--accent-rgb), 0.22);
-}
-
-.fileFocused .actions {
-  opacity: 1;
-}
-
-/* Status badge (M, A, D, R, ?) */
-.statusBadge {
+/* Amend — a ghost toggle chip; on = the accent chip fill, accent text and a
+   leading check (the fill is transparent in a tonal theme: text + check). */
+.amendToggle {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-2xs);
-  font-weight: 700;
-  font-family: var(--font-ui);
+  gap: 6px;
   flex-shrink: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill);
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
-.statusM {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
+.amendToggle:hover:not(:disabled) {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.amendToggleOn {
+  background: var(--chip-accent-fill);
   color: var(--accent);
 }
 
-.statusA {
-  background: color-mix(in srgb, var(--success) 20%, transparent);
-  color: var(--success);
+.amendToggleOn:hover:not(:disabled) {
+  background: var(--chip-accent-fill-hover);
+  color: var(--accent);
 }
 
-.statusD {
-  background: color-mix(in srgb, var(--error) 20%, transparent);
+.amendToggle:disabled {
+  cursor: default;
+}
+
+/* Commit — the one bright object. aria-disabled (not disabled) so the tooltip
+   that says why still shows; the click is guarded in the component. */
+.commitBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 12px;
+  background: var(--fg-primary);
+  border: none;
+  border-radius: var(--radius-pill);
+  color: var(--bg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.commitBtn:hover:not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: color-mix(in srgb, var(--fg-primary) 86%, var(--bg-primary));
+}
+
+.commitBtn[aria-disabled="true"] {
+  background: var(--wash-2);
+  color: var(--fg-muted);
+  cursor: default;
+}
+
+.commitBtn[aria-busy="true"] {
+  cursor: default;
+}
+
+.generateBtn:focus-visible,
+.amendToggle:focus-visible,
+.commitBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+/* Errors — under the card on a 12 % error tint; selectable, scrolls past 96px. */
+.commitError {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 7px 4px 7px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
 }
 
-.statusR {
-  background: color-mix(in srgb, var(--merged) 20%, transparent);
-  color: var(--merged);
+.errorIcon {
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
-.statusUntracked {
-  background: color-mix(in srgb, var(--fg-muted) 20%, transparent);
-  color: var(--fg-muted);
+.errorMessage {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 96px;
+  overflow-y: auto;
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
-/* File path: directory dimmed, basename highlighted */
-.filePath {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.errorDismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--error);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.errorDismiss:hover {
+  background: color-mix(in srgb, var(--error) 16%, transparent);
+}
+
+.errorDismiss:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+/* ── Filter ────────────────────────────────────────────────────────── */
+.filterRow {
+  flex-shrink: 0;
+  padding: 8px 10px 4px;
+}
+
+/* Hook on SearchField's <input> (harness, tests); the look is SearchField's. */
+.filterInput {
   min-width: 0;
 }
 
-.fileDir {
+/* ── Lists ─────────────────────────────────────────────────────────── */
+/* A block scroller, so neither the 32px headers nor the 28px rows squash. */
+.list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 2px 0 8px;
+}
+
+/* The list keeps its 6px scrollbar gutter reserved, and the gutter is the
+   rows' right inset (global.css › side-panel scrollbars). */
+@supports selector(::-webkit-scrollbar) {
+  .list {
+    overflow-y: scroll;
+    --list-inset-end: 0px;
+  }
+}
+
+/* A row: icon · name · folder · (stats | actions) · status letter. */
+.fileEntry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row-h);
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding: 0 6px 0 8px;
+  border-radius: var(--radius-md);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.fileEntry:hover {
+  background: var(--wash-0);
+}
+
+/* One selected row is the active one (its diff is open); two or more are a
+   multi-selection. Both keep their wash on hover. */
+.fileSelected,
+.fileSelected:hover {
+  background: var(--row-active);
+}
+
+.filePicked,
+.filePicked:hover {
+  background: var(--row-picked);
+}
+
+/* Keyboard cursor — only while the list itself has focus. */
+.container:focus .fileFocused {
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
+}
+
+.fileIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--row-icon);
+  height: var(--row-icon);
+}
+
+.fileIcon > svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.dirIcon {
   color: var(--fg-muted);
 }
 
-.fileBasename {
+/* Basename first, then its folder (Codex's file picker order), on one baseline.
+   The pair is a wrapping line box one line tall: the folder takes what the name
+   leaves and ellipsises, and when that is under 3em it wraps out of sight
+   instead of shrinking to a sliver ("s‥"). The name keeps its width. */
+.fileLabel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  align-content: flex-start;
+  column-gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 20px;
+  overflow: hidden;
+  line-height: 20px;
+}
+
+.fileName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--fg-primary);
 }
 
-/* Diff stats (+N -M) — hidden when action buttons show */
+.fileNameDeleted {
+  color: var(--fg-secondary);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--fg-secondary) 70%, transparent);
+}
+
+.fileDir {
+  flex: 1 1 0;
+  min-width: 3em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+/* Stats and actions share one grid cell, so they can never overlap: the
+   actions take the numbers' place on hover, keyboard focus and the active row. */
+.fileTrail {
+  display: grid;
+  align-items: center;
+  justify-items: end;
+  flex-shrink: 0;
+}
+
+.fileTrail > * {
+  grid-area: 1 / 1;
+}
+
 .diffStats {
   display: flex;
   gap: 5px;
-  flex-shrink: 0;
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
+  font-size: var(--font-sm);
   font-variant-numeric: tabular-nums;
-  transition: opacity var(--duration-fast) var(--ease-out);
+  white-space: nowrap;
 }
 
 .diffAdd {
@@ -348,45 +441,101 @@
   color: var(--error);
 }
 
-/* Action buttons — overlay on hover, replacing diff stats */
 .actions {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
   display: flex;
+  align-items: center;
   gap: 2px;
-  opacity: 0;
-  transition: opacity var(--duration-fast) var(--ease-out);
-  padding-left: 4px;
+  visibility: hidden;
 }
 
-.fileEntry:hover .actions {
-  opacity: 1;
+.fileEntry:hover .actions,
+.fileSelected:not(.filePicked) .actions,
+.container:focus .fileFocused .actions {
+  visibility: visible;
 }
 
-.fileEntry:hover .diffStats {
-  opacity: 0;
+.fileEntry:hover .diffStats,
+.fileSelected:not(.filePicked) .diffStats,
+.container:focus .fileFocused .diffStats {
+  visibility: hidden;
+}
+
+/* Waiting on git: a spinner holds the actions' place; neither the numbers nor
+   the actions show, whatever the row's hover / focus / active state. */
+.container .fileEntry.fileBusy .actions,
+.container .fileEntry.fileBusy .diffStats {
+  visibility: hidden;
+}
+
+.rowSpinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--fg-muted);
 }
 
 .actionBtn {
-  composes: iconBtn from "../shared/controls.module.css";
-  width: 20px;
-  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-secondary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
-/* Semantic hover overrides — beat the composed iconBtn:hover specificity
-   with a matching :not(:disabled) qualifier. */
-.actionBtnDanger:hover:not(:disabled) {
+.actionBtn:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+/* Discard: neutral at rest, red on hover; the confirm carries the warning. */
+.actionBtnDanger:hover {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--error);
 }
 
-.actionBtnStage:hover:not(:disabled) {
+.actionBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+/* Status as a coloured letter in a 14px slot; the word is its tooltip. */
+.statusLetter {
+  flex-shrink: 0;
+  width: 14px;
+  font-size: var(--font-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.statusM {
+  color: var(--accent);
+}
+
+.statusA {
   color: var(--success);
 }
 
-/* Empty state */
-.empty {
-  composes: empty from "./panel.module.css";
-  font-family: var(--font-ui);
+.statusD {
+  color: var(--error);
+}
+
+.statusR {
+  color: var(--merged);
+}
+
+.statusUntracked {
+  color: var(--fg-muted);
 }

@@ -48,6 +48,8 @@
   min-width: 0;
 }
 
+/* Labels never wrap: anchored under a 28px icon button the menu would
+   otherwise shrink to its narrowest word. */
 .item {
   display: flex;
   align-items: center;
@@ -56,6 +58,7 @@
   padding: 0 10px;
   font-size: var(--font-md);
   color: var(--fg-primary);
+  white-space: nowrap;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out),
@@ -65,6 +68,17 @@
 .item:hover {
   background: var(--surface-hover);
   color: var(--fg-primary);
+}
+
+/* Disabled (data-disabled): dimmed, and inert under the pointer — the click is
+   ignored in Dropdown.tsx. */
+.item[data-disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.item[data-disabled]:hover {
+  background: transparent;
 }
 
 .selected {

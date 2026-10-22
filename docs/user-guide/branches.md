@@ -12,41 +12,46 @@ Three ways to open it:
 
 ## Branch List Overview
 
-The panel shows two collapsible sections:
+At the top, a strip names the branch you are on (or "Detached at <hash>" when HEAD is detached), its upstream and its ahead/behind counts, with a smart-prompt chip on the right — **Create PR** by default, or the last branch prompt you ran; its arrow lists the others.
 
+Under it, the filter, **+** (New branch) and **⋯** (Branch options), then three collapsible sections:
+
+- **Recent** — branches you checked out recently (from the git reflog), the current one left out since the strip shows it
 - **Local** — all branches in your local repo
 - **Remote** — tracking branches from all remotes
 
 Each branch row displays:
-- Branch name
-- Ahead/behind counts relative to its upstream (e.g. `↑2 ↓1`)
-- Relative date of the last commit (e.g. "3h ago", "2d ago")
-- **Merged** badge — shown on branches already merged into the default branch
+- Branch name (a check marks the current branch)
+- Ahead/behind counts relative to its upstream (e.g. `↑2 ↓1`), and `⇣N` when it is behind the default branch
+- **Merged**, in purple — the branch is already merged into the default branch
+- The age of the last commit (`25m`, `3h`, `2d`, `3w`, `4mo`, `1y`)
 - Stale dimming — branches with no commit in the last 30 days appear dimmed
 
-A **Recent Branches** section at the top shows recently checked-out branches from the git reflog, for quick re-access.
+Hover a row for its last commit: date, author and message.
 
 ## Prefix Folding
 
-When you have many branches following a naming convention (`feature/`, `bugfix/`, `chore/`), prefix folding groups them automatically:
+When you have many branches following a naming convention (`feature/`, `bugfix/`, `chore/`), prefix folding groups them:
 
-- Branches sharing a common `/`-delimited prefix collapse into a folder row (e.g. `feature/ (5)`)
-- Click the folder row (or press `→` / `←`) to expand or collapse it
-- The toggle button in the panel header enables or disables prefix folding globally
+- Branches sharing a common `/`-delimited prefix collapse under a row with a chevron and a count (e.g. `feature/  5`); the branches inside show their name without the prefix (hover for the full name)
+- Click the group row (or `Tab` to it and press `Enter`) to expand or collapse it
+- **⋯ › Group by prefix** turns folding on and off (checked while it is on)
 
 ## Search / Filter
 
-Type in the search bar at the top of the panel to filter branches by name. The filter applies to all sections simultaneously. Press `Escape` to clear the search.
+Type in **Filter branches** to narrow the list by name. The filter applies to Recent, Local and Remote at once — their counts read shown/total — and "No branches match" shows when nothing does. `↓` moves into the list, `Escape` clears the filter, and `/` jumps back to it from the list.
 
 ## Keyboard Operations
 
-The Branches panel is mouse-first: all branch actions live in the right-click context menu, the **+** (New branch) button, and row double-click. Only list navigation is on the keyboard:
+The Branches panel is mouse-first: branch actions live in the right-click context menu and the **+** (New branch) button. Only list navigation is on the keyboard:
 
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` | Navigate branches |
 | `/` | Focus the filter |
 | `Escape` | Clear filter / deselect |
+
+While the right-click menu is open, its shortcut hints work: `⏎` Checkout, `⇧M` Merge into current, `r` Rebase onto, `⇧P` Push, `p` Pull, `f` Fetch, `⇧R` Rename, `d` Delete.
 
 Switching between Git Panel tabs:
 
@@ -59,21 +64,21 @@ Switching between Git Panel tabs:
 
 ## Checkout
 
-Double-click any branch (or right-click → **Checkout**) to check it out.
+Right-click a branch → **Checkout** to check it out (a remote branch offers **Checkout (create local)**).
 
 If your working tree has uncommitted changes, a dialog appears with three options:
-- **Stash** — automatically stashes changes, then checks out
-- **Force** — discards changes and checks out
+- **Stash and switch** — stashes your changes, then checks out
+- **Force switch** — discards changes and checks out
 - **Cancel** — aborts the checkout
 
 ## Create Branch
 
-Click the **+** (New branch) button in the panel header to open the inline branch creation form:
+Click **+** (New branch), next to the filter, to open the inline branch creation form:
 
-1. Type the new branch name
-2. Optionally change the start point (defaults to HEAD)
-3. Toggle "Checkout after create" (on by default)
-4. Press `Enter` to confirm or `Escape` to cancel
+1. Type the new branch name (it has the whole first line)
+2. Optionally change the start point with the **from HEAD** chip
+3. Leave **Check out** on to switch to the new branch, or turn it off
+4. Press `Enter` (or **Create**) to confirm, or `Escape` (or **Cancel**) to cancel — **Create** stays disabled until there is a name
 
 ## Delete Branch
 
@@ -85,7 +90,7 @@ Right-click a branch → **Delete**.
 
 ### Delete merged branches (bulk)
 
-When one or more local branches are already merged into the default branch, a **broom button** (with a count badge) appears in the Branches tab header. Click it to delete them all at once, after confirming a dialog that lists the targets. Each deletion uses safe `git branch -d`, so a branch that isn't truly merged is kept rather than force-deleted.
+**⋯ › Delete N merged branches…** deletes every local branch already merged into the default branch at once, after confirming a dialog that lists the targets; the item is disabled when no branch qualifies. Each deletion uses safe `git branch -d`, so a branch that isn't truly merged is kept rather than force-deleted.
 
 ## Rename Branch
 
@@ -93,11 +98,11 @@ Right-click a branch → **Rename** to edit the branch name inline. The current 
 
 ## Merge
 
-Right-click a branch → **Merge into Current** to merge it into the current branch. The merge runs in the background, and the result is shown as a toast: a conflict error on failure, "Already up to date" when there was nothing to merge, or a success toast with a one-click **Delete branch** action to clean up the branch you just merged.
+Right-click a branch → **Merge into current** to merge it into the current branch. The merge runs in the background, and the result is shown as a toast: a conflict error on failure, "Already up to date" when there was nothing to merge, or a success toast with a one-click **Delete branch** action to clean up the branch you just merged.
 
 ## Rebase
 
-Right-click a branch → **Rebase Current onto This** to rebase the current branch onto the selected branch. Runs in the background; conflicts are reported.
+Right-click a branch → **Rebase onto** to rebase the current branch onto the selected branch. Runs in the background; conflicts are reported.
 
 ## Push
 
@@ -118,17 +123,20 @@ Right-click any branch for the full context menu:
 | Action | Description |
 |--------|-------------|
 | Checkout | Switch to this branch |
-| Create Branch from Here | Create a new branch starting from this commit |
-| Delete | Delete branch (safe by default) |
-| Rename | Rename inline |
-| Merge into Current | Merge this branch into the current one |
-| Rebase Current onto This | Rebase current branch onto this one |
+| Merge into current | Merge this branch into the current one |
+| Rebase onto | Rebase the current branch onto this one |
+| Compare with current | Show `git diff --name-status` between this branch and current |
 | Push | Push this branch |
 | Pull | Pull this branch |
 | Fetch | Fetch all remotes |
-| Compare | Show `git diff --name-status` between this branch and current |
+| Update from base (rebase) | Rebase this branch onto its base branch |
+| Rename | Rename inline |
+| Delete | Delete branch (safe by default) |
+| Copy name | Copy the branch name |
+
+The current branch offers Push, Pull, Fetch, Update from base, Rename and Copy name; a remote branch offers Checkout (create local), Fetch, Compare with current, Open on GitHub and Copy name.
 
 ## Stale and Merged Indicators
 
 - **Stale** (dimmed): the branch has no commits in the last 30 days — a visual cue that it may be abandoned
-- **Merged** badge: the branch has been merged into the default branch and is safe to delete
+- **Merged** (purple text): the branch has been merged into the default branch and is safe to delete

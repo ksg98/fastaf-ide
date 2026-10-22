@@ -11,14 +11,13 @@ The file browser, Markdown viewer, and Diff panels are mutually exclusive — op
 - **Arrow keys** (`Up` / `Down`) — Move selection
 - **Enter** — Open a file or enter a directory
 - **Backspace** — Go up to the parent directory
-- **`..` row** — Click to go up one level (appears when inside a subdirectory)
-- **Breadcrumb bar** — Click any path segment to jump directly to that directory; click the root `/` to return to the repo root
+- **Breadcrumb** (list view) — The row under the search field shows where you are, starting with the folder's own name (`fastaf › src › components`). Click any segment to jump to that directory; click the first to return to the root
 
-Directories are listed first, then files. The entry count is shown as a badge in the panel header.
+Directories are listed first, then files. Hover a row for its full path, its size and when it last changed. An empty folder says so and offers **New file**, which opens a name field in place (Enter creates the file, `Esc` cancels).
 
 ### Sorting
 
-Click the funnel icon in the toolbar to switch sort order:
+Click the sort button (the up/down arrows) in the panel header to switch sort order:
 
 | Mode | Order |
 |------|-------|
@@ -31,46 +30,46 @@ The panel watches the current directory for filesystem changes. When a file is c
 
 ### Git Status Indicators
 
-The panel header shows a legend for git status colors:
+A small dot at the right end of a row shows its git status; hover the dot for its name:
 
-| Color | Label | Meaning |
-|-------|-------|---------|
-| Orange | mod | Modified (unstaged changes) |
-| Green | staged | Staged for commit |
-| Blue | new | Untracked (new file) |
+| Dot | Meaning |
+|-----|---------|
+| Accent (blue) | Modified (unstaged changes) |
+| Green | Staged for commit |
+| Grey | Untracked (new file) |
 
-File and directory names inherit these colors based on their git status. Gitignored entries are shown in a dimmed style.
+A folder takes the dot of the most relevant change inside it. Gitignored entries are shown dimmed.
 
 ### View Modes
 
-The file browser supports two view modes, toggled via toolbar buttons:
+The file browser supports two view modes, toggled via the list and tree buttons in the panel header (the current one is highlighted):
 
 | Mode | Description |
 |------|-------------|
-| **List** (default) | Flat directory listing with breadcrumb navigation and `..` parent entry |
-| **Tree** | Collapsible hierarchy with lazy-loaded subdirectories. Expand folders by clicking the chevron |
+| **List** | Flat directory listing with breadcrumb navigation |
+| **Tree** (default) | Collapsible hierarchy with lazy-loaded subdirectories. Click a folder to expand it; a guide line runs down from its chevron beside its contents |
 
 Switching to tree mode resets to the repository root regardless of the current flat-mode subdirectory. When a search query is active, the view always shows flat results.
 
 ### Filename Search
 
-Type in the search box to search recursively across the entire repository by filename. Supports `*` and `**` glob wildcards (e.g., `*.ts`, `src/**/*.test.ts`). Results appear with their full path. Clear the query with the `×` button or by emptying the input.
+Type in the search box to search recursively across the entire repository by filename. Supports `*` and `**` glob wildcards (e.g., `*.ts`, `src/**/*.test.ts`; the field's tooltip has the syntax). Each result shows the file name, then the folder it is in (at the panel's narrowest width the folder moves to the row's tooltip). Clear the query with the `×` button or `Esc`.
 
-The search icon button to the left of the input toggles between **filename mode** (file icon) and **content mode** (magnifier icon).
+The button at the right end of the search field switches between **filename mode** and **content mode** (it is highlighted while content mode is on).
 
 ### Content Search
 
-Switch to content mode (magnifier icon) to search inside file contents across the repository. Results are grouped by file, showing the matching line number and a highlighted excerpt. Highlights remain aligned on lines containing accented text, symbols, or emoji. Click any result to open the file in the editor, jumping to that line.
+Switch to content mode (the button at the right end of the search field) to search inside file contents across the repository. Results are grouped by file — the file name, its folder and the number of matches — with each matching line number and a highlighted excerpt under it. When a match sits far along a long line, the excerpt starts a few words before it (`…`), so the match is always in view; hover a line to read it whole. Highlights remain aligned on lines containing accented text, symbols, or emoji. Click a file to open it at its first match, or any line to open the file in the editor at that line.
 
-Content search options (shown when in content mode):
+Content search options appear inside the field in content mode:
 
 | Toggle | Meaning |
 |--------|---------|
 | **Aa** (case icon) | Match case |
+| **ab** (underlined word icon) | Match whole word |
 | **`.*`** (regex icon) | Use regular expression |
-| **`\|ab\|`** (word icon) | Match whole word |
 
-A status bar below the search box shows match counts, files searched, files skipped (binary/large), and a "results limited" notice when the result set is truncated. Search begins after a short debounce and requires at least 3 characters.
+A status line below the search field shows match counts, files skipped (binary/large), and a "results limited" notice when the result set is truncated. Search begins after a short debounce and requires at least 3 characters; when nothing matches, the panel says so.
 
 ### File Operations (Context Menu)
 
@@ -78,7 +77,7 @@ Right-click any entry to open the context menu:
 
 | Action | Shortcut | Notes |
 |--------|----------|-------|
-| Copy Path | — | Copies the full absolute path to the clipboard |
+| Copy path | — | Copies the full absolute path to the clipboard |
 | Copy | `Cmd+C` | Stores the file or folder (or every selected row) in the internal clipboard |
 | Cut | `Cmd+X` | Same, as a move; cut entries are shown dimmed |
 | Paste | `Cmd+V` | Pastes into the right-clicked folder, or beside the right-clicked file; disabled when clipboard is empty |
@@ -101,9 +100,9 @@ Works in both the flat list and the tree view:
 | `Cmd+A` | Selects every row on screen |
 | `Escape`, or a click on empty space | Clears the selection |
 
-A selection click never opens a file or expands a folder. Selected rows are tinted more strongly than the row of the file open in the editor.
+A selection click never opens a file or expands a folder. Two or more selected rows are tinted, more strongly than the row of the file open in the editor; a single selected row is outlined while the panel has focus.
 
-With several rows selected, `Cmd+C` / `Cmd+X` put every selected file and folder on the clipboard, and right-clicking a selected row offers, for the whole selection: **Copy N Items**, **Cut N Items**, **Paste**, **Copy Paths** and **Copy Relative Paths** (one path per line), and **Delete N Items…**, which asks once and deletes them all. The label says Files, Folders or Items depending on what is selected. A row inside a selected folder is not copied twice: it travels with the folder. Right-clicking a row outside the selection selects just that row. Rename, Duplicate and the other single-item actions work on one row: click it first.
+With several rows selected, `Cmd+C` / `Cmd+X` put every selected file and folder on the clipboard, and right-clicking a selected row offers, for the whole selection: **Copy N items**, **Cut N items**, **Paste**, **Copy paths** and **Copy relative paths** (one path per line), and **Delete N items…**, which asks once and deletes them all. The label says files, folders or items depending on what is selected. A row inside a selected folder is not copied twice: it travels with the folder. Right-clicking a row outside the selection selects just that row. Rename, Duplicate and the other single-item actions work on one row: click it first.
 
 `Cmd+V` pastes into the folder on screen in the flat list. The tree view has no current folder of its own, so it pastes where you last clicked: into that folder, or beside that file (the repo root when nothing is selected).
 

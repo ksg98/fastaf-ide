@@ -5,13 +5,28 @@ import { appLogger } from "../../stores/appLogger";
 import { repositoriesStore } from "../../stores/repositories";
 import { toastsStore } from "../../stores/toasts";
 import { cx } from "../../utils";
-import { onClickKeyDown } from "../../utils/a11y";
 import { branchListsEqual } from "../../utils/branchListsEqual";
 import { writeClipboard } from "../../utils/clipboard";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu/ContextMenu";
+import {
+	IconAlert,
+	IconBranch,
+	IconCheck,
+	IconChevronDown,
+	IconChevronRight,
+	IconCommit,
+	IconGit,
+	IconMore,
+	IconPlus,
+	IconRefresh,
+} from "../icons";
 import { SmartButtonStrip } from "../SmartButtonStrip/SmartButtonStrip";
+import { EmptyState } from "../shared/EmptyState";
+import { SearchField } from "../shared/SearchField";
+import { SectionHeader } from "../shared/SectionHeader";
+import { Dropdown, type DropdownItem } from "../ui/Dropdown";
 import s from "./BranchesTab.module.css";
 import type { BranchDetail } from "./types";
 
@@ -44,54 +59,58 @@ export interface BranchesTabProps {
 	repoPath: string | null;
 }
 
-const CheckIcon = () => (
-	<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z" />
-	</svg>
-);
+// --- Dates -------------------------------------------------------------------------------
 
-const FolderIcon = () => (
-	<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1H1.75z" />
-	</svg>
-);
+/** git's `%(committerdate:iso8601)`: "2026-10-21 17:46:46 -0700". */
+const GIT_ISO8601 = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) ([+-]\d{2})(\d{2})$/;
 
-const PlusIcon = () => (
-	<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M7.25 1.75a.75.75 0 0 1 1.5 0V7.25h5.5a.75.75 0 0 1 0 1.5h-5.5v5.5a.75.75 0 0 1-1.5 0v-5.5h-5.5a.75.75 0 0 1 0-1.5h5.5V1.75z" />
-	</svg>
-);
-
-/** Convert an ISO date string to a short relative label like "3d ago", "2mo ago" */
-function relativeDate(isoDate: string | null): string {
-	if (!isoDate) return "";
-	const then = new Date(isoDate).getTime();
-	if (Number.isNaN(then)) return "";
-	const diffMs = Date.now() - then;
-	const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-	if (diffDays < 1) return "today";
-	if (diffDays < 7) return `${diffDays}d ago`;
-	const diffWeeks = Math.floor(diffDays / 7);
-	if (diffWeeks < 5) return `${diffWeeks}w ago`;
-	const diffMonths = Math.floor(diffDays / 30);
-	if (diffMonths < 12) return `${diffMonths}mo ago`;
-	const diffYears = Math.floor(diffDays / 365);
-	return `${diffYears}y ago`;
+/**
+ * git prints `%(committerdate:iso8601)` as "2026-10-21 17:46:46 -0700" — close to
+ * ISO 8601 but not it, and JavaScriptCore (the app's WKWebView) parses it as
+ * Invalid Date, so every age label and the stale dimming silently vanished.
+ * Rewrite it to "2026-10-21T17:46:46-07:00"; any other string passes through.
+ */
+export function normalizeGitDate(raw: string): string {
+	return raw.trim().replace(GIT_ISO8601, "$1T$2$3:$4");
 }
 
-/** A branch is considered stale if its last commit is older than 30 days */
-function isStale(isoDate: string | null): boolean {
-	if (!isoDate) return false;
-	const then = new Date(isoDate).getTime();
-	if (Number.isNaN(then)) return false;
-	return Date.now() - then > 30 * 24 * 60 * 60 * 1000;
+/** A git date as epoch ms, or null when it is missing or unparseable. */
+export function parseGitDate(raw: string | null | undefined): number | null {
+	if (!raw) return null;
+	const ms = new Date(normalizeGitDate(raw)).getTime();
+	return Number.isNaN(ms) ? null : ms;
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+/** A branch whose last commit is older than this reads as stale (its name dims). */
+const STALE_MS = 30 * DAY_MS;
+
+/** How long ago `ms` was, as a branch row's age: "now", "25m", "3h", "2d", "3w", "4mo", "1y". */
+export function shortAge(ms: number, now: number = Date.now()): string {
+	const diff = Math.max(0, now - ms);
+	if (diff < MINUTE_MS) return "now";
+	if (diff < HOUR_MS) return `${Math.floor(diff / MINUTE_MS)}m`;
+	if (diff < DAY_MS) return `${Math.floor(diff / HOUR_MS)}h`;
+	const days = Math.floor(diff / DAY_MS);
+	if (days < 7) return `${days}d`;
+	if (days < 35) return `${Math.floor(days / 7)}w`;
+	if (days < 365) return `${Math.floor(days / 30)}mo`;
+	return `${Math.floor(days / 365)}y`;
+}
+
+/** True when the last commit (epoch ms) is more than 30 days old. */
+export function isStale(ms: number | null, now: number = Date.now()): boolean {
+	return ms !== null && now - ms > STALE_MS;
 }
 
 /** Build a multi-line tooltip string with full branch commit info */
 function branchTooltip(branch: BranchDetail): string {
 	const parts: string[] = [branch.name];
-	if (branch.last_commit_date) {
-		parts.push(`Last commit: ${new Date(branch.last_commit_date).toLocaleDateString()}`);
+	const when = parseGitDate(branch.last_commit_date);
+	if (when !== null) {
+		parts.push(`Last commit: ${new Date(when).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`);
 	}
 	if (branch.last_commit_author) {
 		parts.push(`Author: ${branch.last_commit_author}`);
@@ -99,7 +118,7 @@ function branchTooltip(branch: BranchDetail): string {
 	if (branch.last_commit_message) {
 		parts.push(`Message: ${branch.last_commit_message}`);
 	}
-	if (branch.is_merged) parts.push("(merged)");
+	if (branch.is_merged) parts.push("Merged");
 	return parts.join("\n");
 }
 
@@ -109,11 +128,17 @@ interface BranchGroup {
 	branches: BranchDetail[];
 }
 
+/** One section's rows: branches without a prefix first, then the prefix groups. */
+interface SectionLayout {
+	ungrouped: BranchDetail[];
+	groups: BranchGroup[];
+}
+
 /**
  * Split a branch list into ungrouped (no "/") and prefix groups.
  * Groups are sorted alphabetically; ungrouped branches come first.
  */
-function groupBranchesByPrefix(branchList: BranchDetail[]): { ungrouped: BranchDetail[]; groups: BranchGroup[] } {
+function groupBranchesByPrefix(branchList: BranchDetail[]): SectionLayout {
 	const ungrouped: BranchDetail[] = [];
 	const groupMap = new Map<string, BranchDetail[]>();
 
@@ -138,6 +163,28 @@ function groupBranchesByPrefix(branchList: BranchDetail[]): { ungrouped: BranchD
 
 	return { ungrouped, groups };
 }
+
+/** The list's three sections, in display order. */
+type Section = "recent" | "local" | "remote";
+
+/** Identity of one visible row. A branch can show twice (Recent and Local), so the
+ *  key carries the section: selection and rename belong to the row, not the name. */
+function rowKey(section: Section, branch: BranchDetail): string {
+	return `${section}:${branch.name}`;
+}
+
+/** Keys that type into a field rather than drive the list. */
+function isTextEntry(target: EventTarget | null): boolean {
+	if (!(target instanceof HTMLElement)) return false;
+	return (
+		target.tagName === "INPUT" ||
+		target.tagName === "SELECT" ||
+		target.tagName === "TEXTAREA" ||
+		target.isContentEditable
+	);
+}
+
+const sameNames = (a: string[], b: string[]) => a.length === b.length && a.every((name, i) => name === b[i]);
 
 // --- Dialog state types ---
 
@@ -164,9 +211,12 @@ interface CreateBranchState {
 export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	const [branches, setBranches] = createSignal<BranchDetail[]>([]);
 	const [loading, setLoading] = createSignal(false);
-	const [recentNames, setRecentNames] = createSignal<string[]>([]);
-	const [recentExpanded, setRecentExpanded] = createSignal(true);
+	const [loadError, setLoadError] = createSignal<string | null>(null);
+	const [recentNames, setRecentNames] = createSignal<string[]>([], { equals: sameNames });
+	/** Short hash of a detached HEAD (no local branch is current), for the context strip. */
+	const [detachedAt, setDetachedAt] = createSignal<string | null>(null);
 	const [search, setSearch] = createSignal("");
+	const [recentExpanded, setRecentExpanded] = createSignal(true);
 	const [localExpanded, setLocalExpanded] = createSignal(true);
 	const [remoteExpanded, setRemoteExpanded] = createSignal(true);
 
@@ -174,16 +224,23 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	const [foldingEnabled, setFoldingEnabled] = createSignal(true);
 	// Set of group keys that are collapsed. Key format: "local:<prefix>" or "remote:<prefix>"
 	const [collapsedGroups, setCollapsedGroups] = createSignal<Set<string>>(new Set());
+	const [optionsOpen, setOptionsOpen] = createSignal(false);
 
-	// Context menu state
+	// Context menu state: the branch and the row it was opened on
 	const ctxMenu = createContextMenu();
-	const [ctxBranch, setCtxBranch] = createSignal<BranchDetail | null>(null);
+	const [ctxTarget, setCtxTarget] = createSignal<{ branch: BranchDetail; key: string } | null>(null);
 
-	// Keyboard navigation
-	const [selectedIndex, setSelectedIndex] = createSignal(-1);
+	// Keyboard / click selection: the key of one row (see rowKey), or null. Starts at
+	// null, so no row can match it by accident (bug: index -1 matched every row the
+	// filter had hidden from the flat list).
+	const [selectedKey, setSelectedKey] = createSignal<string | null>(null);
+	/** The selection was last moved by the keyboard. Only then does it draw its focus
+	 *  ring: a click or a right-click marks the row without one (as in Changes, Log
+	 *  and Stashes). */
+	const [keyboardNav, setKeyboardNav] = createSignal(false);
 
-	// Rename inline state: branch name being renamed, or null when not active
-	const [renamingBranch, setRenamingBranch] = createSignal<string | null>(null);
+	// Rename inline state: the row being renamed and the branch's current name
+	const [renaming, setRenaming] = createSignal<{ key: string; name: string } | null>(null);
 	const [renameValue, setRenameValue] = createSignal("");
 
 	// Create-branch inline form
@@ -202,9 +259,25 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	let searchInputRef: HTMLInputElement | undefined;
 	let renameInputRef: HTMLInputElement | undefined;
 	let createInputRef: HTMLInputElement | undefined;
+	/** Rendered rows by key, so keyboard selection can scroll its row into view. */
+	const rowEls = new Map<string, HTMLElement>();
+
+	/** `git rev-parse --short HEAD`, for a detached HEAD; null when git can't say. */
+	async function readHeadHash(repoPath: string): Promise<string | null> {
+		try {
+			const res = await invoke<GitCommandResult>("run_git_command", {
+				path: repoPath,
+				args: ["rev-parse", "--short", "HEAD"],
+			});
+			return res.success ? res.stdout.trim() || null : null;
+		} catch {
+			return null;
+		}
+	}
 
 	async function fetchBranches(repoPath: string) {
 		if (branches().length === 0) setLoading(true);
+		setLoadError(null);
 		try {
 			const [result, recent] = await Promise.all([
 				invoke<BranchDetail[]>("get_branches_detail", { path: repoPath }),
@@ -213,17 +286,28 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 					return [] as string[];
 				}),
 			]);
+			// No local branch is current: HEAD is detached. Name its commit in the
+			// strip — read before anything renders, so "Detached HEAD" never flashes.
+			const detached = result.length > 0 && !result.some((b) => b.is_current && !b.is_remote);
+			const head = detached ? await readHeadHash(repoPath) : null;
+			// A reply for a repo the tab has since left must not overwrite the new one.
+			if (props.repoPath !== repoPath) return;
 			// Early-bail: skip setBranches when a revision bump produced an identical
 			// list (e.g. staging a file bumps the repo revision but the branches are
 			// unchanged) so Solid doesn't re-reconcile identical rows.
 			if (!branchListsEqual(branches(), result)) setBranches(result);
 			setRecentNames(recent);
+			setDetachedAt(head);
 		} catch (err) {
+			if (props.repoPath !== repoPath) return;
 			appLogger.error("git", "Failed to load branches", err);
 			setBranches([]);
 			setRecentNames([]);
+			setDetachedAt(null);
+			setLoadError(String(err));
 		} finally {
-			setLoading(false);
+			// A stale reply leaves the loading state to the fetch that replaced it.
+			if (props.repoPath === repoPath) setLoading(false);
 		}
 	}
 
@@ -238,7 +322,12 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			() => {
 				const repoPath = props.repoPath;
 				if (repoPath) void fetchBranches(repoPath);
-				else setBranches([]);
+				else {
+					setBranches([]);
+					setLoading(false);
+					setLoadError(null);
+					setDetachedAt(null);
+				}
 			},
 		),
 	);
@@ -248,57 +337,95 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		on(
 			() => props.repoPath,
 			() => {
-				setSelectedIndex(-1);
-				setRenamingBranch(null);
+				setSelectedKey(null);
+				setRenaming(null);
 				setCreating(false);
+				setOptionsOpen(false);
 			},
 		),
 	);
 
+	const query = createMemo(() => search().trim().toLowerCase());
+	const matchesQuery = (b: BranchDetail) => {
+		const q = query();
+		return q === "" || b.name.toLowerCase().includes(q);
+	};
+	/** A section's count: the total, or "shown/total" while the filter is on. */
+	const countLabel = (shown: number, total: number) => (query() ? `${shown}/${total}` : total);
+
 	const localBranches = createMemo(() => branches().filter((b) => !b.is_remote));
+	const remoteBranches = createMemo(() => branches().filter((b) => b.is_remote));
+	const currentBranch = createMemo(() => localBranches().find((b) => b.is_current));
 
 	/** Local branches merged into main and safe to delete (not current, not main). */
 	const mergedBranches = createMemo(() => localBranches().filter((b) => b.is_merged && !b.is_current && !b.is_main));
 
-	/** Recent branches resolved to BranchDetail objects (only local, matching recent reflog names) */
+	/** Recently checked-out local branches, newest first — without the current one,
+	 *  which the context strip already shows. */
 	const recentBranches = createMemo(() => {
 		const names = recentNames();
 		if (names.length === 0) return [];
 		const byName = new Map(localBranches().map((b) => [b.name, b]));
-		return names.map((name) => byName.get(name)).filter((b): b is BranchDetail => b !== undefined);
+		return names.map((name) => byName.get(name)).filter((b): b is BranchDetail => b !== undefined && !b.is_current);
 	});
 
-	const remoteBranches = createMemo(() => branches().filter((b) => b.is_remote));
+	// The filter applies to every section; a section with no match hides.
+	const filteredRecent = createMemo(() => recentBranches().filter(matchesQuery));
+	const filteredLocal = createMemo(() => localBranches().filter(matchesQuery));
+	const filteredRemote = createMemo(() => remoteBranches().filter(matchesQuery));
 
-	/** Filter branches by search query, but always keep the current branch visible in local */
-	const filteredLocal = createMemo(() => {
-		const q = search().trim().toLowerCase();
-		if (!q) return localBranches();
-		return localBranches().filter((b) => b.is_current || b.name.toLowerCase().includes(q));
+	const layoutOf = (list: BranchDetail[]): SectionLayout =>
+		foldingEnabled() ? groupBranchesByPrefix(list) : { ungrouped: list, groups: [] };
+	const localLayout = createMemo(() => layoutOf(filteredLocal()));
+	const remoteLayout = createMemo(() => layoutOf(filteredRemote()));
+
+	/** Branches are loaded and listable: the strip, the toolbar and the form show. */
+	const hasBranches = () => !loading() && !loadError() && branches().length > 0;
+
+	const showRecent = () => filteredRecent().length > 0;
+	const showLocal = () => (query() ? filteredLocal().length > 0 : localBranches().length > 0);
+	const showRemote = () => filteredRemote().length > 0;
+	const noMatches = () => query() !== "" && !showRecent() && !showLocal() && !showRemote();
+
+	const isGroupOpen = (section: Section, prefix: string) => !collapsedGroups().has(`${section}:${prefix}`);
+
+	/** Every row the list shows, in display order: what ↑ / ↓ walk through. Built from
+	 *  the same layouts the list renders, so the keyboard order is the visual order
+	 *  and rows in collapsed sections or groups are skipped. */
+	const visibleRows = createMemo((): string[] => {
+		const keys: string[] = [];
+		const addLayout = (section: Section, layout: SectionLayout) => {
+			for (const b of layout.ungrouped) keys.push(rowKey(section, b));
+			for (const g of layout.groups) {
+				if (!isGroupOpen(section, g.prefix)) continue;
+				for (const b of g.branches) keys.push(rowKey(section, b));
+			}
+		};
+		if (showRecent() && recentExpanded()) for (const b of filteredRecent()) keys.push(rowKey("recent", b));
+		if (showLocal() && localExpanded()) addLayout("local", localLayout());
+		if (showRemote() && remoteExpanded()) addLayout("remote", remoteLayout());
+		return keys;
 	});
 
-	const filteredRemote = createMemo(() => {
-		const q = search().trim().toLowerCase();
-		if (!q) return remoteBranches();
-		return remoteBranches().filter((b) => b.name.toLowerCase().includes(q));
-	});
+	function registerRow(key: string, el: HTMLElement) {
+		rowEls.set(key, el);
+		onCleanup(() => {
+			if (rowEls.get(key) === el) rowEls.delete(key);
+		});
+	}
 
-	/** Flat list of all visible branches for keyboard navigation */
-	const flatVisible = createMemo((): BranchDetail[] => {
-		const items: BranchDetail[] = [];
-		if (localExpanded()) items.push(...filteredLocal());
-		if (remoteExpanded()) items.push(...filteredRemote());
-		return items;
-	});
+	/** Select a row from the keyboard and keep it in view. */
+	function selectRow(key: string) {
+		setSelectedKey(key);
+		setKeyboardNav(true);
+		rowEls.get(key)?.scrollIntoView?.({ block: "nearest" });
+	}
 
-	const currentBranch = createMemo(() => branches().find((b) => b.is_current && !b.is_remote));
-
-	/** Lookup map for O(1) flat index resolution by branch identity */
-	const flatIndexMap = createMemo(() => {
-		const map = new Map<string, number>();
-		flatVisible().forEach((b, i) => map.set(`${b.name}:${b.is_remote}`, i));
-		return map;
-	});
+	/** Select a row with the pointer: marked, but no keyboard ring. */
+	function pickRow(key: string) {
+		setSelectedKey(key);
+		setKeyboardNav(false);
+	}
 
 	// --- Checkout ---
 
@@ -355,6 +482,11 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	// --- Create Branch ---
 
 	function startCreate() {
+		// Already open: put the caret back in the name instead of wiping it.
+		if (creating()) {
+			createInputRef?.focus();
+			return;
+		}
 		setCreating(true);
 		setCreateState({ name: "", checkout: true, startPoint: null });
 		// Fetch base ref options for the "from" dropdown
@@ -373,6 +505,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		const name = state.name.trim();
 		if (!name) {
 			setCreating(false);
+			containerRef?.focus();
 			return;
 		}
 		try {
@@ -385,6 +518,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			// Only close the form once the branch actually exists — on failure the
 			// form stays open so the user can correct the name and retry.
 			setCreating(false);
+			containerRef?.focus();
 			repositoriesStore.bumpGitRevision(props.repoPath);
 			appLogger.info("git", `Created branch: ${name}`);
 		} catch (err) {
@@ -397,6 +531,20 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		setCreating(false);
 		setCreateState({ name: "", checkout: true, startPoint: null });
 		setCreateBaseRefs([]);
+		containerRef?.focus();
+	}
+
+	/** Enter in the name creates; Esc anywhere in the form cancels. */
+	function handleCreateKeyDown(e: KeyboardEvent) {
+		if (e.key === "Escape") {
+			e.preventDefault();
+			cancelCreate();
+			return;
+		}
+		if (e.key === "Enter" && e.target === createInputRef) {
+			e.preventDefault();
+			void doCreateBranch();
+		}
 	}
 
 	// --- Delete Branch ---
@@ -437,7 +585,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		if (await deleteBranchByName(branch.name, force)) {
 			appLogger.info("git", `Deleted branch: ${branch.name}`);
 			toastsStore.add("Branch deleted", `Removed "${branch.name}"`, "info");
-			setSelectedIndex(-1);
+			setSelectedKey(null);
 		}
 	}
 
@@ -458,7 +606,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			// is_merged flag can never cause data loss.
 			if (await deleteBranchByName(branch.name, false)) deleted++;
 		}
-		setSelectedIndex(-1);
+		setSelectedKey(null);
 		appLogger.info("git", `Deleted ${deleted}/${targets.length} merged branches`);
 		if (deleted > 0) {
 			toastsStore.add(
@@ -479,18 +627,19 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 
 	// --- Rename Branch ---
 
-	function startRename(branch: BranchDetail) {
-		setRenamingBranch(branch.name);
+	function startRename(branch: BranchDetail, key: string) {
+		setRenaming({ key, name: branch.name });
 		setRenameValue(branch.name);
 		requestAnimationFrame(() => renameInputRef?.select());
 	}
 
 	async function doRenameBranch() {
 		if (!props.repoPath) return;
-		const oldName = renamingBranch();
+		const oldName = renaming()?.name;
 		if (!oldName) return;
 		const newName = renameValue().trim();
-		setRenamingBranch(null);
+		setRenaming(null);
+		containerRef?.focus();
 		if (!newName || newName === oldName) return;
 		try {
 			await invoke("rename_branch", { path: props.repoPath, oldName, newName });
@@ -502,8 +651,19 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 	}
 
 	function cancelRename() {
-		setRenamingBranch(null);
+		setRenaming(null);
 		setRenameValue("");
+		containerRef?.focus();
+	}
+
+	function handleRenameKeyDown(e: KeyboardEvent) {
+		if (e.key === "Enter") {
+			e.preventDefault();
+			void doRenameBranch();
+		} else if (e.key === "Escape") {
+			e.preventDefault();
+			cancelRename();
+		}
 	}
 
 	// --- Merge ---
@@ -730,18 +890,21 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 
 	// --- Context menu ---
 
-	function openContextMenu(e: MouseEvent, branch: BranchDetail) {
-		setCtxBranch(branch);
+	function openContextMenu(e: MouseEvent, branch: BranchDetail, key: string) {
+		setCtxTarget({ branch, key });
+		// The row the menu acts on stays marked while the menu is open.
+		pickRow(key);
 		ctxMenu.open(e);
 	}
 
-	function buildContextMenuItems(branch: BranchDetail): ContextMenuItem[] {
+	function buildContextMenuItems(target: { branch: BranchDetail; key: string }): ContextMenuItem[] {
+		const { branch, key } = target;
 		const cur = currentBranch();
 		const isCurrent = branch.is_current;
 		const sep: ContextMenuItem = { separator: true, label: "", action: () => undefined };
 
 		const copyName: ContextMenuItem = {
-			label: "Copy Name",
+			label: "Copy name",
 			action: () => void writeClipboard(branch.name),
 		};
 
@@ -764,7 +927,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 				{ label: "Fetch", shortcut: "f", action: () => void doFetch(branch) },
 				{ label: "Update from base (rebase)", action: () => void doUpdateFromBase(branch) },
 				sep,
-				{ label: "Rename", shortcut: "\u21E7R", action: () => startRename(branch) },
+				{ label: "Rename", shortcut: "\u21E7R", action: () => startRename(branch, key) },
 				sep,
 				copyName,
 			];
@@ -784,7 +947,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 
 		if (!branch.is_main) {
 			items.push(sep);
-			items.push({ label: "Rename", shortcut: "\u21E7R", action: () => startRename(branch) });
+			items.push({ label: "Rename", shortcut: "\u21E7R", action: () => startRename(branch, key) });
 			items.push({ label: "Delete", shortcut: "d", action: () => startDelete(branch) });
 		}
 
@@ -794,50 +957,58 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		return items;
 	}
 
+	// --- Branch options menu ---
+
+	function optionItems(): DropdownItem[] {
+		const merged = mergedBranches().length;
+		return [
+			{
+				id: "group",
+				label: "Group by prefix",
+				icon: <span class={s.menuMark}>{foldingEnabled() ? <IconCheck size={14} /> : null}</span>,
+			},
+			{ id: "divider", label: "", divider: true },
+			{
+				id: "delete-merged",
+				label: merged > 0 ? `Delete ${merged} merged branch${merged === 1 ? "" : "es"}…` : "Delete merged branches…",
+				disabled: merged === 0,
+				icon: <span class={s.menuMark} />,
+			},
+		];
+	}
+
+	function handleOption(id: string) {
+		setOptionsOpen(false);
+		if (id === "group") setFoldingEnabled((v) => !v);
+		else if (id === "delete-merged") startDeleteMerged();
+	}
+
 	// --- Keyboard navigation ---
 
 	function handleKeyDown(e: KeyboardEvent) {
-		// Don't intercept when rename input or create input is focused
-		const target = e.target as HTMLElement;
-		if (target.tagName === "INPUT" && target !== containerRef) {
-			// Handle rename input
-			if (renamingBranch() !== null) {
-				if (e.key === "Enter") {
-					e.preventDefault();
-					doRenameBranch();
-				}
-				if (e.key === "Escape") {
-					e.preventDefault();
-					cancelRename();
-				}
-			}
-			// Handle create input
-			if (creating()) {
-				if (e.key === "Enter") {
-					e.preventDefault();
-					doCreateBranch();
-				}
-				if (e.key === "Escape") {
-					e.preventDefault();
-					cancelCreate();
-				}
-			}
+		// The filter, the create form and the rename field handle their own keys; a
+		// key one of them already acted on (Esc that cancelled the form) stops here.
+		if (e.defaultPrevented || isTextEntry(e.target)) return;
+
+		if (e.key === "Escape" && optionsOpen()) {
+			e.preventDefault();
+			setOptionsOpen(false);
 			return;
 		}
 
-		const flat = flatVisible();
-		const idx = selectedIndex();
+		const rows = visibleRows();
+		const idx = rows.indexOf(selectedKey() ?? "");
 
 		if (e.key === "ArrowDown") {
 			e.preventDefault();
-			if (flat.length === 0) return;
-			setSelectedIndex(idx < flat.length - 1 ? idx + 1 : 0);
+			if (rows.length === 0) return;
+			selectRow(rows[idx < rows.length - 1 ? idx + 1 : 0]);
 			return;
 		}
 		if (e.key === "ArrowUp") {
 			e.preventDefault();
-			if (flat.length === 0) return;
-			setSelectedIndex(idx <= 0 ? flat.length - 1 : idx - 1);
+			if (rows.length === 0) return;
+			selectRow(rows[idx <= 0 ? rows.length - 1 : idx - 1]);
 			return;
 		}
 		if (e.key === "Escape") {
@@ -846,7 +1017,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 				setSearch("");
 				return;
 			}
-			setSelectedIndex(-1);
+			setSelectedKey(null);
 			return;
 		}
 		if (e.key === "/") {
@@ -854,8 +1025,24 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			searchInputRef?.focus();
 			return;
 		}
-		// Branch actions are mouse-first (context menu / row dblclick / New button).
+		// Branch actions are mouse-first (context menu / New button).
 		// Only arrow nav + "/" + Escape are handled here — no letter-key shortcuts.
+	}
+
+	/** The filter's own keys: ↓ hands over to the list, Esc on an empty field leaves it.
+	 *  (Esc on a non-empty field clears it — SearchField does that itself.) */
+	function handleSearchKeyDown(e: KeyboardEvent) {
+		if (e.key === "ArrowDown") {
+			e.preventDefault();
+			const first = visibleRows()[0];
+			if (first) selectRow(first);
+			containerRef?.focus();
+			return;
+		}
+		if (e.key === "Escape" && search() === "") {
+			e.preventDefault();
+			containerRef?.focus();
+		}
 	}
 
 	// Focus container ONCE when branches first load so keyboard nav works
@@ -872,11 +1059,6 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		}
 	});
 
-	// Helper: get the global flat index for a branch
-	function getFlatIndex(branch: BranchDetail): number {
-		return flatIndexMap().get(`${branch.name}:${branch.is_remote}`) ?? -1;
-	}
-
 	// --- Dialog helpers ---
 
 	const dialogData = createMemo(() => {
@@ -884,9 +1066,11 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		if (!d) return null;
 		if (d.type === "delete") {
 			const { branch } = d;
-			const info = branch.is_merged ? "This branch is merged into main." : "This branch has unmerged commits.";
+			const info = branch.is_merged
+				? "This branch is merged into main."
+				: "This branch has unmerged commits. Delete refuses to remove it; Force delete discards them.";
 			return {
-				title: `Delete branch "${branch.name}"?`,
+				title: `Delete branch “${branch.name}”?`,
 				message: info,
 				branch,
 			};
@@ -895,7 +1079,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			const { branch, currentBranch: cur } = d;
 			return {
 				title: `Merge into ${cur}`,
-				message: `Merge "${branch.name}" into "${cur}"?`,
+				message: `Merge “${branch.name}” into “${cur}”?`,
 				branch,
 			};
 		}
@@ -903,7 +1087,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 			const { branch, currentBranch: cur } = d;
 			return {
 				title: `Rebase ${cur}`,
-				message: `Rebase current branch "${cur}" onto "${branch.name}"?`,
+				message: `Rebase the current branch “${cur}” onto “${branch.name}”?`,
 				branch,
 			};
 		}
@@ -922,114 +1106,315 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 
 	// --- Render helpers ---
 
-	function renderBranchName(branch: BranchDetail) {
-		const isRenaming = renamingBranch() === branch.name;
-		if (isRenaming) {
-			return (
-				<input
-					ref={renameInputRef}
-					class={s.inlineInput}
-					value={renameValue()}
-					onInput={(e) => setRenameValue(e.currentTarget.value)}
-					onClick={(e) => e.stopPropagation()}
-					onDblClick={(e) => e.stopPropagation()}
-					// keydown handled at container level
+	/** The current branch (or a detached HEAD), its upstream and sync state, and Create PR. */
+	const renderContext = () => (
+		<div class={s.context}>
+			<Show
+				when={currentBranch()}
+				fallback={
+					<>
+						<span class={s.contextIcon}>
+							<IconCommit size={14} />
+						</span>
+						<span class={s.contextLabel}>
+							<span class={s.contextName}>
+								<Show when={detachedAt()} fallback="Detached HEAD">
+									{(hash) => (
+										<>
+											Detached at <span class={s.contextHash}>{hash()}</span>
+										</>
+									)}
+								</Show>
+							</span>
+						</span>
+					</>
+				}
+			>
+				{(cur) => (
+					<>
+						<span class={s.contextIcon}>
+							<IconBranch size={14} />
+						</span>
+						<span class={s.contextLabel}>
+							<span class={s.contextName} title={cur().name}>
+								{cur().name}
+							</span>
+							<Show when={cur().upstream}>
+								{(upstream) => (
+									<span class={s.contextUpstream} title={`Tracking ${upstream()}`}>
+										{`\u2002\u2192 ${upstream()}`}
+									</span>
+								)}
+							</Show>
+							<Show when={(cur().ahead ?? 0) > 0 || (cur().behind ?? 0) > 0}>
+								<span class={s.contextSync}>
+									<Show when={(cur().ahead ?? 0) > 0}>
+										<span class={s.ahead} title={`${cur().ahead} ahead of ${cur().upstream ?? "upstream"}`}>
+											&#x2191;{cur().ahead}
+										</span>
+									</Show>
+									<Show when={(cur().behind ?? 0) > 0}>
+										<span class={s.behind} title={`${cur().behind} behind ${cur().upstream ?? "upstream"}`}>
+											&#x2193;{cur().behind}
+										</span>
+									</Show>
+								</span>
+							</Show>
+						</span>
+					</>
+				)}
+			</Show>
+			<span class={s.contextAction}>
+				<SmartButtonStrip
+					appearance="chip"
+					placement="git-branches"
+					repoPath={props.repoPath ?? ""}
+					defaultPromptId="smart-create-pr"
+					onError={(msg) => {
+						if (msg) toastsStore.add("Couldn't run the prompt", msg, "error");
+					}}
 				/>
-			);
-		}
-		return (
-			<span class={cx(s.branchName, branch.is_current && s.branchNameBold, branch.is_current && s.branchCurrent)}>
-				{branch.name}
 			</span>
-		);
-	}
+		</div>
+	);
 
-	function renderBranchRow(branch: BranchDetail, isLocal: boolean, indented = false) {
-		const flatIndex = () => getFlatIndex(branch);
-		const isSelected = () => selectedIndex() === flatIndex();
+	/** The filter, New branch and the options menu. */
+	const renderToolbar = () => (
+		<div class={s.toolbar}>
+			<SearchField
+				value={search()}
+				onInput={(value) => setSearch(value)}
+				placeholder="Filter branches"
+				title="Filter branches (press / from the list)"
+				ref={(el) => {
+					searchInputRef = el;
+				}}
+				class={s.filterField}
+				onKeyDown={handleSearchKeyDown}
+				data-focus-target="git-branches-search"
+				data-repo-path={props.repoPath ?? ""}
+			/>
+			<button
+				type="button"
+				class={cx(s.iconBtn, creating() && s.iconBtnOn)}
+				title="New branch"
+				aria-label="New branch"
+				aria-expanded={creating()}
+				onClick={startCreate}
+			>
+				<IconPlus size={16} />
+			</button>
+			<span class={s.optionsAnchor}>
+				<button
+					type="button"
+					class={cx(s.iconBtn, optionsOpen() && s.iconBtnOn)}
+					title="Branch options"
+					aria-label="Branch options"
+					aria-haspopup="menu"
+					aria-expanded={optionsOpen()}
+					onClick={() => setOptionsOpen((v) => !v)}
+				>
+					<IconMore size={16} />
+				</button>
+				<Dropdown
+					items={optionItems()}
+					visible={optionsOpen()}
+					onSelect={handleOption}
+					onClose={() => setOptionsOpen(false)}
+				/>
+			</span>
+		</div>
+	);
+
+	/** New branch: the name on its own line (bug: the start-point select squeezed it to
+	 *  ~16px), then where it starts, whether to switch to it, Cancel and Create. */
+	const renderCreateForm = () => {
+		const refsOf = (kind: string) => createBaseRefs().filter((r) => r.kind === kind);
+		const name = () => createState().name.trim();
+		return (
+			<div class={s.createForm} onKeyDown={handleCreateKeyDown}>
+				<input
+					ref={createInputRef}
+					class={s.inlineInput}
+					placeholder="New branch name"
+					aria-label="New branch name"
+					value={createState().name}
+					onInput={(e) => setCreateState((p) => ({ ...p, name: e.currentTarget.value }))}
+					autocomplete="off"
+					autocorrect="off"
+					spellcheck={false}
+				/>
+				<div class={s.createRow}>
+					<label class={s.baseChip} title="Start point">
+						<span class={s.createFrom}>from</span>
+						<span class={s.baseLabel}>{createState().startPoint ?? "HEAD"}</span>
+						<IconChevronDown size={14} class={s.baseChevron} />
+						<select
+							class={s.baseSelect}
+							aria-label="Start point"
+							value={createState().startPoint ?? ""}
+							onChange={(e) => setCreateState((p) => ({ ...p, startPoint: e.currentTarget.value || null }))}
+						>
+							<option value="">HEAD</option>
+							<Show when={refsOf("local").length > 0}>
+								<optgroup label="Local">
+									<For each={refsOf("local")}>
+										{(ref) => (
+											<option value={ref.name}>
+												{ref.name}
+												{ref.is_default ? " (default)" : ""}
+											</option>
+										)}
+									</For>
+								</optgroup>
+							</Show>
+							<Show when={refsOf("remote").length > 0}>
+								<optgroup label="Remote">
+									<For each={refsOf("remote")}>{(ref) => <option value={ref.name}>{ref.name}</option>}</For>
+								</optgroup>
+							</Show>
+						</select>
+					</label>
+					<button
+						type="button"
+						class={cx(s.toggleChip, createState().checkout && s.toggleChipOn)}
+						aria-pressed={createState().checkout}
+						title={createState().checkout ? "Stay on the current branch" : "Switch to the new branch after creating it"}
+						onClick={() => setCreateState((p) => ({ ...p, checkout: !p.checkout }))}
+					>
+						<Show when={createState().checkout}>
+							<IconCheck size={14} />
+						</Show>
+						Check out
+					</button>
+					<span class={s.createActions}>
+						<button type="button" class={s.textBtn} onClick={cancelCreate}>
+							Cancel
+						</button>
+						<button
+							type="button"
+							class={s.primaryPill}
+							aria-disabled={name() === "" || undefined}
+							title={name() === "" ? "Type a name for the branch" : `Create ${name()}`}
+							onClick={() => {
+								if (name() !== "") void doCreateBranch();
+							}}
+						>
+							Create
+						</button>
+					</span>
+				</div>
+			</div>
+		);
+	};
+
+	function renderBranchRow(branch: BranchDetail, section: Section, prefix?: string) {
+		const key = rowKey(section, branch);
+		const isLocal = !branch.is_remote;
+		const when = parseGitDate(branch.last_commit_date);
+		// Inside a prefix group the prefix is the group's label; the row shows the rest.
+		const label = prefix ? branch.name.slice(prefix.length) : branch.name;
+		const isRenaming = () => renaming()?.key === key;
+		// While renaming, the field is the row's state: no tint behind a bordered box.
+		const isSelected = () => selectedKey() === key && !isRenaming();
 		return (
 			<div
+				ref={(el) => registerRow(key, el)}
 				class={cx(
 					s.branchRow,
-					indented && s.branchRowIndented,
-					isStale(branch.last_commit_date) && s.stale,
-					isSelected() && s.selected,
+					prefix !== undefined && s.branchRowNested,
+					isStale(when) && s.branchRowStale,
+					isSelected() && s.branchRowSelected,
+					isSelected() && keyboardNav() && s.branchRowFocused,
 				)}
 				title={branchTooltip(branch)}
 				onClick={() => {
-					setSelectedIndex(flatIndex());
+					pickRow(key);
 					containerRef?.focus();
 				}}
-				onContextMenu={(e) => openContextMenu(e, branch)}
+				onContextMenu={(e) => openContextMenu(e, branch, key)}
 			>
-				<Show when={isLocal && branch.is_current} fallback={<span class={s.branchIconPlaceholder} />}>
-					<span class={s.branchCurrentIcon}>
-						<CheckIcon />
-					</span>
-				</Show>
-				<Show when={isLocal} fallback={<span class={s.branchName}>{branch.name}</span>}>
-					{renderBranchName(branch)}
+				<span class={s.branchSlot}>
+					<Show when={isLocal && branch.is_current}>
+						<IconCheck size={14} />
+					</Show>
+				</span>
+				<Show
+					when={isLocal && isRenaming()}
+					fallback={<span class={cx(s.branchName, isLocal && branch.is_current && s.branchNameCurrent)}>{label}</span>}
+				>
+					<input
+						ref={renameInputRef}
+						class={cx(s.inlineInput, s.renameInput)}
+						aria-label={`Rename ${branch.name}`}
+						value={renameValue()}
+						onInput={(e) => setRenameValue(e.currentTarget.value)}
+						onKeyDown={handleRenameKeyDown}
+						onClick={(e) => e.stopPropagation()}
+						onDblClick={(e) => e.stopPropagation()}
+						autocomplete="off"
+						autocorrect="off"
+						spellcheck={false}
+					/>
 				</Show>
 				<span class={s.branchMeta}>
 					<Show when={isLocal && (branch.ahead ?? 0) > 0}>
-						<span class={s.ahead}>&#x2191;{branch.ahead}</span>
+						<span class={s.ahead} title={`${branch.ahead} ahead of ${branch.upstream ?? "upstream"}`}>
+							&#x2191;{branch.ahead}
+						</span>
 					</Show>
 					<Show when={isLocal && (branch.behind ?? 0) > 0}>
-						<span class={s.behind}>&#x2193;{branch.behind}</span>
+						<span class={s.behind} title={`${branch.behind} behind ${branch.upstream ?? "upstream"}`}>
+							&#x2193;{branch.behind}
+						</span>
 					</Show>
 					<Show when={isLocal && (branch.base_behind ?? 0) > 0}>
-						<span class={s.baseBehind} title={`${branch.base_behind} behind ${branch.base_branch ?? "base"}`}>
+						<span class={s.baseBehind} title={`${branch.base_behind} behind ${branch.base_branch ?? "main"}`}>
 							&#x21E3;{branch.base_behind}
 						</span>
 					</Show>
 					<Show when={branch.is_merged}>
-						<span class={s.merged}>merged</span>
+						<span class={s.merged}>Merged</span>
 					</Show>
-					<Show when={branch.last_commit_date}>
-						<span class={s.metaDate}>{relativeDate(branch.last_commit_date)}</span>
+					<Show when={when !== null}>
+						<span class={s.age}>{shortAge(when as number)}</span>
 					</Show>
 				</span>
 			</div>
 		);
 	}
 
-	/** Render a grouped or flat list of branch rows for a section */
-	function renderBranchList(
-		branchList: BranchDetail[],
-		section: "local" | "remote",
-		renderRow: (b: BranchDetail, indented?: boolean) => ReturnType<Component>,
-	) {
-		if (!foldingEnabled()) {
-			return <For each={branchList}>{(b) => renderRow(b)}</For>;
-		}
-
-		const { ungrouped, groups } = groupBranchesByPrefix(branchList);
+	/** A section's rows: branches without a prefix, then each prefix group. */
+	function renderLayout(section: "local" | "remote", layout: () => SectionLayout) {
 		return (
 			<>
-				<For each={ungrouped}>{(b) => renderRow(b)}</For>
-				<For each={groups}>
-					{(group) => {
-						const key = `${section}:${group.prefix}`;
-						const isCollapsed = () => collapsedGroups().has(key);
+				<For each={layout().ungrouped}>{(b) => renderBranchRow(b, section)}</For>
+				<For each={layout().groups.map((g) => g.prefix)}>
+					{(prefix) => {
+						const key = `${section}:${prefix}`;
+						const group = () => layout().groups.find((g) => g.prefix === prefix);
+						const open = () => isGroupOpen(section, prefix);
 						return (
 							<>
-								<div
+								{/* tabIndex 0: WebKit leaves a plain <button> out of the Tab order
+								    unless "keyboard navigation" is on in macOS; the old headers
+								    (tabIndex 0 divs) were reachable, so these stay reachable. */}
+								<button
+									type="button"
 									class={s.groupHeader}
-									role="button"
 									tabIndex={0}
+									aria-expanded={open()}
 									onClick={() => toggleGroup(key)}
-									onKeyDown={onClickKeyDown(() => toggleGroup(key))}
 								>
-									<span class={cx(s.chevron, isCollapsed() && s.chevronCollapsed)}>&#x25BC;</span>
-									<span class={s.groupIcon}>
-										<FolderIcon />
+									<span class={s.groupSlot}>
+										<IconChevronRight size={14} class={cx(s.groupChevron, open() && s.groupChevronOpen)} />
 									</span>
-									<span class={s.groupPrefix}>{group.prefix}</span>
-									<span class={s.sectionCount}>{group.branches.length}</span>
-								</div>
-								<Show when={!isCollapsed()}>
+									<span class={s.groupPrefix}>{prefix}</span>
+									<span class={s.groupCount}>{group()?.branches.length ?? 0}</span>
+								</button>
+								<Show when={open()}>
 									<div class={s.groupChildren}>
-										<For each={group.branches}>{(b) => renderRow(b, true)}</For>
+										<For each={group()?.branches ?? []}>{(b) => renderBranchRow(b, section, prefix)}</For>
 									</div>
 								</Show>
 							</>
@@ -1040,6 +1425,77 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 		);
 	}
 
+	const renderList = () => (
+		<Show
+			when={!loadError()}
+			fallback={
+				<EmptyState
+					tone="error"
+					icon={IconAlert}
+					title="Couldn't load branches"
+					description={loadError() ?? ""}
+					action={
+						<button
+							type="button"
+							class={s.emptyAction}
+							onClick={() => {
+								if (props.repoPath) void fetchBranches(props.repoPath);
+							}}
+						>
+							<IconRefresh size={14} />
+							Retry
+						</button>
+					}
+				/>
+			}
+		>
+			<Show when={!loading()} fallback={<EmptyState loading title="Loading branches…" />}>
+				<Show when={branches().length > 0} fallback={<EmptyState icon={IconBranch} title="No branches" />}>
+					<Show
+						when={!noMatches()}
+						fallback={<EmptyState size="compact" title={`No branches match “${search().trim()}”`} />}
+					>
+						<Show when={showRecent()}>
+							<div class={s.section} role="group" aria-label="Recent branches">
+								<SectionHeader
+									label="Recent"
+									count={countLabel(filteredRecent().length, recentBranches().length)}
+									open={recentExpanded()}
+									onToggle={() => setRecentExpanded((v) => !v)}
+								/>
+								<Show when={recentExpanded()}>
+									<For each={filteredRecent()}>{(b) => renderBranchRow(b, "recent")}</For>
+								</Show>
+							</div>
+						</Show>
+						<Show when={showLocal()}>
+							<div class={s.section} role="group" aria-label="Local branches">
+								<SectionHeader
+									label="Local"
+									count={countLabel(filteredLocal().length, localBranches().length)}
+									open={localExpanded()}
+									onToggle={() => setLocalExpanded((v) => !v)}
+								/>
+								<Show when={localExpanded()}>{renderLayout("local", localLayout)}</Show>
+							</div>
+						</Show>
+						<Show when={showRemote()}>
+							<div class={s.section} role="group" aria-label="Remote branches">
+								<SectionHeader
+									label="Remote"
+									count={countLabel(filteredRemote().length, remoteBranches().length)}
+									open={remoteExpanded()}
+									onToggle={() => setRemoteExpanded((v) => !v)}
+								/>
+								<Show when={remoteExpanded()}>{renderLayout("remote", remoteLayout)}</Show>
+							</div>
+						</Show>
+					</Show>
+				</Show>
+			</Show>
+		</Show>
+	);
+
 	// Cleanup on unmount
 	onCleanup(() => {
 		setDialog(null);
@@ -1048,228 +1504,51 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 
 	return (
 		<div ref={containerRef} class={s.container} tabIndex={-1} onKeyDown={handleKeyDown}>
-			<div class={s.searchBar}>
-				<input
-					ref={searchInputRef}
-					data-focus-target="git-branches-search"
-					data-repo-path={props.repoPath ?? ""}
-					class={s.searchInput}
-					type="text"
-					placeholder="Filter branches... (/ to focus)"
-					value={search()}
-					onInput={(e) => setSearch(e.currentTarget.value)}
-					autocomplete="off"
-					autocorrect="off"
-					spellcheck={false}
-					onKeyDown={(e) => {
-						if (e.key === "Escape") {
-							e.preventDefault();
-							setSearch("");
-							containerRef?.focus();
-						}
-					}}
-				/>
-				<button class={s.foldToggle} title="New branch" onClick={() => startCreate()}>
-					<PlusIcon />
-				</button>
-				<button
-					class={cx(s.foldToggle, foldingEnabled() && s.foldToggleActive)}
-					title={foldingEnabled() ? "Disable prefix grouping" : "Enable prefix grouping"}
-					onClick={() => setFoldingEnabled((v) => !v)}
-				>
-					<FolderIcon />
-				</button>
-				<Show when={mergedBranches().length > 0}>
-					<button
-						class={s.foldToggle}
-						style={{ position: "relative" }}
-						title={`Delete ${mergedBranches().length} merged branch${mergedBranches().length === 1 ? "" : "es"}`}
-						onClick={() => startDeleteMerged()}
-					>
-						{/* broom / cleanup */}
-						<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-							<path
-								d="M9.5 1.5 6 5M2 14l3.2-3.2M5.2 10.8 8 8M5.2 10.8 8.5 14M8 8l3-3 2 2-3 3M8 8l2.5 2.5"
-								stroke="currentColor"
-								stroke-width="1.3"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							/>
-						</svg>
-						<span class={s.mergedBadge}>{mergedBranches().length}</span>
-					</button>
-				</Show>
-			</div>
-
-			{/* Create branch inline form */}
-			<Show when={creating()}>
-				<div class={s.createForm}>
-					<input
-						ref={createInputRef}
-						class={s.inlineInput}
-						placeholder="New branch name..."
-						value={createState().name}
-						onInput={(e) => setCreateState((p) => ({ ...p, name: e.currentTarget.value }))}
+			<Show
+				when={props.repoPath}
+				fallback={
+					<EmptyState
+						icon={IconGit}
+						title="No repository"
+						description="Open a repository in the sidebar to see its branches."
 					/>
-					<Show when={createBaseRefs().length > 0}>
-						<select
-							class={s.fromSelect}
-							value={createState().startPoint ?? ""}
-							onChange={(e) => setCreateState((p) => ({ ...p, startPoint: e.currentTarget.value || null }))}
-						>
-							<option value="">HEAD</option>
-							<optgroup label="Local">
-								<For each={createBaseRefs().filter((r) => r.kind === "local")}>
-									{(ref) => (
-										<option value={ref.name}>
-											{ref.name}
-											{ref.is_default ? " (default)" : ""}
-										</option>
-									)}
-								</For>
-							</optgroup>
-							<Show when={createBaseRefs().some((r) => r.kind === "remote")}>
-								<optgroup label="Remote">
-									<For each={createBaseRefs().filter((r) => r.kind === "remote")}>
-										{(ref) => <option value={ref.name}>{ref.name}</option>}
-									</For>
-								</optgroup>
-							</Show>
-						</select>
-					</Show>
-					<label class={s.createCheckboxLabel}>
-						<input
-							type="checkbox"
-							checked={createState().checkout}
-							onChange={(e) => setCreateState((p) => ({ ...p, checkout: e.currentTarget.checked }))}
-						/>
-						Checkout
-					</label>
-					<button class={s.createConfirmBtn} onClick={doCreateBranch}>
-						Create
-					</button>
-					<button class={s.createCancelBtn} onClick={cancelCreate}>
-						Cancel
-					</button>
-				</div>
-			</Show>
-
-			<Show when={props.repoPath}>
-				<div class={s.smartActions}>
-					<SmartButtonStrip placement="git-branches" repoPath={props.repoPath!} defaultPromptId="smart-create-pr" />
-				</div>
-			</Show>
-
-			<Show when={!loading()} fallback={<div class={s.empty}>Loading branches...</div>}>
-				<Show when={branches().length > 0} fallback={<div class={s.empty}>No branches</div>}>
-					{/* Recent section */}
-					<Show when={recentBranches().length > 0}>
-						<div
-							class={s.sectionHeader}
-							role="button"
-							tabIndex={0}
-							onClick={() => setRecentExpanded((v) => !v)}
-							onKeyDown={onClickKeyDown(() => setRecentExpanded((v) => !v))}
-						>
-							<span class={cx(s.chevron, !recentExpanded() && s.chevronCollapsed)}>&#x25BC;</span>
-							Recent
-							<span class={s.sectionCount}>{recentBranches().length}</span>
-						</div>
-						<Show when={recentExpanded()}>
-							<For each={recentBranches()}>{(branch) => renderBranchRow(branch, true)}</For>
-						</Show>
-					</Show>
-
-					{/* Local section */}
-					<div
-						class={s.sectionHeader}
-						role="button"
-						tabIndex={0}
-						onClick={() => setLocalExpanded((v) => !v)}
-						onKeyDown={onClickKeyDown(() => setLocalExpanded((v) => !v))}
-					>
-						<span class={cx(s.chevron, !localExpanded() && s.chevronCollapsed)}>&#x25BC;</span>
-						Local
-						<span class={s.sectionCount}>{localBranches().length}</span>
-					</div>
-					<Show when={localExpanded()}>
-						{renderBranchList(filteredLocal(), "local", (b, indented) => renderBranchRow(b, true, indented))}
-					</Show>
-
-					{/* Remote section - only show when there are remote branches */}
-					<Show when={remoteBranches().length > 0}>
-						<div
-							class={s.sectionHeader}
-							role="button"
-							tabIndex={0}
-							onClick={() => setRemoteExpanded((v) => !v)}
-							onKeyDown={onClickKeyDown(() => setRemoteExpanded((v) => !v))}
-						>
-							<span class={cx(s.chevron, !remoteExpanded() && s.chevronCollapsed)}>&#x25BC;</span>
-							Remote
-							<span class={s.sectionCount}>{remoteBranches().length}</span>
-						</div>
-						<Show when={remoteExpanded()}>
-							{renderBranchList(filteredRemote(), "remote", (b, indented) => renderBranchRow(b, false, indented))}
-						</Show>
-					</Show>
+				}
+			>
+				{/* Nothing to act on while loading, after an error or in a repo with no
+				    branches: the list's state fills the tab on its own. */}
+				<Show when={hasBranches()}>
+					{renderContext()}
+					{renderToolbar()}
+					<Show when={creating()}>{renderCreateForm()}</Show>
 				</Show>
+				<div class={s.list}>{renderList()}</div>
 			</Show>
 
-			{/* Dirty checkout dialog */}
-			<Show when={dirtyCheckout() !== null}>
-				<div class={s.overlay}>
-					<div class={s.popover}>
-						<div class={s.popoverHeader}>
-							<h4>Uncommitted changes</h4>
-						</div>
-						<div class={s.popoverBody}>
-							<p class={s.confirmInfo}>
-								The working tree has uncommitted changes. How do you want to switch to{" "}
-								<strong>{dirtyCheckout()?.branchName}</strong>?
-							</p>
-						</div>
-						<div class={s.popoverActions}>
-							<button class={s.cancelBtn} onClick={() => setDirtyCheckout(null)}>
-								Cancel
-							</button>
-							<button class={s.secondaryBtn} onClick={handleDirtyCheckoutForce}>
-								Force Switch
-							</button>
-							<button class={s.primaryBtn} onClick={handleDirtyCheckoutStash}>
-								Stash and Switch
-							</button>
-						</div>
-					</div>
-				</div>
-			</Show>
+			{/* Uncommitted changes in the way of a checkout */}
+			<ConfirmDialog
+				visible={dirtyCheckout() !== null}
+				title="Uncommitted changes"
+				message={`The working tree has uncommitted changes. How do you want to switch to “${dirtyCheckout()?.branchName ?? ""}”?`}
+				confirmLabel="Stash and switch"
+				discardLabel="Force switch"
+				kind="warning"
+				onClose={() => setDirtyCheckout(null)}
+				onDiscard={handleDirtyCheckoutForce}
+				onConfirm={handleDirtyCheckoutStash}
+			/>
 
-			{/* Delete confirm dialog */}
-			<Show when={dialog()?.type === "delete"}>
-				<div class={s.overlay}>
-					<div class={s.popover}>
-						<div class={s.popoverHeader}>
-							<h4>{dialogData()?.title}</h4>
-						</div>
-						<div class={s.popoverBody}>
-							<p class={s.confirmInfo}>{dialogData()?.message}</p>
-						</div>
-						<div class={s.popoverActions}>
-							<button class={s.cancelBtn} onClick={() => setDialog(null)}>
-								Cancel
-							</button>
-							<Show when={!dialogData()?.branch.is_merged}>
-								<button class={s.dangerBtn} onClick={() => doDeleteBranch(true)}>
-									Force Delete
-								</button>
-							</Show>
-							<button class={s.primaryBtn} onClick={() => doDeleteBranch(false)}>
-								Delete
-							</button>
-						</div>
-					</div>
-				</div>
-			</Show>
+			{/* Delete branch: Delete (-d, refuses unmerged), Force delete (-D) when unmerged */}
+			<ConfirmDialog
+				visible={dialog()?.type === "delete"}
+				title={dialogData()?.title ?? ""}
+				message={dialogData()?.message ?? ""}
+				confirmLabel="Delete"
+				discardLabel={dialogData()?.branch.is_merged ? undefined : "Force delete"}
+				kind="warning"
+				onClose={() => setDialog(null)}
+				onDiscard={() => void doDeleteBranch(true)}
+				onConfirm={() => void doDeleteBranch(false)}
+			/>
 
 			{/* Merge confirm dialog */}
 			<ConfirmDialog
@@ -1306,7 +1585,7 @@ export const BranchesTab: Component<BranchesTabProps> = (props) => {
 
 			{/* Branch context menu */}
 			<ContextMenu
-				items={ctxBranch() ? buildContextMenuItems(ctxBranch()!) : []}
+				items={ctxTarget() ? buildContextMenuItems(ctxTarget()!) : []}
 				x={ctxMenu.position().x}
 				y={ctxMenu.position().y}
 				visible={ctxMenu.visible()}

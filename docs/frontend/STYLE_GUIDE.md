@@ -88,6 +88,9 @@ themes come out right.
 | `--chip-fill` / `--chip-fill-hover` | `--wash-1` / `--wash-2` | transparent / `--wash-1` | Chat chips at rest / hovered |
 | `--chip-accent-fill` / `--chip-accent-fill-hover` | accent 16 % / 24 % | transparent / accent 14 % | The Agent chip |
 | `--branch-selected` | accent 13 % | `--row-selected` | The selected branch row |
+| `--row-active` | accent 13 % | `--row-selected` | A side-panel row whose content is open (the file in the editor, the expanded commit) |
+| `--row-picked` | accent 22 % | accent 16 % | Side-panel rows in a multi-selection — always distinct from `--row-active` |
+| `--field-fill` / `--field-border` | `--wash-0` / `--border-subtle` | `--wash-0` / `--border-strong` | The inline search field (`shared/SearchField`) |
 
 Composer cards put the sheen first — `background: var(--sheen), var(--surface-composer)` — and
 `--sheen` is `none` in a tonal theme. Never zero `--highlight-inset` itself from CSS:
@@ -189,6 +192,7 @@ Compose from these; never hand-roll a button.
 - `.btnDanger` — transparent, error-tinted text and border; hover 14 % error wash.
 - `.btnGhost` — transparent; hover `--surface-hover`.
 - `.iconBtn` — 28×28, radius 8, `--fg-secondary` → `--fg-primary` on hover over a `--row-selected` wash. Every chrome icon button (title bar, panel headers, sidebar footer) uses this size.
+- **Composed buttons need two-class state rules.** With CSS modules (lightningcss), every module that `composes: iconBtn` re-emits `.iconBtn`'s rules into its own sheet, and a copy loaded later resets `background` at equal specificity — so a one-class modifier next to a composed `.iconBtn` silently loses. Write the state with both classes: `.headerBtn.headerBtnOn`, `.sectionAction.sectionActionDanger:hover:not(:disabled)`.
 - `.input` / `.textarea` / `.select` — 28px, **recessed** (`--bg-primary`), hairline, focus = accent border + 3px 22 % ring.
 - Focus for keyboard users: `box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.25)`.
 
@@ -210,9 +214,16 @@ Compose from these; never hand-roll a button.
 ### Status cluster (title bar)
 - There is no bottom status bar: `StatusBar` renders with `placement="toolbar"` as a `display: contents` cluster inside the title bar's right end. Transient status text (anything but "Ready"), agent usage and PR/CI badges flow before the notifications; the panel toggles (Ideas, Files, Markdown, Git, Chat) end the row as 28px ghost buttons — an **open panel lights its toggle** with `--row-selected`. Zoom shows only when it is not 100 %. The cwd and the hold-to-talk mic stay out (the compose dock's Speak replaces the mic). `placement="bar"` keeps the old strip for any surface that still wants it.
 
-### Side panels (`shared/panel.module.css`)
-- 40px header, 13px/500 title, 28px icon buttons on the right, one divider below; one divider on the panel's left edge (the resize handle draws no second line — it lights accent only while hovered or dragged).
-- Rows 26–28px, inset 6px, radius 6.
+### Side panels (`shared/panel.module.css`; Files, Git)
+- 40px header, 13px/500 title, 28px icon buttons on the right, one divider below; one divider on the panel's left edge (`--hairline-w` / `--hairline`; the resize handle draws no second line — it lights accent only while hovered or dragged). A panel with tabs (Git) puts them where the title goes: 28px pills, radius 8, 13px/500 in every state, `--fg-muted` at rest, `--row-selected` behind the active one — no ring, no counts. When the strip overflows (below ~330px) it scrolls sideways, a cut-off end fades out over 16px, and the open tab is always scrolled clear of the fades. A pair of view toggles (Files' List / Tree): the pressed one is `--row-selected`, the other hovers a step lighter (`--wash-0`), so pointing at it never shows two pressed buttons.
+- Geometry: rows are 28px (`--row-h`), 6px in from both edges, 8px padding, radius 6, a 16px leading slot and an 8px gap, so every name starts 38px from the edge. Blocks — the commit composer, a search field, an error banner, a diff well — sit 10px from both edges. Two-line rows (commits, stashes, file history) are 48px: a 13px line, then a 12px meta line; whatever marks the row (a graph dot, an icon) centres on the first line.
+- Row anatomy: icon · name (13px `--fg-primary`) · context (12px `--fg-muted`: a file's folder, a commit's author and time) · numbers (tabular; `+N` `--success`, `−N` `--error`) · state as a coloured letter or a 6px dot. The basename comes before its folder, as in Codex's file picker; a full path is a tooltip, not a name.
+- Row states: hover `--wash-0`; the row whose content is open `--row-active`; a multi-selection `--row-picked`; keyboard focus a 1px inset accent ring. Per-row actions (stage, discard, apply) may appear on hover, focus or selection and take the numbers' place in the same cell — never on top of them.
+- Search field: one component, `shared/SearchField` — 28px, radius 8, `--field-fill` inside a `--field-border` rim, a leading magnifier, a clear × only while there is a query, toggles inside on the right (22px; pressed = 16 % accent wash). The placeholder is plain words ("Filter files"); wildcard and regex help goes in the tooltip. Esc clears; a second Esc belongs to the panel.
+- Section headers: `shared/SectionHeader` — 32px, the chevron in the rows' icon column, a 12px/600 sentence-case label and a `--fg-muted` count, and the section's actions on the right, always visible, as 28px icon buttons with tooltips. The History and Blame drawers are the same header as a full-width band with a hairline above. No unicode triangles, no filled header bands.
+- Empty, loading and error states: `shared/EmptyState` — a 24px icon, a 13px/500 title and one muted line (balanced, never one word alone on line 2), centred a little above the middle; never a lone grey word. Loading is `shared/Spinner` with a muted line, and fades in only after 300ms so a fast fetch never flashes it; an error has a red icon and a selectable message.
+- Commit composer (Git › Changes): the compose dock's card at panel scale — `--surface-composer` under `--sheen` with a `--rim`, radius 14, at the top of the tab. The field grows from 2 to 8 lines and names the shortcut and the branch ("Message (⌘↵ to commit on main)"). One row of 28px controls inside it: generate (the only sparkle), an Amend toggle chip, the Smart Commit chip and the Commit pill — `--fg-primary` fill, a label that tracks the state (Commit, Amend, Committing…, Committed) and a tooltip that says why it is disabled. Errors sit under the card on a 12 % error tint.
+- Log rows: the subject, then author · time with the short hash right-aligned in mono; graph dots sit on the subject line. Refs are 18px chips — the current branch in accent, tags amber with a tag icon, other branches neutral; a branch and its remote fold into one chip with a cloud; two at most, then "+N". Expanding a commit opens one `--row-active` block: the wrapped subject, the body reflowed into paragraphs, "N files changed" with its stats and a copy-hash button, then the files as rows.
 
 ### Menus, popovers, dialogs
 - Menus/popovers: `--surface-overlay`, hairline, radius 8, `--shadow-dropdown`, 4px inset, 28px items.
@@ -241,6 +252,13 @@ The thumb is **invisible until the pointer is over the scrolling element**
 stray grey bar down the side of a panel. Central pane content keeps a 14px
 gutter to match the terminal's own scrollbar. Sidebar list: 8px gutter, same
 hover rule.
+
+Side panels (Files, Git): a 6px gutter, same 4px thumb. Their lists keep it
+reserved (`overflow-y: scroll`, under `@supports selector(::-webkit-scrollbar)`)
+and treat it as the rows' right inset: a list sets `--list-inset-end: 0px`, and
+every row recipe inside it uses `margin: 0 var(--list-inset-end, 6px) 0 6px`.
+A row's pill then sits 6px from both edges whether or not the list scrolls,
+and the right column (stats, letters, dots, hashes) never jumps when it does.
 
 ## AI Chat panel
 

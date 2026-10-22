@@ -77,7 +77,7 @@ export const TIPS: Tip[] = [
 	{
 		feature: "File Content Search",
 		description:
-			"Press C in the file browser search bar to switch to content search — searches inside files with regex, case-sensitive, and whole-word options.",
+			"Click the last toggle inside the file browser's search field to search inside files instead of file names, with case-sensitive, whole-word and regex options.",
 		shortcut: `${mod}+Shift+F`,
 	},
 	{
@@ -165,9 +165,9 @@ export const TIPS: Tip[] = [
 		shortcut: null,
 	},
 	{
-		feature: "Blame Heatmap",
+		feature: "Blame Age Bar",
 		description:
-			"The Blame sub-panel shows an age heatmap — recent changes are highlighted in green, older changes fade to neutral.",
+			"A thin bar runs down the Blame drawer's gutter, bright for recent commits and faint for old ones. Click the gutter to mark every line of that commit.",
 		shortcut: null,
 	},
 	{
@@ -282,7 +282,7 @@ export const TIPS: Tip[] = [
 	{
 		feature: "Prefix Folding",
 		description:
-			"In the Branches tab, branches sharing a common prefix (feature/, bugfix/) are automatically grouped. Toggle folding in the panel header.",
+			"In the Branches tab, branches sharing a prefix (feat/, fix/) fold into groups. Turn it off or on from ⋯ › Group by prefix, beside the filter.",
 		shortcut: null,
 	},
 	{

@@ -329,3 +329,120 @@ export const IconCode = icon(() => (
 		<path d="m8 6-6 6 6 6" />
 	</>
 ));
+
+// ── Side panels (Git, Files) ─────────────────────────────────────────────
+
+export const IconCheck = icon(() => <path d="M20 6 9 17l-5-5" />);
+
+/** Unstage — the counterpart of IconPlus (stage). */
+export const IconMinus = icon(() => <path d="M5 12h14" />);
+
+/** Discard changes: back to the last commit. */
+export const IconUndo = icon(() => (
+	<>
+		<path d="M9 14 4 9l5-5" />
+		<path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" />
+	</>
+));
+
+/** A git tag in a ref chip. */
+export const IconTag = icon(() => (
+	<>
+		<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" />
+		<circle cx="7.5" cy="7.5" r=".5" fill="currentColor" />
+	</>
+));
+
+/** A remote — a branch that also lives on origin. */
+export const IconCloud = icon(() => <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />);
+
+export const IconCopy = icon(() => (
+	<>
+		<rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+		<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+	</>
+));
+
+/** A single commit on a line — the Log tab's empty state. */
+export const IconCommit = icon(() => (
+	<>
+		<circle cx="12" cy="12" r="3" />
+		<path d="M3 12h6" />
+		<path d="M15 12h6" />
+	</>
+));
+
+/** Flat list view. */
+export const IconList = icon(() => (
+	<>
+		<path d="M3 12h.01" />
+		<path d="M3 18h.01" />
+		<path d="M3 6h.01" />
+		<path d="M8 12h13" />
+		<path d="M8 18h13" />
+		<path d="M8 6h13" />
+	</>
+));
+
+/** Tree view. */
+export const IconListTree = icon(() => (
+	<>
+		<path d="M21 12h-8" />
+		<path d="M21 6H8" />
+		<path d="M21 18h-8" />
+		<path d="M3 6v4c0 1.1.9 2 2 2h3" />
+		<path d="M3 10v6c0 1.1.9 2 2 2h3" />
+	</>
+));
+
+/** Sort order (name / date). */
+export const IconArrowDownUp = icon(() => (
+	<>
+		<path d="m3 16 4 4 4-4" />
+		<path d="M7 20V4" />
+		<path d="m21 8-4-4-4 4" />
+		<path d="M17 4v16" />
+	</>
+));
+
+/** Search toggle: match case. */
+export const IconCaseSensitive = icon(() => (
+	<>
+		<path d="m3 15 4-8 4 8" />
+		<path d="M4 13h6" />
+		<circle cx="18" cy="12" r="3" />
+		<path d="M21 9v6" />
+	</>
+));
+
+/** Search toggle: regular expression. */
+export const IconRegex = icon(() => (
+	<>
+		<path d="M17 3v10" />
+		<path d="m12.67 5.5 8.66 5" />
+		<path d="m12.67 10.5 8.66-5" />
+		<path d="M9 17a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v2a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-2z" />
+	</>
+));
+
+/** Search toggle: whole word. */
+export const IconWholeWord = icon(() => (
+	<>
+		<circle cx="7" cy="12" r="3" />
+		<path d="M10 9v6" />
+		<circle cx="17" cy="12" r="3" />
+		<path d="M14 7v8" />
+		<path d="M22 17v1c0 .5-.5 1-1 1H3c-.5 0-1-.5-1-1v-1" />
+	</>
+));
+
+/** Search inside files (content search), as opposed to file names. */
+export const IconTextSearch = icon(() => (
+	<>
+		<path d="M21 6H3" />
+		<path d="M10 12H3" />
+		<path d="M10 18H3" />
+		<circle cx="17" cy="15" r="3" />
+		<path d="m21 19-1.9-1.9" />
+	</>
+));

@@ -19,15 +19,15 @@ App.tsx (central orchestrator)
 │   ├── Terminal/             # Native terminal renderer (never unmounted)
 │   ├── TerminalArea/         # Terminal + split pane layout (up to 6 panes)
 │   ├── SuggestOverlay/       # suggest: follow-up action chips
-│   ├── GitPanel/             # Git panel (6 tabs)
-│   │   ├── ChangesTab        # Staged/unstaged file list with stage/unstage/discard
-│   │   ├── LogTab            # Commit log with expandable diffs
-│   │   ├── StashesTab        # Stash list with apply/pop/drop/show
-│   │   ├── BranchesTab       # Branch CRUD, prefix folding, search, checkout
-│   │   ├── BlameTab          # Line-by-line git blame viewer
-│   │   ├── HistoryTab        # Per-file commit history
+│   ├── GitPanel/             # Git panel (4 tabs + 2 drawers on Changes)
+│   │   ├── ChangesTab        # Commit composer, filter, Staged/Unstaged rows with stage/unstage/discard
+│   │   ├── LogTab            # Commit log: ref chips, auto paging, expandable commit detail
+│   │   ├── StashesTab        # Stash rows: click for the diff well; apply/pop/drop
+│   │   ├── BranchesTab       # Context strip, filter, Recent/Local/Remote, prefix groups, branch CRUD, checkout
+│   │   ├── BlameTab          # Blame drawer: line-by-line blame with an age bar
+│   │   ├── HistoryTab        # History drawer: per-file commit history
 │   │   ├── CommitGraph       # Visual commit graph with lane assignments
-│   │   └── SyncRow           # Push/pull/fetch action bar
+│   │   └── SyncRow           # Push/pull/fetch action bar (not rendered anywhere)
 │   ├── DiffTab/              # Individual file diff tab (with Cmd+F search)
 │   │   └── BranchDiffScrollView  # All-files scroll view (scroll mode)
 │   ├── PrDiffTab/            # PR diff viewer tab
@@ -261,7 +261,7 @@ Native SolidJS component (not a plugin) showing Claude API usage data. Displayed
 | `AgentIcon` | Agent type icon with consistent sizing and coloring |
 | `CiRing` | SVG circular CI status indicator with proportional segments |
 | `DiffViewer` | Syntax-highlighted unified diff renderer |
-| `Dropdown` | Reusable dropdown select component |
+| `Dropdown` | Reusable dropdown menu (overlay recipe; labels never wrap, `disabled` items dim and ignore clicks) |
 | `ContentRenderer` | Safe markdown-to-HTML rendering with DOMPurify sanitization, interactive checkboxes, tweak highlights |
 | `PanelResizeHandle` | Draggable resize handle for panel boundaries |
 | `PromptOption` | Agent prompt multiple-choice option |
@@ -276,6 +276,10 @@ Native SolidJS component (not a plugin) showing Claude API usage data. Displayed
 | `ColorSwatchPicker` | Preset color swatch grid |
 | `KeyComboCapture` | Keyboard shortcut capture input (for keybinding editor) |
 | `SearchBar` | Reusable search bar with regex/case-sensitive toggles |
+| `SearchField` / `SearchFieldToggle` | The one inline filter for side panels (Files search, Changes and Branches filters): magnifier, clear button, Esc clears, toggles inside; `data-*` and `ref` land on the input |
+| `SectionHeader` / `SectionAction` | A side-panel group header or drawer band: chevron toggle, label, count, meta, always-visible 28px actions |
+| `EmptyState` | Empty, loading and error states for side panels: icon, title, one line of help (balanced over two lines), optional action; `compact` for drawers. The loading state fades in only after 300ms, so a fast fetch never flashes it |
+| `Spinner` | The busy ring in `currentColor` used by buttons, rows and `EmptyState` |
 
 ## Panel Toggle States
 

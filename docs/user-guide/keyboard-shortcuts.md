@@ -145,16 +145,35 @@ Note: File browser and Markdown panels are mutually exclusive — opening one cl
 | `Cmd+G` | Git Panel — Branches tab |
 | `Cmd+B` | Quick branch switch (fuzzy search) |
 
+## Git Panel — Changes Tab
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+Enter` (`Ctrl+Enter` on Windows/Linux) | Commit (or amend) from the message field |
+| `↓` in the filter | Move into the file list |
+| `Escape` in the filter | Clear it; on an empty filter, return to the list |
+| `↑` / `↓` | Move between files |
+| `Space` | Stage / unstage the file |
+| `Enter` | Open its diff |
+| `Delete` / `Backspace` | Discard its changes (tracked files, after a confirm) |
+
+## Git Panel — Log and Stashes Tabs
+
+| Shortcut | Action |
+|----------|--------|
+| `↑` / `↓` | Move between commits / stashes |
+| `Enter` | Expand the commit / open the stash's diff |
+
 ## Branches Panel (when panel is focused)
 
-The panel is mouse-first — branch actions (create, delete, rename, merge, rebase, push, pull, fetch, checkout) live in the right-click context menu, the **+** New-branch button, and row double-click. Only list navigation is on the keyboard.
+The panel is mouse-first — branch actions (checkout, merge, rebase, push, pull, fetch, rename, delete) live in the right-click context menu, and New branch is the **+** button. Only list navigation is on the keyboard; while the right-click menu is open, its shortcut hints (`⏎`, `⇧M`, `r`, `⇧P`, `p`, `f`, `⇧R`, `d`) work.
 
 | Shortcut | Action |
 |----------|--------|
 | `↑` / `↓` | Navigate branch list |
 | `/` | Focus the filter |
+| `↓` in the filter | Select the first branch |
 | `Escape` | Clear filter / deselect |
-| double-click | Checkout branch |
 | `Ctrl/Cmd+1–4` | Switch Git Panel tab (1=Changes, 2=Log, 3=Stashes, 4=Branches) |
 
 ## Quick Branch Switcher

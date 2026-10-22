@@ -1,25 +1,25 @@
-/* CommitGraph — Canvas overlay for commit lane visualization.
-   Positioned absolutely over the scroll container (rendered as a
-   sibling outside the scroll flow). The canvas stays fixed in the
-   viewport while content scrolls; the draw pass applies a
-   translate(-scrollTop) to render the visible slice.
+/* CommitGraph — canvas overlay for the commit lanes, a sibling of LogTab's
+   scroll container (outside the scroll flow). It stays fixed in the viewport
+   while the rows scroll; the draw pass blits the visible slice of an
+   offscreen canvas that holds the whole graph.
 
-   Lane colors live as CSS custom properties on the canvas element so
-   they can be overridden per-theme without touching the draw logic.
-   CommitGraph.tsx reads them via getComputedStyle at each rebuild. */
+   Lane colours are the semantic tokens, read through getComputedStyle at
+   every rebuild (and again whenever a theme is applied). Plain var()s of hex
+   tokens only: a canvas cannot take a color-mix() string. Lanes start 6px in,
+   on the rows' inset, so lane 0's centre sits at x = 13px. */
 .canvas {
   position: absolute;
   top: 0;
-  left: 0;
+  left: 6px;
   z-index: 1;
   pointer-events: none;
 
-  --graph-lane-1: #4fc1ff; /* blue */
-  --graph-lane-2: #7fe07f; /* green */
-  --graph-lane-3: #ff7f7f; /* red */
-  --graph-lane-4: #ffd700; /* gold */
-  --graph-lane-5: #da70d6; /* orchid */
-  --graph-lane-6: #20b2aa; /* teal */
-  --graph-lane-7: #ff8c00; /* orange */
-  --graph-lane-8: #ba55d3; /* purple */
+  --graph-lane-1: var(--accent);
+  --graph-lane-2: var(--success);
+  --graph-lane-3: var(--merged);
+  --graph-lane-4: var(--warning);
+  --graph-lane-5: var(--attention);
+  --graph-lane-6: var(--unseen);
+  --graph-lane-7: var(--error);
+  --graph-lane-8: var(--fg-secondary);
 }

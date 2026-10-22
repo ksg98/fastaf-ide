@@ -1,9 +1,22 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { type Component, createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	For,
+	Match,
+	on,
+	onCleanup,
+	Show,
+	Switch,
+} from "solid-js";
 import { invoke } from "../../invoke";
 import { repositoriesStore } from "../../stores/repositories";
 import { cx } from "../../utils";
-import { formatRelativeTime } from "../../utils/time";
+import { fullTimestamp } from "../../utils/time";
+import { IconAlert } from "../icons";
+import { EmptyState } from "../shared/EmptyState";
 import s from "./BlameTab.module.css";
 
 /** Mirrors the Rust BlameLine struct from git.rs */
@@ -23,60 +36,118 @@ export interface BlameTabProps {
 	filePath: string | null;
 }
 
-/** Row height for virtualization (matches line-height: 1.5 at ~13px font) */
+/** One code line (virtualised). */
 const ROW_HEIGHT = 20;
+/** Space above the first line and below the last. */
+const LIST_PAD_TOP = 4;
+const LIST_PAD_BOTTOM = 8;
+/** The age bar fades from the newest line's commit to the oldest's. */
+const AGE_NEWEST = 0.85;
+const AGE_OLDEST = 0.12;
+/** git.rs `ensure_file_tracked`: blame on a file git does not track yet. A new
+ *  file is a state to describe, not a failure to show in red. */
+const UNTRACKED_ERROR = "File is not tracked by git";
 
-/** Compute a heatmap background color based on age fraction (0 = newest, 1 = oldest) */
-function heatmapBackground(ageFraction: number): string {
-	const opacity = 0.15 - ageFraction * 0.13;
-	return `rgba(100, 200, 100, ${opacity.toFixed(3)})`;
+/** True when `get_file_blame` refused because git does not track the file yet. */
+export function isUntrackedBlameError(message: string): boolean {
+	return message.startsWith(UNTRACKED_ERROR);
 }
 
+/** Opacity of the age bar for a line `fraction` of the way from newest (0) to oldest (1). */
+export function ageOpacity(fraction: number): number {
+	const f = Math.min(1, Math.max(0, Number.isFinite(fraction) ? fraction : 0));
+	return Math.round((AGE_NEWEST - f * (AGE_NEWEST - AGE_OLDEST)) * 1000) / 1000;
+}
+
+/** A gutter-sized age: "now", "5m", "3h", "2d", "3w", "4mo", "2y". */
+export function shortAge(authorTimeSec: number, nowMs = Date.now()): string {
+	const sec = Math.max(0, Math.floor(nowMs / 1000 - authorTimeSec));
+	if (sec < 60) return "now";
+	const min = Math.floor(sec / 60);
+	if (min < 60) return `${min}m`;
+	const hours = Math.floor(min / 60);
+	if (hours < 24) return `${hours}h`;
+	const days = Math.floor(hours / 24);
+	if (days < 7) return `${days}d`;
+	if (days < 30) return `${Math.floor(days / 7)}w`;
+	if (days < 365) return `${Math.floor(days / 30)}mo`;
+	return `${Math.floor(days / 365)}y`;
+}
+
+/**
+ * The Blame drawer under the Changes tab: who last changed each line of the
+ * selected file. A commit's first line carries its hash, author and age; a
+ * 2px bar at the gutter's edge fades with age; a click on the gutter marks
+ * every line of that commit.
+ */
 export const BlameTab: Component<BlameTabProps> = (props) => {
+	// Read through memos: handlers and promises read these, and a prop passed as
+	// an expression (a JSX ternary) would create an unowned computation per read.
+	const repoPath = createMemo(() => props.repoPath);
+	const filePath = createMemo(() => props.filePath);
 	const [lines, setLines] = createSignal<BlameLine[]>([]);
 	const [loading, setLoading] = createSignal(false);
 	const [error, setError] = createSignal<string | null>(null);
 	const [highlightedHash, setHighlightedHash] = createSignal<string | null>(null);
+	/** Always mounted, so the virtualizer has its scroll element from the start. */
 	let scrollRef!: HTMLDivElement;
+	/** repo:file whose lines are on screen */
+	let shownKey = "";
 
-	// Fetch blame data when file or repo changes
-	createEffect(() => {
-		const repoPath = props.repoPath;
-		const filePath = props.filePath;
+	// Fetch when the repo, the file or the repo's revision changes — and only
+	// then: `on` names every dependency, so the result the effect stores can
+	// never re-run it (it used to read `lines()` and loop, one git blame per
+	// round-trip). The GENERAL revision: blame reads the working copy, so a save
+	// changes it. A cancelled run hands `loading` to the run that replaced it.
+	createEffect(
+		on(
+			() => {
+				const repo = repoPath();
+				const file = filePath();
+				const rev = repo ? repositoriesStore.getRevision(repo) : 0;
+				return `${repo ?? ""}:${file ?? ""}:${rev}`;
+			},
+			() => {
+				const repo = repoPath();
+				const file = filePath();
 
-		if (!repoPath || !filePath) {
-			setLines([]);
-			setError(null);
-			return;
-		}
+				// Another file: its lines and mark start over; a refresh keeps both.
+				const key = `${repo ?? ""}:${file ?? ""}`;
+				if (key !== shownKey) {
+					shownKey = key;
+					setLines([]);
+					setHighlightedHash(null);
+				}
 
-		// Subscribe to revision for reactivity
-		void repositoriesStore.getRevision(repoPath);
+				if (!repo || !file) {
+					setError(null);
+					setLoading(false);
+					return;
+				}
 
-		if (lines().length === 0) setLoading(true);
-		setError(null);
-		setHighlightedHash(null);
+				let cancelled = false;
+				onCleanup(() => {
+					cancelled = true;
+				});
 
-		let cancelled = false;
-		onCleanup(() => {
-			cancelled = true;
-		});
+				if (lines().length === 0) setLoading(true);
+				setError(null);
 
-		invoke<BlameLine[]>("get_file_blame", { path: repoPath, file: filePath })
-			.then((result) => {
-				if (cancelled) return;
-				setLines(result);
-			})
-			.catch((err) => {
-				if (cancelled) return;
-				setError(String(err));
-				setLines([]);
-			})
-			.finally(() => {
-				if (cancelled) return;
-				setLoading(false);
-			});
-	});
+				invoke<BlameLine[]>("get_file_blame", { path: repo, file })
+					.then((result) => {
+						if (!cancelled) setLines(result);
+					})
+					.catch((err) => {
+						if (cancelled) return;
+						setError(String(err));
+						setLines([]);
+					})
+					.finally(() => {
+						if (!cancelled) setLoading(false);
+					});
+			},
+		),
+	);
 
 	const virtualizer = createVirtualizer({
 		get count() {
@@ -85,9 +156,11 @@ export const BlameTab: Component<BlameTabProps> = (props) => {
 		getScrollElement: () => scrollRef,
 		estimateSize: () => ROW_HEIGHT,
 		overscan: 20,
+		paddingStart: LIST_PAD_TOP,
+		paddingEnd: LIST_PAD_BOTTOM,
 	});
 
-	// Compute age range for heatmap normalization
+	// Age range for the bar's fade
 	const ageRange = createMemo(() => {
 		const data = lines();
 		if (data.length === 0) return { oldest: 0, newest: 0 };
@@ -112,95 +185,81 @@ export const BlameTab: Component<BlameTabProps> = (props) => {
 		return data[index].hash !== data[index - 1].hash;
 	}
 
-	function handleGutterClick(hash: string) {
-		setHighlightedHash((prev) => (prev === hash ? null : hash));
+	function gutterTitle(line: BlameLine): string {
+		const when = fullTimestamp(new Date(line.author_time * 1000).toISOString());
+		return `${line.hash.slice(0, 7)} · ${line.author} · ${when}\n${line.summary}`;
 	}
+
+	const showRows = () => !loading() && !error() && lines().length > 0;
 
 	return (
 		<div class={s.container}>
-			{/* File header */}
-			<Show when={props.filePath}>
-				<div class={s.fileHeader}>
-					<span class={s.fileLabel}>File:</span>
-					<span class={s.filePath} title={props.filePath!}>
-						{props.filePath}
-					</span>
-				</div>
-			</Show>
+			<Switch>
+				<Match when={!repoPath() || !filePath()}>
+					<EmptyState size="compact" title="Select a file to see who changed each line" />
+				</Match>
+				<Match when={loading()}>
+					<EmptyState size="compact" loading title={"Loading blame…"} class={s.loading} />
+				</Match>
+				<Match when={isUntrackedBlameError(error() ?? "")}>
+					<EmptyState size="compact" title="This file isn't tracked yet" />
+				</Match>
+				<Match when={error()}>
+					{(message) => (
+						<div class={s.errorLine} role="alert">
+							<IconAlert size={14} class={s.errorIcon} />
+							<span class={s.errorText}>{message()}</span>
+						</div>
+					)}
+				</Match>
+				<Match when={lines().length === 0}>
+					<EmptyState size="compact" title="This file is empty" />
+				</Match>
+			</Switch>
 
-			{/* Empty / loading / error states */}
-			<Show when={!props.repoPath}>
-				<div class={s.empty}>No repository selected</div>
-			</Show>
-
-			<Show when={props.repoPath && !props.filePath}>
-				<div class={s.empty}>Select a file to view blame</div>
-			</Show>
-
-			<Show when={loading()}>
-				<div class={s.loading}>
-					<span class={s.loadingDot}>Loading blame</span>
-				</div>
-			</Show>
-
-			<Show when={error()}>
-				<div class={s.empty}>{error()}</div>
-			</Show>
-
-			{/* Virtualized blame content */}
-			<Show when={!loading() && !error() && lines().length > 0}>
-				<div class={s.blameScroll} ref={scrollRef!}>
-					<div class={s.blameTable} style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}>
-						{virtualizer.getVirtualItems().map((vItem) => {
-							const line = lines()[vItem.index];
-							const groupStart = isGroupStart(vItem.index);
-							const highlighted = highlightedHash() === line.hash;
-							const fraction = ageFraction(line.author_time);
-
-							return (
-								<div
-									class={cx(s.blameLine, groupStart && s.blameLineGroupStart, highlighted && s.blameLineHighlighted)}
-									style={{
-										position: "absolute",
-										top: 0,
-										left: 0,
-										width: "100%",
-										height: `${vItem.size}px`,
-										transform: `translateY(${vItem.start}px)`,
-										background: highlighted ? undefined : heatmapBackground(fraction),
-									}}
-								>
-									<span
-										class={cx(s.gutter, !groupStart && s.gutterContinuation)}
-										onClick={() => handleGutterClick(line.hash)}
-									>
-										<Show when={groupStart}>
-											<span class={s.gutterHash}>{line.hash.slice(0, 7)}</span>
-											<span class={s.gutterAuthor} title={line.author}>
-												{line.author}
-											</span>
-											<span class={s.gutterAge}>{formatRelativeTime(line.author_time * 1000)}</span>
-										</Show>
-									</span>
-									<span class={s.lineNumber}>{line.line_number}</span>
-									<span class={s.code}>{line.content}</span>
-								</div>
-							);
-						})}
+			<div class={s.blameScroll} ref={scrollRef!}>
+				<Show when={showRows()}>
+					<div class={s.blameTable} style={{ height: `${virtualizer.getTotalSize()}px` }}>
+						<For each={virtualizer.getVirtualItems()}>
+							{(vItem) => {
+								const line = () => lines()[vItem.index];
+								return (
+									<Show when={line()}>
+										{(l) => {
+											const groupStart = () => isGroupStart(vItem.index);
+											return (
+												<div
+													class={cx(
+														s.blameLine,
+														groupStart() && vItem.index > 0 && s.blameLineGroupStart,
+														highlightedHash() === l().hash && s.blameLineHighlighted,
+													)}
+													style={{ top: `${vItem.start}px` }}
+												>
+													<span
+														class={s.gutter}
+														title={groupStart() ? gutterTitle(l()) : undefined}
+														onClick={() => setHighlightedHash((prev) => (prev === l().hash ? null : l().hash))}
+													>
+														<span class={s.ageBar} style={{ opacity: ageOpacity(ageFraction(l().author_time)) }} />
+														<Show when={groupStart()}>
+															<span class={s.gutterHash}>{l().hash.slice(0, 7)}</span>
+															<span class={s.gutterAuthor}>{l().author}</span>
+															<span class={s.gutterAge}>{shortAge(l().author_time)}</span>
+														</Show>
+													</span>
+													<span class={s.lineNumber}>{l().line_number}</span>
+													<span class={s.code}>{l().content}</span>
+												</div>
+											);
+										}}
+									</Show>
+								);
+							}}
+						</For>
 					</div>
-				</div>
-
-				{/* Heatmap legend */}
-				<div class={s.heatmapLegend}>
-					<span>Heatmap:</span>
-					<div class={s.heatmapBar}>
-						<div class={s.heatmapRecent} />
-						<div class={s.heatmapOld} />
-					</div>
-					<span>recent</span>
-					<span>old</span>
-				</div>
-			</Show>
+				</Show>
+			</div>
 		</div>
 	);
 };

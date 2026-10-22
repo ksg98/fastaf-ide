@@ -126,3 +126,164 @@
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
+
+/* ── appearance="chip" ────────────────────────────────────────────────
+   A ghost split chip for side-panel control rows (the commit composer, the
+   Branches context strip): no border, no icon, a label that ellipsises first
+   when the row is tight, and an overlay menu right-aligned under it. The arrow
+   and the items keep the `splitArrow` / `menuItem` hook names, so the chip
+   rules are scoped under `.chipSplit` / `.chipMenu` to win over the split
+   look above without touching it. */
+.chipSplit {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+/* One pill, never two halves: pointing at (or focusing, or opening) either half
+   lights the whole chip, and the half that will act takes one more wash on top.
+   A disabled half lights nothing. (The open state is its own rule, so it holds
+   in an engine that drops the :has() list.) */
+.chipSplitOpen {
+  background: var(--wash-1);
+}
+
+.chipSplit:has(> button:not([aria-disabled="true"]):hover),
+.chipSplit:has(> button:focus-visible) {
+  background: var(--wash-1);
+}
+
+/* Keyboard focus rings the whole pill, not a half-moon around one part. */
+.chipSplit:has(> button:focus-visible) {
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+.chipMain {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 4px 0 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.chipMain:hover:not([aria-disabled="true"]),
+.chipMain:focus-visible {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.chipMain[aria-disabled="true"] {
+  cursor: default;
+}
+
+.chipMain:focus-visible {
+  outline: none;
+}
+
+/* canExecute says no: 45 %, the reason is the tooltip. */
+.chipMainDisabled {
+  opacity: 0.45;
+}
+
+.chipLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipSplit .splitArrow {
+  flex-shrink: 0;
+  width: 24px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
+  color: var(--fg-muted);
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.chipSplit .splitArrow:hover,
+.chipSplit .splitArrowOpen,
+.chipSplit .splitArrow:focus-visible {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.chipSplit .splitArrow:focus-visible {
+  outline: none;
+}
+
+/* Overlay recipe (STYLE_GUIDE › Menus): frosted, hairline, radius 8, 28px items. */
+.chipMenu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  margin-top: 4px;
+  padding: 4px;
+  background: var(--surface-overlay);
+  backdrop-filter: var(--blur-overlay);
+  -webkit-backdrop-filter: var(--blur-overlay);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--highlight-inset), var(--shadow-dropdown);
+}
+
+.chipMenu .menuItem {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  white-space: nowrap;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.chipMenu .menuItem:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.chipMenu .menuItem:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
+}
+
+.chipMenu .menuItem:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.menuItemLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

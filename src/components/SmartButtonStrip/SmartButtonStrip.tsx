@@ -1,27 +1,11 @@
-import { type Component, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { type Component, createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { useSmartPrompts } from "../../hooks/useSmartPrompts";
 import { appLogger } from "../../stores/appLogger";
 import { promptLibraryStore, type SavedPrompt, type SmartPlacement } from "../../stores/promptLibrary";
 import { cx } from "../../utils";
+import { IconCheck, IconChevronDown, IconSparkle } from "../icons";
+import { Spinner } from "../shared/Spinner";
 import s from "./SmartButtonStrip.module.css";
-
-const SparkleIcon = () => (
-	<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M8 0l1.5 4.5L14 6l-4.5 1.5L8 12 6.5 7.5 2 6l4.5-1.5L8 0zm4 9l.75 2.25L15 12l-2.25.75L12 15l-.75-2.25L9 12l2.25-.75L12 9z" />
-	</svg>
-);
-
-const ChevronIcon = () => (
-	<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-		<path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="2" fill="none" />
-	</svg>
-);
-
-const CheckIcon = () => (
-	<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class={s.checkMark}>
-		<path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z" />
-	</svg>
-);
 
 export interface SmartButtonStripProps {
 	placement: SmartPlacement;
@@ -35,6 +19,15 @@ export interface SmartButtonStripProps {
 	onBusyChange?: (busy: boolean) => void;
 	/** Extra context variables to pass as manualVariables to executeSmartPrompt */
 	contextVariables?: () => Record<string, string>;
+	/**
+	 * "split" (default): the bordered split button the sidebar and the PR popover use.
+	 * "chip": a ghost split chip for side-panel control rows (the commit composer, the
+	 * Branches context strip) — no icon, a label that ellipsises first when the row is
+	 * tight, and an overlay menu right-aligned under it.
+	 */
+	appearance?: "split" | "chip";
+	/** Extra class on the root element (layout only: flex weights, margins). */
+	class?: string;
 }
 
 /** Translate internal error codes into user-friendly messages */
@@ -56,6 +49,7 @@ export const SmartButtonStrip: Component<SmartButtonStripProps> = (props) => {
 	const [menuOpen, setMenuOpen] = createSignal(false);
 	const [busy, setBusy] = createSignal(false);
 	let rootRef: HTMLDivElement | undefined;
+	const chip = () => props.appearance === "chip";
 
 	// Close dropdown on click outside
 	const handleClickOutside = (e: MouseEvent) => {
@@ -65,6 +59,20 @@ export const SmartButtonStrip: Component<SmartButtonStripProps> = (props) => {
 	};
 	document.addEventListener("mousedown", handleClickOutside);
 	onCleanup(() => document.removeEventListener("mousedown", handleClickOutside));
+
+	// Esc closes an open menu and goes no further (captured on window, so no panel
+	// or global shortcut treats the same press as its own Esc).
+	createEffect(() => {
+		if (!menuOpen()) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== "Escape") return;
+			e.preventDefault();
+			e.stopPropagation();
+			setMenuOpen(false);
+		};
+		window.addEventListener("keydown", onKey, true);
+		onCleanup(() => window.removeEventListener("keydown", onKey, true));
+	});
 
 	const prompts = createMemo(() => {
 		const all = promptLibraryStore.getSmartByPlacement(props.placement);
@@ -111,47 +119,122 @@ export const SmartButtonStrip: Component<SmartButtonStripProps> = (props) => {
 		}
 	}
 
-	return (
-		<Show when={activePrompt()}>
-			<div class={s.split} ref={rootRef}>
+	/** The prompt the main button runs; only read under `<Show when={activePrompt()}>`. */
+	const current = () => activePrompt() as SavedPrompt;
+
+	/** The bordered split button (sidebar, PR popover) — unchanged look. */
+	const renderSplit = () => (
+		<div class={cx(s.split, props.class)} ref={rootRef}>
+			<button
+				class={cx(s.splitMain, busy() && s.splitBusy, !canExecute(current()).ok && s.splitDisabled)}
+				disabled={busy() || !canExecute(current()).ok}
+				onClick={() => runPrompt(current())}
+				title={current().description}
+			>
+				<Show when={busy()} fallback={<IconSparkle size={12} />}>
+					<span class={s.spinner} />
+				</Show>
+				{current().name}
+			</button>
+			<Show when={prompts().length > 1}>
 				<button
-					class={cx(s.splitMain, busy() && s.splitBusy, !canExecute(activePrompt()!).ok && s.splitDisabled)}
-					disabled={busy() || !canExecute(activePrompt()!).ok}
-					onClick={() => runPrompt(activePrompt()!)}
-					title={activePrompt()!.description}
+					class={cx(s.splitArrow, menuOpen() && s.splitArrowOpen)}
+					onClick={() => setMenuOpen(!menuOpen())}
+					title="More actions"
 				>
-					<Show when={busy()} fallback={<SparkleIcon />}>
-						<span class={s.spinner} />
+					{/* stroke 3 on the 24 grid = the old hand-drawn chevron's 2 on a 16 grid */}
+					<IconChevronDown size={10} stroke={3} />
+				</button>
+				<Show when={menuOpen()}>
+					<div class={s.menu}>
+						<For each={prompts()}>
+							{(item) => {
+								const check = () => canExecute(item);
+								const isActive = () => item.id === activePrompt()?.id;
+								return (
+									<button
+										class={cx(s.menuItem, isActive() && s.menuItemActive, !check().ok && s.menuItemDisabled)}
+										disabled={!check().ok}
+										title={!check().ok ? check().reason : item.description}
+										onClick={(e) => {
+											e.stopPropagation();
+											runPrompt(item);
+										}}
+									>
+										{item.name}
+										<Show when={isActive()}>
+											<IconCheck size={12} stroke={2.5} class={s.checkMark} />
+										</Show>
+									</button>
+								);
+							}}
+						</For>
+					</div>
+				</Show>
+			</Show>
+		</div>
+	);
+
+	/**
+	 * The ghost split chip (side-panel control rows). `data-part` names the two
+	 * halves for a caller's layout rules (the commit composer folds the chip to
+	 * its arrow when the row runs out of room).
+	 */
+	const renderChip = () => {
+		const check = () => canExecute(current());
+		// aria-disabled rather than disabled, so the tooltip naming the reason still shows.
+		const blocked = () => busy() || !check().ok;
+		return (
+			<div class={cx(s.chipSplit, menuOpen() && s.chipSplitOpen, props.class)} ref={rootRef}>
+				<button
+					type="button"
+					data-part="main"
+					class={cx(s.chipMain, !check().ok && s.chipMainDisabled)}
+					aria-disabled={blocked() || undefined}
+					aria-busy={busy() || undefined}
+					onClick={() => {
+						if (!blocked()) runPrompt(current());
+					}}
+					title={check().ok ? current().description : check().reason}
+				>
+					<Show when={busy()}>
+						<Spinner size={12} />
 					</Show>
-					{activePrompt()!.name}
+					<span class={s.chipLabel}>{current().name}</span>
 				</button>
 				<Show when={prompts().length > 1}>
 					<button
+						type="button"
+						data-part="arrow"
 						class={cx(s.splitArrow, menuOpen() && s.splitArrowOpen)}
+						aria-haspopup="menu"
+						aria-expanded={menuOpen()}
 						onClick={() => setMenuOpen(!menuOpen())}
 						title="More actions"
 					>
-						<ChevronIcon />
+						<IconChevronDown size={14} />
 					</button>
 					<Show when={menuOpen()}>
-						<div class={s.menu}>
+						<div class={s.chipMenu} role="menu">
 							<For each={prompts()}>
-								{(prompt) => {
-									const check = () => canExecute(prompt);
-									const isActive = () => prompt.id === activePrompt()?.id;
+								{(item) => {
+									const itemCheck = () => canExecute(item);
+									const isActive = () => item.id === activePrompt()?.id;
 									return (
 										<button
-											class={cx(s.menuItem, isActive() && s.menuItemActive, !check().ok && s.menuItemDisabled)}
-											disabled={!check().ok}
-											title={!check().ok ? check().reason : prompt.description}
+											type="button"
+											role="menuitem"
+											class={s.menuItem}
+											disabled={!itemCheck().ok}
+											title={!itemCheck().ok ? itemCheck().reason : item.description}
 											onClick={(e) => {
 												e.stopPropagation();
-												runPrompt(prompt);
+												runPrompt(item);
 											}}
 										>
-											{prompt.name}
+											<span class={s.menuItemLabel}>{item.name}</span>
 											<Show when={isActive()}>
-												<CheckIcon />
+												<IconCheck size={14} class={s.checkMark} />
 											</Show>
 										</button>
 									);
@@ -161,6 +244,14 @@ export const SmartButtonStrip: Component<SmartButtonStripProps> = (props) => {
 					</Show>
 				</Show>
 			</div>
+		);
+	};
+
+	return (
+		<Show when={activePrompt()}>
+			<Show when={chip()} fallback={renderSplit()}>
+				{renderChip()}
+			</Show>
 		</Show>
 	);
 };

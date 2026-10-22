@@ -1,142 +1,500 @@
-/* BranchesTab — local and remote branch list with inline search */
+/* BranchesTab — the Git panel's Branches tab (STYLE_GUIDE › Side panels).
+   Top to bottom: the current branch and Create PR (context strip), the filter
+   toolbar, the New branch form while it is open, then Recent / Local / Remote.
+   Rows sit 6px in from the panel edges with 8px of padding and a 16px leading
+   slot, so every name starts 38px from the edge (50px inside a prefix group). */
 
 .container {
   display: flex;
   flex-direction: column;
   height: 100%;
-  overflow-y: auto;
-}
-
-/* Inline search bar — sticky header with fold-toggle button */
-.searchBar {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  padding: 4px 12px;
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.searchInput {
-  width: 100%;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--fg-primary);
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  padding: 4px 8px;
-  box-sizing: border-box;
-  transition: border-color 0.15s ease;
-}
-
-.searchInput:focus {
-  border-color: var(--accent);
+  min-height: 0;
   outline: none;
 }
 
-.searchInput::placeholder {
-  color: var(--fg-muted);
-  opacity: 0.5;
-}
+/* ── Context strip ───────────────────────────────────────────────────── */
 
-/* Collapsible section headers (Local, Remote) */
-.sectionHeader {
+.context {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  cursor: pointer;
-  user-select: none;
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  font-weight: 600;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 40px;
+  min-width: 0;
+  padding: 0 6px 0 14px;
+}
+
+/* 16px slot, the rows' icon column: the branch name lines up with theirs. */
+.contextIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--row-icon);
+  height: var(--row-icon);
   color: var(--fg-muted);
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s ease;
 }
 
-.sectionHeader:hover {
-  background: var(--bg-highlight);
+/* Name, upstream and sync on one baseline. Tight rows give way in order:
+   the upstream first, then the name; the counts never shrink. */
+.contextLabel {
+  display: flex;
+  align-items: baseline;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
 }
 
-.sectionCount {
-  font-size: var(--font-xs);
-  color: var(--fg-secondary);
+.contextName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-primary);
+  font-size: var(--font-md);
+  font-weight: 500;
+}
+
+/* The en space that separates it from the name lives in its text, so a fully
+   squeezed upstream leaves no gap behind. */
+.contextUpstream {
+  flex: 0 1000 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+}
+
+.contextHash {
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
   font-weight: 400;
+  color: var(--fg-secondary);
 }
 
-/* Chevron for collapsible sections */
-.chevron {
-  font-size: var(--font-xs);
-  transition: transform 0.15s ease;
+.contextSync {
+  display: inline-flex;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: 8px;
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The smart chip takes its own width up to half the strip; a longer prompt name
+   ("Merge Main Into Branch") ellipsises instead of squeezing the branch away. */
+.contextAction {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 50%;
+  margin-left: auto;
+}
+
+/* ── Toolbar: filter · New branch · options ──────────────────────────── */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  padding: 0 6px 6px 10px;
+}
+
+.filterField {
+  flex: 1 1 auto;
+  margin-right: 4px;
+}
+
+.iconBtn {
+  composes: iconBtn from "../shared/controls.module.css";
   flex-shrink: 0;
 }
 
-.chevronCollapsed {
-  transform: rotate(-90deg);
+/* Its form or menu is open. Doubled up so it outranks the composed iconBtn
+   rest rule wherever controls.module.css lands in the cascade. */
+.iconBtn.iconBtnOn {
+  background: var(--row-selected);
+  color: var(--fg-primary);
 }
 
-/* Individual branch row */
-.branchRow {
+.optionsAnchor {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* Leading check column of the options menu (the shared Dropdown): "Group by
+   prefix" when on. */
+.menuMark {
   display: flex;
   align-items: center;
+  justify-content: center;
+  height: 16px;
+  color: var(--accent);
+}
+
+/* ── New branch form ─────────────────────────────────────────────────── */
+
+.createForm {
+  display: flex;
+  flex-direction: column;
   gap: 6px;
-  padding: 4px 12px 4px 20px;
-  cursor: default;
-  transition: background 0.1s ease;
-  font-size: var(--font-md);
+  flex-shrink: 0;
+  padding: 4px 10px 8px;
+}
+
+/* The name field (New branch) and the rename field in a row. */
+.inlineInput {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  background: var(--field-fill);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  outline: none;
+  color: var(--fg-primary);
   font-family: var(--font-ui);
+  font-size: var(--font-md);
+  transition: box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.inlineInput::placeholder {
+  color: var(--fg-muted);
+  opacity: 1;
+}
+
+.inlineInput:focus {
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
+}
+
+/* Inline in a row: 24px, no ring, and pulled left by its padding + border so the
+   name does not move when the field opens. */
+.renameInput {
+  flex: 1 1 auto;
+  height: 24px;
+  margin-left: -7px;
+  padding: 0 6px;
+  border-radius: var(--radius-md);
+}
+
+.renameInput:focus {
+  box-shadow: none;
+}
+
+/* [from HEAD ⌄] [✓ Check out] ……… Cancel (Create). Wraps the two buttons onto
+   their own line when the panel is too narrow for one row. */
+.createRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 4px;
   min-width: 0;
 }
 
-.branchRow:hover {
-  background: var(--bg-highlight);
+/* The start point: a native <select> laid invisibly over a ghost chip, so the
+   chip is as wide as the chosen ref and macOS still pops the system menu.
+   "from" rides inside it, so the phrase reads (and clicks) as one control, and
+   its first letter lines up with the name field's text above. */
+.baseChip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  height: 28px;
+  padding: 0 8px 0 11px;
+  border-radius: var(--radius-pill);
+  color: var(--fg-secondary);
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
-/* Current branch: slightly bolder + accent icon */
-.branchCurrent {
-  color: var(--accent);
+.baseChip:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
 }
 
-.branchCurrentIcon {
+.baseChip:has(.baseSelect:focus-visible) {
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+.createFrom {
   flex-shrink: 0;
-  color: var(--accent);
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
 }
 
-/* Placeholder to align non-current rows with current (icon width) */
-.branchIconPlaceholder {
-  width: 14px;
-  flex-shrink: 0;
-}
-
-/* Branch name — truncates if too long */
-.branchName {
-  flex: 1;
+.baseLabel {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
 }
 
-.branchNameBold {
-  font-weight: 600;
+.baseChevron {
+  flex-shrink: 0;
+  color: var(--fg-muted);
 }
 
-/* Ahead/behind indicators and date — dimmed, right-aligned */
-.branchMeta {
-  display: flex;
+.baseSelect {
+  appearance: none;
+  -webkit-appearance: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* "Check out" — the composer's Amend chip: ghost at rest, accent when on. */
+.toggleChip {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill);
   color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.toggleChip:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.toggleChip:focus-visible,
+.textBtn:focus-visible,
+.primaryPill:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+.toggleChipOn {
+  background: var(--chip-accent-fill);
+  color: var(--accent);
+}
+
+.toggleChipOn:hover {
+  background: var(--chip-accent-fill-hover);
+  color: var(--accent);
+}
+
+.createActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* Ghost text button (Cancel). */
+.textBtn {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill);
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.textBtn:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+/* The one control under an empty state (Retry): a filled neutral chip,
+   10px on its icon side, 12px after the label (the Files panel's New file). */
+.emptyAction {
+  composes: textBtn;
+  gap: 6px;
+  padding: 0 12px 0 10px;
+  background: var(--wash-1);
+}
+
+.emptyAction:hover {
+  background: var(--wash-2);
+  color: var(--fg-primary);
+}
+
+.emptyAction:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+/* Create — the one bright object in the form. */
+.primaryPill {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 12px;
+  background: var(--fg-primary);
+  border: none;
+  border-radius: var(--radius-pill);
+  color: var(--bg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.primaryPill:hover:not([aria-disabled="true"]) {
+  background: color-mix(in srgb, var(--fg-primary) 86%, var(--bg-primary));
+}
+
+.primaryPill[aria-disabled="true"] {
+  background: var(--wash-2);
+  color: var(--fg-muted);
+  cursor: default;
+}
+
+/* ── List ────────────────────────────────────────────────────────────── */
+
+/* The only scroller: the strip, the toolbar and the form stay put above it.
+   A flex column, so EmptyState can fill it; nothing in it may shrink. */
+.list {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 0 8px;
+}
+
+/* The list keeps its 6px scrollbar gutter reserved, and the gutter is the
+   rows' right inset (global.css › side-panel scrollbars). */
+@supports selector(::-webkit-scrollbar) {
+  .list {
+    overflow-y: scroll;
+    --list-inset-end: 0px;
+  }
+}
+
+.list > *,
+.section > * {
+  flex-shrink: 0;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* One branch: [✓] name ……… ↑2 ↓1 ⇣4 Merged 3d */
+.branchRow {
+  display: flex;
+  align-items: center;
+  gap: var(--row-gap);
+  height: var(--row-h);
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding: 0 8px;
+  border-radius: var(--radius-md);
+  color: var(--fg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  cursor: default;
+  user-select: none;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.branchRow:hover {
+  background: var(--wash-0);
+}
+
+/* A row inside a prefix group: one --tree-indent past the group's chevron. */
+.branchRowNested {
+  padding-left: calc(var(--row-pad-x) + var(--tree-indent));
+}
+
+/* Keyboard / click selection. */
+.branchRowSelected,
+.branchRowSelected:hover {
+  background: var(--row-active);
+}
+
+/* Moved there by the keyboard: the ring, only while the list has focus. */
+.container:focus .branchRowFocused {
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
+}
+
+.branchSlot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--row-icon);
+  height: var(--row-icon);
+  color: var(--accent);
+}
+
+.branchName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branchNameCurrent {
+  font-weight: 500;
+}
+
+/* Last commit older than 30 days. */
+.branchRowStale .branchName {
+  color: var(--fg-muted);
+}
+
+.branchMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .ahead {
@@ -144,303 +502,106 @@
 }
 
 .behind {
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
 }
 
 .baseBehind {
   color: var(--warning);
-  font-weight: 600;
 }
 
-.metaDate {
-  color: var(--fg-muted);
-  white-space: nowrap;
-}
-
-/* "merged" badge */
 .merged {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 5px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-2xs);
-  font-weight: 600;
-  background: color-mix(in srgb, var(--success) 20%, transparent);
-  color: var(--success);
+  color: var(--merged);
 }
 
-/* Stale branches (old last commit) */
-.stale .branchName {
+.age {
   color: var(--fg-muted);
 }
 
-/* Empty state */
-.empty {
-  composes: empty from "./panel.module.css";
-  font-family: var(--font-ui);
-}
+/* ── Prefix groups ───────────────────────────────────────────────────── */
 
-/* Selected row — keyboard-navigated highlight */
-.selected {
-  background: var(--bg-tertiary);
-  outline: 1px solid var(--accent);
-  outline-offset: -1px;
-}
-
-/* Inline rename / create input */
-.inlineInput {
-  flex: 1;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  color: var(--fg-primary);
-  font-size: var(--font-md);
-  font-family: var(--font-ui);
-  padding: 2px 6px;
-  min-width: 0;
-  outline: none;
-}
-
-.smartActions {
-  display: flex;
-  justify-content: flex-end;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-/* Create branch inline form row */
-.createForm {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.fromSelect {
-  background: var(--bg-tertiary);
-  color: var(--fg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  padding: 2px 4px;
-  max-width: 140px;
-}
-
-.createCheckboxLabel {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  color: var(--fg-secondary);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.createConfirmBtn,
-.createCancelBtn {
-  padding: 3px 10px;
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.createConfirmBtn {
-  background: var(--accent);
-  color: var(--text-on-accent);
-}
-
-.createConfirmBtn:hover {
-  background: var(--accent-hover);
-}
-
-.createCancelBtn {
-  background: var(--bg-highlight);
-  color: var(--fg-secondary);
-}
-
-.createCancelBtn:hover {
-  background: var(--border);
-  color: var(--fg-primary);
-}
-
-
-/* Inline dialog / popover (for multi-button confirms) */
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--scrim);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.popover {
-  width: 340px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--highlight-inset), var(--shadow-popup);
-  overflow: hidden;
-}
-
-.popoverHeader {
-  display: flex;
-  align-items: center;
-  padding: 12px 16px;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border);
-}
-
-.popoverHeader h4 {
-  margin: 0;
-  font-size: var(--font-lg);
-  font-weight: 600;
-  color: var(--fg-primary);
-}
-
-.popoverBody {
-  padding: 16px;
-}
-
-.confirmInfo {
-  margin: 0;
-  font-size: var(--font-md);
-  font-family: var(--font-ui);
-  color: var(--fg-secondary);
-  line-height: 1.5;
-}
-
-.popoverActions {
-  display: flex;
-  gap: 8px;
-  padding: 12px 16px;
-  background: var(--bg-tertiary);
-  border-top: 1px solid var(--border);
-}
-
-/* Layout only — visual vocabulary comes from composed controls primitives.
-   Buttons still split the actions row evenly. */
-.popoverActions button {
-  flex: 1;
-}
-
-.cancelBtn {
-  composes: btn from "../shared/controls.module.css";
-}
-
-.primaryBtn {
-  composes: btnPrimary from "../shared/controls.module.css";
-}
-
-.secondaryBtn {
-  composes: btn from "../shared/controls.module.css";
-}
-
-.dangerBtn {
-  composes: btnDanger from "../shared/controls.module.css";
-}
-
-/* --- Prefix folding: group header and indented rows --- */
-
-/* Fold toggle button in the search bar */
-.foldToggle {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  color: var(--fg-muted);
-  cursor: pointer;
-  transition: background 0.1s, color 0.1s, border-color 0.1s;
-}
-
-.foldToggle:hover {
-  background: var(--bg-highlight);
-  color: var(--fg-primary);
-}
-
-.foldToggleActive {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-/* Count badge on the "delete merged" cleanup button */
-.mergedBadge {
-  position: absolute;
-  top: -5px;
-  right: -5px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border-radius: var(--radius-pill);
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-/* Prefix group header row */
+/* A 28px row: the chevron in the icon slot, "feat/", the count on the right. */
 .groupHeader {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 3px 12px 3px 16px;
-  cursor: pointer;
-  user-select: none;
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  font-weight: 500;
+  align-self: stretch;
+  gap: var(--row-gap);
+  height: var(--row-h);
+  margin: 0 var(--list-inset-end, 6px) 0 6px;
+  padding: 0 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
   color: var(--fg-secondary);
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s ease;
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
 .groupHeader:hover {
-  background: var(--bg-highlight);
+  background: var(--wash-0);
+  color: var(--fg-primary);
 }
 
-.groupIcon {
-  flex-shrink: 0;
-  color: var(--fg-muted);
-  display: flex;
+.groupHeader:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
+}
+
+.groupSlot {
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: var(--row-icon);
+  height: var(--row-icon);
+  color: var(--fg-muted);
+}
+
+.groupChevron {
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
+.groupChevronOpen {
+  transform: rotate(90deg);
 }
 
 .groupPrefix {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Indented container for branches inside a prefix group */
-.groupChildren {
-  border-left: 2px solid var(--border);
-  margin-left: 20px;
+.groupCount {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
 }
 
-/* Branch rows inside a prefix group get extra left indent */
-.branchRowIndented {
-  padding-left: 16px;
+/* The group's rows, with a guide line centred under the group's chevron (6px
+   inset + 8px padding + half the 16px slot = 22px, less half the line — the
+   Files tree's guides use the same column). It sits beneath the rows' washes,
+   so a hovered or selected row stays one pill. */
+.groupChildren {
+  position: relative;
+  isolation: isolate;
+}
+
+.groupChildren::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 21.5px;
+  z-index: -1;
+  width: 1px;
+  background: var(--hairline);
+  pointer-events: none;
 }

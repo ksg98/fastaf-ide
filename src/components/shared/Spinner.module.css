@@ -1,0 +1,18 @@
+/* Spinner — a hairline ring in the current text colour with one bright arc.
+   Under reduced motion global.css stops the turn; the ring still reads as
+   "working" next to its label. */
+.loadingSpinner {
+  display: inline-block;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  border: 1.5px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-top-color: currentColor;
+  border-radius: var(--radius-full);
+  animation: loadingSpinnerTurn 0.7s linear infinite;
+}
+
+@keyframes loadingSpinnerTurn {
+  to {
+    transform: rotate(360deg);
+  }
+}

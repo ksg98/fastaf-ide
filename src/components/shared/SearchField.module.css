@@ -1,0 +1,125 @@
+/* SearchField — the one inline filter for side panels (STYLE_GUIDE › Side
+   panels). A 28px filled field, radius 8: magnifier · input · clear · toggles.
+   Filled rather than recessed, so it reads on one black (Cursor Dark) and on a
+   grey step (Codex Dark) alike — the material lives in --field-fill and
+   --field-border, never in a per-theme rule here. */
+
+.searchField {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 3px 0 8px;
+  background: var(--field-fill);
+  border: 1px solid var(--field-border);
+  border-radius: var(--radius-lg);
+  cursor: text;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.searchField:hover:not(:focus-within) {
+  border-color: var(--border-strong);
+}
+
+.searchField:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.22);
+}
+
+.searchFieldDisabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.searchIcon {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  transition: color var(--duration-fast) var(--ease-out);
+}
+
+.searchField:focus-within .searchIcon {
+  color: var(--fg-secondary);
+}
+
+.searchInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  box-shadow: none;
+  color: var(--fg-primary);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  line-height: normal;
+}
+
+.searchInput::placeholder {
+  color: var(--fg-muted);
+  opacity: 1;
+}
+
+/* Clear (×) and the toggles share one small-button recipe. */
+.searchClear,
+.searchToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.searchClear {
+  width: 20px;
+  height: 20px;
+}
+
+.searchToggle {
+  width: 22px;
+  height: 22px;
+}
+
+.searchClear:hover,
+.searchToggle:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.searchToggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+/* Pressed: 16 % accent wash + accent glyph (STYLE_GUIDE › Interactive states).
+   Declared after the hover rule so a pressed toggle keeps its accent on hover. */
+.searchToggleOn {
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+}
+
+.searchToggleOn:hover {
+  background: rgba(var(--accent-rgb), 0.22);
+  color: var(--accent);
+}
+
+.searchTrailing {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+}

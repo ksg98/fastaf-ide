@@ -1,174 +1,357 @@
-/* LogTab — commit list with virtual scroll */
+/* LogTab — the commit history: a virtualised list of two-line rows over the
+   canvas graph (STYLE_GUIDE › Side panels › Log rows). A row is the subject
+   over author · time with the short hash right-aligned; refs are 18px chips.
+   Expanding a commit opens one --row-active block: the wrapped subject, every
+   ref, the body as paragraphs, the summary and the files as rows. */
 .container {
   position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  outline: none;
 }
 
+/* A flex column so an EmptyState can fill it; the list and footer keep their size. */
 .scrollContainer {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
   position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* The list keeps its 6px scrollbar gutter reserved, and the gutter is the
+   rows' right inset (global.css › side-panel scrollbars). */
+@supports selector(::-webkit-scrollbar) {
+  .scrollContainer {
+    overflow-y: scroll;
+    --list-inset-end: 0px;
+  }
 }
 
 .virtualList {
   position: relative;
+  flex-shrink: 0;
   width: 100%;
 }
 
-/* Commit row — virtualizer sets position:absolute + width:100% inline, so
-   the "inset rounded row" look is painted by a ::before overlay clipped
-   to a 6px side gutter. The overlay carries the hover / expanded / focused
-   washes; the row itself stays a transparent container. */
+/* ── Commit row ──────────────────────────────────────────────────────────
+   Rows are absolute and full width (the virtualizer places them), so the
+   inset pill is a ::before 6px in from both edges (on the right, the list's
+   gutter is that inset). The left padding leaves the graph its lanes
+   (--graph-w, 14px a lane) plus the 14px the pill and its padding take; the
+   right padding is the pill's inset plus 8. */
 .commitRow {
   position: absolute;
   left: 0;
   width: 100%;
-  padding: 6px 12px;
-  cursor: pointer;
+  height: 48px;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding: 6px calc(var(--list-inset-end, 6px) + 8px) 6px calc(14px + var(--graph-w, 14px));
+  cursor: pointer;
 }
 
 .commitRow::before {
   content: "";
   position: absolute;
-  inset: 2px 6px;
-  border-radius: var(--radius-md);
+  inset: 1px var(--list-inset-end, 6px) 1px 6px;
+  border-radius: var(--radius-lg);
   background: transparent;
   pointer-events: none;
-  transition: background var(--duration-fast) var(--ease-out),
+  transition:
+    background var(--duration-fast) var(--ease-out),
     box-shadow var(--duration-fast) var(--ease-out);
-  z-index: 0;
 }
 
+/* In-flow children paint over the positioned ::before. */
 .commitRow > * {
   position: relative;
-  z-index: 1;
 }
 
 .commitRow:hover::before {
-  background: var(--surface-hover);
+  background: var(--wash-0);
 }
 
-.commitRowExpanded::before {
-  background: var(--surface-hover);
+/* Expanded: one --row-active block (no outline), as tall as its content. */
+.commitRowExpanded {
+  height: auto;
+  min-height: 48px;
+  padding-bottom: 10px;
+  cursor: default;
 }
 
-.commitRowFocused::before {
-  box-shadow: inset 0 0 0 1px var(--accent);
+.commitRowExpanded::before,
+.commitRowExpanded:hover::before {
+  background: var(--row-active);
 }
 
-/* Line 1: dot + hash + subject */
+/* Keyboard focus, only while the list has focus. */
+.container:focus-within .commitRowFocused::before {
+  box-shadow: inset 0 0 0 1px rgba(var(--accent-rgb), 0.6);
+}
+
+/* Line 1: subject + ref chips */
 .commitLine1 {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
+  height: 20px;
   min-width: 0;
-}
-
-.commitDot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-full);
-  background: var(--accent);
-  flex-shrink: 0;
-}
-
-.commitHash {
-  font-family: var(--font-mono);
-  font-size: var(--font-xs);
-  color: var(--fg-secondary);
-  flex-shrink: 0;
 }
 
 .commitSubject {
-  font-size: var(--font-sm);
-  color: var(--fg-primary);
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  font-size: var(--font-md);
+  line-height: 20px;
+  color: var(--fg-primary);
+}
+
+.commitRowExpanded .commitLine1 {
+  height: auto;
+  min-height: 20px;
+  align-items: flex-start;
+  cursor: pointer;
 }
 
 .commitRowExpanded .commitSubject {
+  overflow: visible;
   white-space: normal;
-  text-overflow: unset;
+  overflow-wrap: break-word;
+  font-weight: 500;
+  line-height: 19px;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
-/* Line 2: hash + author + time */
+/* The chips never take more than 60%: the subject always keeps the rest. */
+.refs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+}
+
+/* ── Ref chips ───────────────────────────────────────────────────────────
+   18px, UI font, 12px icons. The current branch is accent, tags amber,
+   other branches neutral; a branch and its remote are one chip with a
+   cloud, a remote-only branch leads with the cloud. */
+.refBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 140px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-md);
+  background: var(--wash-1);
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.refIcon {
+  flex-shrink: 0;
+}
+
+.refName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.refHead {
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.refBranch {
+  background: var(--wash-1);
+  color: var(--fg-secondary);
+}
+
+.refTag {
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--warning);
+}
+
+.refMore {
+  flex-shrink: 0;
+  background: var(--wash-1);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Line 2: author · time, the short hash as a right-aligned column */
 .commitLine2 {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+  height: 16px;
   min-width: 0;
+  font-size: var(--font-sm);
+  line-height: 16px;
+  color: var(--fg-muted);
 }
 
-.commitMeta {
-  font-size: var(--font-xs);
+.commitRowExpanded .commitLine2 {
+  cursor: pointer;
+}
+
+.commitAuthor {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--fg-secondary);
+}
+
+.commitSep {
   flex-shrink: 0;
 }
 
-/* Ref badge — pill vocabulary (bg-highlight base, 1px subtle border,
-   full pill radius); semantic tokens tint the text and border only, so
-   the badge stays legible against any row wash. */
-.refBadge {
+.commitTime {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.commitHash {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  color: var(--fg-muted);
+}
+
+/* ── Expanded commit ─────────────────────────────────────────────────── */
+.commitDetail {
+  margin-top: 6px;
+  cursor: default;
+}
+
+.detailRefs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.detailRefs .refBadge {
+  max-width: 100%;
+}
+
+/* The body, reflowed into paragraphs; lists and trailers keep their breaks. */
+.commitBody {
+  font-size: var(--font-sm);
+  line-height: 1.5;
+  color: var(--fg-secondary);
+  overflow-wrap: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.bodyParagraph {
+  margin: 0 0 6px;
+}
+
+.bodyPre {
+  white-space: pre-wrap;
+}
+
+/* "14 files changed +210 −36" and the copy-hash button, whose hash lines up
+   with line 2's hash above it. */
+.detailSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  margin-top: 4px;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.stats {
+  display: inline-flex;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.statAdd {
+  color: var(--success);
+}
+
+.statDel {
+  color: var(--error);
+}
+
+.copyHash {
   display: inline-flex;
   align-items: center;
-  font-size: var(--font-2xs);
-  font-family: var(--font-mono);
-  font-weight: 600;
-  padding: 0 6px;
-  background: var(--bg-highlight);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
-  white-space: nowrap;
-  line-height: 16px;
-}
-
-.refBranch {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 35%, var(--border-subtle));
-}
-
-.refTag {
-  color: var(--warning);
-  border-color: color-mix(in srgb, var(--warning) 35%, var(--border-subtle));
-}
-
-.refHead {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
-}
-
-/* Expanded: full commit message */
-.commitBody {
-  font-size: var(--font-xs);
+  gap: 5px;
+  flex-shrink: 0;
+  height: 24px;
+  margin: 0 -8px 0 auto;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
   color: var(--fg-secondary);
-  white-space: pre-wrap;
-  padding: 4px 0 2px 0;
-  line-height: 1.4;
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
 }
 
-/* Expanded: changed files */
-.changedFiles {
-  padding: 4px 0 4px 28px;
+.copyHash:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.copyHash:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+/* Files: the Changes row anatomy at 26px, the full width of the block. (Not
+   named "changedFiles": `[class*=_changedFile]` must find the rows only.) */
+.detailFiles {
+  margin: 0 -8px;
 }
 
 .changedFile {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-  color: var(--fg-secondary);
-  border-radius: var(--radius-sm);
+  gap: 8px;
+  height: 26px;
+  padding: 0 6px 0 8px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-md);
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .changedFileClickable {
@@ -176,75 +359,134 @@
 }
 
 .changedFileClickable:hover {
-  background: var(--surface-hover);
-  color: var(--fg-primary);
+  background: var(--wash-0);
 }
 
-.fileStatus {
+.fileIcon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   width: 16px;
   height: 16px;
-  border-radius: var(--radius-sm);
-  font-size: var(--font-2xs);
-  font-weight: 700;
-  flex-shrink: 0;
 }
 
-.statusM {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
+.fileIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Basename, then its folder, on one baseline — the Changes rows' label: a
+   wrapping line box one line tall, so a folder that can't get 3em wraps out of
+   sight instead of shrinking to a sliver ("s…"). The name keeps its width. */
+.fileLabel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  align-content: flex-start;
+  column-gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 20px;
+  overflow: hidden;
+  line-height: 20px;
+}
+
+.fileName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-primary);
+}
+
+.fileNameDeleted {
+  color: var(--fg-secondary);
+  text-decoration: line-through;
+}
+
+.fileDir {
+  flex: 1 1 0;
+  min-width: 3em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+  color: var(--fg-muted);
+}
+
+.fileStatus {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: var(--font-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.statusModified {
   color: var(--accent);
 }
 
-.statusA {
-  background: color-mix(in srgb, var(--success) 20%, transparent);
+.statusAdded {
   color: var(--success);
 }
 
-.statusD {
-  background: color-mix(in srgb, var(--error) 20%, transparent);
+.statusDeleted {
   color: var(--error);
 }
 
-.statusR {
-  background: color-mix(in srgb, var(--merged) 20%, transparent);
+.statusRenamed {
   color: var(--merged);
 }
 
 .statusOther {
-  background: color-mix(in srgb, var(--fg-muted) 20%, transparent);
   color: var(--fg-muted);
 }
 
-.filePath {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.filesLoading {
-  font-size: var(--font-xs);
-  color: var(--fg-muted);
-  padding: 4px 0;
-}
-
-/* Load more button */
-.loadMore {
+/* ── Paging footer ───────────────────────────────────────────────────── */
+/* Centred on the panel: the list's 6px gutter takes the right, so the
+   footer gives up the same on the left (as EmptyState does). */
+.listFooter {
   display: flex;
+  align-items: center;
   justify-content: center;
-  padding: 8px;
-}
-
-.loadMoreBtn {
-  composes: btn from "../shared/controls.module.css";
+  gap: 8px;
+  flex-shrink: 0;
+  height: 40px;
+  margin-left: calc(6px - var(--list-inset-end, 6px));
   font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  padding: 4px 16px;
+  color: var(--fg-muted);
 }
 
-/* Empty / loading states */
-.empty {
-  composes: empty from "./panel.module.css";
+.footerAlert {
+  flex-shrink: 0;
+  color: var(--error);
+}
+
+.retryBtn {
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.retryBtn:hover {
+  background: var(--wash-1);
+  color: var(--fg-primary);
+}
+
+.retryBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
 }

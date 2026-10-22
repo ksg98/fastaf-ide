@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { getFileIconColor } from "../../../components/FileBrowserPanel/fileColors";
 
 describe("getFileIconColor", () => {
-	it("gives folders a muted gray-blue tone", () => {
-		expect(getFileIconColor("src", true)).toBe("#8f98a7");
+	// A folder is the chrome's stroke glyph (SPEC §G4), so it takes the theme's
+	// muted text tone rather than a type colour.
+	it("gives folders the muted text tone", () => {
+		expect(getFileIconColor("src", true)).toBe("var(--fg-muted)");
+		expect(getFileIconColor("node_modules", true)).toBe("var(--fg-muted)");
 	});
 
 	it("maps known extensions to pastel colors", () => {

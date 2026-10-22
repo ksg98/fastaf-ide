@@ -296,7 +296,7 @@ Right-click the main worktree row → **Switch Branch** submenu to checkout a di
 - Single-terminal branches stay compact — no caret, no list — and the whole feature is inert when the setting is off.
 
 ### 2.4 Git Quick Actions
-- Left end of the sidebar footer when a repo is active, as icon buttons (labels in their tooltips; the Git panel's sync row has the same four with labels)
+- Left end of the sidebar footer when a repo is active, as icon buttons (labels in their tooltips)
 - Pull, Push, Fetch, Stash buttons — execute in active terminal
 
 ### 2.5 Sidebar Resize
@@ -357,25 +357,29 @@ Replaced by the Git Panel's Changes tab (section 3.8). `Cmd+Shift+D` now opens t
 - Directory tree of active repository
 - **Auto-refresh**: directory watcher detects external file changes (create/delete/rename) and refreshes automatically within ~1s, preserving selection
 - Navigation: `↑/↓` (navigate), `Enter` (open/enter dir), `Backspace` (parent dir)
-- Breadcrumb toolbar: always-visible path bar with click-to-navigate segments + inline sort dropdown (funnel icon)
-- Search filter: text input with `*` and `**` glob wildcard support
-- Git status indicators: orange (modified), green (staged), blue (untracked)
+- **Header**: the List view, Tree view and Sort buttons sit in the panel header, the current view highlighted. There is no file-count badge, no status legend and no separate toolbar row
+- **Breadcrumb** (list view only): the row under the search field starts with the folder's own name (`fastaf › src › components`); click a segment to jump there. There is no `..` row — `Backspace` goes up. A path wider than the panel scrolls to the current folder and fades its clipped start
+- **Search**: one field (placeholder "Search files"; the `*` / `**` glob help is in its tooltip); `Esc` or `×` clears. Filename results show the file name, then its folder (at the panel's 200px minimum the folder moves to the row's tooltip)
+- **Rows**: 13px names for files and folders; in the tree a folder's chevron sits in the icon column, with an indent guide under each open folder; list view and search results show folders with the folder icon. Sizes and times moved into the row tooltip (path, size, modified time)
+- Git status: a dot at the right end of a row — accent blue (modified), green (staged), grey (untracked) — with its name as the tooltip; a folder shows the dot of what changed inside it (staged first, then modified, then untracked)
+- Empty, loading and error states: "No folder open", "This folder is empty" with a **New file** button (opens the inline name field), "Couldn't read this folder" with the error, and "No files match “…”" for a filename search with no results
 - Context menu (right-click): Copy (`Cmd+C`), Cut (`Cmd+X`), Paste (`Cmd+V`), Rename, Delete, Add to .gitignore
-- **Multi-select** (flat list and tree view): `Cmd+click` (`Ctrl+click` on Windows/Linux) adds or removes a row, `Shift+click` selects the range from the last-clicked row (in tree view the rows of expanded folders count), `Cmd+A` selects every row on screen, and `Escape` or a click on empty space clears it. A selection click never opens a file or expands a folder. Selected rows get a 22 % accent wash, stronger than the 13 % one that marks the file open in the editor
-- **Copy/Cut/Paste act on the whole selection, folders included.** `Cmd+C`/`Cmd+X`, or the menu of a selected row ("Copy 3 Items"), put every selected file and folder on the clipboard, and one Paste lands them all through a single `paste_paths` call: a folder is copied recursively or moved by rename, and one pasted inside itself is refused. A row inside a selected folder is left out, since it travels with the folder. Right-clicking outside the selection selects just that row
-- **The selection menu** also offers Copy Paths / Copy Relative Paths (one per line) and **Delete N Items…**: one confirmation, one `delete_paths` call. Single-row Delete goes through `delete_paths` too, which removes a symlink itself rather than what it points at
+- **Multi-select** (flat list and tree view): `Cmd+click` (`Ctrl+click` on Windows/Linux) adds or removes a row, `Shift+click` selects the range from the last-clicked row (in tree view the rows of expanded folders count), `Cmd+A` selects every row on screen, and `Escape` or a click on empty space clears it. A selection click never opens a file or expands a folder. Two or more selected rows get the multi-selection wash (`--row-picked`), always stronger than the one that marks the file open in the editor; a single selected row, and the list view's arrow-key cursor once the keyboard moves it, are outlined while the panel has focus
+- **Copy/Cut/Paste act on the whole selection, folders included.** `Cmd+C`/`Cmd+X`, or the menu of a selected row ("Copy 3 items"), put every selected file and folder on the clipboard, and one Paste lands them all through a single `paste_paths` call: a folder is copied recursively or moved by rename, and one pasted inside itself is refused. A row inside a selected folder is left out, since it travels with the folder. Right-clicking outside the selection selects just that row
+- **The selection menu** also offers Copy paths / Copy relative paths (one per line) and **Delete N items…**: one confirmation, one `delete_paths` call. Single-row Delete goes through `delete_paths` too, which removes a symlink itself rather than what it points at
 - **Paste target:** the right-clicked folder, or the folder of the right-clicked file. `Cmd+V` pastes into the last-clicked folder (or beside the last-clicked file) in tree view, and into the folder on screen in the flat list
 - **Paste never overwrites.** A copy whose name is taken lands as `name copy.ext`, then `name copy 2.ext` — so pasting into the source folder duplicates. A move whose name is taken is skipped, and a toast names it. Pasted files come up selected, their folder expanded in tree view
 - Keyboard shortcuts work when panel is focused (copy/cut/paste/select all)
-- Sort dropdown: Name (alphabetical, directories first) or Date (newest first, directories first)
-- **View modes**: flat list (default) and tree view — toggle via toolbar buttons. Tree view shows a collapsible hierarchy with lazy-loaded subdirectories on expand. Switching to tree resets to repo root. Search always uses flat results
+- Sort menu (the header's sort button): Name (alphabetical, directories first) or Date (newest first, directories first)
+- **View modes**: tree view (default) and flat list — toggle via the header buttons. Tree view shows a collapsible hierarchy with lazy-loaded subdirectories on expand. Switching to tree resets to repo root. Search always uses flat results
+- Context menu labels are sentence case ("New folder…", "Copy relative path", "Open with default app", "Reveal in file manager")
 - Click file to open in code editor tab
 
 #### 3.4.1 Content Search (`Cmd+Shift+F`)
-- Full-text search across file contents — toggle from filename search via the `C` button in the search bar
-- Options: case-sensitive, regex, whole-word
-- Results stream progressively and are grouped by file with match count per file
-- Each result row shows file path, line number, and highlighted match context
+- Full-text search across file contents — toggle from filename search with the mode button at the right end of the search field (placeholder "Search in files"; at least 3 characters, and the panel says so until then)
+- Options: Match case, Match whole word, Use regular expression — toggles inside the field in content mode
+- Results stream progressively and are grouped by file: a row naming the file, its folder and its match count (a click opens the first match)
+- Each match row shows the line number and the highlighted excerpt; a match far along a long line starts a few words before it (behind `…`) so it is always in view, and hovering the row shows the line in full. No results reads "No matches — Nothing in this folder contains “…”"
 - Match highlighting stays aligned after Unicode text, including non-BMP emoji
 - Click a result to open the file in the code editor at the matched line
 - Binary files and files larger than 1 MB are automatically skipped
@@ -425,51 +429,50 @@ Replaced by the Git Panel's Changes tab (section 3.8). `Cmd+Shift+D` now opens t
 - Keyboard shortcuts are now in Settings > Keyboard Shortcuts tab (auto-generated from `actionRegistry.ts`)
 
 ### 3.8 Git Panel (`Cmd+Shift+D`)
-Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the former Git Operations Panel floating overlay and the standalone Diff Panel.
+Tabbed side panel with four tabs: Changes, Log, Stashes, Branches. Replaces the former Git Operations Panel floating overlay and the standalone Diff Panel. The tabs are text pills in the panel header, with no counts; below ~330px the strip scrolls sideways, a cut-off end fades out, and the open tab is always scrolled into view.
 
 **Changes tab:**
 - Porcelain v2 working tree status via `get_working_tree_status` (branch, upstream, ahead/behind, stash count, staged/unstaged/untracked files)
-- Sync row: Pull, Push, Fetch buttons (background execution via `run_git_command`)
-- Stage / unstage individual files or stage all / unstage all
-- Discard unstaged changes (with confirmation dialog)
-- Inline commit form with message input and Amend toggle
-- Click a file row to open its diff in the diff panel
-- Status icons per file: Modified, Added, Deleted, Renamed, Untracked
-- Per-file diff counts (additions/deletions) shown inline
-- Glob filter to narrow the file list
+- **Commit composer**: a card at the top of the tab that stays put while the list scrolls under it. The field grows from 2 to 8 lines, and its placeholder names the shortcut and the branch ("Message (⌘↵ to commit on main)"; Ctrl+Enter off macOS; "to amend b00e1cb" while amending). One row of controls sits inside the card: **Generate** (the sparkle; click again to stop), an **Amend** toggle chip (on loads the last commit's subject and names its short hash, off restores the draft), the **Smart Commit** chip, and the **Commit** pill. The pill's label tracks the state (Commit / Amend / Committing… / Amending… / Committed / Amended) and its tooltip says what it will do ("Commit 3 staged files to main (⌘↵)") or why it is disabled ("Stage files to commit, or turn on Amend", "Write a commit message"). Commit, Smart Commit and Generate failures show in a dismissable banner under the card
+- When the panel is narrow, the Smart Commit chip gives way first: its label shortens, then it folds to its menu arrow (the menu still lists every `git-changes` prompt, the active one ticked); while a commit runs at the 300px minimum it steps aside until git is done. Generate, Amend and Commit keep their size
+- Sections **Staged** and **Unstaged**, with always-visible actions: Unstage all; Discard all (tracked files only, behind a confirm dialog) and Stage all. While a filter is on, counts read `3/8`
+- Rows: the file icon, the basename, then its folder (the folder drops out when there is no room for it), then `+N −N` and a coloured status letter (M, A, D, R; U = untracked) with the word as its tooltip. The row actions — Unstage, Discard changes, Stage — take the numbers' place on hover, keyboard focus and the selected row; a spinner holds their place while git stages, unstages or discards
+- Click a file row to open its diff (or press `Enter`, or pick **Open diff** in the right-click menu). `Cmd`/`Shift`-click selects several rows; `↑ ↓` move, `Space` stages or unstages, `Delete`/`Backspace` discards (tracked files only)
+- **Filter files** field (`*` matches within a folder, `**` across folders — the help is in its tooltip): `↓` moves into the list, `Esc` clears it, and `Esc` on an empty field returns to the list; "No files match “…”" shows when nothing matches
+- Empty and error states: "No repository", "Not a Git repository", "No changes — The working tree matches <branch>.", and "Couldn't read the working tree" with git's message (selectable)
 - Path-traversal validation on all stage/unstage/discard operations
-- **History sub-panel** (collapsible): per-file commit history via `get_file_history` (follows renames), paginated with virtual scroll
-- **Blame sub-panel** (collapsible): per-line blame via `get_file_blame` (porcelain format), age heatmap (green=recent, fading to neutral), commit metadata per line
+- **History drawer** (collapsible, pinned at the bottom of the tab; its header names the selected file, with the full path as tooltip): the commits that touched the file via `get_file_history` (follows renames), as two-line rows (subject; author · time · hash) — click one to open its diff. **Show more** loads the next 50
+- **Blame drawer** (collapsible): per-line blame via `get_file_blame` (porcelain format). A 2px accent age bar runs down the gutter, bright for recent commits and faint for old ones; hash · author · age show on a commit's first line, with a hairline between commits. Click the gutter to mark every line of that commit. A file git doesn't track yet reads "This file isn't tracked yet"
 
 **Log tab:**
-- Paginated commit log via `get_commit_log` (default 50, max 500)
+- Commit log via `get_commit_log` (50 at a time, max 500): the next 50 load by themselves as you near the end of the list — a "Loading more…" row while they load, "Couldn't load more" with Retry if that fails
 - Virtual scroll via `@tanstack/solid-virtual` for large histories
-- Canvas-based commit graph via `get_commit_graph`: lane assignment, Bezier curve connections, 8-color palette, ref badges (branch, tag, HEAD). Graph follows HEAD only
-- Click a commit row to expand and see its full commit message body (multi-line, untruncated) and changed files (via `get_changed_files`)
+- A commit is a two-line row: its subject, then author · relative time ("3h ago"; the full timestamp is the tooltip), with the short hash right-aligned
+- **Refs are chips**: the current branch in accent, tags amber with a tag icon, other branches neutral. A branch and its remote fold into one chip with a cloud; a remote-only branch leads with the cloud; `origin/HEAD` is hidden. A collapsed row shows up to two whole chips, then "+N", and its tooltip lists every ref
+- Canvas-based commit graph via `get_commit_graph` (the first 200 commits; follows HEAD only): lane assignment and curved connections, in lane colours taken from the theme's semantic colours (redrawn on a theme switch). Dots sit on the subject line and HEAD is a hollow ring; a branch curves into the commit it forked from, a merge curves out of its merge commit, and the dots stay aligned under an expanded commit
+- Click a commit row (or `↑ ↓` then `Enter`) to expand it into one block: the wrapped subject, every ref, the body reflowed into paragraphs (lists and trailers keep their line breaks), "N files changed +a −d" with a copy-hash button, and the changed files (via `get_changed_files`) as rows — icon, name, folder, counts and status letter
 - Click a file in an expanded commit to open its diff at that commit hash
-- Relative timestamps (e.g., "3h ago")
+- Empty and error states: "No commits yet", and "Couldn't load the history" with git's message (a failed read used to show "No commits")
 
 **Stashes tab:**
-- List all stash entries via `get_stash_list`
-- Per-stash actions: Apply, Pop, Drop (via `run_git_command`)
+- List all stash entries via `get_stash_list`. A stash is a two-line row: its subject, then `stash@{n}` · "WIP on main" or "on feat/x" (the raw message is the tooltip)
+- Click a row (or `↑ ↓` then `Enter`) to open its diff in a well under it: a header per file (name, folder, `+N −N`), then the hunks
+- Apply, Pop and Drop (the trash icon) stay on the row, quiet until it is hovered, focused or open (`git_stash_apply` / `git_stash_pop` / `git_stash_drop`). Pop and Drop ask first ("Pop stash@{1}?" / "Drop stash@{1}?"), and a failed apply, pop or drop shows git's message under its row. The same three are in the right-click menu
+- Empty state: "No stashes — Stash work in progress to set it aside without committing."
 
 **Branches tab (`Cmd+G` — opens Git Panel directly on this tab):**
-- Local and Remote branches in collapsible sections
-- Rich info per branch: ahead/behind counts (↑N ↓M), relative date, merged badge, stale dimming (branches with last commit > 30 days)
-- Prefix folding: groups branches by `/` separator (e.g. `feature/`, `bugfix/`), toggle to expand/collapse groups
-- Recent Branches section from git reflog
-- Inline search/filter to narrow branch list
-- Checkout (Enter / double-click): switches to the selected branch, with dirty worktree dialog (stash / force / cancel)
-- **n** — Create new branch (inline form, optional checkout)
-- **d** — Delete branch (safe + force options; refuses main branch and current branch)
-- **R** — Rename branch (inline edit)
-- **M** — Merge selected branch into current. Result is surfaced as a toast: conflict error on failure, "Already up to date" on a no-op, or a success toast with a one-click "Delete branch" action for the now-merged branch
-- **r** — Rebase current onto selected branch
-- **P** — Push branch (auto-detects missing upstream and sets tracking)
-- **p** — Pull current branch
-- **f** — Fetch all remotes
-- Context menu (right-click): Checkout, Create Branch from Here, Delete, Rename, Merge into Current, Rebase Current onto This, Push, Pull, Fetch, Compare (shows `diff --name-status`)
-- **Delete merged**: a broom button (with a count badge of how many qualify) bulk-deletes all local branches already merged into main, behind a confirm dialog listing the targets. Uses safe `git branch -d` per branch, so a stale merged flag can never delete unmerged work
+- A **context strip** at the top shows the current branch (or "Detached at <hash>"), its upstream and ↑/↓ counts, with the smart-prompt chip on the right (Create PR by default, or the last `git-branches` prompt used; its arrow lists the others)
+- Toolbar: the **Filter branches** field (`/` from the list focuses it), **New branch** (+) and **Branch options** (⋯) — "Group by prefix" (checked when on) and "Delete N merged branches…"
+- Sections **Recent** (from git reflog; leaves out the current branch, which the strip shows), **Local** and **Remote**, each collapsible. The filter narrows all three (counts read shown/total), and "No branches match “…”" shows when nothing does
+- Rich info per branch: ahead/behind counts (↑N ↓M), `⇣N` behind main, "Merged" in purple text, a short age (25m, 3h, 2d, 3w, 4mo, 1y) and stale dimming (last commit > 30 days). The current branch has a check in the icon column
+- Prefix folding: groups branches by `/` separator (e.g. `feature/`, `bugfix/`) under a chevron row with its count; the rows inside show the name without the prefix (the tooltip keeps the full name). "Group by prefix" in the options menu turns it on and off; `Tab` reaches the group rows
+- **New branch** form: the name on its own line, then "from <ref>", a "Check out" toggle (on by default), Cancel and Create. `Enter` in the name creates the branch, `Esc` cancels
+- Keyboard: `↑ ↓` select a row, `/` focuses the filter, `Esc` clears the filter, then the selection. Branch actions live in the right-click menu: Checkout, Merge into current, Rebase onto, Compare with current (shows `diff --name-status`), Push, Pull, Fetch, Update from base (rebase), Rename, Delete and Copy name (remote branches: Checkout (create local), Fetch, Compare with current, Open on GitHub, Copy name). Its shortcut hints (`⏎`, `⇧M`, `r`, `⇧P`, `p`, `f`, `⇧R`, `d`) work while the menu is open
+- Checkout over a dirty working tree asks first: "Stash and switch", "Force switch" or Cancel
+- Merge results are surfaced as a toast: conflict error on failure, "Already up to date" on a no-op, or a success toast with a one-click "Delete branch" action for the now-merged branch
+- Delete: safe and force options; refuses the main branch and the current branch. Push auto-detects a missing upstream and sets tracking
+- **Delete merged** (Branch options › "Delete N merged branches…", disabled when none qualify) bulk-deletes all local branches already merged into main, behind a confirm dialog listing the targets. Uses safe `git branch -d` per branch, so a stale merged flag can never delete unmerged work
+- Empty, loading and error states: "No branches", "Loading branches…", and "Couldn't load branches" with a **Retry** button
 - Backend: `get_branches_detail`, `delete_branch`, `create_branch`, `get_recent_branches`
 - Click on sidebar "GIT" vertical label also opens Git Panel on the Branches tab
 
@@ -1221,10 +1224,11 @@ Variables are resolved from the Rust backend (`resolve_context_variables`) and f
 | Location | Prompts shown | Trigger |
 |----------|---------------|---------|
 | **Toolbar dropdown** | All enabled prompts with `toolbar` placement | `Cmd+Shift+K` or lightning bolt button |
-| **Git Panel — Changes tab** | SmartButtonStrip with `git-changes` placement | Inline buttons above changed files |
+| **Git Panel — Changes tab** | SmartButtonStrip (chip) with `git-changes` placement | Smart Commit chip in the commit composer's control row (its arrow lists the other `git-changes` prompts) |
 | **PR Detail Popover** | SmartButtonStrip with `pr-popover` placement | Inline buttons in PR detail view |
 | **Command Palette** | All prompts with `Smart:` prefix | `Cmd+P` then type "Smart" |
-| **Branch context menu** | Prompts with `git-branches` placement | Right-click branch in Branches tab |
+| **Git Panel — Branches tab** | SmartButtonStrip (chip) with `git-branches` placement | The chip at the right of the Branches tab's context strip (Create PR by default; its arrow lists the others) |
+| **Branch context menu** | Prompts with `git-branches` placement | Right-click a branch in the sidebar |
 
 ### 10.10 Smart Prompts Management (Cmd+Shift+K Drawer)
 

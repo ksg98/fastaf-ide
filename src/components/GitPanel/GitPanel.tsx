@@ -1,8 +1,19 @@
-import { type Component, createEffect, createSignal, Match, Show, Switch } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	Match,
+	on,
+	onCleanup,
+	onMount,
+	Show,
+	Switch,
+} from "solid-js";
 import { type DiffStatus, diffTabsStore } from "../../stores/diffTabs";
 import { cx } from "../../utils";
-import { onClickKeyDown } from "../../utils/a11y";
 import p from "../shared/panel.module.css";
+import { SectionHeader } from "../shared/SectionHeader";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
 import { BlameTab } from "./BlameTab";
@@ -30,6 +41,9 @@ const TABS: { id: GitTab; label: string }[] = [
 	{ id: "branches", label: "Branches" },
 ];
 
+/** Width of the fade at a cut-off end of the tab strip (GitPanel.module.css). */
+const TAB_FADE_PX = 16;
+
 export interface GitPanelProps {
 	visible: boolean;
 	repoPath: string | null;
@@ -50,6 +64,12 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 	const [historyExpanded, setHistoryExpanded] = createSignal(false);
 	const [blameExpanded, setBlameExpanded] = createSignal(false);
 	const gitPath = () => (props.fsRoot || props.repoPath) as string | null;
+	// What the tabs get: null while the panel is hidden, so no hidden tab fetches.
+	// Memos, not ternaries in the JSX: Solid wraps a JSX ternary in a fresh memo on
+	// every read, and the tabs read repoPath in click handlers and async fetches,
+	// outside any owner, where each read would leak a computation.
+	const tabRepoPath = createMemo(() => (props.visible ? gitPath() : null));
+	const tabStoreRepoPath = createMemo(() => (props.visible ? props.repoPath : null));
 	const mode = () => props.mode ?? "inline";
 	const openDiff: OpenDiffFn = (...args) => (props.onOpenDiff ?? diffTabsStore.add.bind(diffTabsStore))(...args);
 
@@ -57,6 +77,43 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 	createEffect(() => {
 		const tab = props.requestedTab;
 		if (tab) setActiveTab(tab);
+	});
+
+	// The tab strip overflows below ~330px. Whichever end is cut off fades out, and
+	// the active tab is always scrolled clear of the fades, so a narrow panel never
+	// shows a sliver of a tab ("ges") or hides the one that is open.
+	let tabsRef: HTMLDivElement | undefined;
+	const [tabsClip, setTabsClip] = createSignal({ start: false, end: false });
+
+	function measureTabs() {
+		const el = tabsRef;
+		if (!el) return;
+		const max = el.scrollWidth - el.clientWidth;
+		const start = max > 1 && el.scrollLeft > 1;
+		const end = max > 1 && el.scrollLeft < max - 1;
+		const prev = tabsClip();
+		if (prev.start !== start || prev.end !== end) setTabsClip({ start, end });
+	}
+
+	function revealActiveTab() {
+		const el = tabsRef;
+		const tab = el?.querySelector<HTMLElement>('[aria-current="true"]');
+		if (!el || !tab) return;
+		const strip = el.getBoundingClientRect();
+		const box = tab.getBoundingClientRect();
+		if (box.left < strip.left + TAB_FADE_PX) el.scrollLeft -= strip.left + TAB_FADE_PX - box.left;
+		else if (box.right > strip.right - TAB_FADE_PX) el.scrollLeft += box.right - (strip.right - TAB_FADE_PX);
+		measureTabs();
+	}
+
+	createEffect(on(activeTab, revealActiveTab));
+
+	onMount(() => {
+		if (!tabsRef || typeof ResizeObserver === "undefined") return;
+		// The panel is resized (or shown) — the strip's room changed.
+		const observer = new ResizeObserver(() => revealActiveTab());
+		observer.observe(tabsRef);
+		onCleanup(() => observer.disconnect());
 	});
 
 	/** Split path into basename for compact display */
@@ -76,7 +133,9 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 			</Show>
 			<div class={p.header}>
 				<div
-					class={s.tabs}
+					ref={tabsRef}
+					class={cx(s.tabs, tabsClip().start && s.tabsFadeStart, tabsClip().end && s.tabsFadeEnd)}
+					onScroll={measureTabs}
 					// The strip hides its scrollbar (see GitPanel.module.css); map vertical
 					// wheel/trackpad to horizontal scroll so the overflowing tabs stay reachable.
 					onWheel={(e) => {
@@ -89,7 +148,13 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 					}}
 				>
 					{TABS.map((tab) => (
-						<button class={cx(s.tab, activeTab() === tab.id && s.tabActive)} onClick={() => setActiveTab(tab.id)}>
+						<button
+							type="button"
+							class={cx(s.tab, activeTab() === tab.id && s.tabActive)}
+							aria-pressed={activeTab() === tab.id}
+							aria-current={activeTab() === tab.id ? "true" : undefined}
+							onClick={() => setActiveTab(tab.id)}
+						>
 							{tab.label}
 						</button>
 					))}
@@ -103,60 +168,52 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 				<Switch>
 					<Match when={activeTab() === "changes"}>
 						<ChangesTab
-							repoPath={props.visible ? gitPath() : null}
-							storeRepoPath={props.visible ? props.repoPath : null}
+							repoPath={tabRepoPath()}
+							storeRepoPath={tabStoreRepoPath()}
 							onFileSelect={setSelectedFile}
 							onOpenDiff={openDiff}
 						/>
 					</Match>
 					<Match when={activeTab() === "log"}>
-						<LogTab repoPath={props.visible ? gitPath() : null} onOpenDiff={openDiff} />
+						<LogTab repoPath={tabRepoPath()} onOpenDiff={openDiff} />
 					</Match>
 					<Match when={activeTab() === "stashes"}>
-						<StashesTab repoPath={props.visible ? gitPath() : null} />
+						<StashesTab repoPath={tabRepoPath()} />
 					</Match>
 					<Match when={activeTab() === "branches"}>
-						<BranchesTab repoPath={props.visible ? gitPath() : null} />
+						<BranchesTab repoPath={tabRepoPath()} />
 					</Match>
 				</Switch>
 			</div>
 			{/* Sub-panels: History & Blame — only visible in Changes tab */}
 			<Show when={activeTab() === "changes"}>
 				<div class={s.subPanels}>
-					<div
+					<SectionHeader
+						variant="drawer"
 						class={s.subPanelHeader}
-						role="button"
-						tabIndex={0}
-						onClick={() => setHistoryExpanded((v) => !v)}
-						onKeyDown={onClickKeyDown(() => setHistoryExpanded((v) => !v))}
-					>
-						<span class={cx(s.subChevron, !historyExpanded() && s.subChevronCollapsed)}>&#x25BC;</span>
-						<span class={s.subPanelLabel}>History</span>
-						<Show when={selectedFile()}>
-							<span class={s.subPanelFile}>{basename(selectedFile()!)}</span>
-						</Show>
-					</div>
+						label="History"
+						meta={selectedFile() ? basename(selectedFile()!) : undefined}
+						title={selectedFile() ?? undefined}
+						open={historyExpanded()}
+						onToggle={() => setHistoryExpanded((v) => !v)}
+					/>
 					<Show when={historyExpanded()}>
 						<div class={s.subPanelBody}>
-							<HistoryTab repoPath={props.visible ? gitPath() : null} filePath={selectedFile()} onOpenDiff={openDiff} />
+							<HistoryTab repoPath={tabRepoPath()} filePath={selectedFile()} onOpenDiff={openDiff} />
 						</div>
 					</Show>
-					<div
+					<SectionHeader
+						variant="drawer"
 						class={s.subPanelHeader}
-						role="button"
-						tabIndex={0}
-						onClick={() => setBlameExpanded((v) => !v)}
-						onKeyDown={onClickKeyDown(() => setBlameExpanded((v) => !v))}
-					>
-						<span class={cx(s.subChevron, !blameExpanded() && s.subChevronCollapsed)}>&#x25BC;</span>
-						<span class={s.subPanelLabel}>Blame</span>
-						<Show when={selectedFile()}>
-							<span class={s.subPanelFile}>{basename(selectedFile()!)}</span>
-						</Show>
-					</div>
+						label="Blame"
+						meta={selectedFile() ? basename(selectedFile()!) : undefined}
+						title={selectedFile() ?? undefined}
+						open={blameExpanded()}
+						onToggle={() => setBlameExpanded((v) => !v)}
+					/>
 					<Show when={blameExpanded()}>
 						<div class={s.subPanelBody}>
-							<BlameTab repoPath={props.visible ? gitPath() : null} filePath={selectedFile()} />
+							<BlameTab repoPath={tabRepoPath()} filePath={selectedFile()} />
 						</div>
 					</Show>
 				</div>

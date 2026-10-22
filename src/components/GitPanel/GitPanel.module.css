@@ -7,7 +7,7 @@
   background: var(--surface-glass);
   backdrop-filter: var(--blur-glass);
   -webkit-backdrop-filter: var(--blur-glass);
-  border-left: 1px solid var(--border-subtle);
+  border-left: var(--hairline-w) solid var(--hairline);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -27,7 +27,11 @@
   border-left: none;
 }
 
-/* Tab strip — segmented text tabs; the active one is a raised pill. */
+/* Tab strip — text tabs in the header's title slot. The active one is a quiet
+   --row-selected pill (no ring, no border, no counts); it lines up with the
+   rows' 6px inset (-10px out, 2px back in, so the scroller doesn't clip the
+   first tab's focus ring). The strip scrolls sideways with its scrollbar hidden
+   (GitPanel.tsx maps the wheel). */
 .tabs {
   display: flex;
   align-items: center;
@@ -36,7 +40,9 @@
   flex: 1;
   min-width: 0;
   height: 100%;
+  margin-left: -10px;
   margin-right: 6px;
+  padding-left: 2px;
   scrollbar-width: none;
 }
 
@@ -44,110 +50,94 @@
   display: none;
 }
 
+/* Below ~330px the strip overflows: an end with tabs cut off fades out over
+   16px (GitPanel.tsx sets these and keeps the active tab clear of them), so a
+   tab never stops dead at the edge. The masks are alpha only. */
+.tabsFadeStart {
+  -webkit-mask-image: linear-gradient(to right, transparent, currentColor 16px);
+  mask-image: linear-gradient(to right, transparent, currentColor 16px);
+}
+
+.tabsFadeEnd {
+  -webkit-mask-image: linear-gradient(to left, transparent, currentColor 16px);
+  mask-image: linear-gradient(to left, transparent, currentColor 16px);
+}
+
+.tabsFadeStart.tabsFadeEnd {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    currentColor 16px,
+    currentColor calc(100% - 16px),
+    transparent
+  );
+  mask-image: linear-gradient(to right, transparent, currentColor 16px, currentColor calc(100% - 16px), transparent);
+}
+
+/* 13px/500 in every state, so switching never reflows the strip. */
 .tab {
-  position: relative;
-  height: 24px;
-  background: none;
-  border: none;
-  border-radius: var(--radius-md);
-  color: var(--fg-muted);
-  font-size: var(--font-sm);
-  font-weight: 500;
-  font-family: var(--font-ui);
+  flex-shrink: 0;
+  height: 28px;
+  margin: 0;
   padding: 0 9px;
-  cursor: pointer;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-lg);
+  color: var(--fg-muted);
+  font-family: var(--font-ui);
+  font-size: var(--font-md);
+  font-weight: 500;
   white-space: nowrap;
-  transition: color var(--duration-fast) var(--ease-out),
+  cursor: pointer;
+  transition:
+    color var(--duration-fast) var(--ease-out),
     background var(--duration-fast) var(--ease-out);
 }
 
 .tab:hover {
   color: var(--fg-primary);
-  background: var(--surface-hover);
+  background: var(--wash-0);
 }
 
-.tabActive {
+.tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.45);
+}
+
+.tabActive,
+.tabActive:hover {
   color: var(--fg-primary);
-  background: var(--bg-tertiary);
-  box-shadow: 0 0 0 1px var(--border-subtle);
+  background: var(--row-selected);
 }
 
-.tabActive::before {
-  content: none;
-}
-
-/* Tab content area — fills remaining space above sub-panels */
+/* Tab content area — fills remaining space above the drawers */
 .tabContent {
   flex: 1;
   min-height: 200px;
   overflow: hidden;
 }
 
-/* Sub-panels (History, Blame) — collapsible sections at bottom. */
+/* Drawers (History, Blame) pinned at the bottom of the Changes tab. Each drawer
+   header (shared SectionHeader, variant="drawer") draws its own hairline. They
+   keep their 260px bodies while the panel has room; on a short window the
+   bodies give way (the tab content keeps its 200px), so the last blame lines
+   still scroll into view instead of being cut off by the panel's edge. */
 .subPanels {
-  flex-shrink: 1;
+  flex: 0 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.subPanelHeader {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  cursor: pointer;
-  user-select: none;
-  font-size: var(--font-sm);
-  font-family: var(--font-ui);
-  font-weight: 600;
-  color: var(--fg-secondary);
-  background: transparent;
-  border-bottom: 1px solid var(--border-subtle);
-  transition: background var(--duration-fast) var(--ease-out);
-}
-
-.subPanelHeader:hover {
-  background: var(--surface-hover);
-}
-
-.subChevron {
-  font-size: var(--font-2xs);
-  color: var(--fg-muted);
-  transition: transform var(--duration-base) var(--ease-out);
-  flex-shrink: 0;
-}
-
-.subChevronCollapsed {
-  transform: rotate(-90deg);
-}
-
-.subPanelLabel {
-  color: var(--fg-secondary);
-}
-
-.subPanelFile {
-  font-size: var(--font-xs);
-  font-family: var(--font-ui);
-  font-weight: 400;
-  color: var(--fg-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.subPanelBody {
-  max-height: 250px;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
 
-.placeholder {
-  padding: 24px;
-  text-align: center;
-  color: var(--fg-muted);
-  font-size: var(--font-sm);
+/* Hook for the drawer header root (harness, tests); the look is SectionHeader's. */
+.subPanelHeader {
+  flex-shrink: 0;
+}
+
+.subPanelBody {
+  max-height: 260px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }

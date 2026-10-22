@@ -389,7 +389,7 @@ describe("FileBrowserPanel create file", () => {
 		await waitFor(() => expect(queryByText("main.ts")).not.toBeNull());
 
 		openContextMenuOn(container, "main.ts");
-		clickMenuItem("New File\u2026");
+		clickMenuItem("New file\u2026");
 		// FastAF creates inline: an input row in the tree, committed with Enter.
 		const input = document.querySelector("input[aria-label='New File']") as HTMLInputElement;
 		expect(input).not.toBeNull();
@@ -412,7 +412,7 @@ describe("FileBrowserPanel create file", () => {
 		await waitFor(() => expect(queryByText("README.md")).not.toBeNull());
 
 		openContextMenuOn(container, "README.md");
-		clickMenuItem("New File…");
+		clickMenuItem("New file…");
 
 		// FastAF creates inline: an input row in the list, committed with Enter.
 		const input = document.querySelector("input[aria-label='New File']") as HTMLInputElement;
@@ -610,7 +610,7 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 		cmdClick(container, "src");
 		openMenuOn(container, "src");
 
-		for (const label of ["Copy 2 Folders", "Cut 2 Folders", "Paste", "Copy Paths", "Delete 2 Folders\u2026"]) {
+		for (const label of ["Copy 2 folders", "Cut 2 folders", "Paste", "Copy paths", "Delete 2 folders\u2026"]) {
 			expect(() => clickMenuItem(label), label).not.toThrow();
 			openMenuOn(container, "src");
 		}
@@ -624,7 +624,7 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 		cmdClick(container, "docs");
 		cmdClick(container, "a.txt");
 		openMenuOn(container, "a.txt");
-		clickMenuItem("Delete 2 Items\u2026");
+		clickMenuItem("Delete 2 items\u2026");
 		// The dialog renders in a portal, outside the panel's container.
 		expect(document.body.textContent).toContain("Permanently delete 2 items, folders with all their contents?");
 		expect(deleteCalls()).toEqual([]);
@@ -658,7 +658,7 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 		cmdClick(container, "a.txt");
 		cmdClick(container, "b.txt");
 		openMenuOn(container, "b.txt");
-		clickMenuItem("Delete 2 Files\u2026");
+		clickMenuItem("Delete 2 files\u2026");
 		deleteResult = { deleted: ["a.txt"], errors: ["b.txt: Permission denied"] };
 		clickMenuItem("Delete");
 
@@ -674,7 +674,7 @@ describe("FileBrowserPanel multi-select copy/paste", () => {
 		cmdClick(container, "a.txt");
 		cmdClick(container, "b.txt");
 		openMenuOn(container, "b.txt");
-		clickMenuItem("Copy 2 Files");
+		clickMenuItem("Copy 2 files");
 		// The right-click kept the selection rather than narrowing it to b.txt.
 		expect(pickedNames(container)).toEqual(["a.txt", "b.txt"]);
 

@@ -1,9 +1,23 @@
-import { type Component, createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
+import {
+	type Component,
+	createEffect,
+	createMemo,
+	createSignal,
+	For,
+	Match,
+	on,
+	onCleanup,
+	Show,
+	Switch,
+} from "solid-js";
 import { invoke } from "../../invoke";
 import { appLogger } from "../../stores/appLogger";
 import { repositoriesStore } from "../../stores/repositories";
 import { onClickKeyDown } from "../../utils/a11y";
-import { relativeTime } from "../../utils/time";
+import { fullTimestamp, relativeTime } from "../../utils/time";
+import { IconAlert } from "../icons";
+import { EmptyState } from "../shared/EmptyState";
+import { Spinner } from "../shared/Spinner";
 import type { OpenDiffFn } from "./GitPanel";
 import s from "./HistoryTab.module.css";
 import type { CommitLogEntry } from "./types";
@@ -16,28 +30,42 @@ export interface HistoryTabProps {
 	onOpenDiff: OpenDiffFn;
 }
 
+/**
+ * The History drawer under the Changes tab: the commits that touched the
+ * selected file, as two-line rows (the drawer header names the file). A row
+ * opens the file's diff at that commit.
+ */
 export const HistoryTab: Component<HistoryTabProps> = (props) => {
+	// Read through memos: handlers and promises read these, and a prop passed as
+	// an expression (a JSX ternary) would create an unowned computation per read.
+	const repoPath = createMemo(() => props.repoPath);
+	const filePath = createMemo(() => props.filePath);
 	const [commits, setCommits] = createSignal<CommitLogEntry[]>([]);
 	const [loading, setLoading] = createSignal(false);
+	const [loadError, setLoadError] = createSignal<string | null>(null);
 	const [loadingMore, setLoadingMore] = createSignal(false);
 	const [hasMore, setHasMore] = createSignal(true);
+	/** repo:file whose rows are on screen */
+	let shownKey = "";
 
 	/** Fetch the initial commit page for the file */
-	async function fetchHistory(repoPath: string, filePath: string, isCancelled?: () => boolean) {
+	async function fetchHistory(repo: string, file: string, isCancelled?: () => boolean) {
 		if (commits().length === 0) setLoading(true);
 		setHasMore(true);
 		try {
 			const result = await invoke<CommitLogEntry[]>("get_file_history", {
-				path: repoPath,
-				file: filePath,
+				path: repo,
+				file,
 				count: PAGE_SIZE,
 			});
 			if (isCancelled?.()) return;
+			setLoadError(null);
 			setCommits(result);
 			setHasMore(result.length >= PAGE_SIZE);
 		} catch (err) {
 			if (isCancelled?.()) return;
 			appLogger.debug("git", "Failed to load file history", err);
+			setLoadError(String(err));
 			setCommits([]);
 			setHasMore(false);
 		} finally {
@@ -47,20 +75,22 @@ export const HistoryTab: Component<HistoryTabProps> = (props) => {
 
 	/** Load the next page of commits */
 	async function loadMore() {
-		const repoPath = props.repoPath;
-		const filePath = props.filePath;
+		const repo = repoPath();
+		const file = filePath();
 		const current = commits();
-		if (!repoPath || !filePath || current.length === 0 || loadingMore()) return;
+		if (!repo || !file || current.length === 0 || loadingMore()) return;
 
 		const lastHash = current[current.length - 1].hash;
 		setLoadingMore(true);
 		try {
 			const result = await invoke<CommitLogEntry[]>("get_file_history", {
-				path: repoPath,
-				file: filePath,
+				path: repo,
+				file,
 				count: PAGE_SIZE,
 				after: lastHash,
 			});
+			// The file or the list changed while this page was on its way.
+			if (commits() !== current || filePath() !== file) return;
 			// The `after` param includes the starting commit, so skip the first (duplicate)
 			const newCommits = result.length > 0 && result[0].hash === lastHash ? result.slice(1) : result;
 			if (newCommits.length === 0) {
@@ -79,10 +109,10 @@ export const HistoryTab: Component<HistoryTabProps> = (props) => {
 
 	/** Open a diff tab for the file at a specific commit */
 	function openCommitDiff(hash: string) {
-		const repoPath = props.repoPath;
-		const filePath = props.filePath;
-		if (!repoPath || !filePath) return;
-		props.onOpenDiff(repoPath, filePath, "M", hash);
+		const repo = repoPath();
+		const file = filePath();
+		if (!repo || !file) return;
+		props.onOpenDiff(repo, file, "M", hash);
 	}
 
 	// Re-fetch when the repo, the file, or the repo's git state changes. The GIT
@@ -91,11 +121,11 @@ export const HistoryTab: Component<HistoryTabProps> = (props) => {
 	createEffect(
 		on(
 			() => {
-				const repoPath = props.repoPath;
-				const filePath = props.filePath;
+				const repo = repoPath();
+				const file = filePath();
 				// Value consumed for reactivity
-				const rev = repoPath ? repositoriesStore.getGitRevision(repoPath) : 0;
-				return `${repoPath ?? ""}:${filePath ?? ""}:${rev}`;
+				const rev = repo ? repositoriesStore.getGitRevision(repo) : 0;
+				return `${repo ?? ""}:${file ?? ""}:${rev}`;
 			},
 			() => {
 				let cancelled = false;
@@ -103,12 +133,20 @@ export const HistoryTab: Component<HistoryTabProps> = (props) => {
 					cancelled = true;
 				});
 
-				const repoPath = props.repoPath;
-				const filePath = props.filePath;
-				if (repoPath && filePath) {
-					void fetchHistory(repoPath, filePath, () => cancelled);
+				const repo = repoPath();
+				const file = filePath();
+				// Another file: drop the old one's rows so they never sit under its name.
+				const key = `${repo ?? ""}:${file ?? ""}`;
+				if (key !== shownKey) {
+					shownKey = key;
+					setCommits([]);
+				}
+				if (repo && file) {
+					void fetchHistory(repo, file, () => cancelled);
 				} else {
 					setCommits([]);
+					setLoadError(null);
+					setLoading(false);
 				}
 			},
 		),
@@ -116,69 +154,66 @@ export const HistoryTab: Component<HistoryTabProps> = (props) => {
 
 	return (
 		<div class={s.container} onContextMenu={(e) => e.preventDefault()}>
-			{/* File header */}
-			<Show when={props.filePath}>
-				<div class={s.fileHeader}>
-					<svg class={s.fileIcon} width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-						<path d="M13 4H8.4L7 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1z" />
-					</svg>
-					<span class={s.filePath} title={props.filePath!}>
-						{props.filePath}
-					</span>
-				</div>
-			</Show>
-
-			<Show when={!props.filePath}>
-				<div class={s.empty}>Select a file to view its history</div>
-			</Show>
-
-			<Show when={props.filePath}>
-				<Show when={!loading()} fallback={<div class={s.empty}>Loading history...</div>}>
-					<Show when={commits().length > 0} fallback={<div class={s.empty}>No history found for this file</div>}>
-						<div class={s.scrollContainer}>
-							<For each={commits()}>
-								{(commit) => (
-									<div
-										class={s.commitRow}
-										role="button"
-										tabIndex={0}
-										onClick={() => openCommitDiff(commit.hash)}
-										onKeyDown={onClickKeyDown(() => openCommitDiff(commit.hash))}
-									>
-										{/* Line 1: dot + hash + subject */}
-										<div class={s.commitLine1} title={commit.subject}>
-											<span class={s.commitDot} />
-											<span class={s.commitHash}>{commit.hash.slice(0, 7)}</span>
-											<span class={s.commitSubject}>{commit.subject}</span>
-										</div>
-										{/* Line 2: author + time */}
-										<div class={s.commitLine2}>
-											<span class={s.commitMeta}>
-												{commit.author_name} · {relativeTime(commit.author_date)}
-											</span>
-										</div>
-									</div>
-								)}
-							</For>
-							{/* Load more button */}
-							<Show when={hasMore() && commits().length > 0}>
-								<div class={s.loadMore}>
-									<button
-										class={s.loadMoreBtn}
-										onClick={(e) => {
-											e.stopPropagation();
-											loadMore();
-										}}
-										disabled={loadingMore()}
-									>
-										{loadingMore() ? "Loading..." : "Load more"}
-									</button>
-								</div>
-							</Show>
+			<Switch>
+				<Match when={!filePath()}>
+					<EmptyState size="compact" title="Select a file to see its history" />
+				</Match>
+				<Match when={loading()}>
+					<EmptyState size="compact" loading title={"Loading history…"} />
+				</Match>
+				<Match when={loadError()}>
+					{(message) => (
+						<div class={s.errorLine} role="alert">
+							<IconAlert size={14} class={s.errorIcon} />
+							<span class={s.errorText}>{message()}</span>
 						</div>
-					</Show>
-				</Show>
-			</Show>
+					)}
+				</Match>
+				<Match when={commits().length === 0}>
+					<EmptyState size="compact" title="No commits touch this file" />
+				</Match>
+				<Match when={true}>
+					<div class={s.scrollContainer}>
+						<For each={commits()}>
+							{(commit) => (
+								<div
+									class={s.commitRow}
+									role="button"
+									tabIndex={0}
+									onClick={() => openCommitDiff(commit.hash)}
+									onKeyDown={onClickKeyDown(() => openCommitDiff(commit.hash))}
+								>
+									{/* Line 1: the subject */}
+									<div class={s.commitLine1}>
+										<span class={s.commitSubject} title={commit.subject}>
+											{commit.subject}
+										</span>
+									</div>
+									{/* Line 2: author · time, the short hash right-aligned */}
+									<div class={s.commitLine2}>
+										<span class={s.commitAuthor}>{commit.author_name}</span>
+										<span class={s.commitSep} aria-hidden="true">
+											·
+										</span>
+										<span class={s.commitTime} title={fullTimestamp(commit.author_date)}>
+											{relativeTime(commit.author_date)}
+										</span>
+										<span class={s.commitHash}>{commit.hash.slice(0, 7)}</span>
+									</div>
+								</div>
+							)}
+						</For>
+						<Show when={hasMore()}>
+							<button type="button" class={s.showMore} disabled={loadingMore()} onClick={() => void loadMore()}>
+								<Show when={loadingMore()} fallback="Show more">
+									<Spinner size={14} />
+									<span>{"Loading…"}</span>
+								</Show>
+							</button>
+						</Show>
+					</div>
+				</Match>
+			</Switch>
 		</div>
 	);
 };
