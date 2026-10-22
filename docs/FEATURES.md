@@ -1934,6 +1934,7 @@ FastAF aggregates upstream MCP servers and exposes them through its own `/mcp` e
 ### 20.7 Frontend Bundle Splitting
 - Vite `manualChunks`: terminal, codemirror, diff-view, markdown as separate chunks
 - SettingsPanel, ActivityDashboard, HelpPanel lazy-loaded with `lazy()` + `Suspense`
+- Git panel: Log, Stashes and Branches tabs and the History and Blame drawers load on first open; Changes, the default tab, stays in the startup bundle
 - PTY read buffer increased from 4KB to 64KB for natural batching
 
 ### 20.8 Conditional Timers

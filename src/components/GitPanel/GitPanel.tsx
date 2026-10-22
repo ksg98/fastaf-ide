@@ -3,11 +3,13 @@ import {
 	createEffect,
 	createMemo,
 	createSignal,
+	lazy,
 	Match,
 	on,
 	onCleanup,
 	onMount,
 	Show,
+	Suspense,
 	Switch,
 } from "solid-js";
 import { type DiffStatus, diffTabsStore } from "../../stores/diffTabs";
@@ -16,13 +18,16 @@ import p from "../shared/panel.module.css";
 import { SectionHeader } from "../shared/SectionHeader";
 import { PanelResizeHandle } from "../ui/PanelResizeHandle";
 import { PanelWindowControls } from "../ui/PanelWindowControls";
-import { BlameTab } from "./BlameTab";
-import { BranchesTab } from "./BranchesTab";
 import { ChangesTab } from "./ChangesTab";
 import s from "./GitPanel.module.css";
-import { HistoryTab } from "./HistoryTab";
-import { LogTab } from "./LogTab";
-import { StashesTab } from "./StashesTab";
+
+// Loaded on first open, which keeps them out of the startup bundle and under its
+// budget (scripts/report-frontend-bundles.mjs). Changes is the default tab, so it stays eager.
+const LogTab = lazy(() => import("./LogTab").then((module) => ({ default: module.LogTab })));
+const StashesTab = lazy(() => import("./StashesTab").then((module) => ({ default: module.StashesTab })));
+const BranchesTab = lazy(() => import("./BranchesTab").then((module) => ({ default: module.BranchesTab })));
+const HistoryTab = lazy(() => import("./HistoryTab").then((module) => ({ default: module.HistoryTab })));
+const BlameTab = lazy(() => import("./BlameTab").then((module) => ({ default: module.BlameTab })));
 
 export type OpenDiffFn = (
 	repoPath: string,
@@ -175,13 +180,19 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 						/>
 					</Match>
 					<Match when={activeTab() === "log"}>
-						<LogTab repoPath={tabRepoPath()} onOpenDiff={openDiff} />
+						<Suspense>
+							<LogTab repoPath={tabRepoPath()} onOpenDiff={openDiff} />
+						</Suspense>
 					</Match>
 					<Match when={activeTab() === "stashes"}>
-						<StashesTab repoPath={tabRepoPath()} />
+						<Suspense>
+							<StashesTab repoPath={tabRepoPath()} />
+						</Suspense>
 					</Match>
 					<Match when={activeTab() === "branches"}>
-						<BranchesTab repoPath={tabRepoPath()} />
+						<Suspense>
+							<BranchesTab repoPath={tabRepoPath()} />
+						</Suspense>
 					</Match>
 				</Switch>
 			</div>
@@ -199,7 +210,9 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 					/>
 					<Show when={historyExpanded()}>
 						<div class={s.subPanelBody}>
-							<HistoryTab repoPath={tabRepoPath()} filePath={selectedFile()} onOpenDiff={openDiff} />
+							<Suspense>
+								<HistoryTab repoPath={tabRepoPath()} filePath={selectedFile()} onOpenDiff={openDiff} />
+							</Suspense>
 						</div>
 					</Show>
 					<SectionHeader
@@ -213,7 +226,9 @@ export const GitPanel: Component<GitPanelProps> = (props) => {
 					/>
 					<Show when={blameExpanded()}>
 						<div class={s.subPanelBody}>
-							<BlameTab repoPath={tabRepoPath()} filePath={selectedFile()} />
+							<Suspense>
+								<BlameTab repoPath={tabRepoPath()} filePath={selectedFile()} />
+							</Suspense>
 						</div>
 					</Show>
 				</div>

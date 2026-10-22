@@ -7,6 +7,7 @@ import { toastsStore } from "../../stores/toasts";
 import { cx } from "../../utils";
 import { branchListsEqual } from "../../utils/branchListsEqual";
 import { writeClipboard } from "../../utils/clipboard";
+import { remoteUrlToGitHub } from "../../utils/githubUrl";
 import { handleOpenUrl } from "../../utils/openUrl";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { ContextMenu, type ContextMenuItem, createContextMenu } from "../ContextMenu/ContextMenu";
@@ -42,17 +43,6 @@ interface GitCommandResult {
 /** Detects git's "Already up to date." no-op message across merge/pull/push. */
 function isAlreadyUpToDate(output: string): boolean {
 	return /already up.to.date/i.test(output);
-}
-
-/** Convert a git remote URL (SSH or HTTPS) to a GitHub web URL, or null if not GitHub. */
-export function remoteUrlToGitHub(remoteUrl: string): string | null {
-	// SSH: git@github.com:owner/repo.git
-	const sshMatch = remoteUrl.match(/^git@github\.com:(.+?)(?:\.git)?$/);
-	if (sshMatch) return `https://github.com/${sshMatch[1]}`;
-	// HTTPS: https://github.com/owner/repo.git
-	const httpsMatch = remoteUrl.match(/^https?:\/\/github\.com\/(.+?)(?:\.git)?$/);
-	if (httpsMatch) return `https://github.com/${httpsMatch[1]}`;
-	return null;
 }
 
 export interface BranchesTabProps {

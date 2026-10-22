@@ -9,7 +9,7 @@ const entries = [
 ];
 
 const deferredAssetPattern =
-	/(?:CodeEditorTab|createCodeMirror|DiffFileList|ContentRenderer|MarkdownTab|ComposePanel|PrDiffTab|katex|cytoscape|mermaid)/i;
+	/(?:CodeEditorTab|createCodeMirror|DiffFileList|ContentRenderer|MarkdownTab|ComposePanel|PrDiffTab|katex|cytoscape|mermaid|LogTab|StashesTab|BranchesTab|HistoryTab|BlameTab)/i;
 
 let failed = false;
 
