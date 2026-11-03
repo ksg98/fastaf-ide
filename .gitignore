@@ -53,6 +53,7 @@ scripts/*
 !scripts/dev-server.mjs
 !scripts/generate-release-notes.sh
 !scripts/install.sh
+!scripts/sync-upstream.sh
 !scripts/report-frontend-bundles.mjs
 !scripts/check-frontend-cycles.mjs
 !scripts/hooks/
