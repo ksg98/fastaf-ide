@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-04
+
 ### Added
 - Sidebar: a Collapse all / Expand all button next to the Projects filter, and a chevron on each project (on hover) showing whether its branches are open.
 
