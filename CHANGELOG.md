@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-04
+
 ### Upstream sync: TUICommander 2.0.0
 
 FastAF now includes TUICommander 2.0.0 (Apache-2.0, by Stefano Straus), merged into FastAF's own design and
