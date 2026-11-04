@@ -1323,6 +1323,12 @@ function createRepositoriesStore() {
 			save();
 		},
 
+		/** Open or close the branches of every project at once (sidebar "Collapse all"). */
+		setAllExpanded(expanded: boolean): void {
+			for (const path of Object.keys(state.repositories)) setState("repositories", path, "expanded", expanded);
+			save();
+		},
+
 		/** Toggle repository collapsed state */
 		toggleCollapsed(path: string): void {
 			setState("repositories", path, "collapsed", (c) => !c);

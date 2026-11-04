@@ -1662,6 +1662,8 @@
 	"general.hint.scrollSensitivity": "How fast the terminal scrolls per wheel/trackpad tick (100% = raw device speed)",
 	"sidebar.cloneFromGithub": "Clone from GitHub…",
 	"sidebar.importProjects": "Import from Claude Code / Codex / Cursor / superset.sh…",
+	"sidebar.collapseAll": "Collapse all",
+	"sidebar.expandAll": "Expand all",
 	"sidebar.allProjects": "All projects",
 	"sidebar.saveWorkspace": "Save current as workspace…",
 	"sidebar.renameWorkspace": "Rename workspace…",

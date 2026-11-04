@@ -121,6 +121,22 @@ export const IconChevronDown = icon(() => <path d="m6 9 6 6 6-6" />);
 
 export const IconChevronRight = icon(() => <path d="m9 18 6-6-6-6" />);
 
+/** Lucide `chevrons-up-down` (ISC): expand all. */
+export const IconChevronsUpDown = icon(() => (
+	<>
+		<path d="m7 15 5 5 5-5" />
+		<path d="m7 9 5-5 5 5" />
+	</>
+));
+
+/** Lucide `chevrons-down-up` (ISC): collapse all. */
+export const IconChevronsDownUp = icon(() => (
+	<>
+		<path d="m7 20 5-5 5 5" />
+		<path d="m7 4 5 5 5-5" />
+	</>
+));
+
 export const IconSettings = icon(() => (
 	<>
 		<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />

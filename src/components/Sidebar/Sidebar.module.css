@@ -410,6 +410,36 @@
   color: var(--fg-primary);
 }
 
+/* The folder and the chevron share the slot: the chevron shows only while the
+   row is hovered or focused, pointing down when the branches are open. */
+.repoFolderGlyph,
+.repoFoldGlyph {
+  display: inline-flex;
+}
+
+.repoFoldGlyph {
+  display: none;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.repoChevron.expanded .repoFoldGlyph {
+  transform: rotate(90deg);
+}
+
+.repoHeader:is(:hover, :focus-visible) .repoFolderGlyph {
+  display: none;
+}
+
+.repoHeader:is(:hover, :focus-visible) .repoFoldGlyph {
+  display: inline-flex;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .repoFoldGlyph {
+    transition: none;
+  }
+}
+
 .repoActionBtn {
   width: 24px;
   height: 24px;

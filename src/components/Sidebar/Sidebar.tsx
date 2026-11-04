@@ -29,6 +29,8 @@ import {
 	IconArchive,
 	IconArrowDownLine,
 	IconArrowUpLine,
+	IconChevronsDownUp,
+	IconChevronsUpDown,
 	IconCompose,
 	IconFunnel,
 	IconHelp,
@@ -105,6 +107,11 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 	// Empty state must account for grouped repos too — a repo moved into a group
 	// leaves state.repoOrder, so checking ungrouped alone would falsely report
 	// "No repositories" when every repo is grouped. (#64)
+	/** Any visible project showing its branches: the header button then collapses all. */
+	const anyRepoExpanded = createMemo(() => {
+		const layout = groupedLayout();
+		return [...layout.ungrouped, ...layout.groups.flatMap((g) => g.repos)].some((repo) => repo.expanded);
+	});
 	const hasVisibleRepos = createMemo(() => {
 		const layout = groupedLayout();
 		return layout.ungrouped.length > 0 || layout.groups.some((g) => g.repos.length > 0);
@@ -564,6 +571,24 @@ export const Sidebar: Component<SidebarProps> = (props) => {
 					<div class={s.sectionHeader}>
 						<span class={s.sectionLabel}>{t("sidebar.projects", "Projects")}</span>
 						<div class={s.sectionActions}>
+							<Show when={hasVisibleRepos()}>
+								<button
+									type="button"
+									class={s.sectionAction}
+									onClick={() => repositoriesStore.setAllExpanded(!anyRepoExpanded())}
+									aria-label={
+										anyRepoExpanded() ? t("sidebar.collapseAll", "Collapse all") : t("sidebar.expandAll", "Expand all")
+									}
+									title={
+										anyRepoExpanded() ? t("sidebar.collapseAll", "Collapse all") : t("sidebar.expandAll", "Expand all")
+									}
+									data-testid="sidebar-collapse-all"
+								>
+									<Show when={anyRepoExpanded()} fallback={<IconChevronsUpDown size={14} />}>
+										<IconChevronsDownUp size={14} />
+									</Show>
+								</button>
+							</Show>
 							<Show when={hasVisibleRepos()}>
 								<button
 									type="button"

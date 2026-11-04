@@ -1869,9 +1869,15 @@ export const RepoSection: Component<{
 					</div>
 					{/* Leading folder icon (CSS `order: -1`), open while the repo is expanded. */}
 					<span class={cx(s.repoChevron, expanded() && s.expanded)}>
-						<Show when={expanded()} fallback={<IconFolder size={16} />}>
-							<IconFolderOpen size={16} />
-						</Show>
+						<span class={s.repoFolderGlyph}>
+							<Show when={expanded()} fallback={<IconFolder size={16} />}>
+								<IconFolderOpen size={16} />
+							</Show>
+						</span>
+						{/* On hover the folder becomes a disclosure chevron: the row folds its branches. */}
+						<span class={s.repoFoldGlyph} aria-hidden="true">
+							<IconChevronRight size={14} />
+						</span>
 					</span>
 				</Show>
 			</div>
